@@ -2677,11 +2677,32 @@ async def _run_verifier(
         message_text = reasoning + "\n".join(output_lines)
 
     if score < 1.0:
+        # Persist infrastructure-specific guidance here so the poll_messages
+        # path (which reads the posted verifierMessage, not local feedback_text)
+        # does not keep telling the agent to spawn new work after a soft fail.
+        reasoning_l = (reasoning or "").lower()
+        infra_soft_fail = reasoning.startswith("Progress check failed") or any(
+            token in reasoning_l
+            for token in ("deadline", "timeout", "timed out", "rose deadline")
+        )
+        if infra_soft_fail:
+            guidance = (
+                "NOTE: The progress verifier failed due to an infrastructure "
+                "timeout/error — this is NOT a judgment that your deliverable is "
+                "incomplete. If the final artifact already exists (files / structured "
+                "result), call attempt_completion again immediately with that same "
+                "result. Do NOT spawn additional sub-agents unless the deliverable "
+                "is actually missing."
+            )
+        else:
+            guidance = (
+                "Take a NEW action that produces fresh tool evidence matching the goal, "
+                "then call attempt_completion again."
+            )
         message_text = (
             f"Verifier score: {score:.0%}\n\n"
             f"Reasoning: {message_text}\n\n"
-            "Take a NEW action that produces fresh tool evidence matching the goal, "
-            "then call attempt_completion again."
+            f"{guidance}"
         )
 
     # Post FINISHED. Surface verifier feedback as the completed

@@ -1331,6 +1331,7 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
+            # No artifacts → incomplete (must not report success without output files)
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1344,10 +1345,30 @@ async def test_run_verifier_disabled_by_env_flag():
                 code_provider=provider,
                 output_files=[],
             )
-            assert score == 1.0, provider
+            assert score == 0.5, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
+            assert "incomplete" in reasoning.lower(), reasoning
             assert struct is None
             assert itok == 0 and otok == 0
+
+            # With extracted artifacts → success without calling the LLM verifier
+            score_ok, reasoning_ok, struct_ok, itok_ok, otok_ok = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["wrote output"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=0,
+                code_provider=provider,
+                output_files=[{"path": "/home/user/output/result.json", "content": "{}"}],
+            )
+            assert score_ok == 1.0, provider
+            assert "verifier disabled" in reasoning_ok.lower(), reasoning_ok
+            assert struct_ok is None
+            assert itok_ok == 0 and otok_ok == 0
 
     assert called["check_progress"] == 0
 

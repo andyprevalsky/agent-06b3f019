@@ -24,7 +24,16 @@ function log(level, message, data = {}) {
 }
 
 // E2B template defaults to 3000; local fallback overrides via PORT.
-const PORT = Number.parseInt(process.env.PORT || '3000', 10);
+const rawPort = process.env.PORT || "3000";
+if (!/^\d+$/.test(rawPort)) {
+  log("error", "Invalid PORT — require a complete decimal value", { port: rawPort });
+  process.exit(1);
+}
+const PORT = Number.parseInt(rawPort, 10);
+if (PORT < 0 || PORT > 65535) {
+  log("error", "PORT out of range (0–65535)", { port: PORT });
+  process.exit(1);
+}
 const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;

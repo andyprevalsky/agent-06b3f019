@@ -1,16 +1,27 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+
 import { createLogger } from '../../providers/logger';
 import {
   INITIAL_RETRY_DELAY_MS,
   MAX_ATTEMPTS,
+  MAX_REDIRECTS,
+  MAX_RESPONSE_BODY_BYTES,
   MAX_RETRY_DELAY_MS,
   REQUEST_TIMEOUT_MS,
   RETRYABLE_STATUS_CODES,
 } from './config';
-import { ExternalHttpRequestFailedError } from './errors';
-import type { ExternalHttpRequestBody, ExternalHttpResponseBody } from './types';
-import { normalizeExternalHttpRequest } from './validate';
+import { ExternalHttpRequestFailedError, InvalidExternalHttpRequestError } from './errors';
+import type { ExternalHttpRequestBody, ExternalHttpResponseBody, HttpMethod } from './types';
+import {
+  assertFetchableExternalUrl,
+  isBlockedExternalAddress,
+  normalizeExternalHttpRequest,
+} from './validate';
 
 const log = createLogger('ExternalHttp');
+
+const IDEMPOTENT_METHODS = new Set<HttpMethod>(['GET', 'HEAD']);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -71,13 +82,105 @@ function shouldRetryResponse(response: Response): boolean {
   return RETRYABLE_STATUS_CODES.has(response.status);
 }
 
+function hasIdempotencyKey(headers?: Record<string, string>): boolean {
+  if (headers === undefined) {
+    return false;
+  }
+  return Object.keys(headers).some((key) => key.toLowerCase() === 'idempotency-key');
+}
+
+function canRetryMethod(method: HttpMethod, headers?: Record<string, string>): boolean {
+  return IDEMPOTENT_METHODS.has(method) || hasIdempotencyKey(headers);
+}
+
+async function assertUrlResolvesToPublicAddress(url: string): Promise<void> {
+  const parsed = new URL(url);
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) !== 0) {
+    if (isBlockedExternalAddress(host)) {
+      throw new InvalidExternalHttpRequestError(
+        `api_request cannot fetch ${JSON.stringify(url)}: ${host} is a non-public address. Pass an absolute http(s) URL.`
+      );
+    }
+    return;
+  }
+
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await lookup(host, { all: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidExternalHttpRequestError(
+      `api_request cannot fetch ${JSON.stringify(url)}: DNS lookup failed for ${host} (${message}). Pass an absolute http(s) URL.`
+    );
+  }
+
+  if (addresses.length === 0) {
+    throw new InvalidExternalHttpRequestError(
+      `api_request cannot fetch ${JSON.stringify(url)}: ${host} did not resolve to any address. Pass an absolute http(s) URL.`
+    );
+  }
+
+  for (const { address } of addresses) {
+    if (isBlockedExternalAddress(address)) {
+      throw new InvalidExternalHttpRequestError(
+        `api_request cannot fetch ${JSON.stringify(url)}: ${host} resolves to non-public address ${address}. Pass an absolute http(s) URL.`
+      );
+    }
+  }
+}
+
+async function readBoundedResponseBuffer(response: Response): Promise<Buffer> {
+  const contentLengthHeader = response.headers.get('content-length');
+  if (contentLengthHeader !== null && contentLengthHeader.trim() !== '') {
+    const declared = Number(contentLengthHeader);
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BODY_BYTES) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ExternalHttpRequestFailedError(
+        `External HTTP response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`,
+        response.status,
+        null
+      );
+    }
+  }
+
+  if (response.body === null) {
+    return Buffer.alloc(0);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value === undefined) {
+      continue;
+    }
+    total += value.byteLength;
+    if (total > MAX_RESPONSE_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new ExternalHttpRequestFailedError(
+        `External HTTP response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`,
+        response.status,
+        null
+      );
+    }
+    chunks.push(value);
+  }
+
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+}
+
 async function readResponseBody(response: Response): Promise<{
   body: unknown;
   body_encoding: ExternalHttpResponseBody['body_encoding'];
   content_type: string | null;
 }> {
   const contentType = response.headers.get('content-type');
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await readBoundedResponseBuffer(response);
 
   if (buffer.length === 0) {
     return { body: '', body_encoding: 'text', content_type: contentType };
@@ -119,7 +222,7 @@ function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
   const init: RequestInit = {
     method: request.method,
     headers,
-    redirect: 'follow',
+    redirect: 'manual',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   };
 
@@ -146,23 +249,55 @@ function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
   return init;
 }
 
+async function fetchWithValidatedRedirects(
+  startUrl: string,
+  init: RequestInit
+): Promise<Response> {
+  let currentUrl = startUrl;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    assertFetchableExternalUrl(currentUrl);
+    await assertUrlResolvesToPublicAddress(currentUrl);
+
+    const response = await fetch(currentUrl, init);
+    const isRedirect = response.status >= 300 && response.status < 400;
+    if (!isRedirect) {
+      return response;
+    }
+
+    const location = response.headers.get('location');
+    if (location === null || location.trim() === '') {
+      return response;
+    }
+
+    await response.body?.cancel().catch(() => undefined);
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+
+  throw new ExternalHttpRequestFailedError(
+    `External HTTP request exceeded ${MAX_REDIRECTS} redirects`
+  );
+}
+
 export async function executeExternalHttpRequest(
   rawRequest: ExternalHttpRequestBody
 ): Promise<ExternalHttpResponseBody> {
   const request = normalizeExternalHttpRequest(rawRequest);
   const finalUrl = appendQueryParams(request.url, request.query);
   const init = buildFetchInit(request);
+  const retriesAllowed = canRetryMethod(request.method, request.headers);
+  const maxAttempts = retriesAllowed ? MAX_ATTEMPTS : 1;
 
   let lastError: unknown = null;
   let lastResponse: Response | null = null;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const started = Date.now();
     try {
-      const response = await fetch(finalUrl, init);
+      const response = await fetchWithValidatedRedirects(finalUrl, init);
       lastResponse = response;
 
-      if (shouldRetryResponse(response) && attempt < MAX_ATTEMPTS) {
+      if (retriesAllowed && shouldRetryResponse(response) && attempt < maxAttempts) {
         const delay = retryDelayMs(response, attempt);
         log.warn('Retrying external HTTP request after retryable status', {
           url: finalUrl,
@@ -182,7 +317,7 @@ export async function executeExternalHttpRequest(
         ok: response.ok,
         status: response.status,
         status_text: response.statusText,
-        url: response.url,
+        url: response.url || finalUrl,
         headers: headersToRecord(response.headers),
         body: parsed.body,
         body_encoding: parsed.body_encoding,
@@ -191,8 +326,14 @@ export async function executeExternalHttpRequest(
         attempts: attempt,
       };
     } catch (error) {
+      if (error instanceof InvalidExternalHttpRequestError) {
+        throw error;
+      }
+      if (error instanceof ExternalHttpRequestFailedError) {
+        throw error;
+      }
       lastError = error;
-      if (attempt >= MAX_ATTEMPTS) {
+      if (!retriesAllowed || attempt >= maxAttempts) {
         break;
       }
       const delay = retryDelayMs(lastResponse, attempt);
@@ -207,11 +348,17 @@ export async function executeExternalHttpRequest(
   }
 
   if (lastResponse !== null) {
-    const parsed = await readResponseBody(lastResponse);
+    let parsedBody: unknown = null;
+    try {
+      const parsed = await readResponseBody(lastResponse);
+      parsedBody = parsed.body;
+    } catch {
+      parsedBody = null;
+    }
     throw new ExternalHttpRequestFailedError(
       `External HTTP request failed with status ${lastResponse.status}`,
       lastResponse.status,
-      parsed.body
+      parsedBody
     );
   }
 

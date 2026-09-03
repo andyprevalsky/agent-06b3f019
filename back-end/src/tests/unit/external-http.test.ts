@@ -37,6 +37,18 @@ async function testValidation(): Promise<void> {
     () => assertFetchableExternalUrl('network/foo.contact'),
     InvalidExternalHttpRequestError
   );
+  assert.throws(
+    () => assertFetchableExternalUrl('http://localhost:8080/secret'),
+    InvalidExternalHttpRequestError
+  );
+  assert.throws(
+    () => assertFetchableExternalUrl('http://127.0.0.1/'),
+    InvalidExternalHttpRequestError
+  );
+  assert.throws(
+    () => assertFetchableExternalUrl('http://169.254.169.254/latest/meta-data/'),
+    InvalidExternalHttpRequestError
+  );
 
   const normalized = normalizeExternalHttpRequest({
     method: 'post',
@@ -210,6 +222,7 @@ async function testTextXmlAndBinaryResponses(): Promise<void> {
 async function testPostJsonBody(): Promise<void> {
   globalThis.fetch = (async (_input, init) => {
     assert.equal(init?.method, 'POST');
+    assert.equal(init?.redirect, 'manual');
     assert.equal(
       init?.headers instanceof Headers ? init.headers.get('content-type') : null,
       'application/json; charset=utf-8'
@@ -226,6 +239,25 @@ async function testPostJsonBody(): Promise<void> {
   assert.deepEqual(result.body, { total_count: 1 });
 }
 
+async function testPostDoesNotRetryWithoutIdempotencyKey(): Promise<void> {
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    return jsonResponse({ message: 'unavailable' }, { status: 503 });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'POST',
+    url: 'https://example.com/mutate',
+    body: { action: 'create' },
+  });
+
+  assert.equal(callCount, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 503);
+  assert.equal(result.attempts, 1);
+}
+
 async function main(): Promise<void> {
   await testValidation();
   await testSuccessfulJsonResponse();
@@ -235,6 +267,7 @@ async function main(): Promise<void> {
   await testLargeJsonBodyNotTruncated();
   await testTextXmlAndBinaryResponses();
   await testPostJsonBody();
+  await testPostDoesNotRetryWithoutIdempotencyKey();
   process.stdout.write('external-http unit tests passed\n');
 }
 

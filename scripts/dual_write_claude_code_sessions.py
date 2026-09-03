@@ -129,9 +129,24 @@ const sessions = JSON.parse(fs.readFileSync(process.env.DUAL_WRITE_PAYLOAD, 'utf
 const prisma = new PrismaClient({
   datasources: { db: { url: process.env.DUAL_WRITE_DATABASE_URL } },
 });
+const TERMINAL = new Set(['CLOSED', 'COMPLETED', 'ERROR']);
 (async () => {
   const ids = [];
   for (const s of sessions) {
+    const existing = await prisma.claudeCodeSession.findUnique({ where: { id: s.id } });
+    const incomingTerminal = TERMINAL.has(s.status);
+    const existingTerminal = existing && TERMINAL.has(existing.status);
+    const output =
+      existing &&
+      typeof existing.output === 'string' &&
+      existing.output.length > (s.output || '').length
+        ? existing.output
+        : s.output;
+    const closedAt = existingTerminal
+      ? existing.closedAt
+      : incomingTerminal
+        ? new Date()
+        : null;
     await prisma.claudeCodeSession.upsert({
       where: { id: s.id },
       create: {
@@ -141,14 +156,14 @@ const prisma = new PrismaClient({
         streamUrl: s.streamUrl,
         goal: s.goal,
         status: s.status,
-        output: s.output,
-        closedAt: new Date(),
+        output,
+        closedAt,
       },
       update: {
         agentId: s.agentId,
-        output: s.output,
+        output,
         status: s.status,
-        closedAt: new Date(),
+        closedAt: closedAt,
         streamUrl: s.streamUrl ?? undefined,
         goal: s.goal,
       },
@@ -175,13 +190,13 @@ const prisma = new PrismaClient({
             capture_output=True,
             text=True,
         )
+        line = (proc.stdout or "").strip().splitlines()[-1]
+        return json.loads(line)
     except subprocess.CalledProcessError as exc:
-        payload_path.unlink(missing_ok=True)
         err = (exc.stderr or "") + (exc.stdout or "")
         raise SystemExit(f"prisma dual-write failed:\n{err}") from exc
-    payload_path.unlink(missing_ok=True)
-    line = (proc.stdout or "").strip().splitlines()[-1]
-    return json.loads(line)
+    finally:
+        payload_path.unlink(missing_ok=True)
 
 
 def verify_session_on_hub(session_id: str) -> int:

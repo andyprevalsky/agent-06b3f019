@@ -10,6 +10,7 @@
  */
 
 import { prisma } from './database';
+import { decryptCredentialEnvelope } from './claudeCredentials';
 import { createLogger } from './logger';
 
 const log = createLogger('IntegrationConnectionSync');
@@ -77,14 +78,16 @@ export async function clearConnectionNeedsReconnectFromIntegrationRecovery(param
   if (provider === null) return;
 
   const accountId = params.accountId?.trim() ?? '';
-  if (accountId === '') {
-    // Legacy Integration rows (accountId="") cannot be mapped to a specific chip
-    // in multi-account setups. Upload/connect paths may still heal broadly.
-    return;
-  }
+  // Mirror failure handling: accountless Integration recovery heals the same
+  // deterministic set (every needs_reconnect chip for this provider). Scoped
+  // accountId heals only that chip.
+  const where =
+    accountId === ''
+      ? { userId: params.userId, provider, state: 'needs_reconnect' as const }
+      : { userId: params.userId, provider, accountId, state: 'needs_reconnect' as const };
 
   const result = await prisma.computeAccountConnection.updateMany({
-    where: { userId: params.userId, provider, accountId, state: 'needs_reconnect' },
+    where,
     data: { state: 'connected', lastErrorReason: null },
   });
 
@@ -96,6 +99,59 @@ export async function clearConnectionNeedsReconnectFromIntegrationRecovery(param
       updated: result.count,
     });
   }
+}
+
+/**
+ * Recover the ComputeAccountConnection accountId to heal after credential upload.
+ * Prefers an account_id inside the decrypted envelope (GPT), then a single
+ * needs_reconnect chip, then a single Integration row with a non-empty accountId.
+ */
+export async function resolveAccountIdForCredentialRecovery(
+  userId: string,
+  integrationName: 'claude_code' | 'gpt_code',
+  encryptedCredentials: string
+): Promise<string | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (
+    decryptionKey !== undefined &&
+    decryptionKey !== '' &&
+    integrationName === 'gpt_code'
+  ) {
+    const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
+    if (decrypted !== null && decrypted !== '') {
+      try {
+        const parsed = JSON.parse(decrypted) as Record<string, unknown>;
+        const tokens = parsed.tokens as Record<string, unknown> | undefined;
+        const fromEnvelope =
+          typeof tokens?.account_id === 'string' ? tokens.account_id.trim() : '';
+        if (fromEnvelope !== '') return fromEnvelope;
+      } catch {
+        // Envelope shape is validated elsewhere; ignore parse misses here.
+      }
+    }
+  }
+
+  const provider = integrationNameToProvider(integrationName);
+  if (provider !== null) {
+    const chips = await prisma.computeAccountConnection.findMany({
+      where: { userId, provider, state: 'needs_reconnect' },
+      select: { accountId: true },
+    });
+    if (chips.length === 1) {
+      const chipAccountId = chips[0].accountId.trim();
+      if (chipAccountId !== '') return chipAccountId;
+    }
+  }
+
+  const integrations = await prisma.integration.findMany({
+    where: { userId, name: integrationName, accountId: { not: '' } },
+    select: { accountId: true },
+  });
+  if (integrations.length === 1) {
+    const integrationAccountId = integrations[0].accountId.trim();
+    if (integrationAccountId !== '') return integrationAccountId;
+  }
+  return null;
 }
 
 /**

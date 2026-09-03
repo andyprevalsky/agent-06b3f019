@@ -11,7 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { markGptUserTokenRateLimited } from '../../providers/gptCredentials';
 import { markUserTokenRateLimited } from '../../providers/claudeCredentials';
-import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
+import {
+  clearConnectionNeedsReconnectFromIntegrationRecovery,
+  reconcileConnectionStatesFromIntegrations,
+} from '../../providers/integrationConnectionSync';
 import { upsertAccountConnection } from '../../domains/compute-grants/repo';
 
 type TestFn = () => Promise<void>;
@@ -191,6 +194,45 @@ test('reconcile repairs EXPIRED/auth_error drift without touching rate-limited r
     healthyChip?.state === 'connected',
     `rate-limited healthy integration must stay connected, got ${healthyChip?.state}`
   );
+});
+
+test('credential recovery heals accountless needs_reconnect chips', async () => {
+  const legacyAccountId = `${claudeAccountId}-legacy-heal`;
+  await prisma.integration.create({
+    data: {
+      userId,
+      name: 'claude_code',
+      accountId: '',
+      accountEmail: 'legacy@example.com',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+      failureReason: null,
+      config: { encryptedCredentials: 'placeholder' },
+    },
+  });
+  await upsertAccountConnection({
+    userId,
+    provider: 'claude',
+    accountId: legacyAccountId,
+    accountEmail: 'legacy@example.com',
+  });
+  await prisma.computeAccountConnection.updateMany({
+    where: { userId, provider: 'claude', accountId: legacyAccountId },
+    data: { state: 'needs_reconnect', lastErrorReason: 'auth_error' },
+  });
+
+  await clearConnectionNeedsReconnectFromIntegrationRecovery({
+    userId,
+    integrationName: 'claude_code',
+    // accountless — must heal the same deterministic provider set as failure
+  });
+
+  const chip = await prisma.computeAccountConnection.findFirst({
+    where: { userId, provider: 'claude', accountId: legacyAccountId },
+  });
+  assert(chip?.state === 'connected', `expected connected after accountless heal, got ${chip?.state}`);
+  assert(chip?.lastErrorReason === null, 'healed chip must clear lastErrorReason');
 });
 
 async function main() {

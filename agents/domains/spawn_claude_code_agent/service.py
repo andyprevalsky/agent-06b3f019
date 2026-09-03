@@ -645,12 +645,16 @@ async def _run_agentic_loop(  # noqa: C901
     gpt_token_user_id: Optional[str] = None,
     code_provider: str = "claude",
     code_events: list[Dict[str, Any]] | None = None,
+    terminal_output_persisted: Optional[list[bool]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
     Returns (exit_code, attempt_completion, conversation_history,
              total_input_tokens, total_output_tokens, code_events).
     exit_code is -1 if the process has not exited.
+
+    ``terminal_output_persisted`` is an optional single-element list shared with
+    the activity so fatal-path persistence is visible to outer cleanup.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -667,6 +671,10 @@ async def _run_agentic_loop(  # noqa: C901
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
+
+    def _mark_terminal_output_persisted() -> None:
+        if terminal_output_persisted is not None:
+            terminal_output_persisted[0] = True
 
     async def on_output(data: str, is_buffer: bool) -> None:
         nonlocal last_output_time, pending_output
@@ -705,7 +713,8 @@ async def _run_agentic_loop(  # noqa: C901
         pending_output = True
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns
+        nonlocal completed_codex_turns, last_output_time
+        last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
@@ -828,7 +837,7 @@ async def _run_agentic_loop(  # noqa: C901
                                     if code_provider == "codex"
                                     else None,
                                 )
-                                terminal_output_persisted = True
+                                _mark_terminal_output_persisted()
                         except Exception as persist_err:
                             logger.warning(
                                 "[ClaudeCode] Failed to persist fatal terminal output",
@@ -1318,15 +1327,16 @@ async def _run_verifier(
     )
 
     if code_agent_verifier_disabled():
-        # Treat a finished session as complete — no "Verifying completion"
-        # chip and no second LLM pass. Still surface any /home/user/output
-        # files we already extracted so the parent can use them. Always
-        # score 1.0 — the kill-switch exists specifically to stop dual-agent
-        # verifier loops, including non-zero exits.
-        score = 1.0
+        # Skip the dual-agent LLM verifier, but do not claim success without
+        # extracted /home/user/output artifacts — otherwise a failed session
+        # reports success=True to the parent (score >= 1.0).
+        has_artifacts = bool(extracted_output_files)
+        score = 1.0 if has_artifacts else 0.5
         v_reasoning = (
             "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
-            f"Returning session result as-is (provider={code_provider}, exit_code={exit_code})."
+            f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
+            f", artifacts={len(extracted_output_files)})."
+            + ("" if has_artifacts else " No output artifacts extracted — incomplete.")
         )
         logger.info(
             "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
@@ -1334,7 +1344,9 @@ async def _run_verifier(
             task_id=task_id,
             code_provider=code_provider,
             exit_code=exit_code,
+            has_artifacts=has_artifacts,
             has_structured_from_files=bool(output_file_structured),
+            score=score,
         )
         return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
@@ -1689,7 +1701,7 @@ async def spawn_claude_code_activity(  # noqa: C901
     total_output_tokens = 0
     action_summary: list[str] = []
     code_events: list[Dict[str, Any]] = []
-    terminal_output_persisted = False
+    terminal_output_persisted_box = [False]
 
     if not output_schema:
         raise ValueError(
@@ -1804,6 +1816,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             action_summary=action_summary,
             tool_call_id=tool_call_id,
             code_events=code_events,
+            terminal_output_persisted=terminal_output_persisted_box,
         )
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
@@ -1826,7 +1839,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                 code_provider,
                 credential_feedback=credential_feedback,
             )
-            terminal_output_persisted = True
+            terminal_output_persisted_box[0] = True
         else:
             logger.warning(
                 "[ClaudeCode] Skipping terminal persist — display and code events were empty",
@@ -1984,22 +1997,23 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         if task_id:
             try:
-                # Persist terminal output before closing
+                # Persist terminal output before closing (skip if already written)
                 try:
-                    cancelled_output = build_durable_terminal_transcript(
-                        terminal.get_display(),
-                        code_events,
-                        action_summary,
-                    )
-                    if cancelled_output:
-                        await persist_terminal_output(task_id, cancelled_output, agent_id, code_provider)
-                        terminal_output_persisted = True
-                        logger.info(
-                            "[ClaudeCode] Persisted terminal output on cancel",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            output_len=len(cancelled_output),
+                    if not terminal_output_persisted_box[0]:
+                        cancelled_output = build_durable_terminal_transcript(
+                            terminal.get_display(),
+                            code_events,
+                            action_summary,
                         )
+                        if cancelled_output:
+                            await persist_terminal_output(task_id, cancelled_output, agent_id, code_provider)
+                            terminal_output_persisted_box[0] = True
+                            logger.info(
+                                "[ClaudeCode] Persisted terminal output on cancel",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                output_len=len(cancelled_output),
+                            )
                 except Exception as output_error:
                     logger.warning(
                         "[ClaudeCode] Failed to persist output on cancel",
@@ -2057,7 +2071,7 @@ async def spawn_claude_code_activity(  # noqa: C901
         if task_id:
             try:
                 try:
-                    if not terminal_output_persisted:
+                    if not terminal_output_persisted_box[0]:
                         failed_output = build_durable_terminal_transcript(
                             terminal.get_display(),
                             code_events,
@@ -2070,7 +2084,7 @@ async def spawn_claude_code_activity(  # noqa: C901
                                 agent_id,
                                 code_provider,
                             )
-                            terminal_output_persisted = True
+                            terminal_output_persisted_box[0] = True
                             logger.info(
                                 "[ClaudeCode] Persisted terminal output on failure",
                                 agent_id=agent_id,

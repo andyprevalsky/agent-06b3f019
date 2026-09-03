@@ -271,11 +271,15 @@ const POOL_AUTH_FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
  * keep failing on every subsequent spawn until it's re-synced. Rotating the
  * pool token immediately is the only way to make the next agent succeed.
  */
-const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
+const CREDENTIAL_AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
   /API Error:\s*401\b.*OAuth access token has been revoked/i,
+];
+
+/** Billing/credit banners — rotate/cooldown the credential, but do not flip needs_reconnect. */
+const BILLING_FAILURE_PATTERNS: readonly RegExp[] = [
   /Credit balance(?: is)? too low/i,
   /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
 ];
@@ -298,7 +302,9 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
     /You've hit your limit\s*·\s*resets\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\(UTC\))/i
   );
   const isRateLimited = /You've hit your limit/i.test(output);
-  const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
+  const credentialAuthFailure = CREDENTIAL_AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
+  const billingFailure = BILLING_FAILURE_PATTERNS.some((re) => re.test(output));
+  const authFailure = credentialAuthFailure || billingFailure;
   const revokedOauth = REVOKED_OAUTH_PATTERNS.some((re) => re.test(output));
   if (!isRateLimited && !authFailure) return;
   const sharedCredentialReason = authFailure
@@ -355,9 +361,10 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
     await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
   }
 
-  // Non-revoked auth banners ("Please run /login") only rate-limit the Integration
-  // row for pool rotation; the chip still needs to prompt re-sync.
-  if (authFailure && !revokedOauth && integrationId !== '') {
+  // Non-revoked credential-auth banners ("Please run /login") only rate-limit the
+  // Integration row for pool rotation; the chip still needs to prompt re-sync.
+  // Billing/credit failures must not mark needs_reconnect — re-consent cannot fix them.
+  if (credentialAuthFailure && !revokedOauth && integrationId !== '') {
     await syncConnectionAfterIntegrationAuthFailure({
       integrationId,
       failureReason: 'auth_error',

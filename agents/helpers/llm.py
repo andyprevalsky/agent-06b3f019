@@ -1027,9 +1027,13 @@ def build_verifier_context_messages(
                 tool_name=str(tool_name or "tool"),
                 used_chars=_tool_result_chars_used,
             )
-            _tool_result_chars_used += len(tool_text)
             if truncated:
                 _tool_result_budget_hits += 1
+            # Aggregate budget exhausted → empty text; skip append so later
+            # tools cannot keep growing the verifier prompt past the cap.
+            if not tool_text:
+                continue
+            _tool_result_chars_used += len(tool_text)
 
             screenshot_b64 = metadata.get("screenshot_b64")
             if screenshot_b64:
@@ -1118,10 +1122,9 @@ def _budget_verifier_tool_result_text(
     remaining_total = max(0, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS - used_chars)
     cap = min(per_tool_cap, remaining_total)
     if cap <= 0:
-        stub = (
-            f"TOOL_RESULT {json.dumps({'tool_name': tool_name, 'result': '[omitted: verifier tool-result budget exhausted]'}, ensure_ascii=False)}"
-        )
-        return stub, True
+        # Do not emit a stub — callers must skip appending so the aggregate
+        # budget stays hard-capped at VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS.
+        return "", True
     if len(tool_text) <= cap:
         return tool_text, False
     marker = f"...[verifier truncated {len(tool_text) - cap} chars from {tool_name}]..."

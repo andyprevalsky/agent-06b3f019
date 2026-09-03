@@ -71,7 +71,8 @@ function loadProdDatabaseUrl(): string {
   const envVars = dotenv.parse(readFileSync(envPath));
   const remoteUrl = selectRemoteDatabaseUrl({
     ...envVars,
-    SEED_REMOTE_DATABASE_URL: process.env.SEED_REMOTE_DATABASE_URL,
+    SEED_REMOTE_DATABASE_URL:
+      process.env.SEED_REMOTE_DATABASE_URL?.trim() || envVars.SEED_REMOTE_DATABASE_URL,
   });
   if (!remoteUrl) {
     throw new Error(
@@ -79,6 +80,17 @@ function loadProdDatabaseUrl(): string {
     );
   }
   return remoteUrl;
+}
+
+/** Host:port/dbname identity so pooler vs direct URLs to the same DB still match. */
+export function canonicalDatabaseTarget(databaseUrl: string): string {
+  const parsed = new URL(databaseUrl);
+  const hostname = parsed.hostname.toLowerCase();
+  const defaultPort =
+    parsed.protocol === 'postgres:' || parsed.protocol === 'postgresql:' ? '5432' : '';
+  const port = parsed.port || defaultPort;
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  return `${hostname}:${port}/${database}`;
 }
 
 export async function syncAndyClaudeTokensFromProd(options?: {
@@ -91,6 +103,13 @@ export async function syncAndyClaudeTokensFromProd(options?: {
   }
 
   const remoteUrl = loadProdDatabaseUrl();
+  if (canonicalDatabaseTarget(localUrl) === canonicalDatabaseTarget(remoteUrl)) {
+    throw new Error(
+      'Refusing Andy Claude token sync: local DATABASE_URL resolves to the same database as prod. ' +
+        'Point DATABASE_URL at a local/test database before syncing.'
+    );
+  }
+
   const remote = new PrismaClient({ datasources: { db: { url: remoteUrl } } });
   const local = new PrismaClient({ datasources: { db: { url: localUrl } } });
 

@@ -519,10 +519,46 @@ export async function markUserTokenRateLimited(
       accountId: options?.accountId ?? null,
       integrationId: options?.integrationId ?? null,
     });
+    // Resolve account identity before syncing chips — never broadly mark with an
+    // absent ID when the Integration row (or scoped options) already carries one.
+    let resolvedAccountId = options?.accountId?.trim() ?? '';
+    if (resolvedAccountId === '' && options?.integrationId) {
+      const row = await prisma.integration.findUnique({
+        where: { id: options.integrationId },
+        select: { accountId: true },
+      });
+      resolvedAccountId = row?.accountId?.trim() ?? '';
+    }
+    if (resolvedAccountId === '' && updated.count > 0) {
+      const affected = await prisma.integration.findMany({
+        where: {
+          userId,
+          name: 'claude_code',
+          status: 'EXPIRED',
+          failureReason: options.failureReason,
+          ...(options?.integrationId ? { id: options.integrationId } : {}),
+        },
+        select: { accountId: true },
+      });
+      const uniqueIds = [
+        ...new Set(affected.map((row) => row.accountId?.trim() ?? '').filter((id) => id !== '')),
+      ];
+      if (uniqueIds.length > 0) {
+        for (const accountId of uniqueIds) {
+          await markConnectionNeedsReconnectFromIntegrationFailure({
+            userId,
+            integrationName: 'claude_code',
+            accountId,
+            failureReason: options.failureReason,
+          });
+        }
+        return;
+      }
+    }
     await markConnectionNeedsReconnectFromIntegrationFailure({
       userId,
       integrationName: 'claude_code',
-      accountId: options?.accountId,
+      accountId: resolvedAccountId === '' ? null : resolvedAccountId,
       failureReason: options.failureReason,
     });
     return;

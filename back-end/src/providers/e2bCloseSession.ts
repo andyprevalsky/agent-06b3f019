@@ -83,7 +83,7 @@ export async function closeClaudeCodeSession(
   }
 
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
-    const local = await closeLocalClaudeCodeSession(taskId, userId);
+    const local = await closeLocalClaudeCodeSession(taskId, userId, additionalPaths);
     return { outputFiles: local.outputFiles };
   }
 

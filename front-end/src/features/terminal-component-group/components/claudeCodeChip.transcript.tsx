@@ -66,7 +66,10 @@ function healSoftWrappedTranscriptLines(output: string): string {
       prevStartsMarker &&
       /[A-Za-z0-9]$/.test(prev) &&
       !/[.!:?)]$/.test(prev) &&
-      /^[a-z0-9/]/.test(line)
+      /^[a-z0-9/]/.test(line) &&
+      // Mid-token fragments never contain whitespace ("h", "ng/resumability:").
+      // A wrapped new word like "npm test" must keep its boundary.
+      !/\s/.test(line)
     ) {
       // Mid-token wrap: "[Claude tool] Bas" + "h" → "[Claude tool] Bash"
       // or "[Claude] ... checkpointi" + "ng/resumability:" → joined.

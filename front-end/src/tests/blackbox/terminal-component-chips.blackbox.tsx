@@ -494,6 +494,33 @@ describe('ClaudeCodeChip', () => {
     expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
   });
 
+  it('treats bare session_cancelled sharing toolCallId as terminal', () => {
+    messagesRef.current = [
+      makeMsg({
+        metadata: {
+          task_id: 'task-1',
+          toolCallId: 'tc-cancel-1',
+          action_type: 'claude_code_started',
+          title: 'Claude Code Started',
+        },
+      }),
+      makeMsg({
+        text: 'User paused the agent',
+        metadata: {
+          // No task_id — handler cancel race; only toolCallId links it.
+          toolCallId: 'tc-cancel-1',
+          action_type: 'session_cancelled',
+          title: 'Claude Code Session Cancelled',
+          toolStatus: 'ERROR',
+        },
+      }),
+    ];
+
+    renderWithProviders(<ClaudeCodeChip taskId="task-1" />);
+    expect(screen.queryByText('Claude Code Spinning up...')).not.toBeInTheDocument();
+    expect(screen.getByText('Claude Code Failed')).toBeInTheDocument();
+  });
+
   it('renders verifying state from system message metadata', () => {
     messagesRef.current = [
       makeMsg({
@@ -673,6 +700,16 @@ describe('code-agent terminal formatting', () => {
     );
     expect(blocks.some((block) => block.title === 'Bas')).toBe(false);
     expect(blocks.some((block) => block.title === 'Claude note')).toBe(false);
+  });
+
+  it('preserves word boundaries when a wrapped tool name is followed by its detail', () => {
+    const blocks = parseCodeAgentTranscript(
+      ['[Claude tool] Bash', 'npm test --runInBand'].join('\n'),
+    );
+    const bash = blocks.find((block) => block.kind === 'tool' && block.title === 'Bash');
+    expect(bash).toBeDefined();
+    expect(bash?.lines).toEqual(['npm test --runInBand']);
+    expect(blocks.some((block) => block.title === 'Bashnpm')).toBe(false);
   });
 });
 

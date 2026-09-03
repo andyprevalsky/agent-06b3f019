@@ -17,6 +17,7 @@ logger = structlog.get_logger()
 
 ACTIVITY_TIMEOUT_SECONDS = 130
 ACTIVITY_MAX_ATTEMPTS = 3
+SAFE_HTTP_METHODS = frozenset({"GET", "HEAD"})
 
 
 def _safe_time() -> float:
@@ -40,6 +41,20 @@ def _format_title(prefix: str, tool_call: Dict[str, Any]) -> str:
     url = str(tool_call.get("url") or "")
     display_url = url if len(url) <= LOG_URL_MAX_LENGTH else f"{url[: LOG_URL_MAX_LENGTH - 3]}..."
     return f"{prefix} {method} {display_url}"
+
+
+def _has_idempotency_key(tool_call: Dict[str, Any]) -> bool:
+    headers = tool_call.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    return any(str(key).lower() == "idempotency-key" for key in headers)
+
+
+def _activity_max_attempts(tool_call: Dict[str, Any]) -> int:
+    method = str(tool_call.get("method") or "GET").upper()
+    if method in SAFE_HTTP_METHODS or _has_idempotency_key(tool_call):
+        return ACTIVITY_MAX_ATTEMPTS
+    return 1
 
 
 async def execute_api_request(
@@ -74,7 +89,7 @@ async def execute_api_request(
             api_request_activity,
             args=[tool_call, user_id],
             start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
-            retry_policy=RetryPolicy(maximum_attempts=ACTIVITY_MAX_ATTEMPTS),
+            retry_policy=RetryPolicy(maximum_attempts=_activity_max_attempts(tool_call)),
         )
 
         elapsed_time = _safe_time() - start_time

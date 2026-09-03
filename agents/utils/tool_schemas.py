@@ -376,8 +376,8 @@ class ApiRequestTool(BaseModel):
     """Call a public HTTP API and return the full response body."""
 
     tool: Literal["api_request"]
-    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] = Field(
-        description="HTTP method for the request."
+    method: Literal["GET", "HEAD"] = Field(
+        description="HTTP method for the request. Only safe read-only methods are allowed."
     )
     url: str = Field(description="Absolute http(s) URL for the API endpoint.")
     query: Optional[Dict[str, Any]] = Field(
@@ -391,10 +391,41 @@ class ApiRequestTool(BaseModel):
     headers: Optional[Dict[str, str]] = Field(
         default=None,
         description=(
-            "Optional HTTP headers, including Authorization or API keys when needed. "
-            "Use grep first when credentials are stored in local data."
+            "Optional non-credential HTTP headers (for example Accept or User-Agent). "
+            "Do not include Authorization, API keys, cookies, or other secrets; "
+            "approved credentials must go through a credential-broker binding to an allowlisted origin."
         ),
     )
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_credential_headers(cls, value: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+        if not value:
+            return value
+        blocked = {
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+        }
+        for key in value:
+            lowered = key.lower().strip()
+            if (
+                lowered in blocked
+                or "authorization" in lowered
+                or lowered.endswith("api-key")
+                or lowered.endswith("access-token")
+                or lowered.endswith("auth-token")
+            ):
+                raise ValueError(
+                    f"Credential header {key!r} is not allowed on api_request; "
+                    "use an approved credential-broker binding instead."
+                )
+        return value
 
 
 class GrepTool(BaseModel):
