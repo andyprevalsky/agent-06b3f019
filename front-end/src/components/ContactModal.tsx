@@ -29,12 +29,16 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
   const { toast } = useToast();
   const [copied, setCopied] = useState(false);
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
   const email = 'andy@hinavi.ai';
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (copyResetTimeoutRef.current !== null) {
         clearTimeout(copyResetTimeoutRef.current);
+        copyResetTimeoutRef.current = null;
       }
     };
   }, []);
@@ -42,6 +46,9 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
   const copyToClipboard = async () => {
     try {
       await navigator.clipboard.writeText(email);
+      if (!mountedRef.current) {
+        return;
+      }
       setCopied(true);
       toast({
         title: 'Email copied!',
@@ -50,9 +57,16 @@ const ContactModal = ({ open, onOpenChange, subtitle }: ContactModalProps) => {
       if (copyResetTimeoutRef.current !== null) {
         clearTimeout(copyResetTimeoutRef.current);
       }
-      copyResetTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+      copyResetTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) {
+          setCopied(false);
+        }
+      }, 2000);
     } catch (err) {
       console.error('Failed to copy email:', err);
+      if (!mountedRef.current) {
+        return;
+      }
       toast({
         title: 'Copy failed',
         description: 'Please manually copy the email address.',

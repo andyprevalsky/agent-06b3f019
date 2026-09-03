@@ -2134,6 +2134,17 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
     Idempotent — running it twice on its own output is a no-op.
     """
+    # Work on shallow copies of assistant rows (and their tool_calls lists) so
+    # pass 1's dedupe cannot mutate caller-owned message objects before pass 2.
+    messages = [
+        (
+            {**msg, "tool_calls": list(msg["tool_calls"])}
+            if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list)
+            else dict(msg)
+        )
+        for msg in messages
+    ]
+
     seen_ids: set[str] = set()
     repaired = False
 

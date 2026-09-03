@@ -8823,7 +8823,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     # never let a CDP hang become "Verification failed".
                     current_state = await _get_browser_state_soft(
                         dom_service,
-                        include_screenshot=False,
+                        include_screenshot=True,
                     )
                     current_screenshot = (
                         current_state.get("screenshot") if current_state else None
