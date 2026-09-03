@@ -57,10 +57,18 @@ GATES = (
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
     ),
+    Gate(
+        "llm-trajectory-injection-approval",
+        ("bash", "scripts/tests/check-llm-trajectory-injection-approval.test.sh"),
+    ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
     Gate(
         "durable-evidence-links",
         ("bash", "scripts/tests/durable-evidence-links.test.sh"),
+    ),
+    Gate(
+        "publish-evidence-browser-validation",
+        ("bash", "scripts/tests/publish_evidence_links_browser_validation.test.sh"),
     ),
     Gate(
         "workflow-deployment-migration",

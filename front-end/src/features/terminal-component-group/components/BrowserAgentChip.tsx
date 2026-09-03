@@ -18,7 +18,7 @@
  *                                                                  \--err-> [ERROR]
  *   (neither present => [UNAVAILABLE])
  *
- * RECORDING PLAYHEAD → LIVE TRAJECTORY (while RECORDING tab READY + <video>):
+ * RECORDING PLAYHEAD ↔ LIVE TRAJECTORY (while RECORDING tab READY + <video>):
  *   video.timeupdate|seeked
  *        │
  *        ▼
@@ -32,10 +32,27 @@
  *   (fixed portal hanging off the recording — no layout/scroll shift,
  *    z-index above terminal chrome so it stays visible)
  *
+ * LIVE TRAJECTORY CLICK → VIDEO SEEK:
+ *   click step i
+ *        │
+ *        ▼
+ *   (segmentIndex, timeInSegment) = seekTargetFromOffset(step.offsetSec, durations)
+ *        │
+ *        ▼
+ *   setSegmentIndex + video.currentTime = timeInSegment (+ play)
+ *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type SyntheticEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
@@ -47,6 +64,7 @@ import {
   findActiveStepIndex,
   playheadFromSegments,
   resolveRecordingStartMs,
+  seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
 
@@ -68,6 +86,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const [recordingState, setRecordingState] = useState<'idle' | 'loading' | 'ready' | 'error'>(
     'idle',
   );
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   // Which Kernel replay segment (one per session/rotation) is currently playing.
   // The segments auto-advance into one continuous recording (baseline -> each
   // rotation), so this is the playhead, not a manual tab selection.
@@ -76,6 +95,8 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // video element so scrubbing / playback updates the live trajectory side panel.
   const [playheadSec, setPlayheadSec] = useState(0);
   const segmentDurationsRef = useRef<number[]>([]);
+  // Shared across stitched + multi-URL players so trajectory clicks can seek.
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const toolCallId = message.metadata?.toolCallId as string | undefined;
 
@@ -213,6 +234,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
+    setRecordingError(null);
     setSegmentIndex(0);
     setPlayheadSec(0);
     segmentDurationsRef.current = [];
@@ -259,11 +281,37 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     setPlayheadSec(playheadFromSegments(segmentDurationsRef.current, segIdx, video.currentTime));
   }
 
-  function handleVideoTimeSync(
-    event: SyntheticEvent<HTMLVideoElement>,
-    segIdx: number = 0,
-  ) {
+  function handleVideoTimeSync(event: SyntheticEvent<HTMLVideoElement>, segIdx: number = 0) {
     syncPlayheadFromVideo(event.currentTarget, segIdx);
+  }
+
+  /** Click a trajectory row → jump the recording to that step's wall-clock time. */
+  function seekRecordingToOffset(offsetSec: number) {
+    const { segmentIndex: nextSeg, timeInSegment } = seekTargetFromOffset(
+      offsetSec,
+      segmentDurationsRef.current,
+    );
+    if (nextSeg !== segmentIndex) {
+      setSegmentIndex(nextSeg);
+      // Segment swap remounts <video> (key=url). Apply currentTime once metadata loads.
+      requestAnimationFrame(() => {
+        const v = videoRef.current;
+        if (!v) return;
+        const apply = () => {
+          v.currentTime = timeInSegment;
+          void v.play().catch(() => {});
+          syncPlayheadFromVideo(v, nextSeg);
+        };
+        if (v.readyState >= 1) apply();
+        else v.addEventListener('loadedmetadata', apply, { once: true });
+      });
+      return;
+    }
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = timeInSegment;
+    void v.play().catch(() => {});
+    syncPlayheadFromVideo(v, segmentIndex);
   }
 
   async function openRecording() {
@@ -306,8 +354,17 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
       setPlayheadSec(0);
       segmentDurationsRef.current = [];
       setRecordingState('ready');
-    } catch {
+    } catch (err) {
       if (loadGeneration === recordingLoadGeneration.current) {
+        const message = err instanceof Error ? err.message : '';
+        // Ownership failures happen while signing the attachment URL. A later
+        // 403 on the signed recording download is usually an expired URL, not
+        // the wrong account — keep that as a generic load failure.
+        setRecordingError(
+          /Failed to get attachment URL.*\(403\)|Access denied/i.test(message)
+            ? 'Sign in as the agent owner to load this recording.'
+            : 'Failed to load recording.',
+        );
         setRecordingState('error');
       }
     }
@@ -382,7 +439,9 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                   <p className="text-xs text-muted-foreground">Loading recording…</p>
                 )}
                 {hasRecording && recordingState === 'error' && (
-                  <p className="text-xs text-red-500">Failed to load recording.</p>
+                  <p className="text-xs text-red-500">
+                    {recordingError ?? 'Failed to load recording.'}
+                  </p>
                 )}
                 {/* Stitched replay: rotate_ip's per-session segments were
                     concatenated server-side into ONE continuous MP4, so the whole
@@ -397,8 +456,10 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                       steps={trajectory}
                       activeIndex={activeStepIndex}
                       playheadSec={playheadSec}
+                      onStepClick={seekRecordingToOffset}
                     >
                       <video
+                        ref={videoRef}
                         title="Browser recording"
                         src={recordingUrl}
                         controls
@@ -421,6 +482,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                     steps={trajectory}
                     activeIndex={activeStepIndex}
                     playheadSec={playheadSec}
+                    onStepClick={seekRecordingToOffset}
                   >
                     <div>
                       {recordingSource.urls.length > 1 && (
@@ -445,6 +507,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         </div>
                       )}
                       <video
+                        ref={videoRef}
                         key={recordingSource.urls[segmentIndex]}
                         title="Browser recording"
                         src={recordingSource.urls[segmentIndex]}
@@ -456,9 +519,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         onSeeked={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onLoadedMetadata={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onEnded={() => {
-                          setSegmentIndex((i) =>
-                            i + 1 < recordingSource.urls.length ? i + 1 : i,
-                          );
+                          setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
                         }}
                         className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
                       />
@@ -488,11 +549,13 @@ function RecordingWithLiveTrajectory({
   steps,
   activeIndex,
   playheadSec,
+  onStepClick,
   children,
 }: {
   steps: TrajectoryStep[];
   activeIndex: number;
   playheadSec: number;
+  onStepClick?: (offsetSec: number) => void;
   children: React.ReactNode;
 }) {
   // Fixed portal anchored to the recording box — zero layout/scroll impact on the
@@ -501,7 +564,9 @@ function RecordingWithLiveTrajectory({
   const [panelStyle, setPanelStyle] = useState<CSSProperties | null>(null);
 
   useLayoutEffect(() => {
-    const PANEL_W = 288; // w-72
+    // Wider than w-72 so long action names (browser_challenge_recovery) leave
+    // room for wrapped titles instead of Cap…/Wai…/Bro… ellipsis.
+    const PANEL_W = 340;
     const GAP = 8;
 
     const sync = () => {
@@ -536,11 +601,7 @@ function RecordingWithLiveTrajectory({
   }, []);
 
   return (
-    <div
-      ref={anchorRef}
-      data-testid="recording-with-live-trajectory"
-      className="relative w-full"
-    >
+    <div ref={anchorRef} data-testid="recording-with-live-trajectory" className="relative w-full">
       {children}
       {panelStyle &&
         createPortal(
@@ -560,7 +621,12 @@ function RecordingWithLiveTrajectory({
                   t={playheadSec.toFixed(1)}s
                 </p>
               </div>
-              <TrajectoryList steps={steps} activeIndex={activeIndex} live />
+              <TrajectoryList
+                steps={steps}
+                activeIndex={activeIndex}
+                live
+                onStepClick={onStepClick}
+              />
             </div>
           </aside>,
           document.body,
@@ -573,10 +639,12 @@ function TrajectoryList({
   steps,
   activeIndex,
   live = false,
+  onStepClick,
 }: {
   steps: TrajectoryStep[];
   activeIndex: number;
   live?: boolean;
+  onStepClick?: (offsetSec: number) => void;
 }) {
   const activeRef = useRef<HTMLLIElement | null>(null);
 
@@ -594,31 +662,48 @@ function TrajectoryList({
       {steps.map((s, i) => {
         const isActive = i === activeIndex;
         const isPast = activeIndex >= 0 && i < activeIndex;
+        const clickable = typeof onStepClick === 'function';
         return (
           <li
             key={i}
             ref={isActive ? activeRef : undefined}
             data-testid={isActive ? 'recording-active-step' : undefined}
             data-step-index={i}
-            className={`flex items-start gap-2 rounded px-1.5 py-1 ${
-              isActive
-                ? 'bg-foreground/10 ring-1 ring-foreground/20'
-                : isPast
-                  ? 'opacity-70'
-                  : live
-                    ? 'opacity-40'
-                    : ''
-            }`}
+            data-step-offset={s.offsetSec}
           >
-            <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
-            <span
-              className={`shrink-0 font-mono ${
-                s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
+            <button
+              type="button"
+              disabled={!clickable}
+              onClick={() => onStepClick?.(s.offsetSec)}
+              title={clickable ? `Seek recording to t=${s.offsetSec.toFixed(1)}s` : s.title}
+              className={`flex w-full flex-col items-stretch gap-0.5 rounded px-1.5 py-1 text-left ${
+                clickable ? 'cursor-pointer hover:bg-foreground/5' : 'cursor-default'
+              } ${
+                isActive
+                  ? 'bg-foreground/10 ring-1 ring-foreground/20'
+                  : isPast
+                    ? 'opacity-70'
+                    : live
+                      ? 'opacity-40'
+                      : ''
               }`}
             >
-              {s.action}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{s.title}</span>
+              <div className="flex items-start gap-2">
+                <span className="w-5 shrink-0 text-right text-muted-foreground">{i + 1}</span>
+                <span
+                  className={`min-w-0 flex-1 break-words font-mono ${
+                    s.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground'
+                  }`}
+                >
+                  {s.action}
+                </span>
+              </div>
+              {s.title ? (
+                <p className="break-words whitespace-normal pl-7 text-[11px] leading-snug text-foreground/80">
+                  {s.title}
+                </p>
+              ) : null}
+            </button>
           </li>
         );
       })}

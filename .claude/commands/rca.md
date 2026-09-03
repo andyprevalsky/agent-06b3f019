@@ -1,5 +1,5 @@
 ---
-description: "Root-cause a bug the RIGHT way: read the RCA methodology, then produce a LOCAL REPRO that fails on the bug and a fix that makes it pass — never return with a theory."
+description: "Root-cause a bug the RIGHT way: read the RCA methodology, then produce a LOCAL REPRO that fails on the bug and a fix that makes it pass — never return with a theory. FE link validation: every browser agent on the cited agent must be terminated with its recording attached (enforced by publish_evidence_links)."
 ---
 
 # /RCA
@@ -18,6 +18,35 @@ approval request.
 diff inline** (unified diff or before→after with every added/removed line). A
 `path:line` link alone is incomplete — see the "MUST paste the exact diff
 inline" rule in `.claude/shared/approval-format.md`.
+
+## Autonomous fix-and-deploy default
+
+**If you can solve the issue without touching code that requires user approval
+to deploy, do that and immediately run `/deploy`; drive it fully autonomously
+to completion.** Do not stop after diagnosis or ask for implementation agreement
+merely because the request was phrased as RCA-only.
+
+After the local reproduction proves the root cause, determine whether the
+correct generalizable fix requires a human-approval-gated change. Approval-gated
+changes include prompt or other LLM-visible text, agent recovery/terminal
+semantics, runtime trajectory injection, Zod schemas, benchmark definitions or
+timeouts, production environment writes, irreversible or paid actions, and any
+other surface that a repository rule explicitly says requires user approval.
+
+- If the fix does **not** require an approval-gated change: implement it
+  immediately, make the unchanged reproduction pass, cement the regression,
+  write and validate the RCA case, then invoke `/deploy` without returning to
+  the user. Own every deploy test, review, merge, rollout, and production
+  verification loop until completion.
+- If the fix **does** require an approval-gated change: stop at the narrowest
+  approval boundary and use the canonical human-approval format above. After
+  approval, resume the same fix-and-deploy flow without another discretionary
+  pause.
+- Never choose a weaker point fix, fallback, test change, or wrong-layer
+  workaround merely to keep the diff approval-free. Approval status selects
+  whether to pause; it does not select the technical solution.
+- An explicit user instruction to diagnose only or not modify/deploy still
+  takes precedence.
 
 ## Step 0 — READ THE METHODOLOGY (mandatory, every time)
 
@@ -210,19 +239,24 @@ teaches the archive to lie.
 
 ## Output
 
-When RCA-only: present the evidence, which archive searches you ran and whether
-this is a recurrence/relative/novel, a one-sentence root cause at the first-bad
-boundary, exact local repro command + recorded failure, and proposed
-generalizable fix. Then stop for agreement before implementing using the
-canonical approval narrative from `.claude/shared/approval-format.md`. Evidence
-must include a task-framed `What failed:` sentence, the durable FE link
+When the correct generalizable fix requires an approval-gated change, present
+the evidence, which archive searches you ran and whether this is a
+recurrence/relative/novel, a one-sentence root cause at the first-bad boundary,
+exact local repro command + recorded failure, and proposed generalizable fix.
+Then stop at that approval boundary using the canonical approval narrative from
+`.claude/shared/approval-format.md`. Evidence must include a task-framed `What failed:` sentence, the durable FE link
 (`https://www.roselabs.ai/?agent-id=…` after
 `python3 scripts/publish_evidence_links.py`), last-call rendered LLM dump under
 `/opt/cursor/artifacts/rca_evidence/…`, numbered local-repro steps with a
 `Tests:` assertion and measured wall-clock, and Environment (evaluators with
-how they are checked, fixtures, task prompt).
-Put the unchanged repro's current failing result in Evidence and Detail, and
-the expected post-fix assertion in After Behavior.
+how they are checked, fixtures, task prompt). Put the unchanged repro's current
+failing result in Evidence and Detail, and the expected post-fix assertion in
+After Behavior.
+
+When the fix is not approval-gated, do not produce an intermediate RCA-only
+handoff. Implement and verify it, archive the case, run `/deploy` to completion,
+and report the evidence, pre-fix failure, post-fix pass, and deploy result in the
+final handoff.
 
 When fixing too: implement, re-run the identical repro command, and report the
 pre-fix failure AND the post-fix pass side by side.

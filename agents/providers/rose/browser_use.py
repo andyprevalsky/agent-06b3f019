@@ -16,11 +16,22 @@ and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
+
+
+def recover_from_challenge_enabled() -> bool:
+    """Temp kill-switch for challenge recovery (bench A/B).
+
+    Set ``BROWSER_DISABLE_RECOVER_FROM_CHALLENGE=1`` to hide and refuse the tool
+    so the browser agent must navigate around blockers like the manual CDP path.
+    """
+    raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
+    return raw not in {"1", "true", "yes", "on"}
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
@@ -164,8 +175,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
-            "computed styles, dispatching events, querying iframe contents. Wrap in IIFE with try-catch. "
-            "NOT for extracting visible content; for that, use `extract`. NOT interchangeable with `extract`."
+            "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
+            "facts before navigating away. Wrap in IIFE with try-catch. Every successful evaluate also "
+            "retains a bounded browser-extracted DOM snapshot for the verifier (no flag); the JS return "
+            "value is not trusted as proof. Prefer evaluate over inventing page content."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -207,37 +220,37 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "page offers it (for example Continue as guest, Checkout as guest, or I'll reserve). Cookie and "
             "Steel-session auth are applied automatically before you start. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
-            "unusual-traffic pages - those are not authentication blockers. Call recover_from_challenge "
-            "immediately instead of trying to solve them yourself."
+            "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
+            "those instead of trying to solve them yourself."
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
-            "Recovery for a CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic page, or "
-            "repeated 429. Call this immediately when a challenge interstitial blocks progress - do not spend "
-            "steps dragging sliders, clicking verify buttons, or otherwise trying to solve the widget yourself. "
-            "Never use it for bad "
+            "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
+            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
+            "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
+            "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
-            "the tool first waits for Kernel or Steel's native automatic CAPTCHA solver. If the challenge "
-            "remains, it tests isolated copies of browser state: known challenge cookies, all target-site "
-            "cookies, then parallel cookie-group reductions. Set auth_cookies_are_preserved=true when the "
-            "current session is logged in and the replacement machine must keep that authenticated state. "
-            "Set auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose "
-            "auth, but can clear a poisoned cookie that forces anti-bot on every session). If no safe "
-            "cookie fix is proven, it searches permission-compatible Kernel residential, Kernel mobile, "
-            "Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration that "
-            "passes repeated stability probes, and caches that configuration as this user's default for "
-            "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
-            "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
+            "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
+            "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
+            "cookie-group reductions. Set auth_cookies_are_preserved=true when the current session is logged "
+            "in and the replacement machine must keep that authenticated state. Set "
+            "auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose auth, "
+            "but can clear a poisoned cookie that forces anti-bot on every session). If no safe cookie fix "
+            "is proven, it searches permission-compatible Kernel residential, Kernel mobile, Kernel ISP, "
+            "and Steel managed/fixed-IP browsers in parallel, selects a configuration that passes repeated "
+            "stability probes, and caches that configuration as this user's default for future browser "
+            "sessions. Provider CAPTCHA solving remains enabled throughout. Successful recovery returns to "
+            "the current URL with cookies, localStorage, and IndexedDB preserved."
         ),
         "params": {
             "reason": {
                 "type": "string",
                 "description": (
-                    "One line of concrete evidence that the challenge blocks the page (e.g. "
-                    "'Bot or Not slider interstitial on hotels.com', 'captcha wall on search results', "
-                    "'repeated 429s on search')."
+                    "One line of concrete evidence that this page or service must be force-opened and no "
+                    "alternate goal path exists (e.g. 'Bot or Not interstitial blocks only path to search', "
+                    "'captcha wall blocks checkout with no other route', 'repeated 429s on required API')."
                 ),
                 "required": True,
             },
@@ -462,8 +475,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
             "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
             "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
-            "Use a screenshot only if you need to confirm the challenge type, then call recover_from_challenge "
-            "immediately - do not drag sliders, click verify buttons, or otherwise try to solve the widget yourself."
+            "Use a screenshot only if you need to confirm the challenge type. Do not drag sliders, click "
+            "verify buttons, or otherwise try to solve the widget yourself."
         ),
         "params": {},
     },
@@ -691,6 +704,11 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     # providers.rose during worker startup.
     from browser_tools.schemas import BROWSER_TOOL_MODELS, create_browser_agent_action_model
 
+    if not recover_from_challenge_enabled():
+        available_actions = [
+            name for name in available_actions if name != "recover_from_challenge"
+        ]
+
     known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
     if not known_actions:
         return []
@@ -703,10 +721,27 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
     for action_name in known_actions:
         generated_tool = by_name[action_name]
         prompt_metadata = BROWSER_USE_TOOLS.get(action_name) or {}
+        description = prompt_metadata.get("description") or generated_tool["description"]
+        if (
+            action_name == "request_user_assistance_for_authentication"
+            and not recover_from_challenge_enabled()
+        ):
+            description = (
+                "Waterfall step 8: request user help signing in only after steps 1-7 are "
+                "exhausted or unavailable. Before calling, you must have tried every saved "
+                "password, email OTP if available, SMS OTP if available, the minted agent "
+                "account when it has an email, and guest/anonymous completion when the page "
+                "offers it (for example Continue as guest, Checkout as guest, or I'll reserve). "
+                "Cookie and Steel-session auth are applied automatically before you start. "
+                "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
+                "access-denied interstitials, or unusual-traffic pages - those are not "
+                "authentication blockers. Wait briefly or try an alternate URL/path instead "
+                "of trying to solve them yourself."
+            )
         tools.append(
             {
                 "name": action_name,
-                "description": prompt_metadata.get("description") or generated_tool["description"],
+                "description": description,
                 "input_schema": _collapse_nullable_schema(generated_tool["input_schema"]),
             }
         )
@@ -724,6 +759,30 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
+    recover_enabled = (
+        recover_from_challenge_enabled()
+        and "recover_from_challenge" in set(available_actions or [])
+    )
+    if recover_enabled:
+        challenge_rule = (
+            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
+            "are not authentication. recover_from_challenge is a relatively expensive way to "
+            "force-open a blocked page or service - do not use it when an alternate path can "
+            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
+            "to solve challenge widgets yourself. Never call "
+            "request_user_assistance_for_authentication while a challenge interstitial is "
+            "still visible."
+        )
+    else:
+        challenge_rule = (
+            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
+            "are not authentication. No challenge-recovery tool is available - wait briefly "
+            "for the provider auto-solver, try an alternate URL or path to complete the "
+            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
+            "challenge widgets yourself. Never call "
+            "request_user_assistance_for_authentication while a challenge interstitial is "
+            "still visible."
+        )
     return f"""# Role
 
 You are a browser automation agent. You take in a user goal and complete the goal by interacting with a browser you are exposed to via tools.
@@ -766,6 +825,11 @@ action envelope in text; use the provided tool call.
 
 {VERIFICATION_RULES.strip()}
 
+# Evidence Retention
+
+- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and DOM snapshots captured after each successful `evaluate`, not arbitrary historical DOM.
+- Before navigating away from a page with load-bearing facts required by the goal (product name, size, price, quantity, wattage, model, etc.), call `evaluate` while those facts are still visible. The runtime always snapshots the live browser-extracted DOM after a successful evaluate; you do not pass a preserve flag.
+
 # Safety Rules
 
 - NEVER delete or close any user account
@@ -793,7 +857,7 @@ action envelope in text; use the provided tool call.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - Do not open Sign in / Log in and call step 8 while a guest/anonymous path remains viable on the site. Exhaust step 7 first.
 - When authentication still blocks the task after steps 1-7 are exhausted or unavailable, call request_user_assistance_for_authentication (step 8). Do not call attempt_completion, send_message_to_user, or report a status instead.
-- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge immediately when one blocks progress - do not drag sliders, click verify buttons, or otherwise try to solve the widget yourself first. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
+{challenge_rule}
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 

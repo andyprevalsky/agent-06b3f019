@@ -9,6 +9,7 @@ import {
   probeBrowserCookieVariant,
   recoverBrowserChallenge,
 } from './service.challenge-recovery';
+import { ChallengeConfigSearchExhaustedError } from '../../providers/browser/challengeRecovery';
 import { SessionNotFoundError } from './service.local-storage';
 import { probeCookieVariantSchema, recoverChallengeSchema } from './types';
 
@@ -41,6 +42,7 @@ async function handleProbeCookieVariant(req: AuthRequest, res: Response): Promis
       userAgent: input.user_agent,
       blockedResourceUrl: input.blocked_resource_url,
       recoveryReason: input.recovery_reason,
+      blockedConfigKeys: input.blocked_config_keys,
     });
     res.json({ success: true, ...result });
   } catch (error) {
@@ -81,6 +83,7 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
       recoveryReason: input.recovery_reason,
       requirePaymentCdn: input.require_payment_cdn,
       preserveAuth: input.preserve_auth,
+      blockedConfigKeys: input.blocked_config_keys,
     });
     res.json({ success: true, ...result });
   } catch (error) {
@@ -97,9 +100,14 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
       return;
     }
     log.error('Browser challenge recovery failed', { error: String(error) });
+    const failedConfigKeys =
+      error instanceof ChallengeConfigSearchExhaustedError ? error.failedConfigKeys : undefined;
     res.status(503).json({
       error: 'browser_challenge_recovery_failed',
       message: error instanceof Error ? error.message : String(error),
+      ...(failedConfigKeys && failedConfigKeys.length > 0
+        ? { failed_config_keys: failedConfigKeys }
+        : {}),
     });
   }
 }

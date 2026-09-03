@@ -86,8 +86,9 @@ export function buildTrajectorySteps(
       recordingStartMs !== null && tsMs !== null ? (tsMs - recordingStartMs) / 1000 : 0;
     steps.push({
       action,
-      title:
-        (m.metadata?.title as string | undefined) || (m.text ? m.text.slice(0, 80) : '') || '',
+      // Keep the full title/body — the live-trajectory panel wraps rather than
+      // truncating, so callers can read Cap/Wait/Probe/Search/Browser… in full.
+      title: (m.metadata?.title as string | undefined) || (m.text ?? '') || '',
       status: m.metadata?.toolStatus as string | undefined,
       ts,
       offsetSec,
@@ -122,4 +123,31 @@ export function playheadFromSegments(
     if (Number.isFinite(d) && d > 0) prior += d;
   }
   return prior + (Number.isFinite(currentTimeSec) ? Math.max(0, currentTimeSec) : 0);
+}
+
+/**
+ * Map a trajectory wall-clock offset back onto a (segment, timeInSegment) seek
+ * target for a multi-segment playlist. Unknown/zero durations collapse to
+ * segment 0 so a single-file recording still seeks correctly.
+ */
+export function seekTargetFromOffset(
+  offsetSec: number,
+  segmentDurationsSec: number[],
+): { segmentIndex: number; timeInSegment: number } {
+  const t = Number.isFinite(offsetSec) ? Math.max(0, offsetSec) : 0;
+  if (segmentDurationsSec.length === 0) {
+    return { segmentIndex: 0, timeInSegment: t };
+  }
+  let remaining = t;
+  for (let i = 0; i < segmentDurationsSec.length; i++) {
+    const d = segmentDurationsSec[i];
+    const dur = Number.isFinite(d) && d > 0 ? d : 0;
+    const isLast = i === segmentDurationsSec.length - 1;
+    if (!isLast && dur > 0 && remaining > dur) {
+      remaining -= dur;
+      continue;
+    }
+    return { segmentIndex: i, timeInSegment: remaining };
+  }
+  return { segmentIndex: 0, timeInSegment: t };
 }

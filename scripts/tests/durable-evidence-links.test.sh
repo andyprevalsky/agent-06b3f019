@@ -109,6 +109,12 @@ grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format mis
 grep -Fq 'omit the recording player entirely' "$FORMAT" || fail "approval format missing invalid-recording ban"
 grep -Fq 'HTTPS URL' "$FORMAT" || fail "approval format missing HTTPS dump URL requirement"
 grep -Fq 'vscode-remote' "$FORMAT" || fail "approval format missing vscode-remote blank-viewer warning"
+grep -Fq 'every `spawn_browser_agent` task on that agent to be terminated' "$FORMAT" \
+  || fail "approval format missing browser terminate+recording FE validation"
+
+# 3b) publish_evidence_links enforces browser terminate + recording attach.
+bash "$ROOT/scripts/tests/publish_evidence_links_browser_validation.test.sh" \
+  || fail "publish_evidence_links browser validation checks failed"
 
 # 4) Gate must stay wired into /deploy structural suites (both docs + registry).
 DEPLOY="$ROOT/.claude/commands/deploy.md"
@@ -117,5 +123,7 @@ grep -Fq 'bash scripts/tests/durable-evidence-links.test.sh' "$DEPLOY" \
   || fail "/deploy must list durable-evidence-links.test.sh"
 grep -Fq 'durable-evidence-links' "$RUNNER" \
   || fail "run-deploy-structural-gates.py must register durable-evidence-links"
+grep -Fq 'publish-evidence-browser-validation' "$RUNNER" \
+  || fail "run-deploy-structural-gates.py must register publish-evidence-browser-validation"
 
 echo "All durable-evidence-links checks passed."

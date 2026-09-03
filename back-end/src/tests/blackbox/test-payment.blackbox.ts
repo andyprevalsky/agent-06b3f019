@@ -186,12 +186,12 @@ const tests: Array<[string, () => Promise<void>]> = [
         }
         if (
           connected.status === 502 &&
-          /invalid or expired organization token|invalid client secret/i.test(
+          /invalid or expired organization token|invalid client secret|Could not obtain an AgentCard Organization MCP access token|Timed out acquiring an AgentCard Organization MCP access token|Could not reach the AgentCard Organization MCP token endpoint/i.test(
             JSON.stringify(connected.data)
           )
         ) {
           writeLine(
-            `⚠️  SKIP: AgentCard sandbox org token rejected by provider ` +
+            `⚠️  SKIP: AgentCard sandbox org MCP token unavailable ` +
               `(${JSON.stringify(connected.data)}); credential-infra precondition, ` +
               `not a code regression — connect/reset assertions skipped.`
           );

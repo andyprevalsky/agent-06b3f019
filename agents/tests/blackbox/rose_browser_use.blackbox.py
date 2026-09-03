@@ -171,8 +171,9 @@ def test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag():
 
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
-    assert "Call this immediately when a challenge interstitial blocks progress" in description
-    assert "do not spend steps dragging sliders" in description
+    assert "Relatively expensive recovery to forcefully open" in description
+    assert "Do not use when an alternate path can complete the goal" in description
+    assert "Do not drag sliders" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -186,7 +187,8 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "user's default" in description
     assert "rotate_ip" not in BROWSER_USE_TOOLS
     reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
-    assert "challenge blocks the page" in reason
+    assert "force-opened" in reason
+    assert "alternate goal path" in reason
     preserve_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"][
         "auth_cookies_are_preserved"
     ]
@@ -284,7 +286,7 @@ def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
     assert "misleading shell" in desc
     assert "Bot or Not" in desc
     assert "drag" in desc
-    assert "recover_from_challenge immediately" in desc
+    assert "recover_from_challenge" not in desc
 
 
 def test_drag_tool_in_catalog_and_normalizes_coordinates():
@@ -322,7 +324,7 @@ def test_drag_tool_schema_requires_start_and_end():
 
 
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
-    prompt = build_browser_use_system_prompt([])
+    prompt = build_browser_use_system_prompt(["recover_from_challenge"])
 
     assert "- Use the cheapest viable authentication path for this single site." in prompt
     assert "- Priority:\n  - 1. Existing Steel/cookie session" in prompt
@@ -337,8 +339,9 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
     assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
-    assert "Call recover_from_challenge immediately when one blocks progress" in prompt
-    assert "do not drag sliders" in prompt
+    assert "relatively expensive way to force-open a blocked page or service" in prompt
+    assert "do not use it when an alternate path can complete the goal" in prompt
+    assert "Do not drag sliders" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 

@@ -25,6 +25,7 @@ import structlog
 from PIL import Image
 
 from browser_tools.schemas import (
+    MAX_BROWSER_WAIT_MS,
     RequestPaymentCardBrowserTool,
     normalize_browser_wait_ms,
     normalize_evaluate_timeout_seconds,
@@ -1259,7 +1260,19 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             time_ms = normalize_browser_wait_ms(context.params.get("time_ms"), default=1000)
         except ValueError as error:
             return {"success": False, "error": str(error)}
-        event = context.session.event_bus.dispatch(WaitEvent(seconds=time_ms / 1000.0))
+        # browser-use WaitEvent defaults max_seconds=10 and event_timeout=60. Our
+        # schema allows waits up to MAX_BROWSER_WAIT_MS (60s) for OTP polling; if
+        # we leave the vendor defaults, a 60s wait is silently clipped to 10s and
+        # the handler can race its own event_timeout on a full-length sleep.
+        wait_seconds = time_ms / 1000.0
+        max_seconds = MAX_BROWSER_WAIT_MS / 1000.0
+        event = context.session.event_bus.dispatch(
+            WaitEvent(
+                seconds=wait_seconds,
+                max_seconds=max_seconds,
+                event_timeout=max_seconds + 15.0,
+            )
+        )
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
         await context.action_history.record_action(

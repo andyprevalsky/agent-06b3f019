@@ -172,15 +172,37 @@ An RCA is **incomplete** until all of the following are true:
    both artifacts and FE links are recorded.
 10. A case file exists in `docs/rca/cases/` and `python3 scripts/rca_archive.py validate` exits 0 (see Step 8).
 
-### Fix approval and verification handoff
+### Autonomous fix, approval, and verification handoff
 
-When the current task is RCA-only, stop after presenting the evidence-backed diagnosis,
-the proposed generalizable fix, and the exact local reproduction command. Do not treat the
-diagnosis itself as approval to implement the fix.
+**If you can solve the issue without touching code that requires user approval
+to deploy, do that and immediately run `/deploy`; drive it fully autonomously
+to completion.** Do not stop after the evidence-backed diagnosis merely because
+the current task was phrased as RCA-only.
 
-After the user agrees on the fix:
+After the local reproduction proves the root cause, determine whether the
+correct generalizable fix requires a human-approval-gated change. This includes
+prompt or other LLM-visible text, agent recovery/terminal semantics, runtime
+trajectory injection, Zod schemas, benchmark definitions or timeouts,
+production environment writes, irreversible or paid actions, and any other
+surface that a repository rule explicitly says requires user approval.
 
-1. Implement the agreed fix without changing the reproduction's asserted behavior.
+- If the fix is not approval-gated, implement it immediately, complete the
+  verification steps below, write and validate the RCA case, and invoke
+  `/deploy` without an intermediate user handoff. Own the deploy through every
+  test, review, merge, rollout, and production verification loop.
+- If the correct fix is approval-gated, stop at the narrowest approval boundary
+  and request approval using `.claude/shared/approval-format.md`. After approval,
+  resume the same fix-and-deploy flow without another discretionary pause.
+- Never choose a weaker point fix, fallback, test change, or wrong-layer
+  workaround merely to keep the diff approval-free. Approval status determines
+  whether to pause, not which technical solution is correct.
+- An explicit user instruction to diagnose only or not modify/deploy still
+  takes precedence.
+
+For every implemented fix:
+
+1. Implement the selected fix (or the approved fix when approval was required)
+   without changing the reproduction's asserted behavior.
 2. Run the exact same local reproduction command that demonstrated the pre-fix failure.
 3. Report the post-fix command, exit status, and relevant passing assertion back to the user,
    alongside the recorded pre-fix failure.
@@ -191,9 +213,10 @@ After the user agrees on the fix:
    do not hand off a proxy-test pass as benchmark verification.
 
 Changing or weakening the reproduction so the fix appears to pass does not satisfy this
-handoff. If new evidence proves the original reproduction targeted the wrong boundary, explain
-that evidence to the user and obtain agreement on the corrected reproduction before using it
-as the acceptance test.
+handoff. If new evidence proves the original reproduction targeted the wrong boundary,
+record that evidence and establish the corrected reproduction before using it as the
+acceptance test. Pause only if the correction or resulting fix crosses a human-approval
+boundary described above.
 
 There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
