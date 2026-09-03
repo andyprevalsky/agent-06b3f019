@@ -225,6 +225,209 @@ def test_parse_challenge_classification_tolerates_prose_prefix():
     assert parsed.challenged is True
 
 
+def test_parse_challenge_classification_empty_and_partial_text():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        _parse_challenge_classification,
+    )
+
+    try:
+        _parse_challenge_classification("")
+        raise AssertionError("empty classifier response must raise")
+    except ValueError as exc:
+        assert "empty" in str(exc).lower()
+
+    partial_false = _parse_challenge_classification('noise "challenged": false trailing')
+    assert partial_false.challenged is False
+    partial_true = _parse_challenge_classification("noise 'challenged': true trailing")
+    assert partial_true.challenged is True
+
+    try:
+        _parse_challenge_classification("not json and no challenged flag")
+        raise AssertionError("unparseable classifier response must raise")
+    except ValueError as exc:
+        assert "unable to parse" in str(exc).lower()
+
+
+class _SettlePage:
+    def __init__(self):
+        self.load_states: list[str] = []
+        self.timeouts: list[float] = []
+
+    async def wait_for_load_state(self, state, timeout=None):
+        self.load_states.append(state)
+        if state == "networkidle":
+            raise TimeoutError("network never idle")
+
+    async def wait_for_timeout(self, ms):
+        self.timeouts.append(ms)
+
+
+class _DomPage:
+    def __init__(self, *, text="Offers Loading checkout", fail=False):
+        self._text = text
+        self._fail = fail
+        self.url = "https://www.hotels.com/ho129640/"
+
+    async def evaluate(self, _script, _cap):
+        if self._fail:
+            raise RuntimeError("cdp evaluate failed")
+        return self._text
+
+    async def title(self):
+        return "Hotel Kabuki"
+
+    async def screenshot(self, **_kwargs):
+        return b"png-bytes"
+
+
+async def test_wait_for_dom_settled_swallows_load_timeouts():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import wait_for_dom_settled
+
+    page = _SettlePage()
+    await wait_for_dom_settled(page, timeout_ms=50)
+    assert page.load_states == ["domcontentloaded", "networkidle"]
+    assert page.timeouts == [1_500]
+
+
+async def test_capture_agent_stripped_dom_success_and_failure():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        capture_agent_stripped_dom,
+    )
+
+    cleaned = await capture_agent_stripped_dom(_DomPage(text="  Offers   Loading  "))
+    assert cleaned == "  Offers   Loading  "
+    assert await capture_agent_stripped_dom(_DomPage(fail=True)) == ""
+
+
+async def test_capture_challenge_classifier_context_uses_fixed_dom_and_screenshot():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        capture_challenge_classifier_context,
+    )
+
+    class _Response:
+        status = 200
+
+    context = await capture_challenge_classifier_context(
+        _DomPage(),
+        _Response(),
+        agent_dom_tree="fixed agent DOM snapshot",
+        recovery_reason="GraphQL 429 / Offers Loading",
+    )
+    assert context["title"] == "Hotel Kabuki"
+    assert context["status"] == 200
+    assert context["cleaned_dom"] == "fixed agent DOM snapshot"
+    assert context["screenshot_base64_png"]
+    assert context["recovery_reason"] == "GraphQL 429 / Offers Loading"
+    assert "hotels.com" in context["url"]
+
+
+async def test_classify_challenge_with_llm_soft_block_skips_model():
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        classify_challenge_with_llm,
+    )
+
+    called = {"n": 0}
+
+    async def _boom(**_kwargs):
+        called["n"] += 1
+        raise AssertionError("soft-block path must not call the model")
+
+    import helpers.llm as llm_mod
+
+    original = llm_mod.call_llm
+    llm_mod.call_llm = _boom
+    try:
+        result = await classify_challenge_with_llm(
+            {
+                "url": "https://www.hotels.com/ho129640/",
+                "network_summary": "status=429 Too Many Requests https://www.hotels.com/graphql",
+                "recovery_reason": "repeated GraphQL 429 / Offers still Loading",
+            }
+        )
+    finally:
+        llm_mod.call_llm = original
+    assert result["challenged"] is True
+    assert "soft-block" in result["reason"]
+    assert called["n"] == 0
+
+
+async def test_classify_challenge_with_llm_parses_model_and_fails_closed():
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        classify_challenge_with_llm,
+    )
+
+    context = {
+        "url": "https://www.hotels.com/ho129640/",
+        "title": "Hotel Kabuki",
+        "status": 200,
+        "cleaned_dom": "Rooms and rates",
+        "network_summary": "status=200 https://www.hotels.com/graphql",
+        "screenshot_base64_png": None,
+        "recovery_reason": None,
+    }
+    with patch(
+        "helpers.llm.call_llm",
+        new=AsyncMock(
+            return_value={
+                "content": '{"challenged": false, "reason": "destination UI visible"}',
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "actual_model": "rose-labs/rose-1-mini",
+                },
+                "model": "rose-labs/rose-1-mini",
+            }
+        ),
+    ):
+        result = await classify_challenge_with_llm(context, agent_id="agent-1")
+    assert result["challenged"] is False
+    assert "destination UI" in result["reason"]
+    assert result["usage"]["prompt_tokens"] == 11
+
+    with patch("helpers.llm.call_llm", new=AsyncMock(side_effect=RuntimeError("timeout"))):
+        failed = await classify_challenge_with_llm(context, agent_id="agent-1")
+    assert failed["challenged"] is True
+    assert "classifier_error" in failed["reason"]
+
+
+async def test_classify_page_after_settle_collects_usage():
+    from unittest.mock import AsyncMock, patch
+
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import (
+        classify_page_after_settle,
+    )
+
+    usage_collector: list[dict] = []
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.challenge_llm_classifier.wait_for_dom_settled",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "helpers.llm.call_llm",
+            new=AsyncMock(
+                return_value={
+                    "content": '{"challenged": true, "reason": "Turnstile still visible"}',
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+                }
+            ),
+        ),
+    ):
+        result = await classify_page_after_settle(
+            _DomPage(),
+            settle_timeout_ms=10,
+            agent_dom_tree="Turnstile widget",
+            usage_collector=usage_collector,
+        )
+    assert result["clean"] is False
+    assert "Turnstile" in result["reason"]
+    assert result["title"] == "Hotel Kabuki"
+    assert len(usage_collector) == 1
+
+
 async def run_all_tests() -> bool:
     print("challenge-llm-classifier-network blackbox tests:")
     result = BlackboxResult()
@@ -259,6 +462,34 @@ async def run_all_tests() -> bool:
     result.record(
         "parse_challenge_classification_tolerates_prose_prefix",
         test_parse_challenge_classification_tolerates_prose_prefix,
+    )
+    result.record(
+        "parse_challenge_classification_empty_and_partial_text",
+        test_parse_challenge_classification_empty_and_partial_text,
+    )
+    await result.record_async(
+        "wait_for_dom_settled_swallows_load_timeouts",
+        test_wait_for_dom_settled_swallows_load_timeouts,
+    )
+    await result.record_async(
+        "capture_agent_stripped_dom_success_and_failure",
+        test_capture_agent_stripped_dom_success_and_failure,
+    )
+    await result.record_async(
+        "capture_challenge_classifier_context_uses_fixed_dom_and_screenshot",
+        test_capture_challenge_classifier_context_uses_fixed_dom_and_screenshot,
+    )
+    await result.record_async(
+        "classify_challenge_with_llm_soft_block_skips_model",
+        test_classify_challenge_with_llm_soft_block_skips_model,
+    )
+    await result.record_async(
+        "classify_challenge_with_llm_parses_model_and_fails_closed",
+        test_classify_challenge_with_llm_parses_model_and_fails_closed,
+    )
+    await result.record_async(
+        "classify_page_after_settle_collects_usage",
+        test_classify_page_after_settle_collects_usage,
     )
     await result.record_async(
         "network_entries_override_prefers_explicit_status_rows",
