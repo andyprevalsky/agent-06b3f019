@@ -141,6 +141,16 @@ def test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page
             "sameSite": "None",
         },
         {
+            "name": "cf_clearance",
+            "value": "challenge-token",
+            "domain": ".doordash.com",
+            "path": "/",
+            "expires": 1893456000,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+        },
+        {
             "name": "other",
             "value": "1",
             "domain": ".example.com",
@@ -209,16 +219,33 @@ def test_read_and_delete_cookies_use_humanizer_playwright_context_not_actor_page
 
         read = await sa._execute_read_cookies_action(context)
         assert read["success"] is True
-        assert read["cookie_count"] == 1
-        assert read["cookies"][0]["value"] == long_value
-        assert len(read["cookies"][0]["value"]) == len(long_value)
+        assert read["cookie_count"] == 2
+        by_name = {cookie["name"]: cookie for cookie in read["cookies"]}
+        assert by_name["ddweb_session_id"]["value"] == long_value
+        assert len(by_name["ddweb_session_id"]["value"]) == len(long_value)
+        assert by_name["cf_clearance"]["value"] == "challenge-token"
 
+        # Domain-only wipe refused (would destroy DoorDash auth).
+        context.params = {"domain": ".doordash.com"}
+        refused_domain = await sa._execute_delete_cookies_action(context)
+        assert refused_domain["success"] is False
+        assert "explicit cookie name" in refused_domain["error"]
+
+        # Auth/session cookie delete refused.
         context.params = {"name": "ddweb_session_id", "domain": ".doordash.com"}
+        refused_auth = await sa._execute_delete_cookies_action(context)
+        assert refused_auth["success"] is False
+        assert "auth/session cookie" in refused_auth["error"]
+        assert any(c["name"] == "ddweb_session_id" for c in jar.cookies_list)
+
+        # Named challenge cookie delete allowed.
+        context.params = {"name": "cf_clearance", "domain": ".doordash.com"}
         deleted = await sa._execute_delete_cookies_action(context)
         assert deleted["success"] is True
         assert deleted["deleted_count"] == 1
-        assert deleted["remaining_cookie_count"] == 1
-        assert jar.cookies_list[0]["name"] == "other"
+        assert deleted["deleted_cookies"][0]["name"] == "cf_clearance"
+        remaining = {c["name"] for c in jar.cookies_list}
+        assert remaining == {"ddweb_session_id", "other"}
 
     asyncio.run(_run())
 

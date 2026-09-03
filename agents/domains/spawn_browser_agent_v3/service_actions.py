@@ -1522,6 +1522,7 @@ async def _execute_read_cookies_action(context: _ActionContext) -> Dict[str, Any
 
 async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, Any]:
     from domains.spawn_browser_agent_v3.cookie_config_tools import (
+        auth_cookies_matching_filters,
         cookie_config_tools_enabled,
         select_cookies_for_deletion,
     )
@@ -1530,18 +1531,39 @@ async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, A
         return {"success": False, "error": "delete_cookies is disabled for this run"}
     name = context.params.get("name")
     domain = context.params.get("domain")
-    if not name and not domain:
+    # Domain-only deletes wipe the DoorDash login jar and empty the cart.
+    # Require an explicit cookie name (challenge/poison cookies only).
+    if not isinstance(name, str) or not name.strip():
         return {
             "success": False,
-            "error": "delete_cookies requires at least one of name or domain",
+            "error": (
+                "delete_cookies requires an explicit cookie name. Domain-only "
+                "wipes are refused because they destroy authenticated DoorDash "
+                "sessions. Delete only named challenge cookies (e.g. "
+                "cf_clearance, __cf_bm), then call restore_cookies or "
+                "set_browser_config if the page is still blocked."
+            ),
         }
+    name = name.strip()
+    domain_filter = domain.strip() if isinstance(domain, str) and domain.strip() else None
     jar = await _resolve_cookie_jar(context)
     before = await jar.cookies()
+    protected = auth_cookies_matching_filters(before, name=name, domain=domain_filter)
     targets = select_cookies_for_deletion(
         before,
-        name=name if isinstance(name, str) else None,
-        domain=domain if isinstance(domain, str) else None,
+        name=name,
+        domain=domain_filter,
+        protect_auth=True,
     )
+    if protected and not targets:
+        return {
+            "success": False,
+            "error": (
+                f"Refused to delete auth/session cookie {name!r}. "
+                "Use restore_cookies or set_browser_config instead of wiping login state."
+            ),
+            "protected_auth_cookies": protected,
+        }
     for cookie in targets:
         await jar.clear_cookies(
             name=cookie.get("name"),
@@ -1553,6 +1575,8 @@ async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, A
         "success": True,
         "deleted_count": len(targets),
         "deleted_cookies": targets,
+        "protected_auth_cookie_count": len(protected),
+        "protected_auth_cookies": protected,
         "remaining_cookie_count": len(after),
         "current_url": context.current_url,
     }
@@ -1560,8 +1584,12 @@ async def _execute_delete_cookies_action(context: _ActionContext) -> Dict[str, A
         dom_service=context.dom_service,
         action="delete_cookies",
         thinking=context.thinking,
-        params={"name": name, "domain": domain},
-        result={"success": True, "deleted_count": len(targets)},
+        params={"name": name, "domain": domain_filter},
+        result={
+            "success": True,
+            "deleted_count": len(targets),
+            "protected_auth_cookie_count": len(protected),
+        },
     )
     return result
 

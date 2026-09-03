@@ -82,11 +82,39 @@ def select_cookies_for_deletion(
     *,
     name: Optional[str] = None,
     domain: Optional[str] = None,
+    protect_auth: bool = True,
 ) -> List[Dict[str, Any]]:
+    """Select cookies to delete.
+
+    When ``protect_auth`` is True (default), auth/session cookies are never
+    selected — DoorDash grocery benches die when the model domain-wipes the jar
+    or deletes login cookies while trying to clear Cloudflare.
+    """
+    from domains.spawn_browser_agent_v3.challenge_recovery import is_auth_cookie
+
+    selected: List[Dict[str, Any]] = []
+    for cookie in cookies:
+        if not cookies_match_filters(cookie, name=name, domain=domain):
+            continue
+        if protect_auth and is_auth_cookie(cookie):
+            continue
+        selected.append(serialize_cookie(cookie))
+    return selected
+
+
+def auth_cookies_matching_filters(
+    cookies: Iterable[Mapping[str, Any]],
+    *,
+    name: Optional[str] = None,
+    domain: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return auth cookies that would have matched the delete filters."""
+    from domains.spawn_browser_agent_v3.challenge_recovery import is_auth_cookie
+
     return [
         serialize_cookie(cookie)
         for cookie in cookies
-        if cookies_match_filters(cookie, name=name, domain=domain)
+        if cookies_match_filters(cookie, name=name, domain=domain) and is_auth_cookie(cookie)
     ]
 
 

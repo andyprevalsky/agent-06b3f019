@@ -304,19 +304,21 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "delete_cookies": {
         "description": (
-            "TEMPORARY experiment tool. Delete cookies from the live jar by name and/or domain. "
-            "Provide at least one of name or domain. Prefer surgical deletes of challenge/poison "
-            "cookies over wiping the whole jar when auth must survive."
+            "TEMPORARY experiment tool. Delete ONE named challenge/poison cookie from the live jar "
+            "(e.g. cf_clearance, __cf_bm). Cookie name is REQUIRED. Never delete by domain alone, "
+            "never wipe the jar, and never delete DoorDash login/session cookies — that logs the "
+            "user out and empties the cart. Prefer set_browser_config or restore_cookies for "
+            "bot walls; use delete_cookies only for a specific named challenge cookie."
         ),
         "params": {
             "name": {
                 "type": "string",
-                "description": "Cookie name to delete",
-                "required": False,
+                "description": "Required cookie name to delete (challenge cookies only)",
+                "required": True,
             },
             "domain": {
                 "type": "string",
-                "description": "Cookie domain filter",
+                "description": "Optional domain filter; cannot be used without name",
                 "required": False,
             },
         },
@@ -324,9 +326,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "restore_cookies": {
         "description": (
             "TEMPORARY experiment tool. Re-inject the vaulted authenticated CookieBundle for the "
-            "current page's auth realm (same path as session init / prepare-auth). Use after "
-            "delete_cookies or a fresh config when you need the seeded DoorDash login cookies back. "
-            "Do NOT try to login manually."
+            "current page's auth realm (same path as session init / prepare-auth). Prefer this "
+            "(or set_browser_config) when a challenge appears — do NOT wipe auth cookies with "
+            "delete_cookies. Do NOT try to login manually."
         ),
         "params": {},
     },
@@ -343,7 +345,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "TEMPORARY experiment tool. Switch this browser session to one allowlisted config key "
             "(steel_fixed, kernel_mobile, kernel_residential_city, kernel_residential_state, "
             "kernel_residential_country, steel_managed, kernel_isp). Creates a replacement session, "
-            "preserves storage when possible, and reconnects. Expensive — prefer cookie surgery first."
+            "preserves storage when possible, and reconnects. Prefer this (or restore_cookies) over "
+            "reloading the same blocked store URL or wiping auth cookies."
         ),
         "params": {
             "config_key": {
@@ -848,17 +851,30 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
     present. Provider transforms strip the marker before sending the request.
     """
     _ = available_actions
+    available = set(available_actions or [])
     recover_enabled = (
-        recover_from_challenge_enabled()
-        and "recover_from_challenge" in set(available_actions or [])
+        recover_from_challenge_enabled() and "recover_from_challenge" in available
+    )
+    cookie_tools_on = cookie_config_tools_enabled() and (
+        "set_browser_config" in available or "restore_cookies" in available
     )
     if recover_enabled:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
-            "are not authentication. recover_from_challenge is a relatively expensive way to "
-            "force-open a blocked page or service — do not use it when an alternate path can "
-            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
-            "to solve challenge widgets yourself. Never call "
+            "are not authentication. Prefer recover_from_challenge (or set_browser_config / "
+            "restore_cookies when available) over reloading or hopping between the same "
+            "store/convenience URLs. Do not thrash /convenience/store/{id}. Do not drag "
+            "sliders or solve challenge widgets yourself. Never call "
+            "request_user_assistance_for_authentication while a challenge interstitial is "
+            "still visible."
+        )
+    elif cookie_tools_on:
+        challenge_rule = (
+            "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
+            "are not authentication. Do NOT loop the same DoorDash store/convenience URL. "
+            "Prefer set_browser_config or restore_cookies. delete_cookies may only remove a "
+            "named challenge cookie (never domain-wide, never login/session cookies). Do not "
+            "drag sliders or solve challenge widgets yourself. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
         )
@@ -866,8 +882,8 @@ def build_browser_use_system_prompt(available_actions: List[str]) -> str:
         challenge_rule = (
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
             "are not authentication. No challenge-recovery tool is available — wait briefly "
-            "for the provider auto-solver, try an alternate URL or path to complete the "
-            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
+            "for the provider auto-solver. Avoid repeatedly reloading the same blocked "
+            "store URL. Do not drag sliders, click verify buttons, or otherwise try to solve "
             "challenge widgets yourself. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
