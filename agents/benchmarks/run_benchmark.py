@@ -3034,6 +3034,7 @@ async def _judge_output_recovers_expected_fields(
     if not expected_schema.get("fields"):
         return None
 
+    claude_auth = await _benchmark_judge_claude_auth_kwargs()
     judged = await check_progress(
         context=[
             {
@@ -3050,6 +3051,7 @@ async def _judge_output_recovers_expected_fields(
         response_schema=expected_schema,
         call_site="semantic_output_field_recovery_judge",
         agent_id=root_agent_id,
+        **claude_auth,
     )
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
@@ -8935,6 +8937,35 @@ async def _call_declared_agentic_llm_judge(
     return {"score": score, "reasoning": reasoning, "usage": usage}
 
 
+async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dict:
+    """Fetch Claude OAuth for harness-side judges (declared evaluators / semantic judges).
+
+    Agent workflows already resolve Claude auth via Temporal activities. Harness-side
+    ``check_progress`` calls (post-run judges) previously omitted the token, so Rose
+    fell through OpenAI → Anthropic API key → OpenRouter and failed with 402 when
+    those funded paths were empty — even though the same user's Claude OAuth worked
+    for the agent itself. Pass the OAuth token so judges share the agent auth path.
+    """
+    from helpers.llm import fetch_claude_max_token
+
+    resolved_user_id = (user_id or "").strip() or _current_benchmark_user_id()
+    if not resolved_user_id:
+        return {}
+    try:
+        token_data = await fetch_claude_max_token(resolved_user_id)
+    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+        print(f"    ⚠ Declared-judge Claude auth fetch failed: {exc}")
+        return {}
+    if not token_data or not token_data.get("accessToken"):
+        return {}
+    return {
+        "claude_token": token_data["accessToken"],
+        "claude_token_source": token_data.get("source"),
+        "claude_token_pool_id": token_data.get("poolTokenId"),
+        "claude_token_user_id": resolved_user_id,
+    }
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -8961,6 +8992,13 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    judge_user_id = (
+        agent.get("userId")
+        or agent.get("user_id")
+        or _current_benchmark_user_id()
+    )
+    claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     return await check_progress(
         context=[
             {
@@ -8975,7 +9013,8 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         verifier_system_prompt=verifier_prompt,
         response_schema=None,
         call_site="benchmark_declared_evaluator",
-        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+        agent_id=agent.get("agent_id") or agent.get("id"),
+        **claude_auth,
     )
 
 

@@ -17,8 +17,8 @@ tags:
   - mac-app
   - monitor
 sources:
-  - https://github.com/Rose-Ai-Labs/rose/actions/runs/32897589028
-  - /tmp/mac-dl-art/report.json
+  - PR #1180
+  - memory:mac-download-egress-null-logs
 repro: cd back-end && DOWNLOAD_EGRESS_REPORT_PATH=/tmp/dl-egress-repro/report.json npx tsx scripts/download-egress-health.ts
 status: fixed
 ---
@@ -31,32 +31,23 @@ aggregates stayed healthy; the monitor still exited 2 because Render's logs API
 returns `{ "logs": null, "hasMore": false }` when the text filter matches zero
 rows — not `{ "logs": [] }`.
 
+## Diagnosis
+
 `fetchTelemetryLogs` required `Array.isArray(body.logs)`, so every quiet hour
 became a diagnostic incident. `prod-health.ts` already used `data.logs || []`.
 
-Archive search (`Render logs query returned no logs array download egress`,
-`download egress Render telemetry`): no prior case on this contract.
-
 ## Solution
 
-Treat `logs == null` as an empty page (same as prod-health). Keep throwing when
-`logs` is present but not an array. Unit test covers live `logs: null` empty
-window → exit 0, and malformed `logs` string → exit 2.
+Treat `logs: null` as an empty window (`[]`), matching the prod-health contract,
+so quiet periods do not page as monitor failures.
 
-## Evidence
+## Human feedback
 
-Pre-fix (local, same credentials as CI):
+Ops noise: Slack stayed on failure→failure while downloads were healthy; the
+monitor false-alarmed on empty Render log windows.
 
-```
-HEALTHY: ... diagnostic failures 1
-- Render download telemetry unavailable: Error: Render logs query returned no logs array
-EXIT:2
-```
+## Reusable lesson
 
-Live Render empty filter:
-
-```
-{"hasMore":false,"logs":null,...}
-```
-
-Post-fix: same command exits 0 with empty diagnostic-failure list.
+Third-party "empty result" payloads are often `null`, not `[]`. Normalize both
+before failing a health gate, and align new monitors with existing prod-health
+parsers.

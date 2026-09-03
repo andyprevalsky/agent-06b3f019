@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cemented guard: RCA/descend evidence links must be durable + self-contained.
+# Cemented guard: RCA/descend evidence links must be durable + self-contained!
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
