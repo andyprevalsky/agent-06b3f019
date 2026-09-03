@@ -202,7 +202,7 @@ class ResponseSchemaConfig(BaseModel):
     def _coerce_malformed_input(cls, value: Any) -> Any:
         # Models reliably emit output_schema in three malformed shapes that the
         # canonical {"fields": [...]} form does not match. Coerce each into the
-        # structured form rather than failing validation — failure forces a costly
+        # structured form rather than failing validation -  failure forces a costly
         # LLM retry loop (cache_hit_pct ~99% repeats the same shape) and burns the
         # entire ~50s timeout on smoke tasks like spawn-sub-agents.
         #
@@ -370,6 +370,62 @@ class WebFetchTool(BaseModel):
             "membership PDFs', 'download the spec sheet'."
         ),
     )
+
+
+class ApiRequestTool(BaseModel):
+    """Call a public HTTP API and return the full response body."""
+
+    tool: Literal["api_request"]
+    method: Literal["GET", "HEAD"] = Field(
+        description="HTTP method for the request. Only safe read-only methods are allowed."
+    )
+    url: str = Field(description="Absolute http(s) URL for the API endpoint.")
+    query: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional query-string parameters appended to the URL.",
+    )
+    body: Optional[Any] = Field(
+        default=None,
+        description="Optional JSON-serializable request body for non-GET methods.",
+    )
+    headers: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Optional non-credential HTTP headers (for example Accept or User-Agent). "
+            "Do not include Authorization, API keys, cookies, or other secrets; "
+            "approved credentials must go through a credential-broker binding to an allowlisted origin."
+        ),
+    )
+
+    @field_validator("headers")
+    @classmethod
+    def _reject_credential_headers(cls, value: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+        if not value:
+            return value
+        blocked = {
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+        }
+        for key in value:
+            lowered = key.lower().strip()
+            if (
+                lowered in blocked
+                or "authorization" in lowered
+                or lowered.endswith("api-key")
+                or lowered.endswith("access-token")
+                or lowered.endswith("auth-token")
+            ):
+                raise ValueError(
+                    f"Credential header {key!r} is not allowed on api_request; "
+                    "use an approved credential-broker binding instead."
+                )
+        return value
 
 
 class GrepTool(BaseModel):
@@ -650,7 +706,7 @@ def first_url_in_text(text: Optional[str]) -> Optional[str]:
 
 
 def url_origin_for_log(url: str) -> str:
-    """Scheme + host (+ port) only — never credentials, path, query, or fragment.
+    """Scheme + host (+ port) only -  never credentials, path, query, or fragment.
 
     A URL recovered from free-form text can carry `user:password@` userinfo and
     secrets in the query string, so only the origin is ever safe to log.
@@ -799,7 +855,7 @@ class SpawnAgentTool(BaseModel):
             # ("Navigate to https://... then check out") and leave `start_url`
             # unset. Rejecting that costs a full re-generation, and because the
             # omission is a systematic model habit rather than a random glitch,
-            # the blind retry reproduces it — three strikes then kills the agent
+            # the blind retry reproduces it -  three strikes then kills the agent
             # before a browser session is ever created. Recover the URL instead;
             # only fail when the goal genuinely names no destination.
             # Only https is recoverable. The browser restores authenticated
@@ -826,7 +882,99 @@ class SpawnAgentTool(BaseModel):
             raise ValueError(f"output_schema is required when type='{self.type}'.")
         # Some models emit output_schema for explore type even though it has no effect
         # downstream (explore agents return free-form summary). Drop it silently rather
-        # than failing validation — rejecting forces a costly LLM retry loop.
+        # than failing validation -  rejecting forces a costly LLM retry loop.
+        if self.type == "explore" and self.output_schema:
+            self.output_schema = None
+        return self
+
+
+class SpawnAgentToolNoGP(BaseModel):
+    """EXECUTE-phase spawn_agent with general_purpose / for_each removed.
+
+    Used when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set so coding-agent
+    GitHub ranking benches cannot select recursive GP fan-out. Schema-level
+    narrowing beats a runtime rejection loop the same way SpawnExploreAgentTool
+    does for PLAN.
+    """
+
+    tool: Literal["spawn_agent"]
+    type: Literal["browser", "code", "explore"] = Field(
+        description=(
+            "Select by capability: 'browser' starts a browser session for stateful "
+            "or authenticated web work; 'code' starts a coding agent (Claude Code / "
+            "Codex CLI) in an ephemeral sandbox; 'explore' performs read-only "
+            "research for web or user-data facts. "
+            "general_purpose and for_each are disabled for this run -  use "
+            "type='code' for GitHub discovery/ranking work."
+        )
+    )
+    goal: str = Field(
+        description=(
+            "The self-contained task/prompt and description for the spawned agent. "
+            "Spawned agents have no access to ANY of your context by default. "
+            "The goal and attachments parameters are their ONLY source of information. "
+            "Include all relevant pieces of information. "
+            f"{SELF_CONTAINED_GOAL_RULE.strip()}"
+        )
+    )
+    output_schema: Optional[ResponseSchemaConfig] = Field(
+        default=None,
+        description=(
+            "Structured data the agent returns and validates against. Required when "
+            "type='browser' or type='code'. Ignored when type='explore'."
+        ),
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional when the spawned agent needs files from the current context. "
+            "Use exact `original_filename` values from file_pointer objects."
+        ),
+    )
+    start_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "HTTPS URL the browser opens first. Required when type='browser'; "
+            "ignored otherwise."
+        ),
+    )
+    github_repo_link: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional when type='code'. GitHub repository URL to clone and sync to. "
+            "Ignored for every other type."
+        ),
+    )
+    context_gates: Optional[Dict[str, bool]] = Field(
+        default=None,
+        description=(
+            "Optional when type='explore'. Applicable keys are 'network' and "
+            "'recent_communications'. Missing keys default to true."
+        ),
+    )
+    depth: Optional[Literal["quick", "medium", "deep"]] = Field(
+        default="quick",
+        description=(
+            "Optional when type='explore'. Controls research thoroughness as a TURN "
+            "budget: 'quick' (~5 turns), 'medium' (~20 turns), 'deep' (~50 turns). "
+            "Default 'quick'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_spawn_agent_no_gp_constraints(self) -> "SpawnAgentToolNoGP":
+        if self.type == "browser" and not self.start_url:
+            recovered = first_url_in_text(self.goal)
+            if recovered and urlsplit(recovered).scheme == "https":
+                self.start_url = recovered
+                logger.warning(
+                    "spawn_agent(type='browser') omitted start_url; recovered from goal",
+                    start_url_origin=url_origin_for_log(recovered),
+                )
+            else:
+                raise ValueError("start_url is required when type='browser'.")
+        if self.type in ("browser", "code") and not self.output_schema:
+            raise ValueError(f"output_schema is required when type='{self.type}'.")
         if self.type == "explore" and self.output_schema:
             self.output_schema = None
         return self
@@ -837,7 +985,7 @@ class SpawnExploreAgentTool(BaseModel):
 
     Narrowed variant of SpawnAgentTool: during PLAN only explore agents are
     permitted. Schema-level narrowing is cheaper than a runtime rejection
-    loop — the LLM cannot pick an invalid `type` and we drop ~600 tokens of
+    loop -  the LLM cannot pick an invalid `type` and we drop ~600 tokens of
     per-type field guidance the model would otherwise have to reason past.
     """
 
@@ -916,14 +1064,14 @@ class AttemptCompletionWithResultTool(BaseModel):
     your `result` must be complete and self-contained when you emit it.
 
     Requirements:
-    - Complete: do not defer the answer. There is no future turn.
-    - Grounded: every claim must be backed by evidence from your prior
+   - Complete: do not defer the answer. There is no future turn.
+   - Grounded: every claim must be backed by evidence from your prior
       tool results. If a fact cannot be found, report the gap explicitly
       ("No results for [X] after searching [keywords]") rather than
       fabricating it.
-    - Token-efficient, punctual, and information-dense. Strip filler;
+   - Token-efficient, punctual, and information-dense. Strip filler;
       every sentence should carry signal.
-    - Cite sources inline with [N] tags and end `result` with a
+   - Cite sources inline with [N] tags and end `result` with a
       `Sources:` block mapping each tag to its URL or source identifier.
 
     Emit a single `attempt_completion_with_result` tool_use block, do
@@ -969,6 +1117,7 @@ TOOL_MODELS: ToolRegistry = {
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
     "web_fetch": WebFetchTool,
+    "api_request": ApiRequestTool,
     "send_message_to_user": SendMessageToUserTool,
     "send_message_to_user_execute_phase": SendMessageToUserExecutePhaseTool,
     "spawn_agent": SpawnAgentTool,
@@ -977,7 +1126,7 @@ TOOL_MODELS: ToolRegistry = {
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
     "attempt_completion": AttemptCompletionTool,
-    # Sub-agent (skip_verification=True) completion tool — carries the
+    # Sub-agent (skip_verification=True) completion tool -  carries the
     # final handoff payload to the parent in `result`.
     "attempt_completion_with_result": AttemptCompletionWithResultTool,
     # Phone calling tool
@@ -993,8 +1142,19 @@ PLAN_TOOL_MODELS: ToolRegistry = {
     "spawn_agent": SpawnExploreAgentTool,
 }
 
-# Tools available inside the explore agent (subset of read-only tools)
-EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "attempt_completion_with_result"]
+# Tools available inside the explore agent (subset of read-only tools).
+# Full registry list -  callers that inject tools into an explore agent MUST use
+# `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
+EXPLORE_AGENT_TOOLS = ["web_search", "people_search", "web_fetch", "grep", "api_request", "attempt_completion_with_result"]
+
+
+def get_explore_agent_tools() -> list[str]:
+    """Explore tool names for injection, honoring ROSE_DISABLE_API_REQUEST."""
+    from domains.api_request.config import api_request_disabled
+
+    if not api_request_disabled():
+        return list(EXPLORE_AGENT_TOOLS)
+    return [name for name in EXPLORE_AGENT_TOOLS if name != "api_request"]
 
 
 # ============================================================================
@@ -1064,6 +1224,75 @@ def render_tool_list(
 # ============================================================================
 
 
+def get_tool_models(*, phase: Optional[str] = None) -> ToolRegistry:
+    """Return the tool registry for ``phase``, honoring GPA kill-switch.
+
+    PLAN keeps the explore-only spawn_agent variant. EXECUTE (and unspecified)
+    swaps in :class:`SpawnAgentToolNoGP` when
+    ``ROSE_DISABLE_GENERAL_PURPOSE_AGENT`` is set so the LLM cannot select
+    general_purpose / for_each.
+    """
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if phase == "plan":
+        return dict(PLAN_TOOL_MODELS)
+    registry = dict(TOOL_MODELS)
+    if general_purpose_agent_disabled():
+        registry["spawn_agent"] = SpawnAgentToolNoGP
+    return registry
+
+
+def get_planner_assignable_tools() -> list[str]:
+    """Planner-assignable tool names, stripping GPA aliases when disabled."""
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if not general_purpose_agent_disabled():
+        return list(PLANNER_ASSIGNABLE_TOOLS)
+    return [
+        name
+        for name in PLANNER_ASSIGNABLE_TOOLS
+        if name
+        not in {
+            "spawn_general_purpose_agent",
+            "spawn_general_purpose_agent_for_each",
+        }
+    ]
+
+
+def get_planner_response_model() -> Type[BaseModel]:
+    """PlannerResponse model, with GPA aliases removed when the kill-switch is on."""
+    from domains.spawn_agent.config import general_purpose_agent_disabled
+
+    if not general_purpose_agent_disabled():
+        return PlannerResponse
+
+    allowed = get_planner_assignable_tools()
+    # Dynamic enum so structured-output schema cannot emit disabled aliases.
+    filtered_enum = Enum(  # type: ignore[misc]
+        "PlanToolNameNoGP",
+        {name: name for name in allowed},
+        type=str,
+    )
+    task_model = create_model(
+        "PlannerTaskNoGP",
+        task_idx=(str, Field(description=PLANNER_TASK_IDX_DESCRIPTION)),
+        goal=(str, Field(description=PLANNER_TASK_GOAL_DESCRIPTION)),
+        tool_name=(filtered_enum, Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)),
+        depends_on=(
+            List[str],
+            Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION),
+        ),
+        __base__=BaseModel,
+    )
+    return create_model(
+        "PlannerResponseNoGP",
+        title=(str, Field(description=PLANNER_RESPONSE_TITLE_DESCRIPTION)),
+        tasks=(List[task_model], Field(description=PLANNER_RESPONSE_TASKS_DESCRIPTION)),
+        join=(Literal["all", "any"], Field(description=PLANNER_RESPONSE_JOIN_DESCRIPTION)),
+        __base__=BaseModel,
+    )
+
+
 def create_agent_action_model(
     available_tool_names: List[str],
     tool_registry: Optional[Dict[str, Type[BaseModel]]] = None,
@@ -1072,9 +1301,9 @@ def create_agent_action_model(
     Dynamically create an AgentAction Pydantic model based on available tools.
 
     This ensures:
-    - Only available tools are in the schema (better LLM guidance)
-    - Type-safe tool calls (Pydantic validates structure)
-    - No JSON string parsing hacks needed
+   - Only available tools are in the schema (better LLM guidance)
+   - Type-safe tool calls (Pydantic validates structure)
+   - No JSON string parsing hacks needed
 
     NOTE: reasoning is NOT part of this model anymore. Reasoning is handled via
     OpenRouter's reasoning_details which are extracted from API responses and
@@ -1082,12 +1311,13 @@ def create_agent_action_model(
 
     Args:
         available_tool_names: List of tool names this agent can use
-        tool_registry: Optional custom registry (defaults to TOOL_MODELS)
+        tool_registry: Optional custom registry (defaults to TOOL_MODELS,
+            with SpawnAgentToolNoGP when ROSE_DISABLE_GENERAL_PURPOSE_AGENT is set)
 
     Returns:
         Pydantic model class for AgentAction with proper tool union
     """
-    registry = tool_registry or TOOL_MODELS
+    registry = tool_registry if tool_registry is not None else get_tool_models()
 
     # Build list of tool models for available tools
     tool_types = []
@@ -1160,6 +1390,7 @@ __all__ = [
     "SendMessageToUserExecutePhaseTool",
     "MessagePersonTool",
     "SpawnAgentTool",
+    "SpawnAgentToolNoGP",
     "SetPlanTool",
     "AttemptCompletionTool",
     "AttemptCompletionWithResultTool",
@@ -1168,6 +1399,11 @@ __all__ = [
     "TOOL_MODELS",
     "ToolRegistry",
     "create_agent_action_model",
+    "get_tool_models",
+    "get_planner_assignable_tools",
+    "get_planner_response_model",
+    "EXPLORE_AGENT_TOOLS",
+    "get_explore_agent_tools",
     "render_tool_list",
     "ProgressScore",
 ]

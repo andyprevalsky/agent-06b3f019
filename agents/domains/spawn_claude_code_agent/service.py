@@ -26,7 +26,9 @@ from domains.spawn_claude_code_agent.config import (
     FATAL_ERROR_PATTERNS,
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
+    SDK_IDLE_TIMEOUT_S,
     SILENCE_TIMEOUT_S,
+    code_agent_verifier_disabled,
 )
 from domains.spawn_claude_code_agent.repo import (
     check_sandbox_health,
@@ -154,6 +156,172 @@ def build_codex_credential_feedback(
         for source in ("initial", "oauth", "funded_api_key")
         if source in feedback_by_source
     ]
+
+
+_TIMELINE_EVENT_TYPES = frozenset(
+    {
+        "session",
+        "agent_message",
+        "assistant",
+        "tool_use",
+        "tool_result",
+        "result",
+        "error",
+    }
+)
+
+
+def _tool_detail_from_event(event: dict[str, Any]) -> str:
+    """Human-readable one-line detail for a tool_use event."""
+    paths = event.get("paths")
+    if isinstance(paths, list):
+        path_bits = [str(p).strip() for p in paths if str(p).strip()]
+        if path_bits:
+            return ", ".join(path_bits[:4])
+
+    raw_input = event.get("input")
+    if isinstance(raw_input, str) and raw_input.strip():
+        return raw_input.strip()[:240]
+    if isinstance(raw_input, dict):
+        for key in (
+            "command",
+            "file_path",
+            "path",
+            "notebook_path",
+            "pattern",
+            "query",
+            "url",
+            "content",
+            "description",
+        ):
+            value = raw_input.get(key)
+            if isinstance(value, str) and value.strip():
+                text = value.strip().replace("\n", " ")
+                return text[:240]
+        try:
+            return json.dumps(raw_input, ensure_ascii=False, default=str)[:240]
+        except Exception:
+            return ""
+    return ""
+
+
+def format_code_events_transcript(
+    code_events: list[Dict[str, Any]] | None = None,
+    action_summary: list[str] | None = None,
+) -> str:
+    """Format SDK/code-agent events into FE-parseable coherent log lines.
+
+    Markers match ``ParseCodeAgentTranscript``:
+    ``[Claude]``, ``[Claude tool]``, ``[Claude result]``.
+    """
+    lines: list[str] = []
+    for event in code_events or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
+        provider = str(event.get("provider") or "claude").strip().title() or "Claude"
+        if provider.lower() not in {"claude", "codex"}:
+            provider = "Claude"
+
+        if event_type == "session":
+            cwd = event.get("cwd") or event.get("working_directory")
+            detail = f"Session started in {cwd}" if cwd else "Session started"
+            lines.append(f"[{provider}] {detail}")
+            continue
+
+        if event_type in {"agent_message", "assistant"}:
+            text = event.get("text") or event.get("content") or event.get("message")
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{provider}] {text.strip()}")
+            continue
+
+        if event_type == "tool_use":
+            tool_name = (
+                event.get("tool")
+                or event.get("name")
+                or event.get("tool_name")
+                or "Tool"
+            )
+            detail = _tool_detail_from_event(event)
+            if detail:
+                lines.append(f"[{provider} tool] {tool_name} · {detail}")
+            else:
+                lines.append(f"[{provider} tool] {tool_name}")
+            continue
+
+        if event_type == "tool_result":
+            # Keep the log tool-centric; skip noisy raw tool_result blobs unless they
+            # carry a short status/error the FE can show under the next result card.
+            status = event.get("status")
+            error = event.get("error")
+            if isinstance(error, str) and error.strip():
+                lines.append(f"[{provider} result] {error.strip()[:400]}")
+            elif isinstance(status, str) and status.strip() and status.strip().lower() not in {
+                "completed",
+                "success",
+                "ok",
+            }:
+                lines.append(f"[{provider} result] status={status.strip()}")
+            continue
+
+        if event_type == "result":
+            status = str(event.get("status") or "").strip()
+            text = event.get("text") or event.get("content") or event.get("result")
+            if isinstance(text, str) and text.strip():
+                prefix = "failed - " if status.lower() in {"failed", "error"} else ""
+                lines.append(f"[{provider} result] {prefix}{text.strip()[:800]}")
+            elif status:
+                lines.append(f"[{provider} result] {status}")
+            continue
+
+        if event_type == "error":
+            text = event.get("text") or event.get("error") or event.get("message")
+            if isinstance(text, str) and text.strip():
+                lines.append(f"[{provider} result] {text.strip()[:800]}")
+            continue
+
+    summary_lines = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
+    if summary_lines:
+        if lines:
+            lines.append("")
+        lines.append("## Action Summary")
+        lines.extend(summary_lines[-30:])
+
+    return "\n".join(lines).strip()
+
+
+def code_events_have_timeline(code_events: list[Dict[str, Any]] | None) -> bool:
+    """True when events carry a real note/tool timeline (prefer over janky PTY)."""
+    for event in code_events or []:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
+        if event_type in _TIMELINE_EVENT_TYPES:
+            return True
+    return False
+
+
+def build_durable_terminal_transcript(
+    display_output: str,
+    code_events: list[Dict[str, Any]] | None = None,
+    action_summary: list[str] | None = None,
+) -> str:
+    """Prefer structured event timeline; fall back to PTY display / summary.
+
+    ``ClaudeCodeSession.output`` is what the FE CompletedTranscriptSurface renders.
+    Raw Claude Code PTY often staircase-wraps and dumps tool lines under a single
+    note. Structured ``code_agent_event`` frames are the coherent source of truth
+    when present. If only PTY bytes exist, keep them so the chip is never empty.
+    """
+    formatted_events = format_code_events_transcript(code_events, action_summary)
+    if formatted_events and code_events_have_timeline(code_events):
+        return formatted_events
+
+    if (display_output or "").strip():
+        return display_output
+
+    return formatted_events
+
 
 
 def safe_time() -> float:
@@ -340,62 +508,85 @@ def _log_code_agent_event(
     task_id: str,
     sandbox_id: str,
 ) -> None:
-    """Promote high-value sandbox events into retained worker logs."""
-    if event.get("provider") != "codex":
-        return
+    """Promote high-value sandbox events into retained worker logs.
 
+    Codex Fast Mode events stay provider-specific. Claude (and Codex) tool /
+    turn progress must also land at info so local + prod log retention keep
+    tool_use / tool_result / agent_message / result visible in bench run JSON
+    — debug-only lines are often dropped by prod log drains.
+    """
+    provider = event.get("provider")
     event_type = event.get("type")
-    if event_type == "fast_cache_proxy_started":
-        logger.info(
-            "[ClaudeCode] Codex Fast Mode proxy started",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            base_url=event.get("base_url"),
-            target=event.get("target"),
-        )
-        return
 
-    if event_type == "fast_cache_proxy_request":
+    if provider == "codex":
+        if event_type == "fast_cache_proxy_started":
+            logger.info(
+                "[ClaudeCode] Codex Fast Mode proxy started",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                base_url=event.get("base_url"),
+                target=event.get("target"),
+            )
+            return
+
+        if event_type == "fast_cache_proxy_request":
+            logger.info(
+                "[ClaudeCode] Codex Fast Mode proxy request",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                method=event.get("method"),
+                path=event.get("path"),
+                status=event.get("status"),
+                cache=event.get("cache"),
+            )
+            return
+
+        if event_type == "fast_cache_proxy_error":
+            logger.warning(
+                "[ClaudeCode] Codex Fast Mode proxy error",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                method=event.get("method"),
+                path=event.get("path"),
+                error=event.get("error"),
+            )
+            return
+
+        if event_type == "usage":
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            input_tokens = usage.get("input_tokens") or 0
+            cached_input_tokens = usage.get("cached_input_tokens") or 0
+            cached_pct = (
+                round((cached_input_tokens / input_tokens) * 100, 1) if input_tokens else 0.0
+            )
+            logger.info(
+                "[ClaudeCode] Codex turn usage",
+                agent_id=agent_id,
+                task_id=task_id,
+                sandbox_id=sandbox_id,
+                input_tokens=input_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cached_input_pct=cached_pct,
+                output_tokens=usage.get("output_tokens") or 0,
+                reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
+            )
+            return
+
+    # Progress events for Claude Code + Codex — must survive info-level retention.
+    if event_type in {"tool_use", "tool_result", "agent_message", "result", "error", "session"}:
+        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         logger.info(
-            "[ClaudeCode] Codex Fast Mode proxy request",
+            "[ClaudeCode] Code-agent event",
             agent_id=agent_id,
             task_id=task_id,
             sandbox_id=sandbox_id,
-            method=event.get("method"),
-            path=event.get("path"),
+            provider=provider,
+            event_type=event_type,
+            tool_name=tool_name,
             status=event.get("status"),
-            cache=event.get("cache"),
-        )
-        return
-
-    if event_type == "fast_cache_proxy_error":
-        logger.warning(
-            "[ClaudeCode] Codex Fast Mode proxy error",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            method=event.get("method"),
-            path=event.get("path"),
-            error=event.get("error"),
-        )
-        return
-
-    if event_type == "usage":
-        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-        input_tokens = usage.get("input_tokens") or 0
-        cached_input_tokens = usage.get("cached_input_tokens") or 0
-        cached_pct = round((cached_input_tokens / input_tokens) * 100, 1) if input_tokens else 0.0
-        logger.info(
-            "[ClaudeCode] Codex turn usage",
-            agent_id=agent_id,
-            task_id=task_id,
-            sandbox_id=sandbox_id,
-            input_tokens=input_tokens,
-            cached_input_tokens=cached_input_tokens,
-            cached_input_pct=cached_pct,
-            output_tokens=usage.get("output_tokens") or 0,
-            reasoning_output_tokens=usage.get("reasoning_output_tokens") or 0,
         )
 
 
@@ -453,12 +644,17 @@ async def _run_agentic_loop(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     code_provider: str = "claude",
+    code_events: list[Dict[str, Any]] | None = None,
+    terminal_output_persisted: Optional[list[bool]] = None,
 ) -> tuple[int, bool, list[Dict[str, str]], int, int, list[Dict[str, Any]]]:
     """Run the WebSocket-based agentic loop monitoring Claude Code output.
 
     Returns (exit_code, attempt_completion, conversation_history,
              total_input_tokens, total_output_tokens, code_events).
     exit_code is -1 if the process has not exited.
+
+    ``terminal_output_persisted`` is an optional single-element list shared with
+    the activity so fatal-path persistence is visible to outer cleanup.
     """
     last_output_time = safe_time()
     exit_code: Optional[int] = None
@@ -472,9 +668,13 @@ async def _run_agentic_loop(  # noqa: C901
     interaction_count = 0
     total_input_tokens = 0
     total_output_tokens = 0
-    code_events: list[Dict[str, Any]] = []
+    code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
+
+    def _mark_terminal_output_persisted() -> None:
+        if terminal_output_persisted is not None:
+            terminal_output_persisted[0] = True
 
     async def on_output(data: str, is_buffer: bool) -> None:
         nonlocal last_output_time, pending_output
@@ -513,7 +713,8 @@ async def _run_agentic_loop(  # noqa: C901
         pending_output = True
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns
+        nonlocal completed_codex_turns, last_output_time
+        last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
@@ -566,6 +767,27 @@ async def _run_agentic_loop(  # noqa: C901
 
             silence_duration = safe_time() - last_output_time
 
+            # Autonomous CC waits for SDK exit after the first silence observation
+            # (parent-LLM nudge is intentionally skipped). If the CLI then goes
+            # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
+            if (
+                silence_duration >= SDK_IDLE_TIMEOUT_S
+                and not pending_output
+                and ws_connected
+                and exit_code is None
+            ):
+                logger.warning(
+                    "[ClaudeCode] SDK idle timeout waiting for exit",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    silence_s=silence_duration,
+                    idle_limit_s=SDK_IDLE_TIMEOUT_S,
+                )
+                action_summary.append(
+                    f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"
+                )
+                break
+
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
                 filtered_output = terminal.get_display()
                 pending_output = False
@@ -600,15 +822,22 @@ async def _run_agentic_loop(  # noqa: C901
                         # Temporal-retried activity will re-fetch the same
                         # broken token via LRU and burn another E2B sandbox).
                         try:
-                            await persist_terminal_output(
-                                task_id,
+                            durable_fatal_output = build_durable_terminal_transcript(
                                 filtered_output,
-                                agent_id,
-                                code_provider,
-                                credential_feedback=build_codex_credential_feedback(code_events)
-                                if code_provider == "codex"
-                                else None,
+                                code_events,
+                                action_summary,
                             )
+                            if durable_fatal_output:
+                                await persist_terminal_output(
+                                    task_id,
+                                    durable_fatal_output,
+                                    agent_id,
+                                    code_provider,
+                                    credential_feedback=build_codex_credential_feedback(code_events)
+                                    if code_provider == "codex"
+                                    else None,
+                                )
+                                _mark_terminal_output_persisted()
                         except Exception as persist_err:
                             logger.warning(
                                 "[ClaudeCode] Failed to persist fatal terminal output",
@@ -1080,6 +1309,10 @@ async def _run_verifier(
     """Run the verifier to confirm completion.
 
     Returns (score, reasoning, structured_response, input_tokens, output_tokens).
+
+    When ``ROSE_DISABLE_CODE_AGENT_VERIFIER`` is set, skip the dual-agent LLM
+    verifier entirely (Claude Code and Codex). The session result is returned
+    as-is so the parent tool call finishes when the code agent ends.
     """
     from helpers.llm import check_progress
     from loop.activity_helper import call_temporal_activity_from_activity
@@ -1088,6 +1321,34 @@ async def _run_verifier(
     verifier_call_id = str(uuid_module.uuid4())
     input_tokens = 0
     output_tokens = 0
+    extracted_output_files = output_files or []
+    output_file_structured = _structured_response_from_output_files(
+        output_schema, extracted_output_files
+    )
+
+    if code_agent_verifier_disabled():
+        # Skip the dual-agent LLM verifier, but do not claim success without
+        # extracted /home/user/output artifacts — otherwise a failed session
+        # reports success=True to the parent (score >= 1.0).
+        has_artifacts = bool(extracted_output_files)
+        score = 1.0 if has_artifacts else 0.5
+        v_reasoning = (
+            "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
+            f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
+            f", artifacts={len(extracted_output_files)})."
+            + ("" if has_artifacts else " No output artifacts extracted — incomplete.")
+        )
+        logger.info(
+            "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
+            agent_id=agent_id,
+            task_id=task_id,
+            code_provider=code_provider,
+            exit_code=exit_code,
+            has_artifacts=has_artifacts,
+            has_structured_from_files=bool(output_file_structured),
+            score=score,
+        )
+        return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
     try:
         await save_claude_code_message(
@@ -1103,8 +1364,6 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        extracted_output_files = output_files or []
-        output_file_structured = _structured_response_from_output_files(output_schema, extracted_output_files)
         if output_file_structured and (exit_code is None or exit_code == 0):
             v_reasoning = (
                 "The code agent completed successfully and the requested file outputs were extracted "
@@ -1441,6 +1700,8 @@ async def spawn_claude_code_activity(  # noqa: C901
     total_input_tokens = 0
     total_output_tokens = 0
     action_summary: list[str] = []
+    code_events: list[Dict[str, Any]] = []
+    terminal_output_persisted_box = [False]
 
     if not output_schema:
         raise ValueError(
@@ -1554,22 +1815,37 @@ async def spawn_claude_code_activity(  # noqa: C901
             code_provider=code_provider,
             action_summary=action_summary,
             tool_call_id=tool_call_id,
+            code_events=code_events,
+            terminal_output_persisted=terminal_output_persisted_box,
         )
         total_input_tokens += loop_input_tokens
         total_output_tokens += loop_output_tokens
 
-        # 4. Persist terminal output
+        # 4. Persist terminal output (durable fallback when PTY display is empty)
         filtered_output = terminal.get_display()
         credential_feedback = (
             build_codex_credential_feedback(code_events) if code_provider == "codex" else None
         )
-        await persist_terminal_output(
-            task_id,
+        durable_output = build_durable_terminal_transcript(
             filtered_output,
-            agent_id,
-            code_provider,
-            credential_feedback=credential_feedback,
+            code_events,
+            action_summary,
         )
+        if durable_output:
+            await persist_terminal_output(
+                task_id,
+                durable_output,
+                agent_id,
+                code_provider,
+                credential_feedback=credential_feedback,
+            )
+            terminal_output_persisted_box[0] = True
+        else:
+            logger.warning(
+                "[ClaudeCode] Skipping terminal persist — display and code events were empty",
+                agent_id=agent_id,
+                task_id=task_id,
+            )
 
         # A fast CLI failure can set ``exit_code`` before the one-second silence
         # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
@@ -1721,17 +1997,23 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         if task_id:
             try:
-                # Persist terminal output before closing
+                # Persist terminal output before closing (skip if already written)
                 try:
-                    cancelled_output = terminal.get_display()
-                    if cancelled_output:
-                        await persist_terminal_output(task_id, cancelled_output, agent_id, code_provider)
-                        logger.info(
-                            "[ClaudeCode] Persisted terminal output on cancel",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            output_len=len(cancelled_output),
+                    if not terminal_output_persisted_box[0]:
+                        cancelled_output = build_durable_terminal_transcript(
+                            terminal.get_display(),
+                            code_events,
+                            action_summary,
                         )
+                        if cancelled_output:
+                            await persist_terminal_output(task_id, cancelled_output, agent_id, code_provider)
+                            terminal_output_persisted_box[0] = True
+                            logger.info(
+                                "[ClaudeCode] Persisted terminal output on cancel",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                output_len=len(cancelled_output),
+                            )
                 except Exception as output_error:
                     logger.warning(
                         "[ClaudeCode] Failed to persist output on cancel",
@@ -1788,6 +2070,34 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         if task_id:
             try:
+                try:
+                    if not terminal_output_persisted_box[0]:
+                        failed_output = build_durable_terminal_transcript(
+                            terminal.get_display(),
+                            code_events,
+                            action_summary,
+                        )
+                        if failed_output:
+                            await persist_terminal_output(
+                                task_id,
+                                failed_output,
+                                agent_id,
+                                code_provider,
+                            )
+                            terminal_output_persisted_box[0] = True
+                            logger.info(
+                                "[ClaudeCode] Persisted terminal output on failure",
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                output_len=len(failed_output),
+                            )
+                except Exception as output_error:
+                    logger.warning(
+                        "[ClaudeCode] Failed to persist output on failure",
+                        agent_id=agent_id,
+                        error=str(output_error),
+                    )
+
                 await save_claude_code_message(
                     agent_id=agent_id,
                     title="Task Failed",

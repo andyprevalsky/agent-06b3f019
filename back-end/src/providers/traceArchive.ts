@@ -532,35 +532,42 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === 'bigint' ? value.toString() : value;
 }
 
-/** List a bundle and surface every storage failure to the caller. */
-export async function listArchivedObjectsStrict(
-  rootAgentId: string
+export async function listArchivedObjects(
+  rootAgentId: string,
+  options?: { throwOnError?: boolean }
 ): Promise<ArchivedObjectSummary[]> {
   if (!archiveEnabled()) return [];
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
-  if (backend === 'fake-r2') {
-    return listLocalObjects(rootAgentId).map((item) => ({
-      ...item,
-      ref: fakeR2Ref(rootAgentId, item.path),
-    }));
-  }
-  if (backend === 'r2' || (isProduction() && backend !== 'local')) {
-    return listR2Objects(rootAgentId);
-  }
-  return listLocalObjects(rootAgentId);
-}
-
-/** Best-effort listing for diagnostics and non-terminal creation-time manifests. */
-export async function listArchivedObjects(rootAgentId: string): Promise<ArchivedObjectSummary[]> {
   try {
-    return await listArchivedObjectsStrict(rootAgentId);
+    if (backend === 'fake-r2') {
+      return listLocalObjects(rootAgentId).map((item) => ({
+        ...item,
+        ref: fakeR2Ref(rootAgentId, item.path),
+      }));
+    }
+    if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+      return await listR2Objects(rootAgentId);
+    }
+    return listLocalObjects(rootAgentId);
   } catch (error) {
     log.warn('Trace archive list failed', {
       root_agent_id: rootAgentId,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (options?.throwOnError === true) {
+      throw error instanceof Error
+        ? error
+        : new Error(`Trace archive list failed: ${String(error)}`);
+    }
     return [];
   }
+}
+
+/** List a bundle and surface every storage failure to the caller. */
+export async function listArchivedObjectsStrict(
+  rootAgentId: string
+): Promise<ArchivedObjectSummary[]> {
+  return listArchivedObjects(rootAgentId, { throwOnError: true });
 }
 
 export async function deleteArchivedBundle(

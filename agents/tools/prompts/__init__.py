@@ -6,6 +6,7 @@ is the canonical source for parameter-level documentation; these prompt fragment
 do NOT restate the schema and complement (not duplicate) the Pydantic descriptions.
 """
 
+from tools.prompts.api_request import PROMPT as api_request_prompt
 from tools.prompts.attempt_completion import PROMPT as attempt_completion_prompt
 from tools.prompts.attempt_completion_with_result import (
     PROMPT as attempt_completion_with_result_prompt,
@@ -39,6 +40,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "web_search": web_search_prompt,
     "people_search": people_search_prompt,
     "web_fetch": web_fetch_prompt,
+    "api_request": api_request_prompt,
     # Workflow
     "set_plan": set_plan_prompt,
     "attempt_completion": attempt_completion_prompt,
@@ -46,4 +48,14 @@ TOOL_PROMPTS: dict[str, str] = {
     "wait_for": wait_for_prompt,
 }
 
-__all__ = ["TOOL_PROMPTS"]
+
+def get_tool_prompts() -> dict[str, str]:
+    """TOOL_PROMPTS for injection, honoring ROSE_DISABLE_API_REQUEST."""
+    from domains.api_request.config import api_request_disabled
+
+    if not api_request_disabled():
+        return dict(TOOL_PROMPTS)
+    return {name: prompt for name, prompt in TOOL_PROMPTS.items() if name != "api_request"}
+
+
+__all__ = ["TOOL_PROMPTS", "get_tool_prompts"]

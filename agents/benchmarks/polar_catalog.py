@@ -27,10 +27,16 @@ BU_BENCH_PATH = POLAR_DIR / "bu_bench_v1.json"
 POLAR_GROUP = "polar-bench"
 POLAR_TAG = "polar-bench"
 
-_ODYSSEY_TIMEOUTS = {"easy": 900, "medium": 1800, "hard": 3600}
+# Odysseys assigns easy/medium/hard by reference step count + domain spread, not
+# wall-clock. Upstream runs a step budget (paper default 100; ablation 200) via
+# OSWorld — no per-level timeout_seconds. We mirror that: disable wall-clock for
+# polar-bench and cap browser steps by difficulty. BU has no level → easy budget.
+_ODYSSEY_STEP_BUDGETS = {"easy": 100, "medium": 250, "hard": 500}
 _ODYSSEY_PRICE_CENTS = {"easy": 1000, "medium": 2000, "hard": 5000}
-_BU_TIMEOUT_SECONDS = 900
+_BU_STEP_BUDGET = 100
 _BU_PRICE_CENTS = 1000
+# timeout_seconds=0 means wall-clock disabled (step budget is the limit).
+_POLAR_WALL_CLOCK_DISABLED_SECONDS = 0
 
 
 def _slug_title(title: str, limit: int = 60) -> str:
@@ -94,15 +100,18 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
     criteria = criteria_from_rubrics(normalized_rubrics)
 
     website = str(raw.get("website") or "https://www.google.com")
+    step_budget = _ODYSSEY_STEP_BUDGETS.get(level, _ODYSSEY_STEP_BUDGETS["hard"])
     return {
         "name": _odyssey_name(task_id),
         "title": f"Polar Odysseys — {title}",
         "description": (
             f"Odysseys {level} live-web task from polar-evals "
-            f"({len(normalized_rubrics)} rubric checkpoints; perfect = all pass)."
+            f"({len(normalized_rubrics)} rubric checkpoints; perfect = all pass; "
+            f"browser step budget={step_budget})."
         ),
         "prompt": str(raw["prompt"]),
-        "timeout_seconds": _ODYSSEY_TIMEOUTS.get(level, _ODYSSEY_TIMEOUTS["hard"]),
+        "timeout_seconds": _POLAR_WALL_CLOCK_DISABLED_SECONDS,
+        "max_steps": {"browser": step_budget},
         "is_chat_mode": False,
         "expected_tools": ["spawn_browser_agent"],
         "tags": [POLAR_TAG, "browser", "odysseys", level],
@@ -171,9 +180,13 @@ def _bu_entry(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": _bu_name(raw),
         "title": f"Polar BU Bench — {title_suffix} ({category})",
-        "description": f"BU Bench V1 {category} task from polar-evals / browser-use/benchmark.",
+        "description": (
+            f"BU Bench V1 {category} task from polar-evals / browser-use/benchmark "
+            f"(browser step budget={_BU_STEP_BUDGET})."
+        ),
         "prompt": prompt,
-        "timeout_seconds": _BU_TIMEOUT_SECONDS,
+        "timeout_seconds": _POLAR_WALL_CLOCK_DISABLED_SECONDS,
+        "max_steps": {"browser": _BU_STEP_BUDGET},
         "is_chat_mode": False,
         "expected_tools": ["spawn_browser_agent"],
         "tags": tags,
@@ -308,3 +321,28 @@ def is_polar_bench_task(task: Any) -> bool:
         group = task.get("group")
     tag_list = list(tags or [])
     return group == POLAR_GROUP or POLAR_TAG in tag_list
+
+
+def polar_browser_step_budget(task: Any) -> int | None:
+    """Return the browser step budget for a polar task, if configured."""
+    if not is_polar_bench_task(task):
+        return None
+    max_steps = getattr(task, "max_steps", None)
+    if max_steps is None and isinstance(task, dict):
+        max_steps = task.get("max_steps")
+    if not isinstance(max_steps, dict):
+        return None
+    budget = max_steps.get("browser")
+    if isinstance(budget, int) and budget > 0:
+        return budget
+    return None
+
+
+def polar_wall_clock_disabled(task: Any) -> bool:
+    """Polar tasks are step-budgeted; timeout_seconds=0 disables wall-clock."""
+    if not is_polar_bench_task(task):
+        return False
+    timeout = getattr(task, "timeout_seconds", None)
+    if timeout is None and isinstance(task, dict):
+        timeout = task.get("timeout_seconds")
+    return timeout == _POLAR_WALL_CLOCK_DISABLED_SECONDS

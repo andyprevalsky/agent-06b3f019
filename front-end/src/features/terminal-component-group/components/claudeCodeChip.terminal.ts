@@ -25,6 +25,7 @@ const ANSI_CYAN = '\x1b[38;2;162;240;242m';
 const ANSI_BLUE = '\x1b[38;2;155;220;255m';
 const ANSI_BG_RED = '\x1b[48;2;72;32;32m';
 const ANSI_BG_GREEN = '\x1b[48;2;28;72;44m';
+const ANSI_BG_YELLOW = '\x1b[48;2;72;58;24m';
 const ANSI_BG_CYAN = '\x1b[48;2;20;68;72m';
 const ANSI_BG_BLUE = '\x1b[48;2;31;55;82m';
 const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
@@ -64,6 +65,34 @@ function decorateTerminalLine(line: string, stream: TerminalStream): string {
   if (!visible) return line;
 
   if (visible.startsWith('▌')) return line;
+
+  const toolCall = visible.match(
+    /^\[(Codex|Claude)(?: Code)? tool\]\s+(\S+)\s*(?:·\s*(.*)|(.*))?$/i,
+  );
+  if (toolCall) {
+    const toolName = toolCall[2] ?? 'Tool';
+    const detail = (toolCall[3] ?? toolCall[4] ?? '').trim();
+    return actionBlock('⚙', toolName, detail, ANSI_YELLOW, ANSI_BG_YELLOW);
+  }
+
+  const toolResult = visible.match(/^\[(Codex|Claude)(?: Code)? result\]\s*(.*)$/i);
+  if (toolResult) {
+    const detail = (toolResult[2] ?? '').trim();
+    const failed = /fail|error/i.test(detail.slice(0, 80));
+    return actionBlock(
+      failed ? '✕' : '✓',
+      failed ? 'Result failed' : 'Result',
+      detail,
+      failed ? ANSI_RED : ANSI_GREEN,
+      failed ? ANSI_BG_RED : ANSI_BG_GREEN,
+    );
+  }
+
+  const agentNote = visible.match(/^\[(Codex|Claude)(?: Code)?\]\s*(.*)$/i);
+  if (agentNote) {
+    const detail = (agentNote[2] ?? '').trim();
+    return actionBlock('✦', agentNote[1], detail, ANSI_BLUE, ANSI_BG_BLUE);
+  }
 
   const commandOutput = visible.match(/^\[(Codex|Claude)(?: Code)? command output\]$/i);
   if (commandOutput) {

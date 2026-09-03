@@ -80,17 +80,6 @@ export function StatusDisplay({
   );
 }
 
-export function TurnCounter({ state, turnCount }: { state: ChipState; turnCount: number }) {
-  const label = `${turnCount} ${turnCount === 1 ? 'turn' : 'turns'} completed`;
-  const isActive = state === 'spinning_up' || state === 'live' || state === 'verifying';
-  return (
-    <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2 font-mono text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
-      <span>{label}</span>
-      {isActive && <span className="animate-dots ml-0.5 inline-block w-4" aria-hidden="true" />}
-    </span>
-  );
-}
-
 export function TerminalSurface({
   terminalContainerRef,
   className,
@@ -145,7 +134,6 @@ export interface HeaderProps {
   outputSchema: { fields: ResponseSchemaField[] } | undefined;
   githubRepoUrl: string | undefined;
   codeProvider: CodeProvider;
-  turnCount: number;
   onMaximize: () => void;
 }
 
@@ -154,7 +142,6 @@ export function CompactHeader({
   outputSchema,
   githubRepoUrl,
   codeProvider,
-  turnCount,
   onMaximize,
 }: HeaderProps) {
   return (
@@ -162,7 +149,6 @@ export function CompactHeader({
       <div className="flex min-w-0 items-center gap-2">
         <ProviderIcon codeProvider={codeProvider} className="h-4 w-4 flex-shrink-0" />
         <StatusDisplay state={state} codeProvider={codeProvider} />
-        <TurnCounter state={state} turnCount={turnCount} />
         <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="bottom" />
         <GithubRepoLink url={githubRepoUrl} />
       </div>

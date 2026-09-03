@@ -590,16 +590,16 @@ def test_convert_context_to_messages_one_tool_result_per_tool_use():
     )
 
 
-def test_convert_context_to_messages_pairs_orphan_tool_use():
-    """A tool_use whose terminal TOOL row never landed gets a synthetic result.
+def test_convert_context_to_messages_strips_orphan_tool_use():
+    """A tool_use whose terminal TOOL row never landed is stripped, not faked.
 
     Same captured request as above also declared attempt_completion
-    (dd27bdbb-1e39-4414-bea1-4d1fce95b691) with no terminal row, which
-    Anthropic rejects with "tool_use ids were found without tool_result
-    blocks". build_llm_messages already ran _ensure_tool_result_pairing;
-    convert_context_to_messages did not.
+    (dd27bdbb-1e39-4414-bea1-4d1fce95b691) with no terminal row. Inventing a
+    synthetic tool_result used to create duplicate-result 400s when a late real
+    result arrived after an intervening assistant. Strip the orphan tool_call
+    instead so Anthropic never sees an unpaired tool_use or a fake result.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "dd27bdbb-1e39-4414-bea1-4d1fce95b691"
     context = [
@@ -621,12 +621,9 @@ def test_convert_context_to_messages_pairs_orphan_tool_use():
     messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
 
     tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
-    assert tool_use_ids == [call_id]
-    assert [tid for tid, _ in tool_result_ids] == [call_id], (
-        f"every tool_use needs a tool_result, got {tool_result_ids}"
-    )
-    synthetic = [m for m in messages if m.get("tool_call_id") == call_id]
-    assert synthetic and synthetic[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert tool_use_ids == [], f"orphan tool_use must be stripped, got {tool_use_ids}"
+    assert tool_result_ids == [], f"no synthetic tool_result allowed, got {tool_result_ids}"
+    assert not any(m.get("tool_call_id") == call_id for m in messages)
 
 
 def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
@@ -636,7 +633,7 @@ def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
     timestamp. If dedup ran before they were filtered, the internal row would
     win and the real result would be dropped, orphaning the tool_use.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "toolu_dedup_ordering"
     context = [
@@ -670,7 +667,6 @@ def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert len(tool_msgs) == 1, tool_msgs
     assert "the real result the model must see" in tool_msgs[0]["content"]
-    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
     assert "internal sub-agent chatter" not in tool_msgs[0]["content"]
 
 
@@ -680,12 +676,13 @@ def test_convert_context_to_messages_verifier_row_between_call_and_error_result(
     convert_context_to_messages renders verifier TOOL rows as `role: assistant`,
     and _ensure_tool_result_pairing treats every assistant as a run boundary. If
     the ERROR result sorts after that verifier row, the declaring assistant looks
-    uncovered: the pairing pass synthesizes a placeholder AND keeps the real
+    uncovered: the old pairing pass synthesized a placeholder AND kept the real
     result, producing exactly the two-tool_result-blocks 400 this suite exists to
     prevent. Terminal rows are re-anchored to their IN_PROGRESS timestamp --
-    ERROR as well as FINISHED -- so the pair stays contiguous.
+    ERROR as well as FINISHED -- so the pair stays contiguous. When re-anchoring
+    fails, pull-forward still prefers the real result over inventing one.
     """
-    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+    from helpers.llm import convert_context_to_messages
 
     call_id = "tc-verifier-interleave"
     context = [
@@ -724,7 +721,6 @@ def test_convert_context_to_messages_verifier_row_between_call_and_error_result(
     )
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert len(tool_msgs) == 1
-    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
     assert "boom" in tool_msgs[0]["content"]
 
 
@@ -1633,6 +1629,43 @@ async def test_fetch_compute_token_activity_pins_benchmark_provider():
         method="GET",
     )
     assert "tokenType=claude" in call["url"]
+
+
+async def test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation():
+    """Claude pin must refuse GPT rotation so browser-smoke cache stays measurable.
+
+    Repro: smoke r16 browser-smoke — Claude auth_error → _rotate_compute_token
+    requested token_type=gpt → mid-sequence OpenRouter→Codex switch → 0%
+    repeatable cache (floor 40%). Pin must short-circuit before any HTTP lease.
+    """
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "should-not-lease",
+                    "accountId": "acct-1",
+                    "source": "user",
+                },
+            },
+        }
+    )
+
+    from helpers.httpx_capture import clear_captures, get_captures
+
+    clear_captures()
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
+        "temporalio.activity.heartbeat"
+    ):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1", token_type="gpt")
+
+    assert result is None
+    assert get_captures() == [], (
+        "pinned cross-provider rotation must not HTTP-lease a compute token"
+    )
 
 
 def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
@@ -5060,6 +5093,137 @@ async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
     assert "2026-07-06,YouTube" in payload["result"]
 
 
+async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
+    """Verifier file evidence keeps deliverables; demotes huge intermediate dumps.
+
+    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB–300KB)
+    were fully inlined into verifier_execute, Rose hit the attempt deadline
+    mid-JSON, soft-failed score=0.5, and the finished agent looped on CC spawns.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        _resolve_verifier_file_evidence,
+    )
+
+    intermediate = "x" * 80_000
+    # ~30k deliverable so truncated intermediate (40k) cannot also fit in 48k budget.
+    deliverable = '{"repos":[' + ",".join(
+        f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
+        for i in range(350)
+    ) + "]}"
+    assert 20_000 < len(deliverable) < VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+    ctx = [
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-intermediate",
+            "text": "",
+            "file_pointer": {
+                "id": "file-intermediate",
+                "storage_path": "user/cuda_repo_candidates.json",
+                "original_filename": "cuda_repo_candidates.json",
+                "mime_type": "application/json",
+                "size_bytes": len(intermediate),
+                "created_at": "2026-09-03T07:00:00Z",
+            },
+            "metadata": {},
+        },
+        {
+            "role": "ASSISTANT",
+            "message_id": "msg-deliverable",
+            "text": "",
+            "file_pointer": {
+                "id": "file-deliverable",
+                "storage_path": "user/top_100_cuda_repos.json",
+                "original_filename": "top_100_cuda_repos.json",
+                "mime_type": "application/json",
+                "size_bytes": len(deliverable),
+                "created_at": "2026-09-03T07:01:00Z",
+            },
+            "metadata": {},
+        },
+    ]
+
+    def _fake_cached(file_id):
+        if file_id == "file-intermediate":
+            return (intermediate.encode(), {})
+        if file_id == "file-deliverable":
+            return (deliverable.encode(), {})
+        return None
+
+    with patch("helpers.llm.get_cached_file", side_effect=_fake_cached):
+        evidence = await _resolve_verifier_file_evidence(ctx)
+
+    inter = evidence["msg-intermediate"][0]
+    final = evidence["msg-deliverable"][0]
+    assert final["content_inlined"] is True
+    assert "repo_000" in final["result"]
+    assert inter["content_inlined"] is False, "huge intermediate dump must be demoted to metadata"
+    assert "Omitted from verifier inline" in inter["result"]
+    total_inlined = sum(
+        len(p["result"]) for payloads in evidence.values() for p in payloads if p.get("content_inlined")
+    )
+    assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+
+def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
+    """spawn_agent ranking dumps must not inflate verifier_execute past Rose deadlines.
+
+    Regression (cuda-kernel top100 r16 agent2): file-evidence budget only capped
+    resolved file pointers, but TOOL_RESULT bodies still embedded 25k–45k JSON
+    tables → 134k user batch on GPT → attempt deadline → score 0.5 loop.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_TOOL_RESULT_CHARS,
+        VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        build_verifier_context_messages,
+    )
+
+    huge_table = "| repo | stars |\n" + "\n".join(
+        f"| org/cuda-repo-{i} | {100000 - i} |" for i in range(2000)
+    )
+    assert len(huge_table) > VERIFIER_MAX_TOOL_RESULT_CHARS
+
+    ctx = [
+        {
+            "role": "USER",
+            "text": "Rank top 100 CUDA kernel repos",
+            "timestamp": "2026-09-03T08:00:00Z",
+        },
+        {
+            "role": "TOOL",
+            "text": huge_table,
+            "timestamp": "2026-09-03T08:01:00Z",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "call_spawn_huge",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": '{"repos":[' + ",".join(f'{{"rank":{i},"url":"https://github.com/o/r{i}"}}' for i in range(100)) + "]}",
+            "timestamp": "2026-09-03T08:02:00Z",
+            "metadata": {
+                "toolName": "attempt_completion",
+                "toolCallId": "call_done",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    msgs = build_verifier_context_messages(ctx, "system")
+    user_blobs = [m["content"] for m in msgs if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    joined = "\n\n".join(user_blobs)
+    assert "verifier truncated" in joined or "[omitted: verifier tool-result budget exhausted]" in joined
+    # spawn_agent body must be capped; attempt_completion deliverable may use the larger cap
+    spawn_segments = [s for s in joined.split("TOOL_RESULT ") if '"tool_name": "spawn_agent"' in s or '"tool_name":"spawn_agent"' in s]
+    assert spawn_segments, joined[:500]
+    assert len(spawn_segments[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS + 64
+    tool_only = sum(len(s) for s in joined.split("\n\n") if s.startswith("TOOL_RESULT "))
+    assert tool_only <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 200
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
@@ -7148,9 +7312,9 @@ async def test_call_llm_structured_streaming_non_dict_choices_continues():
     assert "ok" in result.response, f"Expected 'ok' substring, got {result.response!r}"
 
 
-def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
-    """Orphan assistant tool_use → synthetic tool_result inserted right after."""
-    from helpers.llm import _ensure_tool_result_pairing, SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+def test_ensure_tool_result_pairing_strips_orphan_tool_use():
+    """Orphan assistant tool_use → tool_call stripped; no synthetic tool_result."""
+    from helpers.llm import _ensure_tool_result_pairing
 
     msgs = [
         {"role": "system", "content": "sys"},
@@ -7164,12 +7328,41 @@ def test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use():
         {"role": "assistant", "content": "continuing"},
     ]
     fixed = _ensure_tool_result_pairing(msgs)
-    # Synthetic tool_result is inserted between the orphan assistant and the next user.
+    assert not any(m.get("role") == "tool" for m in fixed), f"no synthetic tool_result allowed: {fixed}"
+    first_assistant = next(m for m in fixed if m.get("role") == "assistant")
+    assert not first_assistant.get("tool_calls"), f"orphan tool_call must be stripped: {first_assistant}"
+
+
+def test_ensure_tool_result_pairing_pulls_late_result_forward():
+    """Late real tool_result after an intervening assistant is pulled forward (no dup).
+
+    Polar false-fail shape: timeout ERROR then pause-cancel FINISHED for the same
+    tool_call_id, with an assistant between them. Dedup keeps the latest; pairing
+    must pull that real result forward to the declaring assistant — never inject a
+    placeholder that would then duplicate the late real result.
+    """
+    from helpers.llm import _ensure_tool_result_pairing
+
+    call_id = "toolu_011uTWNQfc3aDKLLL8RQ68Sg"
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": "spawn_browser_agent", "arguments": "{}"}}
+            ],
+        },
+        {"role": "assistant", "content": "intervening verifier/progress"},
+        {"role": "tool", "tool_call_id": call_id, "name": "spawn_browser_agent", "content": "canceled by pause"},
+    ]
+    fixed = _ensure_tool_result_pairing(msgs)
     tool_msgs = [m for m in fixed if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1, f"Expected 1 synthetic tool message, got {len(tool_msgs)}"
-    assert tool_msgs[0]["tool_call_id"] == "tc1"
-    assert tool_msgs[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
-    assert tool_msgs[0]["name"] == "spawn_agent"
+    assert len(tool_msgs) == 1, f"expected exactly one real tool_result, got {tool_msgs}"
+    assert tool_msgs[0]["content"] == "canceled by pause"
+    # Real result must sit immediately after the declaring assistant.
+    assert fixed[0].get("role") == "assistant" and fixed[0].get("tool_calls")
+    assert fixed[1].get("role") == "tool" and fixed[1].get("tool_call_id") == call_id
+    assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
@@ -7267,8 +7460,8 @@ async def run_all_tests():
         test_convert_context_to_messages_one_tool_result_per_tool_use,
     )
     r.record(
-        "convert_context_to_messages_pairs_orphan_tool_use",
-        test_convert_context_to_messages_pairs_orphan_tool_use,
+        "convert_context_to_messages_strips_orphan_tool_use",
+        test_convert_context_to_messages_strips_orphan_tool_use,
     )
     r.record(
         "convert_context_to_messages_subagent_row_cannot_win_the_dedup",
@@ -7370,6 +7563,10 @@ async def run_all_tests():
     await r.record_async(
         "fetch_compute_token_activity_pins_benchmark_provider",
         test_fetch_compute_token_activity_pins_benchmark_provider,
+    )
+    await r.record_async(
+        "fetch_compute_token_activity_pin_blocks_cross_provider_rotation",
+        test_fetch_compute_token_activity_pin_blocks_cross_provider_rotation,
     )
     r.record(
         "benchmark_compute_token_type_rejects_conflicting_provider_policy",
@@ -7609,6 +7806,14 @@ async def run_all_tests():
         test_resolve_verifier_file_evidence_uses_cached_text_file_content,
     )
     await r.record_async(
+        "verifier_file_evidence_budget_prefers_deliverable",
+        test_resolve_verifier_file_evidence_budget_prefers_deliverable,
+    )
+    r.record(
+        "verifier_ctx_tool_result_budget_truncates_spawn_agent",
+        test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent,
+    )
+    await r.record_async(
         "verifier_ctx_self_closes_trailing_refs",
         test_build_verifier_context_messages_self_closes_trailing_refs,
     )
@@ -7772,8 +7977,12 @@ async def run_all_tests():
         "stream_non_dict_choices_continues", test_call_llm_structured_streaming_non_dict_choices_continues
     )
     r.record(
-        "ensure_tool_result_pairing_inserts_synthetic",
-        test_ensure_tool_result_pairing_inserts_synthetic_for_orphan_tool_use,
+        "ensure_tool_result_pairing_strips_orphan_tool_use",
+        test_ensure_tool_result_pairing_strips_orphan_tool_use,
+    )
+    r.record(
+        "ensure_tool_result_pairing_pulls_late_result_forward",
+        test_ensure_tool_result_pairing_pulls_late_result_forward,
     )
     r.record(
         "ensure_tool_result_pairing_strips_orphan_tool_result",

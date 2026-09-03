@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
+import os
 from typing import Final
+
+# Temporary kill-switch for the post-run code-agent completion verifier
+# (Claude Code + Codex share this path). When set, the sandbox session's
+# natural end is the result — no dual-agent verifier LLM pass.
+# Values: 1 / true / yes / on
+ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV: Final[str] = "ROSE_DISABLE_CODE_AGENT_VERIFIER"
+
+
+def code_agent_verifier_disabled() -> bool:
+    """Return True when the post-run code-agent verifier should be skipped."""
+    raw = os.getenv(ROSE_DISABLE_CODE_AGENT_VERIFIER_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
 
 # Silence timeout — if no output for this long, Claude Code is "done talking"
 SILENCE_TIMEOUT_S: Final[float] = 1.0
 
-# Maximum runtime before timeout
+# After the autonomous CC path observes silence and begins waiting for the SDK
+# exit, require a fresh WebSocket event within this window. Without it, a hung
+# CLI (no exit_code, no further events) spins until MAX_RUNTIME_S — seen on
+# cuda-kernel k=3 r12 agent 4e1a84b7 (ScheduleWakeup/Bash then 10m+ of only
+# progress chips). Progress chips do not refresh last_output_time.
+SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
+
+# Maximum runtime before timeout.
+# Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
+# A 60m cap let hung Claude Code sessions burn the whole bench with no parent
+# recovery (k=3 2026-09-02: 3009s/3721s CC waits → all timeouts). Successful
+# code-agent path finishes CC in ~15m; 30m fails hung sessions with headroom.
 MAX_RUNTIME_S: Final[int] = 1800  # 30 minutes (matches E2B SANDBOX_TIMEOUT_MS)
 
 # Fatal error patterns in Claude Code output that should immediately abort the session.

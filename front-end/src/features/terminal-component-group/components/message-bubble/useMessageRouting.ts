@@ -59,7 +59,9 @@ export function useMessageRouting(message: Message): MessageRouting {
   const isClaudeCodeInProgress = isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
   const isClaudeCodeStarted =
     isClaudeCodeToolMessage && metadata?.action_type === 'claude_code_started';
-  const isClaudeCodeComplete = isClaudeCodeToolMessage && metadata?.action_type === 'task_complete';
+  const isClaudeCodeComplete =
+    isClaudeCodeToolMessage &&
+    (metadata?.action_type === 'task_complete' || metadata?.action_type === 'session_cancelled');
   const isClaudeCodeChipMessage = Boolean(
     isClaudeCodeInProgress || isClaudeCodeStarted || isClaudeCodeComplete,
   );

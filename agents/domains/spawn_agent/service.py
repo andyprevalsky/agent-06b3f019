@@ -36,7 +36,7 @@ from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
-from utils.tool_schemas import EXPLORE_AGENT_TOOLS
+from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
 
@@ -190,6 +190,14 @@ def validate_spawn_params(tool_call: dict) -> None:
         raise ValueError(
             f"spawn_agent type='{agent_type}' is invalid. Must be one of: {', '.join(sorted(VALID_AGENT_TYPES))}."
         )
+
+    from domains.spawn_agent.config import (
+        disabled_general_purpose_rejection_message,
+        is_disabled_general_purpose_type,
+    )
+
+    if is_disabled_general_purpose_type(agent_type):
+        raise ValueError(disabled_general_purpose_rejection_message(agent_type=agent_type))
 
     # PLAN-phase gate: only `explore` is legal during PLAN. The PLAN-loop
     # response_model already narrows the schema to SpawnExploreAgentTool, but
@@ -363,6 +371,7 @@ async def spawn_explore_agent_activity(
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
     from providers.fast_cache.client import resolve_agent_fast_mode
+    from tools.api_request import ApiRequestManager
     from tools.grep import GrepManager
     from tools.people_search import PeopleSearchManager
     from tools.web_fetch import WebFetchManager
@@ -662,6 +671,22 @@ async def spawn_explore_agent_activity(
                         )
                     ):
                         unavailable_sources_collected.append(normalized)
+        elif tool_name == "api_request":
+            from domains.api_request.config import api_request_disabled
+
+            if api_request_disabled():
+                return {
+                    "error": True,
+                    "message": "api_request is temporarily disabled.",
+                }
+            manager = ApiRequestManager()
+            result = await manager.execute_tool(
+                execute_activity=tagged_execute_activity,
+                tool_call=tool_call_dict,
+                tool_call_id=tool_call_id,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
                 completion_no_evidence_rejects += 1
@@ -670,11 +695,18 @@ async def spawn_explore_agent_activity(
                 # ends the leaf so the chip does not fill with 50 rejects.
                 if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
+                from domains.api_request.config import api_request_disabled
+
+                evidence_tools = "web_search, people_search, web_fetch, or grep"
+                if not api_request_disabled():
+                    evidence_tools = (
+                        "web_search, people_search, web_fetch, grep, or api_request"
+                    )
                 return {
                     "error": True,
                     "message": (
                         "Completion rejected: no evidence tool has succeeded yet. "
-                        "Call web_search, people_search, web_fetch, or grep successfully before completing."
+                        f"Call {evidence_tools} successfully before completing."
                     ),
                 }
             return {"success": True, "message": "Completion accepted"}
@@ -790,7 +822,7 @@ async def spawn_explore_agent_activity(
             system_prompt=explore_system_prompt,
             verifier_prompt_generator=explore_verifier_prompt,
             model=model,
-            tools=EXPLORE_AGENT_TOOLS,
+            tools=get_explore_agent_tools(),
             initial_context=[{"role": "USER", "text": initial_user_text}],
             task_id=task_id,
             is_inside_temporal_activity=True,

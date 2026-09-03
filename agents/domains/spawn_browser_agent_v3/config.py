@@ -45,7 +45,11 @@ def browser_start_to_close_timeout_minutes(
     goal: str = "",
     workflow_instance=None,
 ) -> int:
-    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m."""
+    """3m Fast Mode ceiling is demo-only; every other FM browser keeps 30m.
+
+    Polar / high BROWSER_MAX_ITERATIONS runs scale the ceiling with the step
+    budget (~30m per 100 steps, matching Odysseys Opus wall-clock at 100 steps).
+    """
     from domains.spawn_agent.config import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
     demo = is_oai_demo_goal(goal)
@@ -53,6 +57,10 @@ def browser_start_to_close_timeout_minutes(
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
     if fast_mode and demo:
         return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
+    steps = get_max_iterations()
+    if steps > DEFAULT_MAX_ITERATIONS:
+        # 100 steps ≈ 30 minutes upstream; keep a small buffer above that ratio.
+        return max(ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES, int(steps * 0.35) + 15)
     return ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
 
 
@@ -153,6 +161,49 @@ BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS = int(
 )
 BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVERIES", "8"))
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
+
+# Soft/optional get_browser_state budget (post-verifier reject screenshot, etc.).
+# Healthy IDLE gaps on browser runs sit near ~12s p95; 10s is the agreed soft
+# bound. One retry keeps transient CDP blips from dropping the refresh while
+# still finishing in << TREE STALL silence (~510s). Do NOT use this for the
+# main action-loop fetch — that path still needs the challenge-survival
+# BrowserStateRequest budget (90–260s freezes).
+BROWSER_STATE_SOFT_TIMEOUT_SECONDS = float(
+    os.getenv("BROWSER_STATE_SOFT_TIMEOUT_SECONDS", "10")
+)
+BROWSER_STATE_SOFT_ATTEMPTS = int(os.getenv("BROWSER_STATE_SOFT_ATTEMPTS", "2"))
+
+# `read_browser_state` replaced free per-turn DOM injection (d5b79a331). Counting
+# it against MAX_ITERATIONS burns the action budget on observation: smoke agent
+# b4b36b53 spent 16/60 steps on read_browser_state, hit max steps on Submit,
+# and never read the visible FCaptcha score (browser-biometrics-webdecoy).
+# Observation stays free up to a consecutive cap so a stuck model cannot loop
+# forever without advancing the wall-clock action budget.
+BUDGET_FREE_BROWSER_ACTIONS = frozenset({"read_browser_state"})
+MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS = int(
+    os.getenv("BROWSER_MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS", "5")
+)
+
+
+def adjust_iteration_after_action(
+    *,
+    iteration: int,
+    action_name: str,
+    consecutive_budget_free: int,
+) -> tuple[int, int]:
+    """Refund a step budget unit for observation-only tools.
+
+    Returns ``(new_iteration, new_consecutive_budget_free)``. After
+    ``MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS`` observation-only calls in a row,
+    further observations consume budget so the loop still terminates.
+    """
+    name = str(action_name or "").strip().lower()
+    if name in BUDGET_FREE_BROWSER_ACTIONS:
+        consecutive = int(consecutive_budget_free) + 1
+        if consecutive <= MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS:
+            return max(0, int(iteration) - 1), consecutive
+        return int(iteration), consecutive
+    return int(iteration), 0
 
 # Verifier DOM checkpoints retained across the browser activity (evaluate
 # always-on preserved_evidence + pre-write approval snapshots). Bounded so

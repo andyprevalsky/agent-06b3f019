@@ -948,6 +948,8 @@ def build_verifier_context_messages(
 
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     current_batch: List[str] = []
+    _tool_result_chars_used = 0
+    _tool_result_budget_hits = 0
 
     def _flush_batch() -> None:
         """Emit current_batch as a single user-role message and reset it."""
@@ -1009,14 +1011,30 @@ def build_verifier_context_messages(
             if structured_result is None:
                 structured_result = metadata.get("structuredResponse")
 
+            tool_name = metadata.get("toolName", "tool")
             tool_payload = {
-                "tool_name": metadata.get("toolName", "tool"),
+                "tool_name": tool_name,
                 "tool_call_id": metadata.get("toolCallId"),
                 "result": structured_result if structured_result is not None else text,
             }
             if metadata.get("title"):
                 tool_payload["title"] = metadata["title"]
-            tool_text = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            # Cap per-tool and total TOOL_RESULT size. File-evidence budget only
+            # covers resolved file pointers; spawn_agent / artifact_file tool
+            # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
+            # user batch → GPT RoseDeadline). Truncate before dump.
+            tool_text, truncated = _budget_verifier_tool_result_text(
+                "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str),
+                tool_name=str(tool_name or "tool"),
+                used_chars=_tool_result_chars_used,
+            )
+            if truncated:
+                _tool_result_budget_hits += 1
+            # Aggregate budget exhausted → empty text; skip append so later
+            # tools cannot keep growing the verifier prompt past the cap.
+            if not tool_text:
+                continue
+            _tool_result_chars_used += len(tool_text)
 
             screenshot_b64 = metadata.get("screenshot_b64")
             if screenshot_b64:
@@ -1060,7 +1078,63 @@ def build_verifier_context_messages(
     current_batch.append("Evaluate the agent's progress as JSON.")
     _flush_batch()
 
+    if _tool_result_budget_hits:
+        logger.info(
+            "Verifier tool-result budget applied",
+            truncated_tool_results=_tool_result_budget_hits,
+            used_chars=_tool_result_chars_used,
+            budget_chars=VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS,
+        )
+
     return messages
+
+
+# Per-tool / total caps for TOOL_RESULT bodies in verifier_execute. Distinct from
+# the file-evidence budget: spawn_agent and artifact_file tool rows often embed
+# full ranking JSON directly in `result`, bypassing file-pointer inlining.
+VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
+VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 40_000
+VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 64_000
+_VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
+    {
+        "attempt_completion",
+        "artifact_file",
+        "write_file",
+        "create_file",
+    }
+)
+
+
+def _budget_verifier_tool_result_text(
+    tool_text: str,
+    *,
+    tool_name: str,
+    used_chars: int,
+) -> tuple[str, bool]:
+    """Truncate a verifier TOOL_RESULT line to per-tool and total budgets.
+
+    Returns (possibly_truncated_text, was_truncated).
+    """
+    per_tool_cap = (
+        VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS
+        if tool_name in _VERIFIER_DELIVERABLE_TOOL_NAMES
+        else VERIFIER_MAX_TOOL_RESULT_CHARS
+    )
+    remaining_total = max(0, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS - used_chars)
+    cap = min(per_tool_cap, remaining_total)
+    if cap <= 0:
+        # Do not emit a stub — callers must skip appending so the aggregate
+        # budget stays hard-capped at VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS.
+        return "", True
+    if len(tool_text) <= cap:
+        return tool_text, False
+    marker = f"...[verifier truncated {len(tool_text) - cap} chars from {tool_name}]..."
+    keep = max(0, cap - len(marker))
+    if keep < 64:
+        return tool_text[:cap], True
+    head = keep // 2
+    tail = keep - head
+    return tool_text[:head] + marker + tool_text[-tail:], True
 
 
 def _verifier_file_evidence_key(msg: Dict[str, Any]) -> str:
@@ -1108,6 +1182,102 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
     }
 
 
+# Main-agent INLINE_THRESHOLD is 20MB — fine for the acting agent, catastrophic for
+# verifier_execute: intermediate ranking dumps (100KB–300KB+) get fully inlined,
+# Rose streams mid-JSON past the attempt deadline, soft-fails score=0.5, and the
+# finished agent is bounced back into execute (cuda-kernel top100). Cap verifier
+# inlining separately; prefer deliverable-looking filenames within the budget.
+VERIFIER_MAX_INLINE_FILE_CHARS = 40_000
+VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 48_000
+_VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
+    r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
+    re.IGNORECASE,
+)
+
+
+def _truncate_text_for_verifier_inline(text: str, *, max_chars: int, filename: str) -> str:
+    """Keep head+tail when a single file exceeds the verifier per-file cap."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = f"\n\n...[verifier truncated {len(text) - max_chars} chars from {filename}]...\n\n"
+    keep = max_chars - len(marker)
+    if keep < 64:
+        return text[:max_chars]
+    head = keep // 2
+    tail = keep - head
+    return text[:head] + marker + text[-tail:]
+
+
+def _verifier_file_inline_priority(filename: str) -> int:
+    """Lower sorts first. Deliverable-looking names beat intermediate dumps."""
+    return 0 if _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename or "") else 1
+
+
+def _verifier_omitted_file_metadata_text(artifact: Dict[str, Any]) -> str:
+    filename = artifact.get("original_filename") or "file"
+    size_bytes = artifact.get("size_bytes") or 0
+    mime_type = artifact.get("mime_type") or "application/octet-stream"
+    return (
+        "file_pointer:\n"
+        f"  original_filename: {filename}\n"
+        f"  mime_type: {mime_type}\n"
+        f"  size_bytes: {size_bytes}\n"
+        "  note: Omitted from verifier inline (file-evidence budget); "
+        "prefer newest deliverable artifacts already inlined above/below."
+    )
+
+
+def _apply_verifier_file_evidence_budget(
+    evidence_by_message: Dict[str, List[Dict[str, Any]]],
+    context: List[Dict[str, Any]],
+) -> None:
+    """Keep deliverables; demote older/intermediate inlines that blow the budget."""
+    indexed: List[Tuple[int, int, str, int, Dict[str, Any]]] = []
+    for msg_index, msg in enumerate(context):
+        if not isinstance(msg, dict):
+            continue
+        key = _verifier_file_evidence_key(msg)
+        payloads = evidence_by_message.get(key) or []
+        for payload_index, payload in enumerate(payloads):
+            if not payload.get("content_inlined"):
+                continue
+            artifact = payload.get("artifact") or {}
+            filename = str(artifact.get("original_filename") or "")
+            indexed.append(
+                (
+                    _verifier_file_inline_priority(filename),
+                    -msg_index,  # newer messages first among same priority
+                    key,
+                    payload_index,
+                    payload,
+                )
+            )
+
+    indexed.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    used = 0
+    kept = 0
+    demoted = 0
+    for _prio, _neg_idx, _key, _pidx, payload in indexed:
+        n = len(str(payload.get("result") or ""))
+        if used + n <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS:
+            used += n
+            kept += 1
+            continue
+        artifact = payload.get("artifact") or {}
+        payload["result"] = _verifier_omitted_file_metadata_text(artifact)
+        payload["content_inlined"] = False
+        demoted += 1
+
+    if demoted:
+        logger.info(
+            "Verifier file-evidence budget applied",
+            kept_inlined=kept,
+            demoted_to_metadata=demoted,
+            used_chars=used,
+            budget_chars=VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
+        )
+
+
 async def _resolve_verifier_file_evidence(
     context: List[Dict[str, Any]],
 ) -> Dict[str, List[Dict[str, Any]]]:
@@ -1116,6 +1286,9 @@ async def _resolve_verifier_file_evidence(
     This mirrors the main-agent attachment loading policy: use the module cache
     first, download only from activity context, inline small text files, and
     fall back to metadata for large/binary/unavailable files.
+
+    Verifier inlining is further capped (per-file + total budget) so intermediate
+    artifact dumps cannot inflate verifier_execute past Rose attempt deadlines.
     """
     evidence_by_message: Dict[str, List[Dict[str, Any]]] = {}
     for msg in context:
@@ -1148,6 +1321,11 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
+                        text_content = _truncate_text_for_verifier_inline(
+                            text_content,
+                            max_chars=VERIFIER_MAX_INLINE_FILE_CHARS,
+                            filename=fp.original_filename,
+                        )
                         result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True
                     except UnicodeDecodeError:
@@ -1164,6 +1342,8 @@ async def _resolve_verifier_file_evidence(
 
         if payloads:
             evidence_by_message[_verifier_file_evidence_key(msg)] = payloads
+
+    _apply_verifier_file_evidence_budget(evidence_by_message, context)
     return evidence_by_message
 
 
@@ -2097,13 +2277,10 @@ async def build_llm_messages(
     if llm_only_user_preamble:
         messages = inject_llm_only_user_preamble(messages, llm_only_user_preamble)
 
-    # Defensive: pair every assistant tool_call with a tool result before sending
-    # to the LLM. Mirrors claude-code-src's ensureToolResultPairing — when an
-    # activity (set_plan, spawn_agent, spawn_claude_code_agent, …) crashes or
-    # times out before the parent TOOL terminal row is written, the assistant's
-    # tool_use ends up orphaned in DB. Anthropic rejects with 400 (or stalls)
-    # if a tool_use lacks a matching tool_result. We fill the gap with a
-    # synthetic error tool_result so the loop can continue.
+    # Defensive: pair every assistant tool_call with a real tool result before
+    # sending to the LLM. When an activity crashes/times out before the parent
+    # TOOL terminal row is written, pull any late real result forward; if none
+    # exists, strip the orphan tool_call. Never invent a fake tool_result.
     messages = _ensure_tool_result_pairing(messages)
 
     # Resolve context pointers to <resolved-ref> blocks
@@ -2116,11 +2293,8 @@ async def build_llm_messages(
     return messages
 
 
-SYNTHETIC_TOOL_RESULT_PLACEHOLDER = "[Tool result missing due to internal error]"
-
-
 def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Ensure every assistant tool_call has a matching tool message.
+    """Ensure every remaining assistant tool_call has a matching real tool message.
 
     OpenAI-format invariants the Anthropic transform relies on:
     - Every assistant.tool_calls[i].id has a tool message with that tool_call_id
@@ -2130,15 +2304,28 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
       are dropped (build_llm_messages already converts those to user text upstream
       — this is the belt-and-suspenders pass for any that slipped through).
 
-    Repairs the message list in place by:
+    Repairs the message list by:
     1. Stripping duplicate tool_call ids that appear in a later assistant.
-    2. Inserting synthetic error tool messages for any tool_call id with no
-       matching tool message before the next assistant.
-    3. Dropping orphaned tool messages whose tool_call_id has no preceding
-       declaration.
+    2. Pulling a late real tool result forward when it lands after an intervening
+       assistant (dual-write / timeout-then-cancel ordering).
+    3. Stripping orphan tool_calls that still have no real result — never invent
+       a fake "[Tool result missing…]" placeholder.
+    4. Dropping orphaned tool messages whose tool_call_id has no preceding
+       declaration, and dropping duplicate tool results for the same id.
 
     Idempotent — running it twice on its own output is a no-op.
     """
+    # Work on shallow copies of assistant rows (and their tool_calls lists) so
+    # pass 1's dedupe cannot mutate caller-owned message objects before pass 2.
+    messages = [
+        (
+            {**msg, "tool_calls": list(msg["tool_calls"])}
+            if msg.get("role") == "assistant" and isinstance(msg.get("tool_calls"), list)
+            else dict(msg)
+        )
+        for msg in messages
+    ]
+
     seen_ids: set[str] = set()
     repaired = False
 
@@ -2165,15 +2352,15 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
         else:
             msg.pop("tool_calls", None)
 
-    # Pass 2: walk the list, fill in missing tool messages, drop orphan tool
-    # messages. We rebuild a fresh list to keep insertion logic simple.
+    # Pass 2: walk the list, pull late real results forward, strip orphan
+    # tool_calls, drop orphan/duplicate tool messages.
     #
     # `emitted_results` is global, not per-assistant: a real result can land after
-    # a *later* assistant (dual-write corruption re-declares a tool_call on a
-    # second row), and emitting it there too would be a second tool_result for one
-    # tool_use — exactly the 400 this pass exists to avoid. Such a straggler is
-    # pulled forward to its declaring assistant rather than dropped, so the real
-    # result survives instead of being replaced by a synthetic placeholder.
+    # a *later* assistant (dual-write corruption / timeout-then-cancel), and
+    # emitting it there too would be a second tool_result for one tool_use —
+    # exactly the 400 this pass exists to avoid. Such a straggler is pulled
+    # forward to its declaring assistant rather than left late (or replaced by a
+    # fake placeholder).
     emitted_results: set[str] = set()
     pulled_forward: set[int] = set()
     result: List[Dict[str, Any]] = []
@@ -2184,12 +2371,17 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
         role = msg.get("role")
 
         if role == "assistant":
-            tcs = msg.get("tool_calls") or []
+            tcs = list(msg.get("tool_calls") or [])
             for tc in tcs:
                 tc_id = tc.get("id")
                 if tc_id:
                     declared_at_or_before.add(tc_id)
-            result.append(msg)
+            # Copy so we can strip orphan tool_calls without mutating the input
+            # list's nested dicts in surprising ways for callers that reuse msgs.
+            assistant_msg = dict(msg)
+            if tcs:
+                assistant_msg["tool_calls"] = list(tcs)
+            result.append(assistant_msg)
 
             # Collect every tool message that follows this assistant up to the
             # next assistant, and check coverage.
@@ -2217,18 +2409,13 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
                     non_tool_run.append(m2)
                 j += 1
 
-            # Synthesize missing tool messages for any declared id not covered.
+            # For any declared id not covered in-window: pull a late real result
+            # forward, or strip the orphan tool_call. Never invent a placeholder.
             tc_ids = [tc.get("id") for tc in tcs if tc.get("id")]
-            tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
+            orphan_ids: set[str] = set()
             for tc_id in tc_ids:
                 if tc_id in emitted_results:
                     continue
-                repaired = True
-                emitted_results.add(tc_id)
-                # A real result for this id may exist further down the list, past
-                # an intervening assistant. Pull it forward so the tool_result
-                # still directly follows the tool_use that declared it; only fall
-                # back to a placeholder when there is no real result at all.
                 straggler = next(
                     (
                         later
@@ -2240,18 +2427,22 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
                     None,
                 )
                 if straggler is not None:
+                    repaired = True
+                    emitted_results.add(tc_id)
                     pulled_forward.add(id(straggler))
                     tool_run.append(straggler)
                     continue
-                synthetic: Dict[str, Any] = {
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
-                }
-                name = tc_names.get(tc_id)
-                if name:
-                    synthetic["name"] = name
-                tool_run.append(synthetic)
+                orphan_ids.add(tc_id)
+
+            if orphan_ids:
+                repaired = True
+                remaining = [
+                    tc for tc in (assistant_msg.get("tool_calls") or []) if tc.get("id") not in orphan_ids
+                ]
+                if remaining:
+                    assistant_msg["tool_calls"] = remaining
+                else:
+                    assistant_msg.pop("tool_calls", None)
 
             # Tool messages first (so tool_use→tool_result pairing is contiguous),
             # then any non-tool messages (user text, etc.) that lived in this gap.
@@ -2262,7 +2453,7 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
         if role == "tool":
             # Tool message at the head of the list (no preceding assistant) or
-            # following a non-assistant — both are orphans.
+            # following a non-assistant — both are orphans unless already pulled.
             tcid = msg.get("tool_call_id")
             if id(msg) in pulled_forward:
                 # Already emitted under the assistant that declared it.
@@ -5103,13 +5294,20 @@ def max_tokens_for_verifier_call_site(call_site: str) -> int:
         return DECLARED_EVALUATOR_MAX_TOKENS
     return VERIFIER_MAX_TOKENS
 # A verifier is advisory and must never outlive the agent benchmark/activity
-# that requested it. Keep each provider attempt short enough to fall through,
-# while also fencing the entire retry loop so six individually bounded attempts
-# cannot accumulate into a multi-minute zombie.
-VERIFIER_ATTEMPT_DEADLINE_S = 75.0
-VERIFIER_TTFT_TIMEOUT_S = 45.0
-VERIFIER_IDLE_TIMEOUT_S = 45.0
-VERIFIER_TOTAL_TIMEOUT_S = 180.0
+# that requested it. Bound each provider attempt, and fence the retry loop so
+# individually bounded attempts cannot accumulate into a multi-minute zombie.
+#
+# 2026-09-03 RCA (cuda-kernel-github-top100-code-agent k=3): attempt_completion
+# verifier_execute streamed 50–60 content chunks but RoseDeadlineError'd at the
+# old 75s attempt wall with unterminated JSON; the 180s total then soft-failed
+# at score=0.5 and bounced a finished ranking agent back into execute. Long
+# ranking transcripts need headroom for a cold verifier JSON completion (warm
+# cache retries historically finish in ~25s). Keep the fence well under the
+# 4200s task budget.
+VERIFIER_ATTEMPT_DEADLINE_S = 180.0
+VERIFIER_TTFT_TIMEOUT_S = 60.0
+VERIFIER_IDLE_TIMEOUT_S = 90.0
+VERIFIER_TOTAL_TIMEOUT_S = 420.0
 
 
 @activity.defn
@@ -6252,10 +6450,29 @@ async def fetch_compute_token_activity(
     fast_cache_affinity_key: Optional[str] = None,
     token_type: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Fetch one provider-typed compute token across Claude/GPT from the backend."""
+    """Fetch one provider-typed compute token across Claude/GPT from the backend.
+
+    When ``BENCHMARK_COMPUTE_TOKEN_TYPE`` is set (predeploy smoke), the pin is a
+    hard constraint: cross-provider rotation requests are refused so a Claude
+    auth failure cannot silently lease a GPT token mid-sequence and zero the
+    repeatable prompt-cache ratchet (browser-smoke floor is 40%).
+    """
     config = load_config()
     pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
+
+    if (
+        pinned_benchmark_type
+        and token_type in ("claude", "gpt")
+        and token_type != pinned_benchmark_type
+    ):
+        logger.info(
+            "Skipping compute token fetch: rotation asked for %s but "
+            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s (keep waterfall affinity)",
+            token_type,
+            pinned_benchmark_type,
+        )
+        return None
 
     try:
         async with httpx.AsyncClient() as client:
@@ -6268,12 +6485,13 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
-            if token_type in ("claude", "gpt"):
+            if pinned_benchmark_type:
+                # Pin wins over callers (including _rotate_compute_token).
+                params["tokenType"] = pinned_benchmark_type
+            elif token_type in ("claude", "gpt"):
                 params["tokenType"] = token_type
             elif anthropic_family_excluded():
                 params["tokenType"] = "gpt"
-            elif pinned_benchmark_type:
-                params["tokenType"] = pinned_benchmark_type
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={
@@ -6288,6 +6506,14 @@ async def fetch_compute_token_activity(
                 token = data.get("accessToken")
                 provider_type = data.get("type")
                 if token and provider_type in ("claude", "gpt"):
+                    if pinned_benchmark_type and provider_type != pinned_benchmark_type:
+                        logger.warning(
+                            "Rejecting compute token type=%s under "
+                            "BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                            provider_type,
+                            pinned_benchmark_type,
+                        )
+                        return None
                     logger.info(
                         "✅ Compute token fetched",
                         user_id=user_id,
@@ -6607,7 +6833,9 @@ async def call_planner_llm_activity(
     import time
 
     from utils.prompts import build_planner_system_prompt
-    from utils.tool_schemas import PlannerResponse
+    from utils.tool_schemas import get_planner_response_model
+
+    planner_response_model = get_planner_response_model()
 
     activity_start = time.perf_counter()
     _safe_heartbeat("Calling planner LLM")
@@ -6706,7 +6934,7 @@ async def call_planner_llm_activity(
             model=model,
             temperature=0.2,
             max_tokens=16384,
-            response_model=PlannerResponse,
+            response_model=planner_response_model,
             on_chunk=on_plan_heartbeat,
             on_raw_progress=on_plan_progress,
             agent_id=agent_id,
