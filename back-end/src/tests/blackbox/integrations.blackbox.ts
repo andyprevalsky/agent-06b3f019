@@ -5473,8 +5473,9 @@ async function uploadGptCredentials(accessToken: string): Promise<void> {
 }
 
 async function readCredentialRow(userId: string, name: 'claude_code' | 'gpt_code') {
-  return prisma.integration.findUnique({
-    where: { userId_name_accountId: { userId, name, accountId: '' } },
+  return prisma.integration.findFirst({
+    where: { userId, name },
+    orderBy: { updatedAt: 'desc' },
   });
 }
 

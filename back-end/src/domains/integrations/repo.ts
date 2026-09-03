@@ -295,6 +295,23 @@ export async function updateIntegrationStatus(
   });
 }
 
+export async function persistRecoveredIntegrationAccountId(
+  userId: string,
+  name: 'claude_code' | 'gpt_code',
+  recoveredAccountId: string | null
+): Promise<void> {
+  if (recoveredAccountId === null || recoveredAccountId === '') return;
+  const conflict = await prisma.integration.findFirst({
+    where: { userId, name, accountId: recoveredAccountId },
+    select: { id: true },
+  });
+  if (conflict !== null) return;
+  await prisma.integration.updateMany({
+    where: { userId, name, accountId: '' },
+    data: { accountId: recoveredAccountId },
+  });
+}
+
 export {
   deleteIntegration,
   findIntegrationByUserAndName,

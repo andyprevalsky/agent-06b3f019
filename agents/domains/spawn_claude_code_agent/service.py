@@ -1336,7 +1336,7 @@ async def _run_verifier(
             "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
             f", artifacts={len(extracted_output_files)})."
-            + ("" if has_artifacts else " No output artifacts extracted — incomplete.")
+            + ("" if has_artifacts else " No output artifacts extracted - incomplete.")
         )
         logger.info(
             "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",

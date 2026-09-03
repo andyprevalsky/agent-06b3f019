@@ -32,7 +32,6 @@ import {
   markGptPoolTokenRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
-import { prisma } from '../../providers/database';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
@@ -537,23 +536,6 @@ async function resolvePoolingForCredentialSync(userId: string, name: string): Pr
   return resolveSyncedPoolingEnabled({ accountDefault, existing });
 }
 
-async function persistRecoveredIntegrationAccountId(
-  userId: string,
-  name: 'claude_code' | 'gpt_code',
-  recoveredAccountId: string | null
-): Promise<void> {
-  if (recoveredAccountId === null || recoveredAccountId === '') return;
-  const conflict = await prisma.integration.findFirst({
-    where: { userId, name, accountId: recoveredAccountId },
-    select: { id: true },
-  });
-  if (conflict !== null) return;
-  await prisma.integration.updateMany({
-    where: { userId, name, accountId: '' },
-    data: { accountId: recoveredAccountId },
-  });
-}
-
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
   const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
   if (!check.ok) {
@@ -583,7 +565,7 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  await persistRecoveredIntegrationAccountId(userId, 'claude_code', recoveredAccountId);
+  await repo.persistRecoveredIntegrationAccountId(userId, 'claude_code', recoveredAccountId);
   await clearConnectionNeedsReconnectFromIntegrationRecovery({
     userId,
     integrationName: 'claude_code',
@@ -621,7 +603,7 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  await persistRecoveredIntegrationAccountId(userId, 'gpt_code', recoveredAccountId);
+  await repo.persistRecoveredIntegrationAccountId(userId, 'gpt_code', recoveredAccountId);
   await clearConnectionNeedsReconnectFromIntegrationRecovery({
     userId,
     integrationName: 'gpt_code',
