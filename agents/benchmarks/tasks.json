@@ -237,7 +237,8 @@
     ],
     "source": [
       "oai-demo:july-mass-agent-0"
-    ]
+    ],
+    "deploy_category": "harness"
   },
   {
     "name": "single-creator-arm",
@@ -279,7 +280,8 @@
     "approval_handling": null,
     "start_phase": null,
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "spawn-sub-agents",
@@ -309,7 +311,8 @@
       "spawn_claude_code_agent": 0
     },
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "parallel-tool-calls",
@@ -340,7 +343,8 @@
       "spawn_claude_code_agent"
     ],
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "response-schema-non-goal-feedback",
@@ -1001,7 +1005,9 @@
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "deploy_category": "payment",
+    "deploy_canary": true
   },
   {
     "name": "gate-subscription-webhook-resume",
@@ -1512,7 +1518,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "deploy_category": "browser_stateful",
+    "deploy_canary": true
   },
   {
     "name": "browser-agent-amazon-passkey",
@@ -1705,7 +1713,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "deploy_category": "browser_stateful",
+    "deploy_canary": true
   },
   {
     "name": "browser-opentable-reservation",
@@ -2833,7 +2843,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "browser-smoke",
@@ -2858,7 +2869,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "deploy_category": "harness"
   },
   {
     "name": "browser-google-search-single-result",
@@ -3658,7 +3670,8 @@
     },
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
-    "model": "rose-labs/rose-1-oss"
+    "model": "rose-labs/rose-1-oss",
+    "deploy_category": "harness"
   },
   {
     "name": "cache-coverage",
@@ -4990,7 +5003,9 @@
     "enforce_declared_evaluators": true,
     "source": [
       "user:whatsapp-bench-2026-07-29"
-    ]
+    ],
+    "deploy_category": "grep",
+    "deploy_canary": true
   },
   {
     "name": "agent-payment-production-purchase",
@@ -5412,7 +5427,9 @@
     "enforce_declared_evaluators": true,
     "source": [
       "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
-    ]
+    ],
+    "deploy_category": "sms",
+    "deploy_canary": true
   },
   {
     "name": "browser-agent-amazon-mx-buy-under-5-usd",

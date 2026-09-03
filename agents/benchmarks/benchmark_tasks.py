@@ -114,6 +114,11 @@ class BenchmarkTask:
     expected_browser_session_metadata_values: Optional[dict] = None
     expected_pre_credential_message_contains: List[str] = field(default_factory=list)
     expected_post_credential_message_contains: List[str] = field(default_factory=list)
+    # Pre-deploy selection metadata (additive; ignored by the runtime runner).
+    # `select_predeploy_benches.py` reads these from tasks.json; keep them on the
+    # dataclass so catalog load does not reject the fields.
+    deploy_category: Optional[str] = None
+    deploy_canary: bool = False
 
     def effective_price_limit_cents(self) -> int:
         """Return the route-aware cap without weakening the default eval."""
