@@ -36,6 +36,34 @@ TRANSIENT_SKIP_REASONS = {"no_public_manifest", "not_finalized", "no_llm_traces_
 _RECENT_WINDOW_S = 24 * 3600
 _DUMP_TS_RE = re.compile(r"^llm-updates/[0-9a-f]+-(\d+)-planner\.json\.gz\.enc$")
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9_.-]")
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b((?:github\s+)?api[\s_-]?(?:key|token)|access[\s_-]?token|refresh[\s_-]?token|"
+    r"authorization|password|passwd|secret|private[\s_-]?key)"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}")
+_HIGH_CONFIDENCE_SECRET_RE = re.compile(
+    r"\b(?:"
+    r"gh[pousr]_[A-Za-z0-9]{20,255}|"
+    r"github_pat_[A-Za-z0-9_]{20,255}|"
+    r"sk-[A-Za-z0-9_-]{20,255}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,255}|"
+    r"AKIA[A-Z0-9]{16}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r")\b"
+)
+
+
+def redact_reference_text(text: str) -> str:
+    """Remove credential-shaped values before text enters the derived corpus.
+
+    Trace bundles preserve the original user input. Planner RAG is a separate
+    derived surface shared across benchmark runs, so it must never propagate a
+    pasted credential from an old goal or planner task into a new LLM request.
+    """
+    redacted = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    redacted = _BEARER_RE.sub("Bearer [REDACTED]", redacted)
+    return _HIGH_CONFIDENCE_SECRET_RE.sub("[REDACTED]", redacted)
 
 
 @dataclass(frozen=True)
@@ -87,7 +115,7 @@ class PlanEntry:
         plan_raw = raw.get("plan") or {}
         tasks = tuple(
             PlanTask(
-                goal=str(t.get("goal") or ""),
+                goal=redact_reference_text(str(t.get("goal") or "")),
                 tool_name=str(t.get("tool_name") or ""),
                 depends_on=tuple(str(d) for d in (t.get("depends_on") or [])),
             )
@@ -95,14 +123,16 @@ class PlanEntry:
         )
         return cls(
             root_agent_id=str(raw.get("id") or ""),
-            goal=str(raw.get("goal") or ""),
+            goal=redact_reference_text(str(raw.get("goal") or "")),
             user_id=raw.get("user_id"),
             benchmark_task_name=raw.get("task"),
             root_status=raw.get("status"),
             passed=raw.get("passed"),
             created_at=str(raw.get("ts") or ""),
             plan=PlanExemplar(
-                title=str(plan_raw.get("title") or ""), join=str(plan_raw.get("join") or "all"), tasks=tasks
+                title=redact_reference_text(str(plan_raw.get("title") or "")),
+                join=str(plan_raw.get("join") or "all"),
+                tasks=tasks,
             ),
         )
 
@@ -171,11 +201,13 @@ def _parse_plan(dump: dict[str, Any]) -> Optional[PlanExemplar]:
     if not parsed.tasks:
         return None
     return PlanExemplar(
-        title=parsed.title,
+        title=redact_reference_text(parsed.title),
         join=parsed.join,
         tasks=tuple(
             PlanTask(
-                goal=t.goal, tool_name=getattr(t.tool_name, "value", str(t.tool_name)), depends_on=tuple(t.depends_on)
+                goal=redact_reference_text(t.goal),
+                tool_name=getattr(t.tool_name, "value", str(t.tool_name)),
+                depends_on=tuple(t.depends_on),
             )
             for t in parsed.tasks
         ),
@@ -239,7 +271,7 @@ def extract_entry(root_agent_id: str) -> tuple[Optional[PlanEntry], str]:
     return (
         PlanEntry(
             root_agent_id=root_agent_id,
-            goal=goal.strip(),
+            goal=redact_reference_text(goal.strip()),
             user_id=run.get("user_id") if isinstance(run.get("user_id"), str) else None,
             benchmark_task_name=task_name if isinstance(task_name, str) and task_name else None,
             root_status=status if isinstance(status, str) else None,

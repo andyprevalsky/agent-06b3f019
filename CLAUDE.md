@@ -458,7 +458,8 @@ canonicalizes the block away (`providers/fast_cache/normalize.py`). Code: `agent
 - **Corpus:** derived (goal, accepted plan) entries extracted read-only from finalized, successful root bundles
   (`manifest.json.gz.enc` → `run.root_goal`, latest `llm-updates/*-planner.json.gz.enc` → `output.content`).
   Bundles under `trace-archive/` are never written; the index lives under its own `planner-rag/` prefix, encrypted with
-  the archive envelope. Visibility at query time: benchmark runs are shared, private runs only to their own user.
+  the archive envelope. Credential-shaped values are redacted while loading/extracting and again while formatting;
+  raw bundles remain unchanged. Visibility at query time: benchmark runs are shared, private runs only to their own user.
 - **Build / publish:** `cd agents && python scripts/build_planner_rag_index.py [--publish]` (incremental via a scan-state
   object; `--publish-only` pushes the local index to R2). **Time it:** `python scripts/time_planner_rag.py`.
 - **Runtime:** one index per worker process, warmed at worker start (`worker.py`), refreshed in the background every

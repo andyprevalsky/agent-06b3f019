@@ -430,6 +430,43 @@ def test_format_reference_plans_block_shape_and_caps():
     assert len(block) <= MAX_BLOCK_CHARS + 1 and "[truncated]" in block
 
 
+def test_reference_entries_and_blocks_redact_credential_values():
+    """Historical goals can contain pasted credentials; derived/indexed text must not."""
+    from providers.planner_rag import PlanEntry, ReferenceHit, format_reference_plans
+
+    github_token = "gho_" + "A" * 36
+    openai_token = "sk-proj-" + "B" * 32
+    entry = PlanEntry.from_dict(
+        {
+            "id": "secret-bearing-run",
+            "goal": f"Rank CUDA repositories. GitHub API token: {github_token}",
+            "user_id": "u",
+            "task": "credential-redaction",
+            "status": "COMPLETED",
+            "passed": True,
+            "ts": "2026-09-03T00:00:00Z",
+            "plan": {
+                "title": f"Research with api_key={openai_token}",
+                "join": "all",
+                "tasks": [
+                    {
+                        "goal": f"Use Bearer {github_token} without printing it",
+                        "tool_name": "spawn_code_agent",
+                        "depends_on": [],
+                    }
+                ],
+            },
+        }
+    )
+    serialized = json.dumps(entry.to_dict())
+    block = format_reference_plans([ReferenceHit(entry=entry, score=1.0, coverage=1.0)])
+    for secret in (github_token, openai_token):
+        assert secret not in serialized
+        assert secret not in block
+    assert serialized.count("[REDACTED]") >= 3
+    assert "GitHub API token: [REDACTED]" in block
+
+
 def test_insert_reference_plans_position_preserves_prefix_and_tail():
     from providers.planner_rag import insert_reference_plans
 
@@ -805,6 +842,7 @@ async def run_all_tests():
     r.record("query_rank_dedupe_visibility", test_query_ranks_similar_goal_dedupes_and_applies_visibility)
     r.record("query_excludes_unrelated", test_query_excludes_unrelated_and_current_run)
     r.record("format_block_shape_caps", test_format_reference_plans_block_shape_and_caps)
+    r.record("credential_redaction", test_reference_entries_and_blocks_redact_credential_values)
     r.record("insert_position", test_insert_reference_plans_position_preserves_prefix_and_tail)
     r.record("prompt_cache_prefix_untouched", test_reference_block_leaves_prompt_cache_prefix_untouched)
     r.record("fast_cache_fingerprint_untouched", test_reference_block_does_not_change_fast_cache_fingerprints)

@@ -23,7 +23,7 @@ from typing import Any, Optional
 import structlog
 
 from providers.planner_rag import store
-from providers.planner_rag.corpus import PlanEntry
+from providers.planner_rag.corpus import PlanEntry, redact_reference_text
 
 logger = structlog.get_logger(__name__)
 
@@ -250,12 +250,13 @@ def format_reference_plans(
         when = entry.created_at[:10] if entry.created_at else "unknown date"
         lines = [
             f"\n## Reference {number} — similarity {hit.coverage:.2f} — completed {when}",
-            f"Goal: {_truncate(entry.goal, MAX_REFERENCE_GOAL_CHARS)}",
-            f'Plan: "{_truncate(entry.plan.title, 120)}" (join={entry.plan.join})',
+            f"Goal: {_truncate(redact_reference_text(entry.goal), MAX_REFERENCE_GOAL_CHARS)}",
+            f'Plan: "{_truncate(redact_reference_text(entry.plan.title), 120)}" (join={entry.plan.join})',
         ]
         for idx, task in enumerate(entry.plan.tasks):
             deps = f" (depends_on: {', '.join(task.depends_on)})" if task.depends_on else ""
-            lines.append(f"- {idx} [{task.tool_name}] {_truncate(task.goal, MAX_TASK_GOAL_CHARS)}{deps}")
+            safe_goal = redact_reference_text(task.goal)
+            lines.append(f"- {idx} [{task.tool_name}] {_truncate(safe_goal, MAX_TASK_GOAL_CHARS)}{deps}")
         block = "\n".join(lines)
         if len(block) > per_hit_chars:
             block = block[: per_hit_chars - 14].rstrip() + "\n- [truncated]"
