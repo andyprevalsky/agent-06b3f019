@@ -104,13 +104,13 @@ interface OutputValueProps {
 
 function OutputValue({ value }: OutputValueProps) {
   if (isFilePointer(value)) {
-    return <FilePointerDisplay file={value} />;
+    return <FilePointerDisplay file={value} showMiniPreview />;
   }
   if (Array.isArray(value) && value.length > 0 && isFilePointer(value[0])) {
     return (
       <div className="flex w-full flex-col gap-2">
         {value.map((fp, idx) => (
-          <FilePointerDisplay key={idx} file={fp as FilePointer} />
+          <FilePointerDisplay key={idx} file={fp as FilePointer} showMiniPreview />
         ))}
       </div>
     );
