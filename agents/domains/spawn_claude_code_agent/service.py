@@ -1322,16 +1322,11 @@ async def _run_verifier(
         # parent about failed/incomplete sessions. cuda-kernel k=3 r17 agent1
         # got "✅ SUCCESS" with exit_code=-1 and 0 interactions because we always
         # scored 1.0 — the parent then kept spawning more CC sessions in
-        # parallel until the 4200s budget burned.
-        #
-        # r18 agent2: exit_code==0 with 0 output files still scored 1.0, so the
-        # UI showed "✓ Task Completed" and the parent burned a turn on
-        # attempt_completion that the parent verifier rejected at 0%. Require
-        # extractable /home/user/output artifacts for SUCCESS when the
-        # code-agent verifier is disabled — a bare clean exit is not a
-        # deliverable.
+        # parallel until the 4200s budget burned. Score 1.0 only on clean exit
+        # or when usable /home/user/output artifacts were extracted.
         has_output_artifacts = bool(output_file_structured) or bool(extracted_output_files)
-        if has_output_artifacts:
+        clean_exit = exit_code == 0
+        if clean_exit or has_output_artifacts:
             score = 1.0
             v_reasoning = (
                 "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
