@@ -713,6 +713,36 @@ def test_builder_cli_builds_local_index():
         summary2 = json.loads(proc2.stdout[proc2.stdout.index("\n{\n") :])
         assert summary2["scanned_now"] == 1 and summary2["total_entries"] == 5
 
+        # An explicit rescan is replacement, not append-only: if a formerly
+        # usable bundle no longer qualifies, its old entry must leave the index.
+        _write_bundle(
+            archive,
+            "pizza-1",
+            "Order a large pepperoni pizza for delivery tonight",
+            PIZZA_PLAN,
+            task="order-pizza",
+            passed=False,
+            status="FAILED",
+        )
+        proc3 = subprocess.run(
+            [
+                sys.executable,
+                str(AGENTS_ROOT / "scripts" / "build_planner_rag_index.py"),
+                "--json",
+                "--bundle-id",
+                "pizza-1",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+        assert proc3.returncode == 0, proc3.stderr[-2000:]
+        summary3 = json.loads(proc3.stdout[proc3.stdout.index("\n{\n") :])
+        assert summary3["scanned_now"] == 1
+        assert summary3["reasons"] == {"not_successful": 1}
+        assert summary3["total_entries"] == 4
+
 
 def test_unique_goal_docs_and_idf_weighted_coverage():
     """Duplicated benchmark goals collapse into one document; generic-word overlap does not qualify."""

@@ -99,6 +99,7 @@ def main() -> int:
     existing_entries, scan_state = _load_existing(read_backend)
     if args.rescan_all:
         scan_state = {}
+        existing_entries = []
     print(f"[planner-rag] backend={source_backend} existing_entries={len(existing_entries)} scanned={len(scan_state)}")
 
     list_started = time.perf_counter()
@@ -107,6 +108,8 @@ def main() -> int:
     print(f"[planner-rag] listed {len(bundle_ids)} bundles in {list_elapsed:.1f}s")
 
     if args.bundle_id:
+        rescanned = set(args.bundle_id)
+        existing_entries = [entry for entry in existing_entries if entry.root_agent_id not in rescanned]
         for bundle_id in args.bundle_id:
             scan_state.pop(bundle_id, None)
     if args.limit:

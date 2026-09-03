@@ -2,6 +2,7 @@ import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createLogger } from './logger';
+import { withTraceArchiveRequestTimeout } from './traceArchiveRequest';
 import {
   archiveEnabled,
   decryptAndValidateArtifact,
@@ -52,10 +53,16 @@ function getS3Client(): S3Client {
   });
 }
 
-export async function listArchiveBundleIds(): Promise<string[]> {
+/** Enumerate archive roots and surface storage/auth failures to maintenance jobs. */
+export async function listArchiveBundleIdsStrict(): Promise<string[]> {
   if (!archiveEnabled()) return [];
+  return shouldUseR2() ? listR2BundleIds() : listLocalBundleIds();
+}
+
+/** Best-effort enumeration retained for diagnostics and curation callers. */
+export async function listArchiveBundleIds(): Promise<string[]> {
   try {
-    return shouldUseR2() ? await listR2BundleIds() : listLocalBundleIds();
+    return await listArchiveBundleIdsStrict();
   } catch (error) {
     log.warn('Trace archive bundle list failed', {
       error: error instanceof Error ? error.message : String(error),
@@ -128,13 +135,16 @@ async function listR2BundleIds(): Promise<string[]> {
   const ids = new Set<string>();
   let continuationToken: string | undefined;
   do {
-    const response = await client.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: 'trace-archive/',
-        Delimiter: '/',
-        ContinuationToken: continuationToken,
-      })
+    const response = await withTraceArchiveRequestTimeout((abortSignal) =>
+      client.send(
+        new ListObjectsV2Command({
+          Bucket: bucket,
+          Prefix: 'trace-archive/',
+          Delimiter: '/',
+          ContinuationToken: continuationToken,
+        }),
+        { abortSignal }
+      )
     );
     for (const prefix of response.CommonPrefixes ?? []) {
       const value = prefix.Prefix;

@@ -15,6 +15,7 @@ import {
   validateEncryptedArtifactEnvelope as validateEncryptedEnvelope,
 } from './traceArchiveEnvelope';
 import { createLogger } from './logger';
+import { withTraceArchiveRequestTimeout } from './traceArchiveRequest';
 
 const log = createLogger('TraceArchive');
 
@@ -73,7 +74,7 @@ export interface ArchiveBundleDeleteResult {
   deletedObjectCount: number;
 }
 
-function isProduction(): boolean {
+export function isProduction(): boolean {
   return process.env.NODE_ENV === 'production' || process.env.ENVIRONMENT === 'production';
 }
 
@@ -178,7 +179,7 @@ function localArchiveRoot(): string {
   return process.env.TRACE_ARCHIVE_LOCAL_DIR || path.resolve(process.cwd(), '..', '.context');
 }
 
-function objectKey(rootAgentId: string, objectPath: string): string {
+export function objectKey(rootAgentId: string, objectPath: string): string {
   return `trace-archive/${safeSegment(rootAgentId)}/${safeArchivePath(objectPath)}`;
 }
 
@@ -186,7 +187,7 @@ function objectPrefix(rootAgentId: string): string {
   return `trace-archive/${safeSegment(rootAgentId)}/`;
 }
 
-function localObjectPath(rootAgentId: string, objectPath: string): string {
+export function localObjectPath(rootAgentId: string, objectPath: string): string {
   return path.join(localArchiveRoot(), objectKey(rootAgentId, objectPath));
 }
 
@@ -207,7 +208,7 @@ async function putLocal(
 
 let s3Client: S3Client | null = null;
 
-function getS3Client(): S3Client {
+export function getS3Client(): S3Client {
   if (s3Client !== null) return s3Client;
   const accountId = process.env.R2_ACCOUNT_ID || '';
   s3Client = new S3Client({
@@ -244,6 +245,15 @@ function retryDelayMs(attempt: number): number {
   return 250 * attempt * attempt;
 }
 
+export function isMissingObjectError(error: unknown): boolean {
+  const response = (error as { $metadata?: { httpStatusCode?: unknown }; name?: unknown }) ?? {};
+  return (
+    response.$metadata?.httpStatusCode === 404 ||
+    response.name === 'NoSuchKey' ||
+    response.name === 'NotFound'
+  );
+}
+
 async function putR2(
   rootAgentId: string,
   objectPath: string,
@@ -262,24 +272,30 @@ async function putR2(
   }
   const key = objectKey(rootAgentId, objectPath);
   const client = getS3Client();
-  await client.send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: body,
-      ContentType: contentType,
-      ServerSideEncryption: 'AES256',
-    })
-  );
-  if (metadata !== undefined) {
-    await client.send(
+  await withTraceArchiveRequestTimeout((abortSignal) =>
+    client.send(
       new PutObjectCommand({
         Bucket: bucket,
-        Key: `${key}.meta.json`,
-        Body: Buffer.from(JSON.stringify(metadata, null, 2)),
-        ContentType: 'application/json',
+        Key: key,
+        Body: body,
+        ContentType: contentType,
         ServerSideEncryption: 'AES256',
-      })
+      }),
+      { abortSignal }
+    )
+  );
+  if (metadata !== undefined) {
+    await withTraceArchiveRequestTimeout((abortSignal) =>
+      client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: `${key}.meta.json`,
+          Body: Buffer.from(JSON.stringify(metadata, null, 2)),
+          ContentType: 'application/json',
+          ServerSideEncryption: 'AES256',
+        }),
+        { abortSignal }
+      )
     );
   }
   return `r2://${bucket}/${key}`;
@@ -296,7 +312,10 @@ export function validateEncryptedArtifactEnvelope(params: {
   });
 }
 
-function readLocalObject(rootAgentId: string, objectPath: string): StoredEncryptedArtifact | null {
+export function readLocalObject(
+  rootAgentId: string,
+  objectPath: string
+): StoredEncryptedArtifact | null {
   const target = localObjectPath(rootAgentId, objectPath);
   if (!fs.existsSync(target)) return null;
   const metadataPath = `${target}.meta.json`;
@@ -330,12 +349,14 @@ async function streamToBuffer(body: unknown): Promise<Buffer> {
   throw new Error('Unsupported archive response body');
 }
 
-async function getR2Object(bucket: string, key: string): Promise<Buffer> {
-  const response = await getS3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+export async function getR2Object(bucket: string, key: string): Promise<Buffer> {
+  const response = await withTraceArchiveRequestTimeout((abortSignal) =>
+    getS3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal })
+  );
   return streamToBuffer(response.Body);
 }
 
-async function readR2Object(
+export async function readR2ObjectStrict(
   rootAgentId: string,
   objectPath: string
 ): Promise<StoredEncryptedArtifact | null> {
@@ -351,6 +372,18 @@ async function readR2Object(
       ciphertext,
       metadata: metadataFromUnknown(JSON.parse(metadataBuffer.toString('utf8'))),
     };
+  } catch (error) {
+    if (isMissingObjectError(error)) return null;
+    throw error;
+  }
+}
+
+async function readR2Object(
+  rootAgentId: string,
+  objectPath: string
+): Promise<StoredEncryptedArtifact | null> {
+  try {
+    return await readR2ObjectStrict(rootAgentId, objectPath);
   } catch (error) {
     log.warn('Trace archive read failed', {
       root_agent_id: rootAgentId,
@@ -519,20 +552,28 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === 'bigint' ? value.toString() : value;
 }
 
-export async function listArchivedObjects(rootAgentId: string): Promise<ArchivedObjectSummary[]> {
+/** List a bundle and surface every storage failure to the caller. */
+export async function listArchivedObjectsStrict(
+  rootAgentId: string
+): Promise<ArchivedObjectSummary[]> {
   if (!archiveEnabled()) return [];
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
+  if (backend === 'fake-r2') {
+    return listLocalObjects(rootAgentId).map((item) => ({
+      ...item,
+      ref: fakeR2Ref(rootAgentId, item.path),
+    }));
+  }
+  if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+    return listR2Objects(rootAgentId);
+  }
+  return listLocalObjects(rootAgentId);
+}
+
+/** Best-effort listing for diagnostics and non-terminal creation-time manifests. */
+export async function listArchivedObjects(rootAgentId: string): Promise<ArchivedObjectSummary[]> {
   try {
-    if (backend === 'fake-r2') {
-      return listLocalObjects(rootAgentId).map((item) => ({
-        ...item,
-        ref: fakeR2Ref(rootAgentId, item.path),
-      }));
-    }
-    if (backend === 'r2' || (isProduction() && backend !== 'local')) {
-      return await listR2Objects(rootAgentId);
-    }
-    return listLocalObjects(rootAgentId);
+    return await listArchivedObjectsStrict(rootAgentId);
   } catch (error) {
     log.warn('Trace archive list failed', {
       root_agent_id: rootAgentId,

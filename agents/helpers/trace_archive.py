@@ -19,7 +19,7 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -72,7 +72,11 @@ def _local_root() -> Path:
     configured = os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser()
-    if _is_production() and not os.environ.get("CONDUCTOR_WORKSPACE_NAME") and _uses_default_repo_local_root(_LOCAL_ROOT):
+    if (
+        _is_production()
+        and not os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+        and _uses_default_repo_local_root(_LOCAL_ROOT)
+    ):
         return _PROD_FALLBACK_LOCAL_ROOT
     return _LOCAL_ROOT
 
@@ -455,11 +459,7 @@ def list_local_artifact_paths(root_agent_id: str) -> list[str]:
         return []
     paths: list[str] = []
     for item in bundle.rglob("*"):
-        if (
-            item.is_file()
-            and not item.name.endswith(".meta.json")
-            and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
-        ):
+        if item.is_file() and not item.name.endswith(".meta.json") and _ARTIFACT_TRANSACTION_SUFFIX not in item.name:
             paths.append(item.relative_to(bundle).as_posix())
     return sorted(paths)
 
@@ -610,17 +610,19 @@ def _post_backend_artifact(
         return None
 
 
-def _drain_backend_outbox(limit: int = 8) -> None:
+def _drain_backend_outbox(limit: int = 8, root_agent_id: Optional[str] = None) -> int:
     root = _outbox_root()
     if not root.exists():
-        return
+        return 0
     drained = 0
-    for bundle in sorted(item for item in root.iterdir() if item.is_dir()):
+    safe_root = _safe_segment(root_agent_id) if root_agent_id else None
+    bundles = sorted(item for item in root.iterdir() if item.is_dir() and (safe_root is None or item.name == safe_root))
+    for bundle in bundles:
         if drained >= limit:
-            return
+            return drained
         for item in sorted(bundle.rglob("*")):
             if drained >= limit:
-                return
+                return drained
             if not item.is_file() or item.name.endswith(".meta.json"):
                 continue
             meta_path = item.with_suffix(item.suffix + ".meta.json")
@@ -655,7 +657,8 @@ def _drain_backend_outbox(limit: int = 8) -> None:
                     path=path,
                     error=str(exc)[:200],
                 )
-                return
+                return drained
+    return drained
 
 
 def store_encrypted_artifact(
@@ -701,6 +704,8 @@ _ARCHIVE_EXECUTOR = ThreadPoolExecutor(
 )
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(int(os.environ.get("TRACE_ARCHIVE_MAX_IN_FLIGHT", "64") or "64"))
 _ARCHIVE_DROPPED_JOBS = 0
+_ARCHIVE_PENDING_LOCK = threading.Lock()
+_ARCHIVE_PENDING_BY_ROOT: dict[str, set[Future[None]]] = {}
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -726,6 +731,67 @@ def _expected_ref(safe_root: str, safe_path: str) -> str:
     if _is_production() or backend == "r2":
         return f"trace-archive/{safe_root}/{safe_path}"
     return str(_local_root() / safe_root / safe_path)
+
+
+def _track_archive_future(root_agent_id: str, future: Future[None]) -> None:
+    with _ARCHIVE_PENDING_LOCK:
+        _ARCHIVE_PENDING_BY_ROOT.setdefault(root_agent_id, set()).add(future)
+
+    def _remove(completed: Future[None]) -> None:
+        with _ARCHIVE_PENDING_LOCK:
+            pending = _ARCHIVE_PENDING_BY_ROOT.get(root_agent_id)
+            if pending is None:
+                return
+            pending.discard(completed)
+            if not pending:
+                _ARCHIVE_PENDING_BY_ROOT.pop(root_agent_id, None)
+
+    future.add_done_callback(_remove)
+
+
+def _pending_archive_futures(root_agent_id: str) -> set[Future[None]]:
+    with _ARCHIVE_PENDING_LOCK:
+        return set(_ARCHIVE_PENDING_BY_ROOT.get(_safe_segment(root_agent_id), set()))
+
+
+def _root_outbox_has_artifacts(root_agent_id: str) -> bool:
+    bundle = _outbox_root() / _safe_segment(root_agent_id)
+    if not bundle.exists():
+        return False
+    return any(
+        item.is_file() and not item.name.endswith((".meta.json", _ARTIFACT_TRANSACTION_SUFFIX))
+        for item in bundle.rglob("*")
+    )
+
+
+def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
+    """Wait for locally accepted writes, then retry this run's durable outbox.
+
+    The wait is run from a worker thread by terminal lifecycle activities, never
+    on the event loop. It is a first-line ordering barrier only: another worker
+    process can still own writes for the same root, so the backend manifest
+    reconciliation fence remains authoritative.
+    """
+    safe_root = _safe_segment(root_agent_id)
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        pending = _pending_archive_futures(safe_root)
+        if not pending:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        _, unfinished = wait(pending, timeout=remaining)
+        if unfinished:
+            return False
+
+    if _use_r2_archive():
+        while _root_outbox_has_artifacts(safe_root):
+            if time.monotonic() >= deadline:
+                return False
+            if _drain_backend_outbox(limit=64, root_agent_id=safe_root) == 0:
+                return False
+    return True
 
 
 def _archive_bytes_now(
@@ -800,12 +866,15 @@ def _submit_archive_job(
             if result is not None and drain_backend_outbox_after_success:
                 _drain_backend_outbox()
         except Exception as exc:
-            logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
+            logger.warning(
+                "trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200]
+            )
         finally:
             _ARCHIVE_SLOTS.release()
 
     try:
-        _ARCHIVE_EXECUTOR.submit(_job)
+        future = _ARCHIVE_EXECUTOR.submit(_job)
+        _track_archive_future(safe_root, future)
     except Exception:
         _ARCHIVE_SLOTS.release()
         raise
@@ -881,7 +950,9 @@ def archive_json_deferred(
 
     if not in_loop or not _async_writes_enabled():
         body = _body()
-        return archive_bytes(root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True)
+        return archive_bytes(
+            root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True
+        )
     return _submit_archive_job(
         root_agent_id=root_agent_id,
         path=path,

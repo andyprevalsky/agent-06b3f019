@@ -1,5 +1,6 @@
 """Finished tool for marking agent task completion."""
 
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -48,6 +49,19 @@ async def mark_finished(
 
         # Extract goal from first USER message
         goal = extract_goal_from_context(steps_taken)
+
+        # Settle archive jobs accepted by this worker process before the status
+        # transition asks the backend to snapshot the run. This cannot see jobs
+        # owned by another replica, so the backend's durable finalization fence
+        # remains the source of truth and reconciles any cross-process late PUT.
+        from helpers.trace_archive import flush_archive_writes
+
+        archive_settled = await asyncio.to_thread(flush_archive_writes, agent_id, 15.0)
+        if not archive_settled:
+            logger.warning(
+                "trace_archive.pre_terminal_flush_incomplete",
+                agent_id=agent_id,
+            )
 
         # Use the single update_agent_status helper (no activity wrapper - call directly)
         from helpers.update_status import _update_agent_status_impl

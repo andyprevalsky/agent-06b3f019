@@ -14,12 +14,14 @@ from _test_utils import (
 
 
 def _setup():
-    setup_mock({
-        "/api/agents/": {
-            "status": 200,
-            "json": {"ok": True},
-        },
-    })
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
 
 
 async def test_mark_finished_happy_path():
@@ -108,12 +110,45 @@ async def test_mark_finished_with_structured_response():
     assert body["structuredResponse"] == {"name": "Alice", "email": "alice@example.com"}
 
 
+async def test_mark_finished_flushes_archive_before_terminal_status():
+    """Accepted local archive jobs settle before the backend snapshots COMPLETED."""
+    events = []
+
+    def flush(agent_id, timeout_s):
+        events.append(("flush", agent_id, timeout_s))
+        return True
+
+    async def update(**kwargs):
+        events.append(("status", kwargs["agent_id"], kwargs["status"]))
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.trace_archive.flush_archive_writes", side_effect=flush),
+        patch("helpers.update_status._update_agent_status_impl", side_effect=update),
+    ):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-fin-flush",
+            steps_taken=[{"role": "USER", "text": "Finish durably"}],
+        )
+
+    assert events == [
+        ("flush", "agent-fin-flush", 15.0),
+        ("status", "agent-fin-flush", "COMPLETED"),
+    ]
+
+
 async def run_all_tests():
     print("finished blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_mark_finished_happy_path)
     await r.record_async("boundary", test_mark_finished_boundary)
     await r.record_async("structured_response", test_mark_finished_with_structured_response)
+    await r.record_async(
+        "archive_flush_before_terminal_status",
+        test_mark_finished_flushes_archive_before_terminal_status,
+    )
     teardown_mock()
     return r.all_passed
 
