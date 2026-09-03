@@ -67,11 +67,13 @@ async def main() -> int:
     )
 
     per_call: list[dict[str, float]] = []
+    by_cache: dict[str, list[float]] = {}
     hits_by_goal: dict[str, list[dict[str, object]]] = {}
     for round_idx in range(args.rounds):
         for goal in goals:
             result = await retrieve_reference_plans(goal, user_id=args.user_id)
             per_call.append(dict(result.timing_ms))
+            by_cache.setdefault(result.cache, []).append(result.timing_ms.get("total", 0.0))
             if round_idx == 0:
                 hits_by_goal[goal] = [
                     {
@@ -95,14 +97,25 @@ async def main() -> int:
     summary = {
         "backend": backend,
         "corpus": len(index),
+        "unique_goals": index.unique_goals,
         "calls": len(per_call),
         "cold_load_ms": round(cold_ms, 1),
         "stats": stats,
+        "by_cache": {
+            state: {
+                "calls": len(values),
+                "p50_ms": round(statistics.median(values), 3),
+                "max_ms": round(max(values), 3),
+            }
+            for state, values in by_cache.items()
+        },
     }
     if args.json:
         print(json.dumps({**summary, "hits": hits_by_goal}, indent=2))
         return 0
-    print(f"calls={len(per_call)}")
+    print(f"calls={len(per_call)} unique_goals={index.unique_goals}")
+    for state, row in summary["by_cache"].items():
+        print(f"  cache={state:<5} calls={row['calls']:<3} total p50={row['p50_ms']:.3f}ms max={row['max_ms']:.3f}ms")
     for key, row in stats.items():
         print(f"  {key:<11} p50={row['p50_ms']:>8.2f}ms  p95={row['p95_ms']:>8.2f}ms  max={row['max_ms']:>8.2f}ms")
     for goal, hits in hits_by_goal.items():

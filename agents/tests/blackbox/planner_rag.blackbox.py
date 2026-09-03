@@ -52,8 +52,14 @@ class _LocalArchive:
         os.environ["PLANNER_RAG_ENABLED"] = "1"
         os.environ.pop("FLY_APP_NAME", None)
         os.environ.pop("ENVIRONMENT", None)
+        from providers.planner_rag import reset_index_cache
+
+        reset_index_cache()
 
     def close(self) -> None:
+        from providers.planner_rag import reset_index_cache
+
+        reset_index_cache()
         for key, value in self._old.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -679,6 +685,121 @@ def test_builder_cli_builds_local_index():
         assert summary2["scanned_now"] == 1 and summary2["total_entries"] == 5
 
 
+def test_unique_goal_docs_and_idf_weighted_coverage():
+    """Duplicated benchmark goals collapse into one document; generic-word overlap does not qualify."""
+    from providers.planner_rag import PlanEntry, PlannerRagIndex
+
+    def entry(i: str, goal: str, task: str = "bench") -> PlanEntry:
+        return PlanEntry.from_dict(
+            {
+                "id": i,
+                "goal": goal,
+                "user_id": "u",
+                "task": task,
+                "status": "COMPLETED",
+                "passed": True,
+                "ts": "2026-09-0" + i[-1],
+                "plan": PIZZA_PLAN,
+            }
+        )
+
+    entries = [entry(f"pop-{n}", POPULATION_GOAL) for n in range(1, 9)] + [
+        entry("cuda-1", "Research the top 100 CUDA kernel repositories on GitHub and summarize their build systems"),
+        entry("flight-1", "Book the cheapest nonstop flight from SFO to Paris next month"),
+    ]
+    index = PlannerRagIndex(entries)
+    assert len(index) == 10 and index.unique_goals == 3
+
+    # Only two generic words ("research", "top") overlap the CUDA goal: below the coverage floor.
+    assert index.query("Research the top 5 competitors of Notion and write a comparison table", user_id="u") == []
+    # A genuinely similar goal clears it.
+    hits = index.query("Summarize the build systems used by the top CUDA kernel repos on GitHub", user_id="u")
+    assert [h.entry.root_agent_id for h in hits] == ["cuda-1"] and hits[0].coverage >= 0.5
+    # The 8 duplicate population runs yield exactly one exemplar (newest wins).
+    hits = index.query(POPULATION_GOAL, user_id="u")
+    assert len(hits) == 1 and hits[0].entry.root_agent_id == "pop-8"
+
+
+async def test_retrieval_is_cached_warm_after_first_call():
+    from providers.planner_rag import get_index, retrieve_reference_plans
+
+    with _LocalArchive() as archive:
+        _seed_corpus(archive)
+        _publish_local_index()
+        cold = await retrieve_reference_plans(POPULATION_GOAL, user_id="user-a")
+        assert cold.cache == "cold" and cold.timing_ms["index_load"] > 0
+        warm = await retrieve_reference_plans(POPULATION_GOAL, user_id="user-a")
+        assert warm.cache == "warm" and warm.timing_ms["index_load"] == 0
+        assert warm.hits == cold.hits and warm.message == cold.message
+        assert warm.timing_ms["total"] < 20, warm.timing_ms
+        index, state, load_ms = await get_index()
+        assert index is not None and state == "warm" and load_ms == 0
+
+
+async def test_cold_load_is_single_flight_under_concurrency():
+    import providers.planner_rag.retrieval as retrieval
+    from providers.planner_rag import retrieve_reference_plans
+
+    with _LocalArchive() as archive:
+        _seed_corpus(archive)
+        _publish_local_index()
+        calls = {"n": 0}
+        original = retrieval.load_index_from_store
+
+        def counting_load(*args, **kwargs):
+            calls["n"] += 1
+            return original(*args, **kwargs)
+
+        retrieval.load_index_from_store = counting_load  # type: ignore[assignment]
+        try:
+            results = await asyncio.gather(
+                *[retrieve_reference_plans(POPULATION_GOAL, user_id="user-a") for _ in range(25)]
+            )
+        finally:
+            retrieval.load_index_from_store = original  # type: ignore[assignment]
+        assert calls["n"] == 1, f"expected one cold load, got {calls['n']}"
+        assert all(r.hits and r.hits[0].entry.root_agent_id == "pop-2" for r in results)
+        assert sum(1 for r in results if r.cache == "cold") == 25
+
+
+async def test_stale_index_is_served_warm_and_refreshed_in_background():
+    import providers.planner_rag.retrieval as retrieval
+    from providers.planner_rag import retrieve_reference_plans
+
+    with _LocalArchive() as archive:
+        _seed_corpus(archive)
+        _publish_local_index()
+        first = await retrieve_reference_plans(POPULATION_GOAL, user_id="user-a")
+        assert first.cache == "cold"
+        # Publish a bigger index, then expire the cache: the stale copy is still served without blocking.
+        _write_bundle(archive, "pizza-2", "Order two pizzas for the office party", PIZZA_PLAN, task="order-pizza")
+        _publish_local_index()
+        os.environ["PLANNER_RAG_INDEX_TTL_S"] = "0"
+        try:
+            stale = await retrieve_reference_plans(POPULATION_GOAL, user_id="user-a")
+            assert stale.cache == "warm" and stale.corpus_size == 5
+            inflight = retrieval._inflight
+            assert inflight is not None
+            await inflight
+            refreshed = await retrieve_reference_plans(POPULATION_GOAL, user_id="user-a")
+            assert refreshed.corpus_size == 6, "background refresh must pick up the new index"
+        finally:
+            os.environ.pop("PLANNER_RAG_INDEX_TTL_S", None)
+
+
+async def test_warm_index_reports_availability():
+    from providers.planner_rag import warm_index
+
+    with _LocalArchive():
+        assert await warm_index() is False, "no index published yet"
+    with _LocalArchive() as archive:
+        _seed_corpus(archive)
+        _publish_local_index()
+        assert await warm_index() is True
+        os.environ["PLANNER_RAG_ENABLED"] = "0"
+        assert await warm_index() is False
+
+
 def test_no_outbound_http_calls():
     assert get_captured_requests() == [], get_captured_requests()
 
@@ -703,6 +824,11 @@ async def run_all_tests():
     await r.record_async("planner_activity_injects_block", test_planner_activity_injects_reference_block_after_goal)
     await r.record_async("planner_activity_no_hits", test_planner_activity_without_hits_sends_unchanged_messages)
     r.record("planner_goal_extraction", test_planner_goal_extraction)
+    r.record("unique_goal_docs_idf_coverage", test_unique_goal_docs_and_idf_weighted_coverage)
+    await r.record_async("retrieval_cached_warm", test_retrieval_is_cached_warm_after_first_call)
+    await r.record_async("cold_load_single_flight", test_cold_load_is_single_flight_under_concurrency)
+    await r.record_async("stale_index_background_refresh", test_stale_index_is_served_warm_and_refreshed_in_background)
+    await r.record_async("warm_index_availability", test_warm_index_reports_availability)
     r.record("builder_cli_local", test_builder_cli_builds_local_index)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)
     teardown_mock()

@@ -9,11 +9,15 @@ from providers.planner_rag.retrieval import (
     ReferenceHit,
     RetrievalResult,
     format_reference_plans,
+    get_index,
+    index_ttl_s,
     insert_reference_plans,
     load_index_from_store,
     planner_rag_enabled,
+    reset_index_cache,
     retrieve_reference_plans,
     tokenize,
+    warm_index,
 )
 
 __all__ = [
@@ -28,10 +32,14 @@ __all__ = [
     "RetrievalResult",
     "extract_entry",
     "format_reference_plans",
+    "get_index",
+    "index_ttl_s",
     "insert_reference_plans",
     "load_index_from_store",
     "planner_rag_enabled",
+    "reset_index_cache",
     "retrieve_reference_plans",
     "scan_bundles",
     "tokenize",
+    "warm_index",
 ]

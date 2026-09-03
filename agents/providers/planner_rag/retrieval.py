@@ -4,6 +4,10 @@ Lexical BM25 over past root goals (no external embedding call, no network on
 the query path once the index is loaded). Returns a formatted
 ``# Reference Plans`` block that the planner activity injects as a user
 message *after* the cached static prefix, so prompt caching is untouched.
+
+Hot path design (10k agents): one index per worker process, loaded once
+(warmed at worker start), refreshed in the background on a TTL, never on the
+request path. A planner call costs one in-memory BM25 query (~0.1ms).
 """
 
 from __future__ import annotations
@@ -29,8 +33,9 @@ MAX_BLOCK_CHARS = 6000
 MAX_HIT_CHARS = 1800
 MAX_TASK_GOAL_CHARS = 280
 MAX_REFERENCE_GOAL_CHARS = 600
-MIN_COVERAGE = 0.2
+MIN_COVERAGE = 0.3
 RELATIVE_SCORE_FLOOR = 0.25
+DEFAULT_INDEX_TTL_S = 600.0
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset(
@@ -72,7 +77,12 @@ class ReferenceHit:
 
 
 class PlannerRagIndex:
-    """Immutable BM25 index over ``PlanEntry.goal``. Build once, query many."""
+    """Immutable BM25 index over unique ``PlanEntry.goal`` texts. Build once, query many.
+
+    Benchmark reruns duplicate the same goal hundreds of times; indexing one
+    document per unique goal keeps IDF meaningful (a term shared by 300
+    identical runs is not "common") and makes the index tiny.
+    """
 
     K1 = 1.2
     B = 0.75
@@ -81,28 +91,44 @@ class PlannerRagIndex:
         self.entries = list(entries)
         self.generated_at = generated_at
         self.source = source
-        self._doc_tokens: list[list[str]] = [tokenize(e.goal) for e in self.entries]
+        self._doc_entries: list[list[int]] = []
+        self._doc_tokens: list[list[str]] = []
+        doc_by_key: dict[str, int] = {}
+        for idx, entry in enumerate(self.entries):
+            tokens = tokenize(entry.goal)
+            key = " ".join(tokens)
+            doc = doc_by_key.get(key)
+            if doc is None:
+                doc = len(self._doc_tokens)
+                doc_by_key[key] = doc
+                self._doc_tokens.append(tokens)
+                self._doc_entries.append([])
+            self._doc_entries[doc].append(idx)
         self._doc_len = [len(t) for t in self._doc_tokens]
         total = sum(self._doc_len)
         self._avgdl = (total / len(self._doc_len)) if self._doc_len else 0.0
         self._postings: dict[str, list[tuple[int, int]]] = {}
-        for idx, tokens in enumerate(self._doc_tokens):
+        for doc, tokens in enumerate(self._doc_tokens):
             counts: dict[str, int] = {}
             for token in tokens:
                 counts[token] = counts.get(token, 0) + 1
             for token, tf in counts.items():
-                self._postings.setdefault(token, []).append((idx, tf))
-        self._n = len(self.entries)
-        self._goal_key = [" ".join(t) for t in self._doc_tokens]
+                self._postings.setdefault(token, []).append((doc, tf))
+        self._n_docs = len(self._doc_tokens)
+        self._unseen_idf = math.log(1.0 + (self._n_docs + 0.5) / 0.5) if self._n_docs else 0.0
 
     def __len__(self) -> int:
-        return self._n
+        return len(self.entries)
+
+    @property
+    def unique_goals(self) -> int:
+        return self._n_docs
 
     def _idf(self, term: str) -> float:
         df = len(self._postings.get(term, ()))
         if df == 0:
-            return 0.0
-        return math.log(1.0 + (self._n - df + 0.5) / (df + 0.5))
+            return self._unseen_idf
+        return math.log(1.0 + (self._n_docs - df + 0.5) / (df + 0.5))
 
     def query(
         self,
@@ -114,58 +140,72 @@ class PlannerRagIndex:
         min_coverage: float = MIN_COVERAGE,
         relative_floor: float = RELATIVE_SCORE_FLOOR,
     ) -> list[ReferenceHit]:
-        """Top-k visible, deduplicated exemplars for ``goal``.
+        """Top-k visible exemplars for ``goal``, one per unique past goal.
 
         Visibility: an entry is shown to a user only if it is that user's own
-        run or a benchmark run (shared corpus). Duplicated goals collapse to
-        the best (passed, newest) run. Hits need ``min_coverage`` of the query
-        terms and at least ``relative_floor`` of the top score.
+        run or a benchmark run (shared corpus). Within a unique goal the best
+        (passed, newest) visible run is returned. ``coverage`` is the
+        IDF-weighted share of the query's terms found in the past goal
+        (terms unknown to the corpus count at the maximum IDF, so a query
+        that shares only generic words with a past goal scores low); hits
+        need ``min_coverage`` and at least ``relative_floor`` of the top score.
         """
-        if self._n == 0 or k <= 0:
+        if self._n_docs == 0 or k <= 0:
             return []
         query_terms = sorted(set(tokenize(goal)))
         if not query_terms:
             return []
+        total_mass = sum(self._idf(term) for term in query_terms)
+        if total_mass <= 0.0:
+            return []
 
         scores: dict[int, float] = {}
-        matched: dict[int, int] = {}
+        matched_mass: dict[int, float] = {}
         for term in query_terms:
-            idf = self._idf(term)
-            if idf == 0.0:
+            postings = self._postings.get(term)
+            if not postings:
                 continue
-            for idx, tf in self._postings[term]:
-                dl = self._doc_len[idx]
+            idf = self._idf(term)
+            for doc, tf in postings:
+                dl = self._doc_len[doc]
                 denom = tf + self.K1 * (1 - self.B + self.B * dl / (self._avgdl or 1.0))
-                scores[idx] = scores.get(idx, 0.0) + idf * tf * (self.K1 + 1) / denom
-                matched[idx] = matched.get(idx, 0) + 1
+                scores[doc] = scores.get(doc, 0.0) + idf * tf * (self.K1 + 1) / denom
+                matched_mass[doc] = matched_mass.get(doc, 0.0) + idf
 
-        best_per_goal: dict[str, tuple[int, float, float]] = {}
-        for idx, score in scores.items():
+        candidates: list[tuple[int, float, float]] = []
+        for doc, score in scores.items():
+            coverage = matched_mass[doc] / total_mass
+            if coverage < min_coverage:
+                continue
+            best = self._best_visible_entry(doc, user_id, exclude_root_agent_id)
+            if best is None:
+                continue
+            candidates.append((best, score, coverage))
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda item: (-item[1], -item[2], self.entries[item[0]].created_at))
+        top_score = candidates[0][1]
+        hits = [
+            ReferenceHit(entry=self.entries[idx], score=round(score, 4), coverage=round(coverage, 4))
+            for idx, score, coverage in candidates
+            if score >= top_score * relative_floor
+        ]
+        return hits[:k]
+
+    def _best_visible_entry(
+        self, doc: int, user_id: Optional[str], exclude_root_agent_id: Optional[str]
+    ) -> Optional[int]:
+        best: Optional[int] = None
+        for idx in self._doc_entries[doc]:
             entry = self.entries[idx]
             if exclude_root_agent_id and entry.root_agent_id == exclude_root_agent_id:
                 continue
             if not self._visible(entry, user_id):
                 continue
-            coverage = matched[idx] / len(query_terms)
-            if coverage < min_coverage:
-                continue
-            key = self._goal_key[idx]
-            current = best_per_goal.get(key)
-            if current is None or self._prefer(idx, current[0]):
-                best_per_goal[key] = (idx, score, coverage)
-
-        if not best_per_goal:
-            return []
-        ranked = sorted(
-            best_per_goal.values(), key=lambda item: (-item[1], self.entries[item[0]].created_at), reverse=False
-        )
-        top_score = ranked[0][1]
-        hits = [
-            ReferenceHit(entry=self.entries[idx], score=round(score, 4), coverage=round(coverage, 4))
-            for idx, score, coverage in ranked
-            if score >= top_score * relative_floor
-        ]
-        return hits[:k]
+            if best is None or self._prefer(idx, best):
+                best = idx
+        return best
 
     @staticmethod
     def _visible(entry: PlanEntry, user_id: Optional[str]) -> bool:
@@ -250,12 +290,105 @@ def load_index_from_store(*, backend: Optional[str] = None) -> Optional[PlannerR
     return index_from_document(document, source=backend)
 
 
+# ── process-level cache ────────────────────────────────────────────────────
+
+
+@dataclass
+class _CachedIndex:
+    index: Optional[PlannerRagIndex]
+    loaded_at: float
+    load_ms: float
+
+
+_cached: Optional[_CachedIndex] = None
+_inflight: Optional[asyncio.Task[Optional[PlannerRagIndex]]] = None
+
+
+def index_ttl_s() -> float:
+    raw = os.environ.get("PLANNER_RAG_INDEX_TTL_S", "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_INDEX_TTL_S
+    except ValueError:
+        return DEFAULT_INDEX_TTL_S
+
+
+def reset_index_cache() -> None:
+    """Drop the cached index (tests, or after publishing a new index locally)."""
+    global _cached, _inflight
+    _cached = None
+    _inflight = None
+
+
+def _ensure_load_task() -> "asyncio.Task[Optional[PlannerRagIndex]]":
+    """Return the in-flight load task, creating one if none is running (single-flight)."""
+    global _inflight
+    task = _inflight
+    if task is not None and not task.done():
+        return task
+
+    async def _load() -> Optional[PlannerRagIndex]:
+        global _cached
+        started = time.perf_counter()
+        index = await asyncio.to_thread(load_index_from_store)
+        load_ms = (time.perf_counter() - started) * 1000
+        _cached = _CachedIndex(index=index, loaded_at=time.monotonic(), load_ms=load_ms)
+        logger.info(
+            "planner_rag.index_loaded",
+            backend=store.storage_backend(),
+            corpus_size=len(index) if index else 0,
+            unique_goals=index.unique_goals if index else 0,
+            generated_at=index.generated_at if index else None,
+            load_ms=round(load_ms, 1),
+        )
+        return index
+
+    task = asyncio.ensure_future(_load())
+    _inflight = task
+    return task
+
+
+async def get_index() -> tuple[Optional[PlannerRagIndex], str, float]:
+    """Return ``(index, cache_state, load_ms)``.
+
+    ``warm``: served from the process cache (a stale cache kicks off one
+    background refresh but is still served immediately). ``cold``: nothing
+    cached yet, loaded now (single-flight: concurrent callers share one load).
+    """
+    cached = _cached
+    if cached is not None:
+        if time.monotonic() - cached.loaded_at > index_ttl_s():
+            _ensure_load_task()
+        return cached.index, "warm", 0.0
+    started = time.perf_counter()
+    index = await _ensure_load_task()
+    return index, "cold", (time.perf_counter() - started) * 1000
+
+
+async def warm_index() -> bool:
+    """Pre-load the index (worker startup). Best-effort: never raises."""
+    if not planner_rag_enabled():
+        return False
+    try:
+        index, _, load_ms = await get_index()
+    except Exception as exc:
+        logger.warning("planner_rag.warm_failed", error=str(exc)[:200])
+        return False
+    if index is None:
+        logger.warning("planner_rag.warm_no_index", backend=store.storage_backend())
+        return False
+    logger.info(
+        "planner_rag.warmed", corpus_size=len(index), unique_goals=index.unique_goals, load_ms=round(load_ms, 1)
+    )
+    return True
+
+
 @dataclass
 class RetrievalResult:
     message: Optional[str]
     hits: list[ReferenceHit] = field(default_factory=list)
     corpus_size: int = 0
     source: str = "none"
+    cache: str = "none"
     timing_ms: dict[str, float] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
@@ -271,6 +404,7 @@ class RetrievalResult:
             ],
             "corpus_size": self.corpus_size,
             "source": self.source,
+            "cache": self.cache,
             "timing_ms": self.timing_ms,
             "message_chars": len(self.message or ""),
         }
@@ -287,13 +421,12 @@ async def retrieve_reference_plans(
     started = time.perf_counter()
     timing: dict[str, float] = {}
     try:
-        load_started = time.perf_counter()
-        index = await asyncio.to_thread(load_index_from_store)
-        timing["index_load"] = round((time.perf_counter() - load_started) * 1000, 2)
+        index, cache_state, load_ms = await get_index()
+        timing["index_load"] = round(load_ms, 2)
         if index is None:
             logger.warning("planner_rag.index_unavailable", backend=store.storage_backend())
             timing["total"] = round((time.perf_counter() - started) * 1000, 2)
-            return RetrievalResult(message=None, timing_ms=timing)
+            return RetrievalResult(message=None, cache=cache_state, timing_ms=timing)
 
         query_started = time.perf_counter()
         hits = index.query(goal, user_id=user_id, k=k, exclude_root_agent_id=exclude_root_agent_id)
@@ -304,7 +437,12 @@ async def retrieve_reference_plans(
         timing["format"] = round((time.perf_counter() - format_started) * 1000, 2)
         timing["total"] = round((time.perf_counter() - started) * 1000, 2)
         result = RetrievalResult(
-            message=message, hits=hits, corpus_size=len(index), source=index.source, timing_ms=timing
+            message=message,
+            hits=hits,
+            corpus_size=len(index),
+            source=index.source,
+            cache=cache_state,
+            timing_ms=timing,
         )
         logger.info("planner_rag.retrieved", **result.summary())
         return result
