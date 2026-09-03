@@ -672,7 +672,9 @@ async def run_sms_llm_judge(
 ) -> dict:
     """Judge the SMS trajectory itself — what the human's phone actually showed."""
     from helpers.llm import check_progress
+    from benchmarks.run_benchmark import _benchmark_judge_claude_auth_kwargs
 
+    claude_auth = await _benchmark_judge_claude_auth_kwargs()
     return await check_progress(
         context=[
             {"role": "USER", "text": "Evaluate this SMS thread against the criteria."},
@@ -681,6 +683,7 @@ async def run_sms_llm_judge(
         verifier_system_prompt=build_sms_verifier_prompt(task, evaluator, scenario),
         response_schema=None,
         call_site="benchmark_sms_evaluator",
+        **claude_auth,
     )
 
 

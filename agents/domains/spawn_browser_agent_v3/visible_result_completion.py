@@ -127,9 +127,13 @@ def should_force_visible_result_completion(
     """Rewrite idle post-submit actions once the visible result is stated."""
     if str(action_name or "").strip().lower() not in _POST_RESULT_IDLE_ACTIONS:
         return False
-    if not history_has_submit_click(action_summaries, action_entries):
+    # Materialize once so generator/iterator callers are not consumed by the
+    # submit check and then appear empty to the navigation guard (CodeRabbit).
+    summaries = list(action_summaries or [])
+    entries = list(action_entries or [])
+    if not history_has_submit_click(summaries, entries):
         return False
-    if history_has_navigation_after_submit(action_summaries, action_entries):
+    if history_has_navigation_after_submit(summaries, entries):
         return False
     candidates = [last_reasoning, *(prior_reasoning_messages or [])]
     return any(reasoning_states_visible_fcaptcha_result(text) for text in candidates)
