@@ -63,6 +63,11 @@ def _is_recoverable_sandbox_infra_failure(error: BaseException) -> bool:
         "THE SANDBOX WAS NOT FOUND",
         "SANDBOX TIMEOUT",
         "FAILED TO CREATE CODE SESSION",
+        # Proxy/gateway capacity (cuda-kernel k=3 r10 agent1 @ ~30m): HTTP 500
+        # wrapping ``503: no healthy upstream`` — soft-fail after Temporal
+        # retries so no_tool_failures stays green while the agent can re-spawn.
+        "NO HEALTHY UPSTREAM",
+        "HTTP 503",
     )
     return any(m in text for m in markers)
 
@@ -231,7 +236,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     # leaving ClaudeCodeChip stuck on "Spinning up..." on the
                     # durable hub FE (agent 094f1085 / task 1d92a4db).
                     cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    # Capacity flakes (redis pool / 503 no healthy upstream) often
+                    # clear within a minute. Prefer in-activity Temporal retries
+                    # over soft-failing the tool early — soft-fail lets the DAG
+                    # advance into attempt_completion with incomplete CC work
+                    # (cuda-kernel k=3 r10 agent1: soft-fail @~30m → verifier
+                    # 50% → redo CC → 4200s task timeout). Keep soft-fail as the
+                    # post-exhaustion path for no_tool_failures.
+                    retry_policy=RetryPolicy(maximum_attempts=5),
                 )
 
                 # Wait for activity completion or pause signal

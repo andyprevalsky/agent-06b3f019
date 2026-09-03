@@ -2648,24 +2648,15 @@ async def test_cc_execute_tool_github_access_denied_soft_fails_finished():
     assert "github_repo_url" in finished.message or "API-only" in finished.message
 
 
-async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
-    """E2B redis/sandbox capacity flakes must FINISH (not ERROR) for no_tool_failures.
-
-    Local repro (cuda-kernel k=3 r8): concurrent Claude Code spawns returned
-    HTTP 500 redis connection-pool timeouts / sandbox-not-found. Soft-fail so
-    the agent can retry spawn without tripping no_tool_failures.
-    """
+async def _assert_cc_sandbox_infra_soft_fail(activity_message: str, tool_call_id: str) -> None:
+    """Shared assertions for soft-failing recoverable E2B create failures."""
     from temporalio.exceptions import ActivityError
 
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
     activity_error = ActivityError(
-        message=(
-            "Failed to create code session (provider=claude): HTTP 500: "
-            '{"error":"500: Failed to create sandbox: failed to run reserve '
-            'script: redis: connection pool timeout"}'
-        ),
+        message=activity_message,
         scheduled_event_id=1,
         started_event_id=1,
         identity="worker",
@@ -2682,7 +2673,7 @@ async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
             manager.execute_tool(
                 _FakeCCWorkflowInstance(),
                 {"goal": "rank cuda repos via GitHub API"},
-                "tc-sandbox-infra",
+                tool_call_id,
             )
         )
     finally:
@@ -2694,6 +2685,53 @@ async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
     assert finished.metadata.get("action_type") == "task_complete"
     assert "capacity" in finished.message.lower() or "sandbox" in finished.message.lower()
     assert "retry" in finished.message.lower()
+
+
+async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
+    """E2B redis/sandbox capacity flakes must FINISH (not ERROR) for no_tool_failures.
+
+    Local repro (cuda-kernel k=3 r8): concurrent Claude Code spawns returned
+    HTTP 500 redis connection-pool timeouts / sandbox-not-found. Soft-fail so
+    the agent can retry spawn without tripping no_tool_failures.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"500: Failed to create sandbox: failed to run reserve '
+            'script: redis: connection pool timeout"}'
+        ),
+        "tc-sandbox-infra",
+    )
+
+
+async def test_cc_execute_tool_no_healthy_upstream_soft_fails_finished():
+    """Gateway 503 no-healthy-upstream must soft-FINISH like other capacity flakes.
+
+    Local repro (cuda-kernel k=3 r10 agent1 @ ~30m): create returned HTTP 500
+    wrapping ``503: no healthy upstream``. Soft-fail after Temporal retries so
+    no_tool_failures stays green; agent can re-spawn instead of hard-ERROR.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"503: no healthy upstream"}'
+        ),
+        "tc-sandbox-503",
+    )
+
+
+def test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail():
+    """spawn_claude_code_activity must retry enough times for brief E2B 503s.
+
+    r10 agent1 soft-failed after only 2 attempts, then DAG advanced into
+    attempt_completion with incomplete verification and timed out at 4200s.
+    """
+    import inspect
+
+    from domains.spawn_claude_code_agent import handler as cc_handler
+
+    src = inspect.getsource(cc_handler.SpawnClaudeCodeAgentManager.execute_tool)
+    assert "maximum_attempts=5" in src
 
 
 async def test_cc_execute_tool_paused_cancels_activity():
@@ -2911,6 +2949,14 @@ async def run_all_tests():
     await r.record_async(
         "cc_exec_sandbox_infra_soft_fail",
         test_cc_execute_tool_sandbox_infra_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_no_healthy_upstream_soft_fail",
+        test_cc_execute_tool_no_healthy_upstream_soft_fails_finished,
+    )
+    r.record(
+        "cc_spawn_activity_retries_capacity_flakes",
+        test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail,
     )
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
     r.record(
