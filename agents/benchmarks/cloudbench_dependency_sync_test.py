@@ -6733,6 +6733,34 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
             {"name": "browser-toast-nopa-write-lock", "tags": ["browser"], "timeout_seconds": 60, "deploy_category": "browser_stateful", "deploy_canary": True},
         ])
     )
+    # History gate: only tasks with the last 3 attempts passing are selectable.
+    history_dir = fixture / "agents" / "benchmarks" / "history"
+    history_dir.mkdir(parents=True)
+    attempt_rows = []
+    for name in (
+        "smoke-fixture",
+        "payment-fixture",
+        "grep-fixture",
+        "sms-fixture",
+        "browser-toast-nopa-write-lock",
+    ):
+        for index in range(3):
+            attempt_rows.append(
+                {
+                    "task": name,
+                    "passed": True,
+                    "status": "COMPLETED",
+                    "duration_seconds": 1.0,
+                    "cost_cents": 0.0,
+                    "timestamp": f"2026-01-01T00:00:{index:02d}+00:00",
+                    "agent_id": f"{name}-{index}",
+                    "failure_reason": None,
+                    "fast_mode_cache": False,
+                }
+            )
+    (history_dir / "task_attempts.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in attempt_rows) + "\n"
+    )
     (fixture / "agents" / "benchmarks" / "select_predeploy_benches.py").write_text(
         (ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py").read_text()
     )

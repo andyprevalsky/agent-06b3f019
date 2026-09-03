@@ -5,11 +5,12 @@
 # cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
 # frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
 #
-# Task set comes from `agents/benchmarks/select_predeploy_benches.py` — category
-# floor (smoke + one canary per floor category) plus path-triggered depth, hard
-# capped at 20. Identical selection to `run-predeploy-cloud`, so the two paths
-# cannot drift. `run-bench --local` exits non-zero unless every requested task
-# passes, so this script IS the gate.
+# Task set comes from `agents/benchmarks/select_predeploy_benches.py` — only
+# tasks whose last 3 historic attempts all passed, then category floor (smoke +
+# one canary per floor category) plus path-triggered depth, hard capped at 20.
+# Identical selection to `run-predeploy-cloud`, so the two paths cannot drift.
+# `run-bench --local` exits non-zero unless every requested task passes, so
+# this script IS the gate.
 #
 # Usage:
 #   scripts/run-predeploy-local            # run the selected predeploy set locally

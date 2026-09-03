@@ -3,9 +3,12 @@
 
 Deploy cannot run the full daily suite. Selection rules:
 
-1. Floor — every `smoke`-tagged harness task, plus one canary per floor category
+1. Floor — every history-qualified `smoke` harness task, plus one canary per floor category
 2. Path extras — more category depth when the git diff touches matching paths
 3. Hard cap — default 20. Floor must always fit; extras truncate with a scream
+4. History gate — a task is eligible only when its last 3 historic attempts all
+   passed (`history/task_attempts.jsonl`). Short or failing streaks are skipped
+   and reported; floor categories with no qualified canary are marked uncovered.
 
 New catalog tasks auto-attach via `deploy_category` (or derived tags). Preferred
 canary order: `deploy_canary: true` → `pre-deploy`/`smoke` → `pipeline-e2e` →
@@ -26,6 +29,11 @@ from typing import Any, Sequence
 
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
+DEFAULT_ATTEMPTS = Path(__file__).resolve().parent / "history" / "task_attempts.jsonl"
+# Only select a bench when its last N completed attempts all passed. New or
+# flaky tasks stay out of /deploy until they earn this streak on the daily (or
+# explicit) path.
+DEFAULT_PASS_STREAK = 3
 
 FLOOR_CATEGORIES: tuple[str, ...] = (
     "payment",
@@ -150,6 +158,12 @@ class Selection:
     triggered_categories: list[str]
     reasons: dict[str, list[str]] = field(default_factory=dict)
     surface: str = "local"
+    # Tasks considered for selection but rejected because the last
+    # REQUIRED_PASS_STREAK attempts were not all passes (or history was short).
+    skipped_history: list[str] = field(default_factory=list)
+    # Floor categories with no history-qualified canary.
+    uncovered_categories: list[str] = field(default_factory=list)
+    pass_streak_required: int = DEFAULT_PASS_STREAK
 
     @property
     def total(self) -> int:
@@ -276,6 +290,54 @@ def _eligible(task: TaskRef, surface: str) -> bool:
     return True
 
 
+def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
+    """Return chronological pass/fail lists keyed by task name.
+
+    Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
+    file order, then by timestamp when present so out-of-order appends still
+    yield a stable recent window.
+    """
+    if not attempts_file.exists():
+        return {}
+    rows: list[tuple[str, bool, str]] = []
+    with attempts_file.open() as handle:
+        for index, raw_line in enumerate(handle):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            task = entry.get("task")
+            if not isinstance(task, str) or not task:
+                continue
+            passed = bool(entry.get("passed"))
+            timestamp = str(entry.get("timestamp") or "")
+            # Stable tie-break on file order when timestamps collide/missing.
+            rows.append((task, passed, f"{timestamp}:{index:08d}"))
+    rows.sort(key=lambda row: (row[0], row[2]))
+    passes: dict[str, list[bool]] = {}
+    for task, passed, _timestamp in rows:
+        passes.setdefault(task, []).append(passed)
+    return passes
+
+
+def has_pass_streak(
+    task_name: str,
+    attempt_passes: dict[str, list[bool]],
+    *,
+    streak: int = DEFAULT_PASS_STREAK,
+) -> bool:
+    """True iff the task's last `streak` attempts all passed (requires >= streak)."""
+    if streak < 1:
+        raise ValueError("streak must be >= 1")
+    history = attempt_passes.get(task_name) or []
+    if len(history) < streak:
+        return False
+    return all(history[-streak:])
+
+
 def _canary_sort_key(task: TaskRef) -> tuple:
     group_rank = 0 if task.group == "pre-deploy" or task.is_smoke else 1
     bench_rank = 0 if task.bench == "pipeline-e2e" else 1
@@ -285,13 +347,27 @@ def _canary_sort_key(task: TaskRef) -> tuple:
 
 
 def candidates_for_category(
-    tasks: Sequence[TaskRef], category: str, surface: str
+    tasks: Sequence[TaskRef],
+    category: str,
+    surface: str,
+    *,
+    attempt_passes: dict[str, list[bool]] | None = None,
+    pass_streak: int = DEFAULT_PASS_STREAK,
+    skipped_history: list[str] | None = None,
 ) -> list[TaskRef]:
-    out = [
-        t
-        for t in tasks
-        if _eligible(t, surface) and category in categories_for_task(t)
-    ]
+    out: list[TaskRef] = []
+    for task in tasks:
+        if not _eligible(task, surface):
+            continue
+        if category not in categories_for_task(task):
+            continue
+        if attempt_passes is not None and not has_pass_streak(
+            task.name, attempt_passes, streak=pass_streak
+        ):
+            if skipped_history is not None and task.name not in skipped_history:
+                skipped_history.append(task.name)
+            continue
+        out.append(task)
     return sorted(out, key=_canary_sort_key)
 
 
@@ -302,16 +378,22 @@ def select_predeploy_benches(
     surface: str = "local",
     cap: int = DEFAULT_CAP,
     repo_root: Path | None = None,
+    attempts_file: Path | None = None,
+    pass_streak: int = DEFAULT_PASS_STREAK,
 ) -> Selection:
     if cap < 1:
         raise ValueError("cap must be >= 1")
     if surface not in {"local", "cloud"}:
         raise ValueError("surface must be 'local' or 'cloud'")
+    if pass_streak < 1:
+        raise ValueError("pass_streak must be >= 1")
 
     tasks = load_tasks(catalog)
     root = repo_root or catalog.resolve().parents[2]
     changed = discover_changed_files(root, changed_files)
     triggered = categories_triggered_by_paths(changed)
+    attempts_path = attempts_file or DEFAULT_ATTEMPTS
+    attempt_passes = load_attempt_passes(attempts_path)
 
     reasons: dict[str, list[str]] = {}
     selected: list[str] = []
@@ -320,6 +402,8 @@ def select_predeploy_benches(
     path_extras: list[str] = []
     dropped: list[str] = []
     categories_covered: list[str] = []
+    skipped_history: list[str] = []
+    uncovered_categories: list[str] = []
 
     def _add(name: str, bucket: list[str], reason: str) -> bool:
         if name in selected_set:
@@ -336,20 +420,38 @@ def select_predeploy_benches(
         return True
 
     smoke_tasks = [t for t in tasks if t.is_smoke and _eligible(t, surface)]
+    smoke_selected = 0
     for task in smoke_tasks:
+        if not has_pass_streak(task.name, attempt_passes, streak=pass_streak):
+            if task.name not in skipped_history:
+                skipped_history.append(task.name)
+            reasons.setdefault(task.name, []).append(
+                f"skipped:history:<{pass_streak}-pass-streak"
+            )
+            continue
         if not _add(task.name, floor, "floor:smoke"):
             raise SystemExit(
                 f"PREDEPLOY FLOOR smoke set cannot fit in hard cap ({cap}). "
                 "Shrink smoke-tagged tasks or raise PREDEPLOY_BENCH_CAP."
             )
-    if smoke_tasks:
+        smoke_selected += 1
+    if smoke_selected:
         categories_covered.append("harness")
 
     for category in FLOOR_CATEGORIES:
-        for cand in candidates_for_category(tasks, category, surface):
+        found = False
+        for cand in candidates_for_category(
+            tasks,
+            category,
+            surface,
+            attempt_passes=attempt_passes,
+            pass_streak=pass_streak,
+            skipped_history=skipped_history,
+        ):
             if cand.name in selected_set:
                 if category not in categories_covered:
                     categories_covered.append(category)
+                found = True
                 break
             if not _add(cand.name, floor, f"floor:canary:{category}"):
                 raise SystemExit(
@@ -358,7 +460,10 @@ def select_predeploy_benches(
                     "FLOOR_CATEGORIES / smoke set or raise PREDEPLOY_BENCH_CAP."
                 )
             categories_covered.append(category)
+            found = True
             break
+        if not found:
+            uncovered_categories.append(category)
 
     if len(floor) > cap:
         raise SystemExit(
@@ -367,7 +472,14 @@ def select_predeploy_benches(
         )
 
     def _add_one_extra(category: str, reason_prefix: str) -> None:
-        for cand in candidates_for_category(tasks, category, surface):
+        for cand in candidates_for_category(
+            tasks,
+            category,
+            surface,
+            attempt_passes=attempt_passes,
+            pass_streak=pass_streak,
+            skipped_history=skipped_history,
+        ):
             if cand.name in selected_set:
                 continue
             # One attempt per category slot — never walk the whole candidate
@@ -409,6 +521,9 @@ def select_predeploy_benches(
         triggered_categories=triggered,
         reasons=reasons,
         surface=surface,
+        skipped_history=skipped_history,
+        uncovered_categories=uncovered_categories,
+        pass_streak_required=pass_streak,
     )
 
 
@@ -417,6 +532,7 @@ def format_report(selection: Selection) -> str:
         "========== PREDEPLOY BENCH SELECTION ==========",
         f"Surface: {selection.surface}",
         f"Hard cap: {selection.cap}",
+        f"Pass streak required: last {selection.pass_streak_required} historic runs all passed",
         f"Changed files: {len(selection.changed_files)}",
         f"Path-triggered categories: {', '.join(selection.triggered_categories) or '(none)'}",
         f"Categories covered: {', '.join(selection.categories_covered) or '(none)'}",
@@ -424,6 +540,18 @@ def format_report(selection: Selection) -> str:
         f"Path extras ({len(selection.path_extras)}): {', '.join(selection.path_extras) or '(none)'}",
         f"TOTAL SELECTED: {selection.total} / {selection.cap}",
     ]
+    if selection.skipped_history:
+        lines.append(
+            f"Skipped (need last {selection.pass_streak_required} historic passes) "
+            f"({len(selection.skipped_history)}): "
+            f"{', '.join(selection.skipped_history)}"
+        )
+    if selection.uncovered_categories:
+        lines.append(
+            f"Uncovered floor categories (no canary with "
+            f"{selection.pass_streak_required}-pass streak): "
+            f"{', '.join(selection.uncovered_categories)}"
+        )
     if selection.cap_hit:
         lines.append(
             CAP_SCREAM.format(
@@ -499,6 +627,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=("names", "report", "json", "names-and-report"),
         default="names-and-report",
     )
+    parser.add_argument(
+        "--attempts-file",
+        type=Path,
+        default=Path(os.environ.get("PREDEPLOY_ATTEMPTS_FILE", DEFAULT_ATTEMPTS)),
+        help="Historic attempts JSONL used for the last-N-pass gate.",
+    )
+    parser.add_argument(
+        "--pass-streak",
+        type=int,
+        default=int(os.environ.get("PREDEPLOY_PASS_STREAK", DEFAULT_PASS_STREAK)),
+        help="Require the last N historic attempts to all pass (default 3).",
+    )
     parser.add_argument("--repo-root", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -521,6 +661,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         surface=args.surface,
         cap=args.cap,
         repo_root=args.repo_root,
+        attempts_file=args.attempts_file,
+        pass_streak=args.pass_streak,
     )
 
     if args.format == "names":
@@ -543,6 +685,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "categories_covered": selection.categories_covered,
                     "triggered_categories": selection.triggered_categories,
                     "changed_files_count": len(selection.changed_files),
+                    "skipped_history": selection.skipped_history,
+                    "uncovered_categories": selection.uncovered_categories,
+                    "pass_streak_required": selection.pass_streak_required,
                     "reasons": selection.reasons,
                     "surface": selection.surface,
                 },

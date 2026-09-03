@@ -189,15 +189,16 @@ of truth; do not duplicate them into other files.
 
 **Pre-Deploy bench selection (auto-attach):** `/deploy` does **not** run the full daily suite. `agents/benchmarks/select_predeploy_benches.py` builds a bounded set every deploy:
 
-1. **Floor** — every `smoke`-tagged harness task + one canary each for `payment`, `grep`, `sms`, `browser_stateful`
-2. **Path extras** — more category depth when the git diff touches matching paths
-3. **Hard cap 20** — floor must always fit; extras truncate with a loud scream (`PREDEPLOY BENCH HARD CAP HIT`). Override only via `PREDEPLOY_BENCH_CAP` with review.
+1. **History gate** — a task is eligible only when its **last 3 historic attempts** in `agents/benchmarks/history/task_attempts.jsonl` all passed; otherwise it is skipped (`SKIPPED (need last 3 historic passes)`). New/flaky tasks stay off `/deploy` until they earn that streak on the daily path.
+2. **Floor** — every history-qualified `smoke`-tagged harness task + one history-qualified canary each for `payment`, `grep`, `sms`, `browser_stateful` (uncovered categories are reported)
+3. **Path extras** — more category depth when the git diff touches matching paths (history-qualified only)
+4. **Hard cap 20** — floor must always fit; extras truncate with a loud scream (`PREDEPLOY BENCH HARD CAP HIT`). Override only via `PREDEPLOY_BENCH_CAP` with review.
 
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 - Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
 - Set `deploy_canary: true` if this task should be preferred as the one-per-category floor/path pick (otherwise shortest ready `pipeline-e2e` wins)
-- Tag `smoke` **only** for must-run harness plumbing (always on the floor; counts toward the cap)
+- Tag `smoke` **only** for must-run harness plumbing (always on the floor when history-qualified; counts toward the cap)
 - New category? Add it to `FLOOR_CATEGORIES` and/or `PATH_TRIGGERS` in `select_predeploy_benches.py` and to `KNOWN_DEPLOY_CATEGORIES`
 - Never rename an existing task `name`
 - Before benches run, the selector **always prints** `TOTAL SELECTED: N / 20` (and screams when the cap binds)
