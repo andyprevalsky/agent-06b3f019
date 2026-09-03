@@ -497,8 +497,6 @@ describe('BrowserAgentChip recording', () => {
     expect(screen.getByTestId('recording-playhead')).toHaveTextContent('t=40.0s');
   });
 
-=======
->>>>>>> origin/main
   it('exposes only Result and Recording tabs (trajectory lives inside Recording)', async () => {
     const messages = [anchorMsg, recordingMsg({ recording_view_url: KERNEL_VIEW_URL })];
     renderChip(messages, anchorMsg);
