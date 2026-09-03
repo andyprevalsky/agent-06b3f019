@@ -471,6 +471,55 @@ def test_transform_messages_for_anthropic_bundles_consecutive_tool_results():
     assert len(user_with_results[0]["content"]) == 2
 
 
+def test_build_anthropic_body_does_not_mutate_caller_messages():
+    """RoseClient reuses one `messages` list across claudeAuth -> waterfall.
+
+    The Anthropic transform merges consecutive user turns and the cache
+    breakpoint rewrites the last message; both must operate on copies, or the
+    OpenRouter fallback after a claudeAuth failure sends merged/duplicated
+    content carrying Anthropic-only cache_control keys.
+    """
+    import copy
+
+    from providers.rose.claude_auth import build_anthropic_body
+    from providers.rose.pools import get_pool
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    messages = [
+        {"role": "system", "content": "static system prompt"},
+        {"role": "user", "content": "GOAL: g\n\nPlan this goal into tasks."},
+        {"role": "user", "content": "# Reference Plans\n\nblock"},
+        {"role": "user", "content": "[TOOL]: earlier output"},
+    ]
+    snapshot = copy.deepcopy(messages)
+
+    first = transform_messages_for_anthropic(messages)
+    assert messages == snapshot, "transform_messages_for_anthropic mutated its input"
+    second = transform_messages_for_anthropic(messages)
+    assert first == second, "transform must be idempotent on unchanged input"
+    assert len(first[2]) == 1 and len(first[2][0]["content"]) == 3, "consecutive user turns merge into one message"
+
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=64,
+    )
+    assert messages == snapshot, "build_anthropic_body mutated its input"
+    assert body["messages"][0]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+    body_again = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=64,
+    )
+    assert body_again["messages"] == body["messages"], "rebuilding from the same input must give the same body"
+
+
 def test_transform_messages_for_anthropic_raises_on_missing_id():
     raised = False
     try:
@@ -5906,6 +5955,7 @@ async def run_all_tests():
     r = BlackboxResult()
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
+    r.record("build_anthropic_body_no_input_mutation", test_build_anthropic_body_does_not_mutate_caller_messages)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
     r.record("oss_pool_is_open_weights_only", test_oss_pool_is_open_weights_only)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)

@@ -385,6 +385,26 @@ def _is_missing_r2_object_error(exc: Exception) -> bool:
     return exc.__class__.__name__ in {"NoSuchKey", "ClientError"} and "NoSuchKey" in str(exc)
 
 
+def use_r2_archive() -> bool:
+    """True when archive reads/writes target R2 (prod, or TRACE_ARCHIVE_BACKEND=r2)."""
+    return _use_r2_archive()
+
+
+def local_archive_root() -> Path:
+    """Local mirror root for archive bundles (``.context/trace-archive`` by default)."""
+    return _local_root()
+
+
+def r2_client() -> Any:
+    """Shared boto3 S3 client for the trace-archive R2 bucket."""
+    return _r2_client()
+
+
+def r2_bucket() -> str:
+    """Name of the trace-archive R2 bucket."""
+    return _r2_bucket()
+
+
 def read_local_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, dict[str, Any]]]:
     """Read a locally archived encrypted artifact and its metadata."""
     safe_root = _safe_segment(root_agent_id)

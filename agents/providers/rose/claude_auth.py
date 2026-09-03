@@ -93,7 +93,9 @@ _DISCLAIMER_BLOCK = {
 def _add_cache_breakpoint(messages: List[Dict[str, Any]]) -> None:
     """Add cache_control to the last content block of the last message.
 
-    Mutates in place. Mirrors Claude Code's addCacheBreakpoints: exactly one
+    Replaces ``messages[-1]`` with a marked copy (the list is mutated, the
+    caller's message dicts are not — they are reused for the waterfall
+    fallback). Mirrors Claude Code's addCacheBreakpoints: exactly one
     message-level marker so the server knows where the reusable prefix ends.
     """
     if not messages:
@@ -101,11 +103,11 @@ def _add_cache_breakpoint(messages: List[Dict[str, Any]]) -> None:
     last = messages[-1]
     content = last.get("content")
     if isinstance(content, str):
-        last["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        messages[-1] = {**last, "content": [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]}
     elif isinstance(content, list) and content:
         target = content[-1]
         if isinstance(target, dict):
-            target["cache_control"] = {"type": "ephemeral"}
+            messages[-1] = {**last, "content": content[:-1] + [{**target, "cache_control": {"type": "ephemeral"}}]}
 
 
 def _add_tool_cache_breakpoint(body: Dict[str, Any]) -> None:
