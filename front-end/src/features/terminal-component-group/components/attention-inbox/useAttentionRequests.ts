@@ -152,6 +152,9 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       );
       reconnectAttemptRef.current += 1;
       reconnectTimeoutRef.current = window.setTimeout(() => {
+        // Guard against jsdom teardown races: a reconnect timer can fire after
+        // the test environment has torn down `window` / unmounted the hook.
+        if (cancelled || typeof window === 'undefined') return;
         setForceResubscribe((prev) => prev + 1);
       }, delay);
     };
