@@ -23,6 +23,7 @@ export async function readArchivedArtifactStrict(params: {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const objectPath = safeArchivePath(params.objectPath);
+  if (backend === 'fake-r2') return readLocalObject(params.rootAgentId, objectPath);
   if (backend === 'r2' || (isProduction() && backend !== 'local')) {
     return readR2ObjectStrict(params.rootAgentId, objectPath);
   }
@@ -37,6 +38,7 @@ export async function plainArchiveArtifactExists(params: {
   if (!archiveEnabled()) return false;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const objectPath = safeArchivePath(params.objectPath);
+  if (backend === 'fake-r2') return fs.existsSync(localObjectPath(params.rootAgentId, objectPath));
   if (backend === 'r2' || (isProduction() && backend !== 'local')) {
     const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
     if (bucket === '') throw new Error('R2 trace archive is not configured');
@@ -67,6 +69,10 @@ export async function readPlainArchivedArtifact(params: {
   if (!archiveEnabled()) return null;
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
   const objectPath = safeArchivePath(params.objectPath);
+  if (backend === 'fake-r2') {
+    const target = localObjectPath(params.rootAgentId, objectPath);
+    return fs.existsSync(target) ? fs.readFileSync(target) : null;
+  }
   if (backend === 'r2' || (isProduction() && backend !== 'local')) {
     const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
     if (bucket === '') throw new Error('R2 trace archive is not configured');

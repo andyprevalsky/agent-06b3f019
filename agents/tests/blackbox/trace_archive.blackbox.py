@@ -869,6 +869,90 @@ async def test_terminal_flush_waits_for_accepted_root_writes():
             restore()
 
 
+def test_terminal_flush_ignores_transaction_temporary_files():
+    """Crash-recovery bookkeeping is not a pending upload artifact."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        try:
+            transaction = (
+                trace_archive._outbox_root()
+                / "agent-transaction-only"
+                / "llm"
+                / "late.json.gz.enc.transaction.123.456.tmp"
+            )
+            transaction.parent.mkdir(parents=True, exist_ok=True)
+            transaction.write_text("temporary recovery state")
+            assert not trace_archive._root_outbox_has_artifacts("agent-transaction-only")
+        finally:
+            restore()
+
+
+def test_outbox_drain_honors_expired_terminal_deadline():
+    """A terminal flush cannot begin another HTTP upload after its deadline."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        posts = []
+        try:
+            ciphertext = b"pending"
+            trace_archive._write_outbox(
+                "agent-expired-flush",
+                "llm/pending.json.gz.enc",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: posts.append(kwargs) or "r2://unexpected"
+            drained = trace_archive._drain_backend_outbox(
+                limit=64,
+                root_agent_id="agent-expired-flush",
+                deadline=time.monotonic() - 1.0,
+            )
+            assert drained == 0
+            assert posts == []
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
+def test_outbox_drain_bounds_upload_by_remaining_terminal_deadline():
+    """Each upload receives only the terminal flush budget that remains."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        upload_budgets = []
+        try:
+            ciphertext = b"pending"
+            trace_archive._write_outbox(
+                "agent-bounded-flush",
+                "llm/pending.json.gz.enc",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: (
+                upload_budgets.append(kwargs["timeout_s"]) or "r2://stored"
+            )
+            deadline = time.monotonic() + 1.0
+            assert (
+                trace_archive._drain_backend_outbox(
+                    limit=64,
+                    root_agent_id="agent-bounded-flush",
+                    deadline=deadline,
+                )
+                == 1
+            )
+            assert len(upload_budgets) == 1
+            assert 0 < upload_budgets[0] <= 1.0
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
 async def test_deferred_json_payload_factory_runs_off_event_loop():
     import asyncio
     import time as time_mod
@@ -1325,6 +1409,18 @@ async def run_all_tests():
     await r.record_async(
         "terminal_flush_waits_for_accepted_root_writes",
         test_terminal_flush_waits_for_accepted_root_writes,
+    )
+    r.record(
+        "terminal_flush_ignores_transaction_temporary_files",
+        test_terminal_flush_ignores_transaction_temporary_files,
+    )
+    r.record(
+        "outbox_drain_honors_expired_terminal_deadline",
+        test_outbox_drain_honors_expired_terminal_deadline,
+    )
+    r.record(
+        "outbox_drain_bounds_upload_by_remaining_terminal_deadline",
+        test_outbox_drain_bounds_upload_by_remaining_terminal_deadline,
     )
     await r.record_async(
         "deferred_json_payload_factory_runs_off_event_loop",

@@ -584,6 +584,7 @@ def _post_backend_artifact(
     path: str,
     ciphertext: bytes,
     metadata: dict[str, Any],
+    timeout_s: Optional[float] = None,
 ) -> Optional[str]:
     url = _backend_archive_url()
     api_key = _backend_api_key()
@@ -591,6 +592,9 @@ def _post_backend_artifact(
         logger.warning("trace_archive.backend_missing_config", root_agent_id=root_agent_id, path=path)
         return None
     try:
+        request_options: dict[str, Any] = {}
+        if timeout_s is not None:
+            request_options["timeout"] = max(0.001, min(30.0, timeout_s))
         resp = _backend_http_client().post(
             url,
             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
@@ -600,6 +604,7 @@ def _post_backend_artifact(
                 "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"),
                 "metadata": metadata,
             },
+            **request_options,
         )
         if resp.status_code == 200:
             return str((resp.json() or {}).get("ref") or f"trace-archive/{root_agent_id}/{path}")
@@ -610,18 +615,39 @@ def _post_backend_artifact(
         return None
 
 
-def _drain_backend_outbox(limit: int = 8, root_agent_id: Optional[str] = None) -> int:
+def _drain_backend_outbox(
+    limit: int = 8,
+    root_agent_id: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> int:
+    if deadline is not None and time.monotonic() >= deadline:
+        return 0
     root = _outbox_root()
-    if not root.exists():
+    try:
+        if not root.exists():
+            return 0
+        safe_root = _safe_segment(root_agent_id) if root_agent_id else None
+        bundles = sorted(
+            item for item in root.iterdir() if item.is_dir() and (safe_root is None or item.name == safe_root)
+        )
+    except OSError as exc:
+        logger.warning("trace_archive.outbox_scan_error", root_agent_id=root_agent_id, error=str(exc)[:200])
         return 0
     drained = 0
-    safe_root = _safe_segment(root_agent_id) if root_agent_id else None
-    bundles = sorted(item for item in root.iterdir() if item.is_dir() and (safe_root is None or item.name == safe_root))
     for bundle in bundles:
-        if drained >= limit:
+        if drained >= limit or (deadline is not None and time.monotonic() >= deadline):
             return drained
-        for item in sorted(bundle.rglob("*")):
-            if drained >= limit:
+        try:
+            items = sorted(bundle.rglob("*"))
+        except OSError as exc:
+            logger.warning(
+                "trace_archive.outbox_scan_error",
+                root_agent_id=bundle.name,
+                error=str(exc)[:200],
+            )
+            return drained
+        for item in items:
+            if drained >= limit or (deadline is not None and time.monotonic() >= deadline):
                 return drained
             if not item.is_file() or item.name.endswith(".meta.json"):
                 continue
@@ -637,11 +663,15 @@ def _drain_backend_outbox(limit: int = 8, root_agent_id: Optional[str] = None) -
                     continue
                 ciphertext, metadata = pair
                 expected_ciphertext_sha256 = str(metadata["ciphertext_sha256"])
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return drained
                 ref = _post_backend_artifact(
                     root_agent_id=root_agent_id,
                     path=path,
                     ciphertext=ciphertext,
                     metadata=metadata,
+                    timeout_s=remaining,
                 )
                 if ref:
                     if _delete_outbox(
@@ -759,7 +789,7 @@ def _root_outbox_has_artifacts(root_agent_id: str) -> bool:
     if not bundle.exists():
         return False
     return any(
-        item.is_file() and not item.name.endswith((".meta.json", _ARTIFACT_TRANSACTION_SUFFIX))
+        item.is_file() and not item.name.endswith(".meta.json") and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
         for item in bundle.rglob("*")
     )
 
@@ -789,7 +819,7 @@ def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
         while _root_outbox_has_artifacts(safe_root):
             if time.monotonic() >= deadline:
                 return False
-            if _drain_backend_outbox(limit=64, root_agent_id=safe_root) == 0:
+            if _drain_backend_outbox(limit=64, root_agent_id=safe_root, deadline=deadline) == 0:
                 return False
     return True
 

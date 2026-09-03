@@ -688,6 +688,7 @@ class AgentWorkflow:
         self.child_tool_counts: Dict[str, int] = {}  # Aggregated tool counts from sub-agents
         self.child_results: Dict[str, Dict] = {}  # Store child results for file extraction after wait_condition
         self.depth: int = 0
+        self.root_agent_id: Optional[str] = None
 
         # Tree state tracking (for sub-agent tree UI)
         self.bus_id: Optional[str] = None  # Shared bus channel ID for tree updates
@@ -1413,6 +1414,7 @@ class AgentWorkflow:
         structlog.contextvars.bind_contextvars(agent_id=agent_id, root_agent_id=root_agent_id)
 
         self.agent_id = agent_id
+        self.root_agent_id = root_agent_id
         self.user_id = user_id
         self.goal = goal
         self.fast_cache_goal = goal  # Overridden by the persisted row goal below
@@ -5023,6 +5025,7 @@ class AgentWorkflow:
                     summary if self.parent_workflow_id else "",
                     structured_response,
                     self.iteration_offset,
+                    self.root_agent_id or self.agent_id,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),

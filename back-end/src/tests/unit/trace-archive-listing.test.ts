@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { listArchivedObjects, listArchivedObjectsStrict } from '../../providers/traceArchive';
+import { listArchiveBundleIdsStrict } from '../../providers/traceArchiveAudit';
 import { createTestHarness, withEnv } from './trace-archive-test-utils';
 
 const { test, finish } = createTestHarness('trace-archive listing unit tests');
@@ -40,6 +41,19 @@ async function main(): Promise<void> {
         } finally {
           fs.readdirSync = originalReadDir;
         }
+      }
+    )
+  );
+  await test(
+    'strict R2 root enumeration rejects missing bucket configuration',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'r2',
+        R2_BUCKET_TRACE_ARCHIVE: undefined,
+      },
+      async () => {
+        await assert.rejects(listArchiveBundleIdsStrict(), /R2 trace archive is not configured/);
       }
     )
   );

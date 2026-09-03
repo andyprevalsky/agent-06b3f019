@@ -9,6 +9,7 @@ import {
   listLocalArchivedObjects,
   listR2ArchivedObjects,
 } from './traceArchiveBundleStorage';
+import { streamToBuffer } from './traceArchiveBody';
 import {
   decryptAndValidateArtifact as decryptAndValidateArtifactEnvelope,
   metadataFromUnknown,
@@ -326,34 +327,13 @@ export function readLocalObject(
   };
 }
 
-async function streamToBuffer(body: unknown): Promise<Buffer> {
-  if (body === undefined || body === null) return Buffer.alloc(0);
-  if (Buffer.isBuffer(body)) return body;
-  if (body instanceof Uint8Array) return Buffer.from(body);
-  const maybeTransform = body as {
-    transformToByteArray?: () => Promise<Uint8Array>;
-    transformToString?: () => Promise<string>;
-  };
-  if (typeof maybeTransform.transformToByteArray === 'function') {
-    return Buffer.from(await maybeTransform.transformToByteArray());
-  }
-  if (typeof maybeTransform.transformToString === 'function') {
-    return Buffer.from(await maybeTransform.transformToString());
-  }
-  const maybeAsyncIterable = body as AsyncIterable<Uint8Array>;
-  if (typeof maybeAsyncIterable[Symbol.asyncIterator] === 'function') {
-    const chunks: Buffer[] = [];
-    for await (const chunk of maybeAsyncIterable) chunks.push(Buffer.from(chunk));
-    return Buffer.concat(chunks);
-  }
-  throw new Error('Unsupported archive response body');
-}
-
 export async function getR2Object(bucket: string, key: string): Promise<Buffer> {
-  const response = await withTraceArchiveRequestTimeout((abortSignal) =>
-    getS3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal })
-  );
-  return streamToBuffer(response.Body);
+  return withTraceArchiveRequestTimeout(async (abortSignal) => {
+    const response = await getS3Client().send(new GetObjectCommand({ Bucket: bucket, Key: key }), {
+      abortSignal,
+    });
+    return streamToBuffer(response.Body, abortSignal);
+  });
 }
 
 export async function readR2ObjectStrict(

@@ -139,6 +139,51 @@ async def test_mark_finished_flushes_archive_before_terminal_status():
     ]
 
 
+async def test_mark_finished_flushes_root_archive_for_subagent():
+    """Subagent completion flushes the root-keyed archive queue."""
+    flushed = []
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "helpers.trace_archive.flush_archive_writes",
+            side_effect=lambda agent_id, timeout_s: flushed.append((agent_id, timeout_s)) or True,
+        ),
+        patch("helpers.update_status._update_agent_status_impl"),
+    ):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-fin-child",
+            steps_taken=[{"role": "USER", "text": "Finish child durably"}],
+            root_agent_id="agent-fin-root",
+        )
+
+    assert flushed == [("agent-fin-root", 15.0)]
+
+
+async def test_mark_finished_continues_when_archive_flush_raises():
+    """The local best-effort barrier cannot prevent durable backend finalization."""
+    statuses = []
+
+    async def update(**kwargs):
+        statuses.append(kwargs["status"])
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.trace_archive.flush_archive_writes", side_effect=RuntimeError("outbox unavailable")),
+        patch("helpers.update_status._update_agent_status_impl", side_effect=update),
+    ):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-fin-flush-error",
+            steps_taken=[{"role": "USER", "text": "Finish despite local flush error"}],
+        )
+
+    assert statuses == ["COMPLETED"]
+
+
 async def run_all_tests():
     print("finished blackbox tests:")
     r = BlackboxResult()
@@ -148,6 +193,14 @@ async def run_all_tests():
     await r.record_async(
         "archive_flush_before_terminal_status",
         test_mark_finished_flushes_archive_before_terminal_status,
+    )
+    await r.record_async(
+        "subagent_flushes_root_archive",
+        test_mark_finished_flushes_root_archive_for_subagent,
+    )
+    await r.record_async(
+        "archive_flush_error_does_not_block_terminal_status",
+        test_mark_finished_continues_when_archive_flush_raises,
     )
     teardown_mock()
     return r.all_passed

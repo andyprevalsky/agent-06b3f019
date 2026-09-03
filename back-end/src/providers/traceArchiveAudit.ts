@@ -56,6 +56,9 @@ function getS3Client(): S3Client {
 /** Enumerate archive roots and surface storage/auth failures to maintenance jobs. */
 export async function listArchiveBundleIdsStrict(): Promise<string[]> {
   if (!archiveEnabled()) return [];
+  if (shouldUseR2() && (process.env.R2_BUCKET_TRACE_ARCHIVE || '') === '') {
+    throw new Error('R2 trace archive is not configured');
+  }
   return shouldUseR2() ? listR2BundleIds() : listLocalBundleIds();
 }
 
@@ -130,7 +133,7 @@ function listLocalBundleIds(): string[] {
 
 async function listR2BundleIds(): Promise<string[]> {
   const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
-  if (bucket === '') return [];
+  if (bucket === '') throw new Error('R2 trace archive is not configured');
   const client = getS3Client();
   const ids = new Set<string>();
   let continuationToken: string | undefined;

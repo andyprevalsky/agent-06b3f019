@@ -13,12 +13,6 @@ import {
   readPlainArchivedArtifact,
 } from './traceArchiveStrict';
 
-const rawPublicManifest = process.env.TRACE_ARCHIVE_PUBLIC_MANIFEST;
-const TRACE_ARCHIVE_PUBLIC_MANIFEST =
-  (rawPublicManifest !== undefined && rawPublicManifest !== ''
-    ? rawPublicManifest
-    : 'true'
-  ).toLowerCase() !== 'false';
 const TRACE_ARCHIVE_MANIFEST_LOCK_SEED = 8_104_327;
 export const TRACE_ARCHIVE_FINALIZING_MARKER = 'manifest.finalization-fence.json';
 
@@ -49,6 +43,11 @@ export interface ManifestReconciliationResult {
   missingFromPublic: string[];
   extraInEncrypted: string[];
   extraInPublic: string[];
+}
+
+function publicManifestEnabled(): boolean {
+  const raw = process.env.TRACE_ARCHIVE_PUBLIC_MANIFEST;
+  return (raw !== undefined && raw !== '' ? raw : 'true').toLowerCase() !== 'false';
 }
 
 function metadataField(artifact: ManifestArtifact, key: string): unknown {
@@ -137,7 +136,7 @@ export async function writePublicManifest(
   refs: ManifestArtifact[],
   benchmarkTaskName?: string
 ): Promise<string | null> {
-  if (!TRACE_ARCHIVE_PUBLIC_MANIFEST) return null;
+  if (!publicManifestEnabled()) return null;
   const publicValue = publicManifest(rootAgentId, refs, benchmarkTaskName);
   const publicManifestRef = await storePlainArtifact({
     rootAgentId,
@@ -238,9 +237,12 @@ async function loadManifestSnapshot(rootAgentId: string): Promise<LoadedManifest
     };
   }
 
+  const includePublicManifest = publicManifestEnabled();
   const [listed, publicBody] = await Promise.all([
     listArchivedObjectsStrict(rootAgentId),
-    readPlainArchivedArtifact({ rootAgentId, objectPath: 'manifest.public.json' }),
+    includePublicManifest
+      ? readPlainArchivedArtifact({ rootAgentId, objectPath: 'manifest.public.json' })
+      : Promise.resolve(null),
   ]);
   const refs = uniqueArtifacts(excludeControlArtifacts(listed));
   const actual = refs
@@ -254,11 +256,11 @@ async function loadManifestSnapshot(rootAgentId: string): Promise<LoadedManifest
       : parseJsonRecord(publicBody, `Public trace archive manifest for ${rootAgentId}`);
   const publicPaths = artifactPaths(publicValue);
   const missingFromEncrypted = pathDifference(actual, encryptedPaths);
-  const missingFromPublic = pathDifference(actual, publicPaths);
+  const missingFromPublic = includePublicManifest ? pathDifference(actual, publicPaths) : [];
   const extraInEncrypted = pathDifference(encryptedPaths, actual);
-  const extraInPublic = pathDifference(publicPaths, actual);
+  const extraInPublic = includePublicManifest ? pathDifference(publicPaths, actual) : [];
   const stale =
-    publicValue === null ||
+    (includePublicManifest && publicValue === null) ||
     missingFromEncrypted.length > 0 ||
     missingFromPublic.length > 0 ||
     extraInEncrypted.length > 0 ||

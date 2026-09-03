@@ -34,7 +34,10 @@ function artifactRef(ref: string, objectPath: string) {
   };
 }
 
-async function seedStaleFinalizedBundle(rootAgentId: string): Promise<string> {
+async function seedStaleFinalizedBundle(
+  rootAgentId: string,
+  options: { includePublic?: boolean } = {}
+): Promise<string> {
   const earlyPath = 'llm/early.json.gz.enc';
   const early = await archiveJson({ rootAgentId, objectPath: earlyPath, value: { early: true } });
   assert(early);
@@ -68,25 +71,27 @@ async function seedStaleFinalizedBundle(rootAgentId: string): Promise<string> {
       },
     },
   });
-  await storePlainArtifact({
-    rootAgentId,
-    objectPath: 'manifest.public.json',
-    body: Buffer.from(
-      JSON.stringify({
-        schema_version: 1,
-        root_agent_id: rootAgentId,
-        benchmark_task_name: 'reconciliation-test',
-        generated_at: new Date(0).toISOString(),
-        artifact_count: 1,
-        fixture_count: 0,
-        provider_count: 0,
-        media_count: 0,
-        llm_trace_count: 1,
-        artifacts: [earlyRef],
-      })
-    ),
-    contentType: 'application/json',
-  });
+  if (options.includePublic !== false) {
+    await storePlainArtifact({
+      rootAgentId,
+      objectPath: 'manifest.public.json',
+      body: Buffer.from(
+        JSON.stringify({
+          schema_version: 1,
+          root_agent_id: rootAgentId,
+          benchmark_task_name: 'reconciliation-test',
+          generated_at: new Date(0).toISOString(),
+          artifact_count: 1,
+          fixture_count: 0,
+          provider_count: 0,
+          media_count: 0,
+          llm_trace_count: 1,
+          artifacts: [earlyRef],
+        })
+      ),
+      contentType: 'application/json',
+    });
+  }
   return earlyPath;
 }
 
@@ -151,6 +156,63 @@ async function main(): Promise<void> {
           earlyPath,
           latePath,
         ]);
+        assert.strictEqual((await inspectFinalizedManifest(rootAgentId)).status, 'current');
+      }
+    )
+  );
+  await test(
+    'public-manifest-off reconciliation converges without creating a public manifest',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined,
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_PUBLIC_MANIFEST: 'false',
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-no-public-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        const rootAgentId = 'reconcile-no-public';
+        await seedStaleFinalizedBundle(rootAgentId, { includePublic: false });
+        const latePath = 'llm/late.json.gz.enc';
+        await archiveJson({ rootAgentId, objectPath: latePath, value: { late: true } });
+
+        const before = await inspectFinalizedManifest(rootAgentId);
+        assert.strictEqual(before.status, 'stale');
+        assert.deepStrictEqual(before.missingFromEncrypted, [latePath]);
+        assert.deepStrictEqual(before.missingFromPublic, []);
+        assert.strictEqual((await reconcileFinalizedManifest(rootAgentId)).status, 'updated');
+        assert.strictEqual((await inspectFinalizedManifest(rootAgentId)).status, 'current');
+        assert.strictEqual(
+          await readPlainArchivedArtifact({ rootAgentId, objectPath: 'manifest.public.json' }),
+          null
+        );
+      }
+    )
+  );
+  await test(
+    'production fake-r2 reconciliation uses its local fake store consistently',
+    withEnv(
+      {
+        NODE_ENV: 'production',
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'fake-r2',
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_PUBLIC_MANIFEST: 'true',
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-prod-fake-r2-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        const rootAgentId = 'reconcile-prod-fake-r2';
+        await seedStaleFinalizedBundle(rootAgentId);
+        await archiveJson({
+          rootAgentId,
+          objectPath: 'llm/late.json.gz.enc',
+          value: { late: true },
+        });
+        assert.strictEqual((await reconcileFinalizedManifest(rootAgentId)).status, 'updated');
         assert.strictEqual((await inspectFinalizedManifest(rootAgentId)).status, 'current');
       }
     )
