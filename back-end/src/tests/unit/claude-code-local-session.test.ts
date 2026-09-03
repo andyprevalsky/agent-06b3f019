@@ -1,10 +1,18 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { createServer } from 'node:net';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, before, test } from 'node:test';
 import {
+  closeLocalClaudeCodeSession,
+  createLocalClaudeCodeSession,
+  createLocalClaudeCodeSessionIfBillingBlocked,
   isE2bTeamBillingBlockError,
   isLocalClaudeCodeSandboxId,
   shouldAllowLocalClaudeCodeFallback,
 } from '../../providers/claudeCodeLocalSession';
+import { prisma } from '../../providers/database';
 
 test('detects E2B team payment-method blocks', () => {
   assert.equal(
@@ -12,9 +20,7 @@ test('detects E2B team payment-method blocks', () => {
     true
   );
   assert.equal(
-    isE2bTeamBillingBlockError(
-      new Error('{"message":"team is blocked: missing payment method"}')
-    ),
+    isE2bTeamBillingBlockError(new Error('{"message":"team is blocked: missing payment method"}')),
     true
   );
   assert.equal(isE2bTeamBillingBlockError(new Error('redis pool timeout')), false);
@@ -23,6 +29,8 @@ test('detects E2B team payment-method blocks', () => {
 test('recognizes local sandbox ids', () => {
   assert.equal(isLocalClaudeCodeSandboxId('local-abc'), true);
   assert.equal(isLocalClaudeCodeSandboxId('i-123'), false);
+  assert.equal(isLocalClaudeCodeSandboxId(null), false);
+  assert.equal(isLocalClaudeCodeSandboxId(undefined), false);
 });
 
 test('disables local fallback on Fly by default', () => {
@@ -34,10 +42,264 @@ test('disables local fallback on Fly by default', () => {
     assert.equal(shouldAllowLocalClaudeCodeFallback(), false);
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     assert.equal(shouldAllowLocalClaudeCodeFallback(), true);
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '0';
+    delete process.env.FLY_APP_NAME;
+    assert.equal(shouldAllowLocalClaudeCodeFallback(), false);
   } finally {
     if (prevFly === undefined) delete process.env.FLY_APP_NAME;
     else process.env.FLY_APP_NAME = prevFly;
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+  }
+});
+
+test('createLocalClaudeCodeSessionIfBillingBlocked returns null when not a billing block', async () => {
+  const result = await createLocalClaudeCodeSessionIfBillingBlocked(new Error('rate limited'), {
+    taskId: 't-no-op',
+    agentId: 'a-no-op',
+    goal: 'noop',
+    envs: {},
+    claudeTokenSource: null,
+    claudeTokenIntegrationId: null,
+  });
+  assert.equal(result, null);
+});
+
+test('createLocalClaudeCodeSessionIfBillingBlocked returns null when Fly disables fallback', async () => {
+  const prevFly = process.env.FLY_APP_NAME;
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  try {
+    delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    process.env.FLY_APP_NAME = 'rose-backend';
+    const result = await createLocalClaudeCodeSessionIfBillingBlocked(
+      new Error('403: team is blocked: missing payment method'),
+      {
+        taskId: 't-fly',
+        agentId: 'a-fly',
+        goal: 'noop',
+        envs: {},
+        claudeTokenSource: null,
+        claudeTokenIntegrationId: null,
+      }
+    );
+    assert.equal(result, null);
+  } finally {
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+  }
+});
+
+const fixtureDir = mkdtempSync(join(tmpdir(), 'claude-local-ws-'));
+const fakeWsServerPath = join(fixtureDir, 'ws-server.mjs');
+// Minimal stand-in for the E2B-template ws-server: bind PORT and stay up until killed.
+writeFileSync(
+  fakeWsServerPath,
+  `
+import { createServer } from 'node:net';
+const port = Number(process.env.PORT);
+const server = createServer();
+server.listen(port, '127.0.0.1', () => {
+  process.stdout.write('listening ' + port + '\\n');
+});
+`
+);
+
+const originalCreate = prisma.claudeCodeSession.create;
+const originalUpdate = prisma.claudeCodeSession.update;
+const createdIds: string[] = [];
+
+before(() => {
+  process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH = fakeWsServerPath;
+  prisma.claudeCodeSession.create = (async ({ data }: { data: { id: string } }) => {
+    createdIds.push(data.id);
+    return data;
+  }) as typeof prisma.claudeCodeSession.create;
+  prisma.claudeCodeSession.update = (async ({ where }: { where: { id: string } }) => {
+    return { id: where.id, status: 'CLOSED' };
+  }) as typeof prisma.claudeCodeSession.update;
+});
+
+after(() => {
+  delete process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
+  prisma.claudeCodeSession.create = originalCreate;
+  prisma.claudeCodeSession.update = originalUpdate;
+  rmSync(fixtureDir, { recursive: true, force: true });
+});
+
+test('createLocalClaudeCodeSession boots a local ws listener and close tears it down', async () => {
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  const prevFly = process.env.FLY_APP_NAME;
+  try {
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
+    delete process.env.FLY_APP_NAME;
+
+    const taskId = `local-session-test-${Date.now()}`;
+    const session = await createLocalClaudeCodeSession({
+      taskId,
+      agentId: 'agent-local-test',
+      goal: 'cover local fallback',
+      envs: { CLAUDE_CODE_TEST: '1' },
+      claudeTokenSource: 'test',
+      claudeTokenIntegrationId: null,
+    });
+
+    assert.equal(session.taskId, taskId);
+    assert.equal(session.sandboxId, `local-${taskId}`);
+    assert.match(session.wsUrl, /^ws:\/\/127\.0\.0\.1:\d+$/);
+    assert.equal(session.uploadedFiles.length, 0);
+    assert.ok(createdIds.includes(taskId));
+
+    // Port must actually be accepting connections.
+    const port = Number(new URL(session.wsUrl).port);
+    await new Promise<void>((resolve, reject) => {
+      const probe = createServer();
+      probe.once('error', () => {
+        // EADDRINUSE means our child still holds the port — expected.
+        resolve();
+      });
+      probe.listen(port, '127.0.0.1', () => {
+        probe.close();
+        reject(new Error(`expected local ws-server to hold port ${port}`));
+      });
+    });
+
+    const closed = await closeLocalClaudeCodeSession(taskId);
+    assert.deepEqual(closed.outputFiles, []);
+  } finally {
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+  }
+});
+
+test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked', async () => {
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  const prevFly = process.env.FLY_APP_NAME;
+  try {
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
+    delete process.env.FLY_APP_NAME;
+    const taskId = `local-session-billing-${Date.now()}`;
+    const session = await createLocalClaudeCodeSessionIfBillingBlocked(
+      new Error('403: team is blocked: missing payment method'),
+      {
+        taskId,
+        agentId: 'agent-billing',
+        goal: 'billing fallback',
+        envs: {},
+        claudeTokenSource: null,
+        claudeTokenIntegrationId: null,
+      }
+    );
+    assert.ok(session);
+    assert.equal(session!.sandboxId, `local-${taskId}`);
+    await closeLocalClaudeCodeSession(taskId);
+  } finally {
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+  }
+});
+
+test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async () => {
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  const prevFly = process.env.FLY_APP_NAME;
+  try {
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
+    delete process.env.FLY_APP_NAME;
+    const taskId = `local-session-attach-${Date.now()}`;
+    const session = await createLocalClaudeCodeSession({
+      taskId,
+      agentId: 'agent-attach',
+      goal: 'attachment staging',
+      envs: {},
+      claudeTokenSource: null,
+      claudeTokenIntegrationId: null,
+      attachments: [
+        {
+          id: 'fp-missing',
+          storage_path: 'missing/does-not-exist.bin',
+          original_filename: 'missing.bin',
+          mime_type: 'application/octet-stream',
+          size_bytes: 1,
+          created_at: new Date().toISOString(),
+        },
+      ],
+    });
+    // Staging failed, so nothing was uploaded into the workdir attachments list.
+    assert.equal(session.uploadedFiles.length, 0);
+    await closeLocalClaudeCodeSession(taskId);
+  } finally {
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+  }
+});
+
+test('closeLocalClaudeCodeSession extracts output files when userId is provided', async () => {
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  const prevFly = process.env.FLY_APP_NAME;
+  try {
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
+    delete process.env.FLY_APP_NAME;
+    const taskId = `local-session-output-${Date.now()}`;
+    await createLocalClaudeCodeSession({
+      taskId,
+      agentId: 'agent-output',
+      goal: 'output extract',
+      envs: {},
+      claudeTokenSource: null,
+      claudeTokenIntegrationId: null,
+    });
+    const outputPath = join('/tmp', 'claude-code-local', taskId, 'output', 'result.txt');
+    writeFileSync(outputPath, 'hello-from-local-claude');
+    // uploadToStorage may throw in this environment; the extract loop must still run and
+    // soft-fail per file rather than aborting close.
+    const closed = await closeLocalClaudeCodeSession(taskId, 'user-output-extract');
+    assert.ok(Array.isArray(closed.outputFiles));
+  } finally {
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+  }
+});
+
+test('createLocalClaudeCodeSession throws when the ws-server never listens', async () => {
+  const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+  const prevFly = process.env.FLY_APP_NAME;
+  const prevOverride = process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
+  const deadServerPath = join(fixtureDir, 'dead-ws-server.mjs');
+  writeFileSync(
+    deadServerPath,
+    `process.stdout.write('dying without listen\\n'); process.exit(0);\n`
+  );
+  try {
+    process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
+    delete process.env.FLY_APP_NAME;
+    process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH = deadServerPath;
+    await assert.rejects(
+      () =>
+        createLocalClaudeCodeSession({
+          taskId: `local-session-dead-${Date.now()}`,
+          agentId: 'agent-dead',
+          goal: 'never listens',
+          envs: {},
+          claudeTokenSource: null,
+          claudeTokenIntegrationId: null,
+        }),
+      /failed to listen on port/i
+    );
+  } finally {
+    if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
+    else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
+    if (prevFly === undefined) delete process.env.FLY_APP_NAME;
+    else process.env.FLY_APP_NAME = prevFly;
+    if (prevOverride === undefined) delete process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
+    else process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH = prevOverride;
   }
 });

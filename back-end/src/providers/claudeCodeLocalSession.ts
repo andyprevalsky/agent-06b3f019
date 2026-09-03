@@ -71,6 +71,12 @@ export async function createLocalClaudeCodeSessionIfBillingBlocked(
 }
 
 function findWsServerPath(): string {
+  // Test seam: unit tests point this at a tiny TCP listener instead of the full
+  // E2B-template ws-server.mjs (which pulls Claude Code deps we do not want in
+  // the coverage process).
+  const override = process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH?.trim();
+  if (override && existsSync(override)) return override;
+
   const candidates = [
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
     join(process.cwd(), 'e2b-templates', 'claude-code', 'ws-server.mjs'),
