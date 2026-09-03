@@ -4,12 +4,13 @@
  * STATE MACHINE:
  * [idle] --enabled+file--> [loading] --ok--> [ready]
  *                            |--fail--> [error]
- * [any] --disabled|file null|unmount--> [idle] (object URLs revoked)
+ * [any] --disabled|file null|unmount--> [idle] (object URLs revoked; in-flight fetch aborted)
  */
 
 import { useEffect, useState } from 'react';
 import type { FilePointer } from '../hooks';
 import {
+  DocumentPreviewLoadError,
   loadDocumentPreview,
   type DocumentPreviewPayload,
 } from './documentPreview.load';
@@ -18,7 +19,7 @@ export type DocumentPreviewLoadState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'ready'; payload: DocumentPreviewPayload }
-  | { status: 'error'; message: string };
+  | { status: 'error'; message: string; downloadUrl?: string };
 
 export function useDocumentPreview(
   file: FilePointer | null | undefined,
@@ -34,30 +35,37 @@ export function useDocumentPreview(
       return;
     }
 
-    let cancelled = false;
+    const controller = new AbortController();
     const objectUrls: string[] = [];
     setLoadState({ status: 'loading' });
 
     void (async () => {
       try {
-        const result = await loadDocumentPreview(file, { activeSheet });
-        objectUrls.push(...result.objectUrls);
-        if (!cancelled) {
-          setLoadState({ status: 'ready', payload: result.payload });
-        } else {
+        const result = await loadDocumentPreview(file, {
+          activeSheet,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) {
           result.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+          return;
         }
+        objectUrls.push(...result.objectUrls);
+        setLoadState({ status: 'ready', payload: result.payload });
       } catch (err) {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        const downloadUrl =
+          err instanceof DocumentPreviewLoadError ? err.downloadUrl : undefined;
         setLoadState({
           status: 'error',
           message: err instanceof Error ? err.message : 'Failed to load document',
+          downloadUrl,
         });
       }
     })();
 
     return () => {
-      cancelled = true;
+      controller.abort();
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [enabled, file, activeSheet]);

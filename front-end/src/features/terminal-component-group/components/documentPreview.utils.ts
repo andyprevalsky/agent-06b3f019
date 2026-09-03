@@ -120,22 +120,27 @@ function isCsv(mime: string, name: string): boolean {
   );
 }
 
+/** OOXML .docx only — legacy CFB `.doc` is not a zip package and cannot be parsed here. */
 function isDocx(mime: string, name: string): boolean {
-  return (
-    mime.includes('wordprocessingml') ||
-    mime === 'application/msword' ||
-    name.endsWith('.docx') ||
-    name.endsWith('.doc')
-  );
+  return mime.includes('wordprocessingml') || name.endsWith('.docx');
 }
 
+/** OOXML .pptx only — legacy CFB `.ppt` is not a zip package and cannot be parsed here. */
 function isPptx(mime: string, name: string): boolean {
-  return (
-    mime.includes('presentationml') ||
-    mime.includes('ms-powerpoint') ||
-    name.endsWith('.pptx') ||
-    name.endsWith('.ppt')
-  );
+  return mime.includes('presentationml') || name.endsWith('.pptx');
+}
+
+/**
+ * Harden untrusted HTML for iframe srcDoc previews.
+ * Blocks network/subresource loads via CSP while allowing inline styles + data: images.
+ */
+export function hardenHtmlPreview(html: string): string {
+  const csp =
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none';\">";
+  if (/<head[\s>]/i.test(html)) {
+    return html.replace(/<head([^>]*)>/i, `<head$1>${csp}`);
+  }
+  return `<!DOCTYPE html><html><head>${csp}</head><body>${html}</body></html>`;
 }
 
 /** Classify how a FilePointer should render inside the document preview drawer. */

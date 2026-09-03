@@ -3,6 +3,10 @@
  */
 import { cn } from '@/lib/utils';
 
+/** Cap preview render so large sheets cannot blow call-stack / main-thread. */
+export const SPREADSHEET_PREVIEW_MAX_ROWS = 200;
+export const SPREADSHEET_PREVIEW_MAX_COLS = 40;
+
 interface SpreadsheetTableProps {
   rows: string[][];
   className?: string;
@@ -21,9 +25,13 @@ export function SpreadsheetTable({
     return <p className="p-4 text-sm text-muted-foreground">This sheet has no rows.</p>;
   }
 
-  const colCount = Math.max(...rows.map((row) => row.length), 1);
-  const header = rows[0] ?? [];
-  const body = rows.slice(1);
+  const previewRows = rows.slice(0, SPREADSHEET_PREVIEW_MAX_ROWS + 1).map((row) =>
+    row.slice(0, SPREADSHEET_PREVIEW_MAX_COLS),
+  );
+  const colCount = previewRows.reduce((max, row) => Math.max(max, row.length), 1);
+  const header = previewRows[0] ?? [];
+  const body = previewRows.slice(1);
+  const truncated = rows.length > previewRows.length || rows.some((row) => row.length > colCount);
   const thPad = dense ? 'px-1.5 py-1' : 'px-3 py-2';
   const tdPad = dense ? 'px-1.5 py-0.5' : 'px-3 py-1.5';
 
@@ -60,6 +68,11 @@ export function SpreadsheetTable({
           ))}
         </tbody>
       </table>
+      {truncated ? (
+        <p className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
+          Preview truncated — download the file for the full sheet.
+        </p>
+      ) : null}
     </div>
   );
 }

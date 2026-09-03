@@ -150,7 +150,8 @@ function MiniBody({
 
   if (
     (kind === 'spreadsheet' || kind === 'csv' || kind === 'numbers') &&
-    payload.spreadsheet
+    payload.spreadsheet &&
+    payload.spreadsheet.rows.length > 0
   ) {
     return (
       <SpreadsheetTable

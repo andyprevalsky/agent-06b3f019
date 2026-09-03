@@ -96,7 +96,7 @@
     "three": "^0.160.1",
     "unist-util-visit": "^5.0.0",
     "vaul": "^0.9.3",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^4.0.5"
   },
   "devDependencies": {

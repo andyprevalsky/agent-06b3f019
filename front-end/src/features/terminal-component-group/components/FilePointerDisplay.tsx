@@ -6,6 +6,7 @@
  * [any] --click--> opens DocumentPreviewDrawer (RIGHT Sheet)
  *
  * Mini-previews are for CompletionSummaryCard only. Elsewhere this stays a compact chip.
+ * The mini-preview is a sibling of the button (never nested interactive content).
  */
 
 import { useState } from 'react';
@@ -30,47 +31,70 @@ export function FilePointerDisplay({
   const typeLabel = documentTypeLabel(file);
   const miniLoadState = useDocumentPreview(file, showMiniPreview);
 
+  const header = (
+    <>
+      <FileIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <span
+        className={cn(
+          'truncate',
+          showMiniPreview ? 'text-sm font-medium text-foreground' : 'max-w-[200px]',
+        )}
+      >
+        {file.original_filename}
+      </span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">({typeLabel})</span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">
+        ({formatFileSize(file.size_bytes)})
+      </span>
+      <Eye
+        className={cn('h-3 w-3 shrink-0 text-muted-foreground', showMiniPreview && 'ml-auto')}
+      />
+    </>
+  );
+
   return (
     <>
-      <button
-        type="button"
-        data-testid="file-pointer-chip"
-        data-filename={file.original_filename}
-        data-mime={file.mime_type}
-        data-mini-preview={showMiniPreview ? 'true' : 'false'}
-        onClick={() => setOpen(true)}
-        className={cn(
-          showMiniPreview
-            ? 'flex w-full max-w-md flex-col gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-muted/70'
-            : 'inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-left text-sm text-foreground transition-colors hover:bg-muted/80',
-        )}
-        title={`View ${file.original_filename}`}
-      >
-        <div className="flex min-w-0 items-center gap-1.5">
-          <FileIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <span
-            className={cn(
-              'truncate',
-              showMiniPreview ? 'text-sm font-medium text-foreground' : 'max-w-[200px]',
-            )}
+      {showMiniPreview ? (
+        <div
+          className="flex w-full max-w-md flex-col gap-2 rounded-md border border-border/60 bg-muted/40 px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-muted/70"
+          data-testid="file-pointer-chip-wrap"
+        >
+          <button
+            type="button"
+            data-testid="file-pointer-chip"
+            data-filename={file.original_filename}
+            data-mime={file.mime_type}
+            data-mini-preview="true"
+            onClick={() => setOpen(true)}
+            className="flex min-w-0 items-center gap-1.5 text-left"
+            title={`View ${file.original_filename}`}
           >
-            {file.original_filename}
-          </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground">({typeLabel})</span>
-          <span className="shrink-0 text-[10px] text-muted-foreground">
-            ({formatFileSize(file.size_bytes)})
-          </span>
-          <Eye
-            className={cn(
-              'h-3 w-3 shrink-0 text-muted-foreground',
-              showMiniPreview && 'ml-auto',
-            )}
-          />
+            {header}
+          </button>
+          <button
+            type="button"
+            data-testid="file-pointer-mini-hit"
+            onClick={() => setOpen(true)}
+            className="w-full text-left"
+            title={`View ${file.original_filename}`}
+          >
+            <DocumentMiniPreview filename={file.original_filename} loadState={miniLoadState} />
+          </button>
         </div>
-        {showMiniPreview ? (
-          <DocumentMiniPreview filename={file.original_filename} loadState={miniLoadState} />
-        ) : null}
-      </button>
+      ) : (
+        <button
+          type="button"
+          data-testid="file-pointer-chip"
+          data-filename={file.original_filename}
+          data-mime={file.mime_type}
+          data-mini-preview="false"
+          onClick={() => setOpen(true)}
+          className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-left text-sm text-foreground transition-colors hover:bg-muted/80"
+          title={`View ${file.original_filename}`}
+        >
+          {header}
+        </button>
+      )}
       <DocumentPreviewDrawer file={file} open={open} onOpenChange={setOpen} />
     </>
   );

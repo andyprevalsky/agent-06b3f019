@@ -254,6 +254,10 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     const iframe = await within(drawer).findByTestId('document-preview-html');
     expect(iframe.tagName).toBe('IFRAME');
     expect(iframe).toHaveAttribute('srcdoc', expect.stringContaining('Rose Labs Report'));
+    expect(iframe).toHaveAttribute('srcdoc', expect.stringContaining('Content-Security-Policy'));
+    // Opaque-origin sandbox: scripts ok, same-origin must stay off (XSS / token theft).
+    expect(iframe.getAttribute('sandbox') ?? '').toContain('allow-scripts');
+    expect(iframe.getAttribute('sandbox') ?? '').not.toContain('allow-same-origin');
     expect(downloadTextMock).toHaveBeenCalled();
   });
 
