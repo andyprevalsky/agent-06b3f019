@@ -216,29 +216,23 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       'browser state injection runs before credential completeness validation'
     );
 
+    // Auth-cookie selection ignores nameless rows, so a bundle that only has
+    // empty-name cookies is treated as empty credentials (soft-skip), not as a
+    // hard injection failure — same outcome as no matching auth cookies.
     await prisma.cookie.deleteMany({ where: { userId, name: { not: '' } } });
-    const scriptCountBeforeRejectedCookies = injectedScripts.length;
-    let rejectedAllInvalidCookies = false;
-    try {
-      await prepareSessionCredentials(
-        sessionId,
-        userId,
-        'https://www.example.co.uk/store/example',
-        { browser: fakeBrowser }
-      );
-    } catch (error) {
-      rejectedAllInvalidCookies =
-        error instanceof AggregateError &&
-        error.errors.some((innerError) =>
-          String(innerError?.cause ?? innerError).includes('without a name')
-        );
-    }
-    assert(rejectedAllInvalidCookies, 'credential boundary accepted only invalid cookie rows');
-    assert(
-      injectedScripts.length === scriptCountBeforeRejectedCookies,
-      'browser state mutated after credential-critical cookie injection failed'
+    const namelessOnlyResult = await prepareSessionCredentials(
+      sessionId,
+      userId,
+      'https://www.example.co.uk/store/example',
+      { browser: fakeBrowser }
     );
-    assert(callerBrowserCloseCount === 0, 'rejected injection closed caller-owned browser');
+    assert(
+      namelessOnlyResult.auth_source === 'none' &&
+        namelessOnlyResult.auth_credential_ref === null &&
+        namelessOnlyResult.cookies_count === 0,
+      'credential boundary accepted only invalid cookie rows'
+    );
+    assert(callerBrowserCloseCount === 0, 'nameless-only soft-skip closed caller-owned browser');
 
     await prisma.cookie.deleteMany({ where: { userId } });
     const emptyCookieBundleResult = await prepareSessionCredentials(

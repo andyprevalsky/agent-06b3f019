@@ -35,7 +35,15 @@
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type SyntheticEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
@@ -68,6 +76,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const [recordingState, setRecordingState] = useState<'idle' | 'loading' | 'ready' | 'error'>(
     'idle',
   );
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   // Which Kernel replay segment (one per session/rotation) is currently playing.
   // The segments auto-advance into one continuous recording (baseline -> each
   // rotation), so this is the playhead, not a manual tab selection.
@@ -213,6 +222,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
+    setRecordingError(null);
     setSegmentIndex(0);
     setPlayheadSec(0);
     segmentDurationsRef.current = [];
@@ -259,10 +269,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     setPlayheadSec(playheadFromSegments(segmentDurationsRef.current, segIdx, video.currentTime));
   }
 
-  function handleVideoTimeSync(
-    event: SyntheticEvent<HTMLVideoElement>,
-    segIdx: number = 0,
-  ) {
+  function handleVideoTimeSync(event: SyntheticEvent<HTMLVideoElement>, segIdx: number = 0) {
     syncPlayheadFromVideo(event.currentTarget, segIdx);
   }
 
@@ -306,8 +313,17 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
       setPlayheadSec(0);
       segmentDurationsRef.current = [];
       setRecordingState('ready');
-    } catch {
+    } catch (err) {
       if (loadGeneration === recordingLoadGeneration.current) {
+        const message = err instanceof Error ? err.message : '';
+        // Ownership failures happen while signing the attachment URL. A later
+        // 403 on the signed recording download is usually an expired URL, not
+        // the wrong account — keep that as a generic load failure.
+        setRecordingError(
+          /Failed to get attachment URL.*\(403\)|Access denied/i.test(message)
+            ? 'Sign in as the agent owner to load this recording.'
+            : 'Failed to load recording.',
+        );
         setRecordingState('error');
       }
     }
@@ -382,7 +398,9 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                   <p className="text-xs text-muted-foreground">Loading recording…</p>
                 )}
                 {hasRecording && recordingState === 'error' && (
-                  <p className="text-xs text-red-500">Failed to load recording.</p>
+                  <p className="text-xs text-red-500">
+                    {recordingError ?? 'Failed to load recording.'}
+                  </p>
                 )}
                 {/* Stitched replay: rotate_ip's per-session segments were
                     concatenated server-side into ONE continuous MP4, so the whole
@@ -456,9 +474,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         onSeeked={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onLoadedMetadata={(e) => handleVideoTimeSync(e, segmentIndex)}
                         onEnded={() => {
-                          setSegmentIndex((i) =>
-                            i + 1 < recordingSource.urls.length ? i + 1 : i,
-                          );
+                          setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
                         }}
                         className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
                       />
@@ -536,11 +552,7 @@ function RecordingWithLiveTrajectory({
   }, []);
 
   return (
-    <div
-      ref={anchorRef}
-      data-testid="recording-with-live-trajectory"
-      className="relative w-full"
-    >
+    <div ref={anchorRef} data-testid="recording-with-live-trajectory" className="relative w-full">
       {children}
       {panelStyle &&
         createPortal(

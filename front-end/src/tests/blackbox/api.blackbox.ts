@@ -378,7 +378,7 @@ describe('api.ts', () => {
           HttpResponse.json({ error: 'no' }, { status: 404 }),
         ),
       );
-      await expect(getAttachmentUrl('a', 'f', 'p')).rejects.toThrow('Failed to get attachment URL');
+      await expect(getAttachmentUrl('a', 'f', 'p')).rejects.toThrow(/Failed to get attachment URL/);
     });
   });
 
