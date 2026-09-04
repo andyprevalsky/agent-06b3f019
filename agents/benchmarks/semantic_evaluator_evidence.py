@@ -33,7 +33,22 @@ DECLARED_JUDGE_METADATA_KEYS = (
     "subAgentId",
     "task_id",
     "browser_url",
+    "agentType",
 )
+
+# Lower rank = pack first when the full/slim evidence exceeds SINGLE_TURN_CHAR_BUDGET.
+# web_* stay lowest so mass-agent root GP spam cannot crowd out coding-agent rows
+# or re-inflate the compact_only bundle toward the old 35MB tree path.
+_GROUNDING_TOOL_RANK: dict[str, int] = {
+    "code_agent_sdk_events": 0,
+    "claude_code_history": 1,
+    "spawn_claude_code_agent": 2,
+    "web_search": 4,
+    "web_fetch": 5,
+}
+_LOW_PRIORITY_GROUNDING_TEXT_CAP = 2_000
+_LOW_PRIORITY_GROUNDING_MAX_ROWS = 10
+_EXPLORE_GROUNDING_RANK = 3
 
 
 def _root_agent_id(data: dict) -> str:
@@ -256,3 +271,82 @@ def single_turn_evidence_char_count(evidence: list[dict[str, Any]]) -> int:
 
 def single_turn_evidence_exceeds_budget(evidence: list[dict[str, Any]]) -> bool:
     return single_turn_evidence_char_count(evidence) > SINGLE_TURN_CHAR_BUDGET
+
+
+def _grounding_tool_rank(metadata: dict[str, Any]) -> int | None:
+    """Return pack priority for a tool row, or None when it is not grounding."""
+    tool_name = str(metadata.get("toolName") or "")
+    if tool_name in _GROUNDING_TOOL_RANK:
+        return _GROUNDING_TOOL_RANK[tool_name]
+    if tool_name == "spawn_agent":
+        agent_type = str(metadata.get("agentType") or "").lower()
+        if agent_type == "explore":
+            return _EXPLORE_GROUNDING_RANK
+        if agent_type == "code":
+            # Code sub-agents are the same grounding class as spawn_claude_code_agent.
+            return _GROUNDING_TOOL_RANK["spawn_claude_code_agent"]
+    return None
+
+
+def messages_have_code_agent_grounding(data: dict) -> bool:
+    """True when root messages include coding-agent tool rows judges need to see."""
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        rank = _grounding_tool_rank(metadata)
+        if rank is not None and rank <= _GROUNDING_TOOL_RANK["spawn_claude_code_agent"]:
+            return True
+    return False
+
+
+def pack_grounding_priority_rows(
+    data: dict,
+    *,
+    base_rows: list[dict[str, Any]],
+    budget: int = SINGLE_TURN_CHAR_BUDGET,
+) -> list[dict[str, Any]]:
+    """Greedily pack high-value grounding tool rows under the single-turn budget.
+
+    Used when full/slim transcripts exceed ``SINGLE_TURN_CHAR_BUDGET`` so
+    compact_only keeps coding-agent / explore / search evidence instead of
+    collapsing to completion + structured_output only.
+    """
+    root_id = _root_agent_id(data)
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    low_priority_kept = 0
+    messages = [m for m in (data.get("messages") or []) if isinstance(m, dict)]
+    for index, message in enumerate(messages):
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        rank = _grounding_tool_rank(metadata)
+        if rank is None:
+            continue
+        tool_name = str(metadata.get("toolName") or "")
+        text_cap = SINGLE_TURN_TEXT_CAP
+        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
+            text_cap = _LOW_PRIORITY_GROUNDING_TEXT_CAP
+        row_metadata = _message_metadata(message)
+        if root_id:
+            row_metadata["source_agent_id"] = root_id
+        role = str(message.get("role") or "TOOL").upper()
+        row = {
+            "role": role or "TOOL",
+            "text": _message_text(message, text_cap),
+            "metadata": row_metadata,
+        }
+        # Negate index so more recent rows sort first within the same rank.
+        candidates.append((rank, -index, row))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    packed = list(base_rows)
+    for rank, _neg_index, row in candidates:
+        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
+            if low_priority_kept >= _LOW_PRIORITY_GROUNDING_MAX_ROWS:
+                continue
+        trial = [*packed, row]
+        if single_turn_evidence_char_count(trial) > budget:
+            continue
+        packed.append(row)
+        if rank >= _GROUNDING_TOOL_RANK["web_search"]:
+            low_priority_kept += 1
+    return packed

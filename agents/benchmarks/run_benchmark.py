@@ -9349,6 +9349,7 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         SINGLE_TURN_TEXT_CAP,
         _append_completion_card,
         build_single_turn_evidence,
+        pack_grounding_priority_rows,
         single_turn_evidence_char_count,
         single_turn_evidence_exceeds_budget,
     )
@@ -9430,18 +9431,22 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         _dbg_evidence("B", "return_slim_under_budget", evidence, "slim")
         # #endregion
         return evidence
+    # Full/slim transcripts blew the budget. Keep completion + structured_output
+    # + compact typed state, then pack coding-agent / explore / search grounding
+    # by priority instead of dropping every tool row (cuda-kernel judge regression).
     compact_only: list[dict] = []
     _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
     evidence = _apply_compact_benchmark_state(compact_only, compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
+    evidence = pack_grounding_priority_rows(data, base_rows=evidence)
     # #region agent log
-    _dbg_evidence("C", "after_compact_only_drop_tools", evidence, "compact_only")
+    _dbg_evidence("C", "after_compact_only_grounding_pack", evidence, "compact_only")
     # #endregion
     if not single_turn_evidence_exceeds_budget(evidence):
         # #region agent log
         _dbg_evidence(
             "C",
-            "return_compact_only_no_grounding",
+            "return_compact_only_with_grounding",
             evidence,
             "compact_only",
         )
@@ -11552,11 +11557,16 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
+    from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
+
     _needs_cc_hydrate = any(
         check.get("type") == "claude_code_session_output"
         for evaluator in task.evaluators
         if evaluator.get("method") == "static_check"
         for check in evaluator.get("checks", [])
+    ) or (
+        any(evaluator.get("method") == "single_turn_llm_judge" for evaluator in task.evaluators)
+        and messages_have_code_agent_grounding(data)
     )
     if _needs_cc_hydrate:
         await _hydrate_claude_code_sessions(data)
