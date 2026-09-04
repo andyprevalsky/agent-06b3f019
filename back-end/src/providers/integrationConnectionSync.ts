@@ -112,18 +112,13 @@ export async function resolveAccountIdForCredentialRecovery(
   encryptedCredentials: string
 ): Promise<string | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
-  if (
-    decryptionKey !== undefined &&
-    decryptionKey !== '' &&
-    integrationName === 'gpt_code'
-  ) {
+  if (decryptionKey !== undefined && decryptionKey !== '' && integrationName === 'gpt_code') {
     const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
     if (decrypted !== null && decrypted !== '') {
       try {
         const parsed = JSON.parse(decrypted) as Record<string, unknown>;
         const tokens = parsed.tokens as Record<string, unknown> | undefined;
-        const fromEnvelope =
-          typeof tokens?.account_id === 'string' ? tokens.account_id.trim() : '';
+        const fromEnvelope = typeof tokens?.account_id === 'string' ? tokens.account_id.trim() : '';
         if (fromEnvelope !== '') return fromEnvelope;
       } catch {
         // Envelope shape is validated elsewhere; ignore parse misses here.

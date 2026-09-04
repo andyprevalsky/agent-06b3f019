@@ -8,19 +8,24 @@ classification: third-party-failure
 problem_class: fixture-environment-data-mismatch
 first_bad_boundary: AgentCard REST/API-key auth now returns 410 endpoint_retired; only OAuth client-credentials still mint a token
 symptoms:
+  - "Could not obtain an AgentCard Organization MCP access token"
+  - "Invalid or expired organization token"
   - "410 endpoint_retired"
   - "API keys are retired. Exchange your OAuth client credentials for a token instead"
-  - "~/.agent-cards-admin.json .accessToken expired (WorkOS session, ~24h)"
+  - "agentcard_org_token_unavailable"
 tags:
   - agentcard
   - oauth
   - credentials
   - env-vars
   - third-party-deprecation
+  - mcp
+  - jwt
 sources:
   - memory:project_agentcard_companies_oauth_mcp
-repro: none-recorded
-status: mitigated
+  - PR #1242
+repro: back-end/src/tests/blackbox/agentcard-org-runtime.blackbox.ts
+status: fixed
 ---
 
 ## Problem
@@ -73,3 +78,49 @@ vars still requires explicit user approval.
 Prefer a self-refreshing client-credentials exchange over any static provider key,
 and delete dead credentials from every `.env` and prod surface — a retired key
 that only mocked tests exercise will fail silently until a live call needs it.
+
+## Recurrence — 2026-09-03 (org MCP rejects the token-endpoint JWT)
+
+`/deploy` Step 6a (`scripts/run-bench --local agent-payment-*`) failed while
+seeding the payment fixture. The identical live probe against HEAD
+`org-runtime.ts` failed, and the same probe passed after the fix:
+
+```
+npx tsx /tmp/probe-org-wallet.ts
+# HEAD: WALLET_FAIL status=502 code=agentcard_org_token_unavailable
+#       "Could not obtain an AgentCard Organization MCP access token"
+# fix:  WALLET_OK livemode=false (sandbox) funded get_company_wallet
+```
+
+Owned first-bad boundary: `AgentCardOrgRuntime.fetchAccessToken` POSTed
+`application/x-www-form-urlencoded` client credentials to the org token
+endpoint, then handed the minted JWT to MCP SDK `initialize` / `tools/call`.
+Live evidence on the Render org client:
+
+1. Form-body client-credentials always returned HTTP 500 `Token grant failed`
+   (the 6a error).
+2. HTTP Basic sometimes minted a JWT with `tokenUse: org_client`, `scope: api`,
+   and no `aud`. MCP rejected that JWT: `Invalid or expired organization token`.
+3. MCP SDK `initialize` 401'd on a healthy `acs_…` secret. Direct JSON-RPC
+   `tools/call` with `Authorization: Bearer <acs_…>` succeeded.
+
+Why the 2026-07-25 guardrail missed it: unit tests mocked a successful JWT
+exchange and never asserted the Bearer bytes against live `tools/call`, so the
+auto-refresh path stayed green while MCP had already stopped accepting those
+JWTs. `.env.example` already documented the `acs_…` secret as a direct bearer.
+
+Fix: `getAccessToken()` returns `AGENTCARD_ORG_OAUTH_CLIENT_SECRET` (else a
+non-`sk_` `AGENTCARD_ORG_MCP_ACCESS_TOKEN`). Default transport POSTs JSON-RPC
+`tools/call` to `AGENTCARD_MCP_RESOURCE` and skips MCP `initialize`. Cemented by
+`agentcard-org-runtime.blackbox.ts` (`tokenRequests === 0`, Bearer is the
+secret) plus unit tests in `agentcard-org-runtime.test.ts` and
+`agentcard-mcp-runtime-extras.test.ts`.
+
+Local `.env` org OAuth (`sha16 6e63d4d747bd90c6`) was a different client than
+Render (`sha16 e6435eec84afb6dd`) and could not `get_company_wallet`; that is a
+fixture mismatch, not the auth-shape bug. Synced local from Render for the
+live probe; `.env` is not committed.
+
+Classification of this recurrence: `our-bug` /
+`logical-inconsistency-in-harness-contracts` (we sent the wrong credential
+shape to the provider MCP).

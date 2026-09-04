@@ -73,6 +73,7 @@ model Agent {
   messages                         Message[]
   toolUsages                       ToolUsage[]
   temporalWorkflowCleanups         TemporalWorkflowCleanup[]
+  traceArchiveFinalization         TraceArchiveFinalization?
   purchaseSpends                   PurchaseSpend[]
   verifier                         Verifier?
 
@@ -103,6 +104,24 @@ model TemporalWorkflowCleanup {
 
   @@id([agentId, workflowId])
   @@index([notBefore, agentId, workflowId])
+  @@index([leaseUntil])
+}
+
+/// Durable outbox for root trace archives that must be finalized after a
+/// soft-delete. The row is created in the same transaction as `Agent.deletedAt`
+/// and removed only after the terminal R2 bundle is complete.
+model TraceArchiveFinalization {
+  rootAgentId  String    @id
+  notBefore    DateTime
+  leaseToken   String?
+  leaseUntil   DateTime?
+  attemptCount Int       @default(0)
+  lastError    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  agent        Agent     @relation(fields: [rootAgentId], references: [id], onDelete: Cascade)
+
+  @@index([notBefore, rootAgentId])
   @@index([leaseUntil])
 }
 

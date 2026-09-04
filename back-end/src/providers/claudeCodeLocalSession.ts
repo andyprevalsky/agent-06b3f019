@@ -17,14 +17,7 @@
  */
 import { type ChildProcess, spawn } from 'child_process';
 import { createServer, Socket } from 'net';
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join, resolve } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';

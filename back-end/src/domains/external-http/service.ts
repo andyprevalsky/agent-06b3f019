@@ -6,12 +6,12 @@ import {
   INITIAL_RETRY_DELAY_MS,
   MAX_ATTEMPTS,
   MAX_REDIRECTS,
-  MAX_RESPONSE_BODY_BYTES,
   MAX_RETRY_DELAY_MS,
   REQUEST_TIMEOUT_MS,
   RETRYABLE_STATUS_CODES,
 } from './config';
 import { ExternalHttpRequestFailedError, InvalidExternalHttpRequestError } from './errors';
+import { readResponseBody } from './responseBody';
 import type { ExternalHttpRequestBody, ExternalHttpResponseBody, HttpMethod } from './types';
 import {
   assertFetchableExternalUrl,
@@ -130,93 +130,6 @@ async function assertUrlResolvesToPublicAddress(url: string): Promise<void> {
   }
 }
 
-async function readBoundedResponseBuffer(response: Response): Promise<Buffer> {
-  const contentLengthHeader = response.headers.get('content-length');
-  if (contentLengthHeader !== null && contentLengthHeader.trim() !== '') {
-    const declared = Number(contentLengthHeader);
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BODY_BYTES) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new ExternalHttpRequestFailedError(
-        `External HTTP response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`,
-        response.status,
-        null
-      );
-    }
-  }
-
-  if (response.body === null) {
-    return Buffer.alloc(0);
-  }
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    if (value === undefined) {
-      continue;
-    }
-    total += value.byteLength;
-    if (total > MAX_RESPONSE_BODY_BYTES) {
-      await reader.cancel().catch(() => undefined);
-      throw new ExternalHttpRequestFailedError(
-        `External HTTP response exceeds ${MAX_RESPONSE_BODY_BYTES} bytes`,
-        response.status,
-        null
-      );
-    }
-    chunks.push(value);
-  }
-
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
-}
-
-async function readResponseBody(response: Response): Promise<{
-  body: unknown;
-  body_encoding: ExternalHttpResponseBody['body_encoding'];
-  content_type: string | null;
-}> {
-  const contentType = response.headers.get('content-type');
-  const buffer = await readBoundedResponseBuffer(response);
-
-  if (buffer.length === 0) {
-    return { body: '', body_encoding: 'text', content_type: contentType };
-  }
-
-  const normalizedType = (contentType ?? '').toLowerCase();
-  const text = buffer.toString('utf8');
-
-  if (
-    normalizedType.includes('application/json') ||
-    normalizedType.includes('+json') ||
-    text.trimStart().startsWith('{') ||
-    text.trimStart().startsWith('[')
-  ) {
-    try {
-      return { body: JSON.parse(text), body_encoding: 'json', content_type: contentType };
-    } catch {
-      return { body: text, body_encoding: 'text', content_type: contentType };
-    }
-  }
-
-  if (
-    normalizedType.startsWith('text/') ||
-    normalizedType.includes('xml') ||
-    normalizedType.includes('javascript')
-  ) {
-    return { body: text, body_encoding: 'text', content_type: contentType };
-  }
-
-  return {
-    body: buffer.toString('base64'),
-    body_encoding: 'base64',
-    content_type: contentType,
-  };
-}
-
 function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
   const headers = new Headers(request.headers ?? {});
   const init: RequestInit = {
@@ -249,10 +162,7 @@ function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
   return init;
 }
 
-async function fetchWithValidatedRedirects(
-  startUrl: string,
-  init: RequestInit
-): Promise<Response> {
+async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit): Promise<Response> {
   let currentUrl = startUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
