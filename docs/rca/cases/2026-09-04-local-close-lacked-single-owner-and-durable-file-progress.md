@@ -75,6 +75,13 @@ and one upload for the already-completed file while the failed file retries at
 the identical storage URL. The backend blackbox runner includes the file as the
 `claude-code-local-close` domain.
 
+Persisted candidates are checked for existence and size before being read. A
+vanished candidate is checkpointed as missing and omitted, while an oversized
+candidate fails before allocation or upload. A close without `userId` stops the
+process and records the database close but retains ownership and files without
+setting `outputFiles`; a later close with identity can therefore finish the
+authorized extraction.
+
 ## Human feedback
 
 The user insisted the isolation work be finished, cemented, and deployed after

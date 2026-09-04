@@ -91,6 +91,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       } catch (error) {
         console.error('Failed to load agent:', error);
         if (clearSelectionOnFailure && selectedAgentIdRef.current === agentId) {
+          setIsLoadingAgent(false);
           selectedAgentIdRef.current = null;
           setSelectedAgentIdState(null);
           syncUrlParam(null);

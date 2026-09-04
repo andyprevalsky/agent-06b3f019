@@ -4,6 +4,7 @@ import {
   isLocalBenchmarkAgentPhoneMockEnabled,
 } from './smsTransportMock';
 import { createHash } from './crypto';
+import { prisma } from './database';
 
 const log = createLogger('AgentPhone');
 
@@ -199,13 +200,13 @@ async function createNumber(agentId: string, areaCode: string) {
 }
 
 async function findAgentByMarker(marker: string): Promise<AgentPhoneAgent | null> {
-  const signal = requestSignal();
   const matches: AgentPhoneAgent[] = [];
   let offset = 0;
+  let scanComplete = false;
   while (offset < MAX_RECONCILE_AGENTS) {
     const response = await fetch(
       `${baseUrl()}/agents?limit=${RECONCILE_PAGE_SIZE}&offset=${offset}`,
-      { headers: authHeaders(), signal }
+      { headers: authHeaders(), signal: requestSignal() }
     );
     const data = await parseJson(response);
     if (!response.ok) {
@@ -218,9 +219,24 @@ async function findAgentByMarker(marker: string): Promise<AgentPhoneAgent | null
       const agent = agentFromPayload(payload);
       if (agent?.description === marker) matches.push(agent);
     }
-    const total = typeof data.total === 'number' ? data.total : offset + page.length;
+    const total =
+      typeof data.total === 'number' && Number.isFinite(data.total) && data.total >= 0
+        ? data.total
+        : null;
     offset += page.length;
-    if (page.length === 0 || page.length < RECONCILE_PAGE_SIZE || offset >= total) break;
+    if (
+      page.length === 0 ||
+      page.length < RECONCILE_PAGE_SIZE ||
+      (total !== null && offset >= total)
+    ) {
+      scanComplete = true;
+      break;
+    }
+  }
+  if (!scanComplete) {
+    throw new Error(
+      `AgentPhone reconciliation exceeded the ${MAX_RECONCILE_AGENTS}-agent scan bound`
+    );
   }
   if (matches.length > 1) {
     throw new Error(`AgentPhone reconciliation found ${matches.length} resources for one marker`);
@@ -258,54 +274,49 @@ async function deleteAgent(agentId: string): Promise<void> {
   }
 }
 
-export async function createAgentPhoneNumber(params: {
+async function provisionAgentPhoneNumber(params: {
   userId: string;
   agentName?: string | null;
   areaCode?: string | null;
-}): Promise<AgentPhoneNumber | null> {
-  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
-    const number = buildMockAgentPhoneNumber(params.userId);
-    log.info('Mocked AgentPhone number provisioning for benchmark run', {
-      userId: params.userId,
-      agentId: number.agentId,
-      numberId: number.numberId,
-    });
-    return number;
-  }
-
-  if (!isAgentPhoneConfigured()) {
-    log.warn('AGENTPHONE_API_KEY missing; agent phone creation skipped', {
-      userId: params.userId,
-    });
-    return null;
-  }
-
+}): Promise<AgentPhoneNumber> {
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
   const marker = markerForUser(params.userId);
-  let agent: AgentPhoneAgent;
+  let agent: AgentPhoneAgent | null;
   try {
-    agent = await createAgent(displayName, marker);
+    agent = await findAgentByMarker(marker);
   } catch (error) {
-    if (isConfirmedAgentCreateRejection(error)) {
-      throw new AgentPhoneProvisioningError(
-        `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
-        true
-      );
-    }
+    throw new AgentPhoneProvisioningError(
+      `AgentPhone provisioning state is uncertain; reconciliation failed before create: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      false
+    );
+  }
+  if (agent === null) {
     try {
-      const recovered = await findAgentByMarker(marker);
-      if (recovered === null) {
-        throw new Error('no exact provisioning marker was visible after a complete scan');
+      agent = await createAgent(displayName, marker);
+    } catch (error) {
+      if (isConfirmedAgentCreateRejection(error)) {
+        throw new AgentPhoneProvisioningError(
+          `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
+          true
+        );
       }
-      agent = recovered;
-    } catch (reconcileError) {
-      throw new AgentPhoneProvisioningError(
-        `AgentPhone agent creation is uncertain; reconciliation failed: ${
-          reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
-        }`,
-        false
-      );
+      try {
+        const recovered = await findAgentByMarker(marker);
+        if (recovered === null) {
+          throw new Error('no exact provisioning marker was visible after a complete scan');
+        }
+        agent = recovered;
+      } catch (reconcileError) {
+        throw new AgentPhoneProvisioningError(
+          `AgentPhone agent creation is uncertain; reconciliation failed: ${
+            reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+          }`,
+          false
+        );
+      }
     }
   }
 
@@ -354,6 +365,41 @@ export async function createAgentPhoneNumber(params: {
     numberId: number.id,
     phoneNumber: number.phoneNumber,
   };
+}
+
+export async function createAgentPhoneNumber(params: {
+  userId: string;
+  agentName?: string | null;
+  areaCode?: string | null;
+}): Promise<AgentPhoneNumber | null> {
+  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
+    const number = buildMockAgentPhoneNumber(params.userId);
+    log.info('Mocked AgentPhone number provisioning for benchmark run', {
+      userId: params.userId,
+      agentId: number.agentId,
+      numberId: number.numberId,
+    });
+    return number;
+  }
+
+  if (!isAgentPhoneConfigured()) {
+    log.warn('AGENTPHONE_API_KEY missing; agent phone creation skipped', {
+      userId: params.userId,
+    });
+    return null;
+  }
+
+  // Provider creation has no idempotency key. Serialize by user across backend
+  // replicas, then reconcile the deterministic marker before any create.
+  return prisma.$transaction(
+    async (transaction) => {
+      await transaction.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext(${`agentphone-provision:${params.userId}`}))
+      `;
+      return provisionAgentPhoneNumber(params);
+    },
+    { maxWait: 30_000, timeout: 120_000 }
+  );
 }
 
 export async function sendAgentPhoneMessage(params: {

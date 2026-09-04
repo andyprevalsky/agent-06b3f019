@@ -184,6 +184,9 @@ describe('useAgentProvider', () => {
     const { result, unmount } = renderHook(() => useAgentProvider(defaultDeps()));
     await waitFor(() => expect(errSpy).toHaveBeenCalled());
     expect(result.current.agent).toBeNull();
+    expect(result.current.isLoadingAgent).toBe(false);
+    expect(result.current.selectedAgentId).toBeNull();
+    expect(window.location.search).not.toContain('agent-id');
     errSpy.mockRestore();
     unmount();
   });

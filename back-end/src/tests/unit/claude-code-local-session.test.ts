@@ -171,7 +171,7 @@ test('createLocalClaudeCodeSession boots a local ws listener and close tears it 
       });
     });
 
-    const closed = await closeLocalClaudeCodeSession(taskId);
+    const closed = await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
     assert.deepEqual(closed.outputFiles, []);
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
@@ -201,7 +201,7 @@ test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked'
     );
     assert.ok(session);
     assert.equal(session!.sandboxId, `local-${taskId}`);
-    await closeLocalClaudeCodeSession(taskId);
+    await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
@@ -225,7 +225,10 @@ test('close preserves ownership metadata until the database records CLOSED', asy
     prisma.claudeCodeSession.update = (async () => {
       throw new Error('database close unavailable');
     }) as typeof prisma.claudeCodeSession.update;
-    await assert.rejects(() => closeLocalClaudeCodeSession(taskId), /database close unavailable/);
+    await assert.rejects(
+      () => closeLocalClaudeCodeSession(taskId, 'unit-close-retry'),
+      /database close unavailable/
+    );
     assert.equal(
       existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')),
       true,
@@ -242,7 +245,7 @@ test('close preserves ownership metadata until the database records CLOSED', asy
   } finally {
     prisma.claudeCodeSession.update = workingUpdate;
   }
-  await closeLocalClaudeCodeSession(taskId);
+  await closeLocalClaudeCodeSession(taskId, 'unit-close-retry');
   assert.equal(existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')), false);
 });
 
@@ -273,7 +276,7 @@ test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async
     });
     // Staging failed, so nothing was uploaded into the workdir attachments list.
     assert.equal(session.uploadedFiles.length, 0);
-    await closeLocalClaudeCodeSession(taskId);
+    await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;

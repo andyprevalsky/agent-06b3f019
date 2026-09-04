@@ -2047,7 +2047,7 @@ class _FakeWorkflowLogger:
     def __init__(self):
         self.records: List[tuple] = []
 
-    def info(self, msg, *args, **kwargs):
+    def info(self, msg, *args):
         self.records.append(("info", str(msg)))
 
     def warning(self, msg, *args, **kwargs):
@@ -5418,6 +5418,11 @@ async def test_workflow_mark_complete_no_parent_no_signal():
                 {"key": "order_total_usd", "label": "Order Total Usd", "value": 11.25},
             ],
         }
+        assert ("info", "Sent completion SMS notification: agent=root-mc") in fake.logger.records
+        assert not any(
+            level == "warning" and message.startswith("Failed to send completion SMS notification")
+            for level, message in fake.logger.records
+        )
     finally:
         _restore_workflow(original)
 

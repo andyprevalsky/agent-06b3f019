@@ -13,16 +13,18 @@
 #
 # The fix verifies the edge at creation time. The critical subtlety pinned here:
 # the origin frontend is NOT up yet when the tunnel starts, so a 502/404 is a
-# PASS (it proves Cloudflare routed to us). Only "no HTTP response at all"
-# (curl writes 000) means the hostname is dead.
+# PASS (it proves Cloudflare routed to us). A 530 from a trycloudflare hostname
+# means Cloudflare has no live tunnel route and must be rejected just like no
+# HTTP response at all (curl writes 000).
 #
 #   case 1 — edge returns 200            → routing
 #   case 2 — edge returns 502 (no origin) → routing (must NOT be treated as dead)
 #   case 3 — edge returns 404             → routing
-#   case 4 — edge always 000              → NOT routing, bounded by the timeout
-#   case 5 — edge 000 then 502            → routing (recovers within the window)
-#   case 6 — run.sh actually recycles a dead tunnel and backs off
-#   case 7 — prefers IPv4 (curl -4) + localtunnel fallback + NXDOMAIN skip
+#   case 4 — edge always 530              → NOT routing, bounded by the timeout
+#   case 5 — edge always 000              → NOT routing, bounded by the timeout
+#   case 6 — edge 000 then 502            → routing (recovers within the window)
+#   case 7 — run.sh actually recycles a dead tunnel and backs off
+#   case 8 — prefers IPv4 (curl -4) + localtunnel fallback + NXDOMAIN skip
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -99,63 +101,73 @@ echo "PASS: HTTP 502 counts as routing (origin not started is not a dead tunnel)
 run_routing_check 10 404 || fail "case 3: HTTP 404 must count as routing"
 echo "PASS: HTTP 404 counts as routing"
 
-# --- case 4: a permanently dead hostname is rejected, and is bounded --------
+# --- case 4: Cloudflare's no-live-route response is rejected ----------------
 started=$SECONDS
-if run_routing_check 6 000 000 000 000 000 000 000 000 000 000; then
-  fail "case 4: a hostname that never responds must NOT count as routing"
+if CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+  run_routing_check 2 530 530 530 530 530 530 530 530; then
+  fail "case 4: HTTP 530 from a trycloudflare hostname must NOT count as routing"
 fi
 elapsed=$(( SECONDS - started ))
-[ "$elapsed" -le 20 ] || fail "case 4: routing check ran ${elapsed}s, expected to stop near its 6s budget"
+[ "$elapsed" -le 10 ] || fail "case 4: routing check ran ${elapsed}s, expected to stop near its 2s budget"
+echo "PASS: persistent HTTP 530 is reported as an unrouted tunnel (${elapsed}s)"
+
+# --- case 5: a permanently dead hostname is rejected, and is bounded --------
+started=$SECONDS
+if run_routing_check 6 000 000 000 000 000 000 000 000 000 000; then
+  fail "case 5: a hostname that never responds must NOT count as routing"
+fi
+elapsed=$(( SECONDS - started ))
+[ "$elapsed" -le 20 ] || fail "case 5: routing check ran ${elapsed}s, expected to stop near its 6s budget"
 echo "PASS: persistent 000 is reported as dead, bounded by the timeout (${elapsed}s)"
 
-# --- case 5: a slow-but-alive edge is accepted ------------------------------
+# --- case 6: a slow-but-alive edge is accepted ------------------------------
 # Remove the production backoff so host scheduling cannot consume this focused
 # fixture's entire wall-clock budget before its deterministic third response.
 CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
-  run_routing_check 20 000 000 502 || fail "case 5: edge that starts routing within the window must pass"
+  run_routing_check 20 000 000 502 || fail "case 6: edge that starts routing within the window must pass"
 echo "PASS: edge that becomes reachable within the window counts as routing"
 
-# --- case 6: run.sh recycles dead tunnels instead of dying ------------------
+# --- case 7: run.sh recycles dead tunnels instead of dying ------------------
 # Structural pins on the shipped retry loop: the old code had neither.
 grep -q 'CLOUDFLARE_TUNNEL_MAX_ATTEMPTS' "$RUN_SH" \
-  || fail "case 6: run.sh no longer bounds quick-tunnel attempts"
+  || fail "case 7: run.sh no longer bounds quick-tunnel attempts"
 grep -q 'recycling the quick tunnel' "$RUN_SH" \
-  || fail "case 6: run.sh no longer recycles a non-routing quick tunnel"
+  || fail "case 7: run.sh no longer recycles a non-routing quick tunnel"
 grep -q 'CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS' "$RUN_SH" \
-  || fail "case 6: run.sh no longer backs off between quick-tunnel attempts"
+  || fail "case 7: run.sh no longer backs off between quick-tunnel attempts"
 grep -q 'CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS' "$RUN_SH" \
-  || fail "case 6: tunnel routing probes no longer expose deterministic retry cadence"
+  || fail "case 7: tunnel routing probes no longer expose deterministic retry cadence"
 # A recycled tunnel must be removed from the service arrays, otherwise cleanup
 # reports a dead pid as a live service.
 awk '/^start_cloudflare_quick_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/start.sh"
 grep -q "unset 'PIDS\[" "$TMP/start.sh" \
-  || fail "case 6: recycled tunnel is not removed from PIDS"
+  || fail "case 7: recycled tunnel is not removed from PIDS"
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/start.sh" \
-  || fail "case 6: tunnel startup no longer verifies the edge routes"
+  || fail "case 7: tunnel startup no longer verifies the edge routes"
 echo "PASS: run.sh bounds, backs off, recycles, and de-registers dead quick tunnels"
 
-# --- case 7: NXDOMAIN skip + localtunnel last-resort fallback --------------
+# --- case 8: NXDOMAIN skip + localtunnel last-resort fallback --------------
 grep -q 'skipping remaining quick-tunnel attempts' "$RUN_SH" \
-  || fail "case 7: run.sh no longer skips remaining quick tunnels on NXDOMAIN"
+  || fail "case 8: run.sh no longer skips remaining quick tunnels on NXDOMAIN"
 grep -q 'start_localtunnel_public_tunnel' "$RUN_SH" \
-  || fail "case 7: run.sh no longer defines localtunnel fallback"
+  || fail "case 8: run.sh no longer defines localtunnel fallback"
 awk '/^start_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_public.sh"
 grep -q 'start_localtunnel_public_tunnel && return 0' "$TMP/start_public.sh" \
-  || fail "case 7: start_public_tunnel no longer calls localtunnel before hard-fail"
+  || fail "case 8: start_public_tunnel no longer calls localtunnel before hard-fail"
 grep -q 'ngrok has no authtoken; trying localtunnel' "$TMP/start_public.sh" \
-  || fail "case 7: start_public_tunnel no longer short-circuits to localtunnel when ngrok is unconfigured"
+  || fail "case 8: start_public_tunnel no longer short-circuits to localtunnel when ngrok is unconfigured"
 grep -q 'loca\.lt' "$RUN_SH" \
-  || fail "case 7: localtunnel URL parser no longer accepts loca.lt"
+  || fail "case 8: localtunnel URL parser no longer accepts loca.lt"
 # Bare `exit 1` on missing authtoken must not remain — it skipped localtunnel.
 awk '/^start_ngrok_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_ngrok.sh"
 grep -q 'ngrok_public_tunnel_fail.*missing an authtoken' "$TMP/start_ngrok.sh" \
-  || fail "case 7: start_ngrok_public_tunnel must use ngrok_public_tunnel_fail for missing authtoken"
+  || fail "case 8: start_ngrok_public_tunnel must use ngrok_public_tunnel_fail for missing authtoken"
 if grep -nE '^\s*exit 1\s*$' "$TMP/start_ngrok.sh" | grep -vq 'ngrok_public_tunnel_fail'; then
   # Allow only exits inside ngrok_public_tunnel_fail itself (not in this fn).
   :
 fi
 ! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
-  || fail "case 7: start_ngrok_public_tunnel still bare-exits on missing authtoken"
+  || fail "case 8: start_ngrok_public_tunnel still bare-exits on missing authtoken"
 echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

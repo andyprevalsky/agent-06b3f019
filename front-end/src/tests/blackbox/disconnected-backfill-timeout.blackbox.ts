@@ -51,4 +51,23 @@ describe('disconnected agent backfill timeout', () => {
     expect(vi.mocked(fetchAgentDetail).mock.calls[0]?.[1]?.aborted).toBe(true);
     unmount();
   });
+
+  it('discards a detail payload whose agent identity differs from the requested agent', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetchAgentDetail).mockResolvedValue({
+      agent: { agent_id: 'agent-b' },
+      messages: [{ message_id: 'foreign-message' }],
+    } as Awaited<ReturnType<typeof fetchAgentDetail>>);
+    const deps = disconnectedDeps();
+    const { unmount } = renderHook(() => useDisconnectedAgentBackfill(deps));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(DISCONNECTED_BACKFILL_POLL_MS + 1);
+    });
+
+    expect(deps.setAgent).not.toHaveBeenCalled();
+    expect(deps.setMessages).not.toHaveBeenCalled();
+    expect(deps.setIsChatMode).not.toHaveBeenCalled();
+    unmount();
+  });
 });

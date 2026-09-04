@@ -1342,14 +1342,11 @@ async def _run_verifier(
             and str(field.get("type") or "").lower()
             in {"file_pointer", "list[file_pointer]"}
         ]
-        single_file_count = file_field_types.count("file_pointer")
         requires_structured_files = bool(file_field_types)
-        has_artifacts = (
-            bool(extracted_output_files)
-            and len(extracted_output_files) >= single_file_count
-            if requires_structured_files
-            else bool(extracted_output_files)
-        )
+        # The schema is the contract. Primitive-only schemas need no artifact,
+        # while any file-bearing schema is complete only when the same
+        # structure returned to the caller can actually be materialized.
+        has_artifacts = output_file_structured is not None if requires_structured_files else True
         has_success_signal = attempt_completion or exit_code == 0
         score = 1.0 if has_artifacts and has_success_signal else 0.5
         v_reasoning = (

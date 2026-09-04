@@ -29,6 +29,7 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
       void Promise.race([fetchAgentDetail(agentId, controller.signal), timeout])
         .then((data) => {
           if (!isActive() || deps.channelRef.current) return;
+          if (data.agent.agent_id !== agentId) return;
           applyAgentBackfill(data, deps.setMessages, deps.setAgent, deps.setIsChatMode, isActive);
         })
         .catch((error: unknown) => {

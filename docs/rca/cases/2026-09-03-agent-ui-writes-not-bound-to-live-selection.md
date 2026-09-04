@@ -134,6 +134,13 @@ initial API tree snapshots racing newer realtime nodes.
 Review regressions also cover a stale reconnect snapshot racing the preceding
 channel's latest event and attempted runtime mutation of the shared empty tree.
 
+Disconnected polling now validates the response payload identity immediately
+before its final state write even though the API boundary also validates it,
+and identity-mismatch selection cleanup clears loading before dropping the
+selected ID. The agent-tree hook no longer mutates its live-bus ref during
+render, so a discarded concurrent render cannot suppress callbacks for the
+still-committed bus.
+
 Selection transitions and stale-work discards now emit identity-only console
 diagnostics (`previousAgentId`, `nextAgentId`, owner, active ID, and surface),
 which the Mac console log captures without recording message content. The

@@ -56,11 +56,13 @@ number creation's entire budget.
 
 ## Solution
 
-Every provider request now has its own bounded signal. Agent creation carries a
-deterministic SHA-256 provisioning marker in its description. If agent creation
-has an ambiguous result, Rose scans the documented paginated agents endpoint
-for the exact marker and recovers its ID and any attached active number. The
-scan is bounded to 10,000 agents and runs only on the exception path.
+Every provider request, including every reconciliation page, now has its own
+bounded signal. Agent creation carries a deterministic SHA-256 provisioning
+marker in its description. Rose acquires a database advisory lock keyed by user
+across backend replicas and scans the documented paginated agents endpoint
+before creating anything, so concurrent requests reuse one marker resource.
+When `total` is absent, full pages continue until an empty or short page; an
+exhausted 10,000-agent bound fails closed rather than claiming a complete scan.
 
 If number creation is ambiguous, Rose reads the known agent. It recovers an
 attached active number, or deletes the newly created agent after the provider
@@ -71,7 +73,9 @@ surfaced so a later request can retry against the same marker instead of
 creating untracked state.
 
 The recovery, cleanup, and fail-closed blackboxes all pass through the standard
-backend blackbox runner.
+backend blackbox runner. Synthetic AgentPhone provisioning additionally requires
+an explicit isolated benchmark or a non-production process, so a leaked flag
+cannot persist phantom provider identities in production.
 
 ## Human feedback
 

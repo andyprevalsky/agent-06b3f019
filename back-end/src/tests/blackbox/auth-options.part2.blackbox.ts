@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
@@ -155,6 +154,12 @@ test('missing minted account mints a primitive inbox before returning fallback',
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents') {
       return {
         ok: true,
@@ -244,6 +249,16 @@ test('ambiguous AgentPhone agent creation recovers the provider resource before 
     const url = String(input);
     const method = init?.method ?? 'GET';
     calls.push({ url, method });
+    if (
+      url === 'https://agentphone.test/v1/agents?limit=100&offset=0' &&
+      method === 'GET' &&
+      Object.keys(createBody).length === 0
+    ) {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents' && method === 'POST') {
       createBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       throw new DOMException('request outcome unknown', 'AbortError');
@@ -312,6 +327,12 @@ test('failed AgentPhone number creation cleans its agent before email-only fallb
     const url = String(input);
     const method = init?.method ?? 'GET';
     calls.push({ url, method });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents' && method === 'POST') {
       return new Response(JSON.stringify({ id: 'agt-cleanup' }), {
         status: 200,
@@ -378,6 +399,12 @@ test('minted identity reuses one primitive inbox and one AgentPhone number per u
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents') {
       return {
         ok: true,

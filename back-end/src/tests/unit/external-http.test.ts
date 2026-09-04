@@ -177,6 +177,28 @@ async function testRetryOn503(): Promise<void> {
   assert.equal(result.attempts, 3);
 }
 
+async function testWrappedValidationErrorDoesNotRetry(): Promise<void> {
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    const wrapped = new TypeError('fetch failed') as TypeError & { cause?: unknown };
+    wrapped.cause = new InvalidExternalHttpRequestError(
+      'api_request cannot fetch rebind.example: it resolves to non-public address 127.0.0.1'
+    );
+    throw wrapped;
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://example.com/rebind-path',
+      }),
+    InvalidExternalHttpRequestError
+  );
+  assert.equal(callCount, 1, 'socket-time validation failures must not be retried');
+}
+
 async function testNoRetryOn401(): Promise<void> {
   let callCount = 0;
   globalThis.fetch = (async () => {
@@ -543,6 +565,7 @@ async function main(): Promise<void> {
   await testSuccessfulJsonResponse();
   await testRetryOn429();
   await testRetryOn503();
+  await testWrappedValidationErrorDoesNotRetry();
   await testNoRetryOn401();
   await testLargeJsonBodyNotTruncated();
   await testTextXmlAndBinaryResponses();

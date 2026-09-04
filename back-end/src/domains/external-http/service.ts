@@ -273,11 +273,22 @@ export function redactExternalUrlForLogs(url: string): string {
   }
 }
 
-function isKnownExternalHttpError(error: unknown): boolean {
-  return (
-    error instanceof InvalidExternalHttpRequestError ||
-    error instanceof ExternalHttpRequestFailedError
-  );
+function findKnownExternalHttpError(
+  error: unknown
+): InvalidExternalHttpRequestError | ExternalHttpRequestFailedError | null {
+  const visited = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === 'object' && !visited.has(current)) {
+    if (
+      current instanceof InvalidExternalHttpRequestError ||
+      current instanceof ExternalHttpRequestFailedError
+    ) {
+      return current;
+    }
+    visited.add(current);
+    current = 'cause' in current ? current.cause : null;
+  }
+  return null;
 }
 
 export async function executeExternalHttpRequest(
@@ -327,7 +338,8 @@ export async function executeExternalHttpRequest(
         attempts: attempt,
       };
     } catch (error) {
-      if (isKnownExternalHttpError(error)) throw error;
+      const knownError = findKnownExternalHttpError(error);
+      if (knownError !== null) throw knownError;
       lastError = error;
       if (!retriesAllowed || attempt >= maxAttempts) {
         break;

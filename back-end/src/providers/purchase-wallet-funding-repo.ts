@@ -1,6 +1,15 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
 import { prisma } from './database';
 
+export async function lockPurchaseWalletTransition(
+  transaction: Prisma.TransactionClient,
+  purchaseId: string
+): Promise<void> {
+  await transaction.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext(${`purchase-wallet-transition:${purchaseId}`}))
+  `;
+}
+
 export async function createOrGetWalletFunding(data: {
   purchaseId: string;
   userId: string;
@@ -198,16 +207,27 @@ export async function markWalletFundingReclaiming(
  */
 export async function claimWalletFundingReclaim(
   id: string,
+  purchaseId: string,
   data: { reclaimIdempotencyKey: string; reclaimLeaseToken: string }
 ) {
-  return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.FUNDED },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMING,
-      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
-      reclaimLeaseToken: data.reclaimLeaseToken,
-      errorMessage: null,
-    },
+  return prisma.$transaction(async (transaction) => {
+    await lockPurchaseWalletTransition(transaction, purchaseId);
+    return transaction.purchaseWalletFunding.updateMany({
+      where: {
+        id,
+        purchaseId,
+        status: PurchaseWalletFundingStatus.FUNDED,
+        // Reciprocal guard: if clearing won the serialized transition, a
+        // later reclaim must not create CLEARED + RECLAIMING.
+        purchase: { status: { not: PurchaseSpendStatus.CLEARED } },
+      },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+        reclaimLeaseToken: data.reclaimLeaseToken,
+        errorMessage: null,
+      },
+    });
   });
 }
 

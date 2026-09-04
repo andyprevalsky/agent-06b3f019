@@ -1331,7 +1331,7 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
-            # No artifacts → incomplete (must not report success without output files)
+            # Primitive-only schemas require no file artifacts.
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1339,15 +1339,15 @@ async def test_run_verifier_disabled_by_env_flag():
                 model="rose-labs/rose-1-lite",
                 terminal=terminal,
                 action_summary=["wrote output"],
-                output_schema={"fields": []},
+                output_schema={"fields": [{"name": "summary", "type": "string"}]},
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
                 output_files=[],
             )
-            assert score == 0.5, provider
+            assert score == 1.0, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
-            assert "incomplete" in reasoning.lower(), reasoning
+            assert "incomplete" not in reasoning.lower(), reasoning
             assert struct is None
             assert itok == 0 and otok == 0
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { listenToAgentTree, type TreeNode } from './agentTreeSubscription';
 
 export type { TreeNode } from './agentTreeSubscription';
@@ -27,15 +27,10 @@ export function useAgentTree(busId: string | null): ReadonlyMap<string, TreeNode
     busId: string | null;
     nodes: ReadonlyMap<string, TreeNode>;
   }>({ busId, nodes: EMPTY_TREE });
-  const liveBusIdRef = useRef(busId);
-  liveBusIdRef.current = busId;
-
   useEffect(() => {
     if (!busId) return;
     return listenToAgentTree(busId, (nodes) => {
-      setTreeState((previous) =>
-        liveBusIdRef.current === busId ? { busId, nodes: new Map(nodes) } : previous,
-      );
+      setTreeState({ busId, nodes: new Map(nodes) });
     });
   }, [busId]);
 

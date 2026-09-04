@@ -7,7 +7,14 @@
  * deterministic and cannot touch a developer or production database.
  */
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -102,9 +109,9 @@ test('overlapping closes share one task-owned operation', async () => {
     return { id: where.id, status: 'CLOSED' };
   }) as typeof prisma.claudeCodeSession.update;
 
-  const first = closeLocalClaudeCodeSession(taskId);
+  const first = closeLocalClaudeCodeSession(taskId, 'user-local-close');
   await waitFor(() => updateCalls === 1);
-  const second = closeLocalClaudeCodeSession(taskId);
+  const second = closeLocalClaudeCodeSession(taskId, 'user-local-close');
   await new Promise<void>((resolve) => setImmediate(resolve));
   releaseUpdate?.();
   const [firstResult, secondResult] = await Promise.all([first, second]);
@@ -166,4 +173,85 @@ test('partial extraction remains resumable and never reuploads completed files',
     secondFileUrls[1],
     'retry must reuse the same storage object key'
   );
+});
+
+test('a vanished persisted candidate is omitted without blocking process close', async () => {
+  const taskId = `close-missing-output-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  writeFileSync(join(workDir, 'output', 'a.txt'), 'first');
+  writeFileSync(join(workDir, 'output', 'b.txt'), 'second');
+
+  let failSecondFile = true;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = decodeURIComponent(String(input));
+    if (failSecondFile && url.endsWith('_b.txt')) {
+      return new Response(JSON.stringify({ message: 'forced second-file failure' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ Key: url }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => closeLocalClaudeCodeSession(taskId, 'user-local-close'),
+    /forced second-file failure/
+  );
+  failSecondFile = false;
+  rmSync(join(workDir, 'output', 'b.txt'));
+  const retried = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  assert.deepEqual(
+    retried.outputFiles.map((file) => file.original_filename),
+    ['a.txt']
+  );
+  assert.equal(existsSync(join(workDir, 'session.json')), false);
+});
+
+test('an oversized candidate fails before the file is loaded or uploaded', async () => {
+  const taskId = `close-oversized-output-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  const oversizedPath = join(workDir, 'output', 'oversized.bin');
+  writeFileSync(oversizedPath, '');
+  truncateSync(oversizedPath, 20 * 1024 * 1024 + 1);
+  let uploadCalls = 0;
+  globalThis.fetch = (async () => {
+    uploadCalls += 1;
+    return new Response(JSON.stringify({ Key: 'unexpected' }), { status: 200 });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => closeLocalClaudeCodeSession(taskId, 'user-local-close'),
+    /File size exceeds maximum of 20MB/
+  );
+  assert.equal(uploadCalls, 0, 'oversized output must be rejected before upload');
+  rmSync(oversizedPath);
+  await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+});
+
+test('a close without user identity leaves output extraction resumable', async () => {
+  const taskId = `close-deferred-identity-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  writeFileSync(join(workDir, 'output', 'later.txt'), 'extract me later');
+  globalThis.fetch = (async (input: RequestInfo | URL) =>
+    new Response(JSON.stringify({ Key: String(input) }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as typeof fetch;
+
+  const anonymousClose = await closeLocalClaudeCodeSession(taskId);
+  assert.deepEqual(anonymousClose.outputFiles, []);
+  const retained = JSON.parse(readFileSync(join(workDir, 'session.json'), 'utf8')) as {
+    outputFiles?: unknown;
+  };
+  assert.equal(retained.outputFiles, undefined, 'missing userId cannot mark extraction complete');
+
+  const authorizedRetry = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  assert.deepEqual(
+    authorizedRetry.outputFiles.map((file) => file.original_filename),
+    ['later.txt']
+  );
+  assert.equal(existsSync(join(workDir, 'session.json')), false);
 });

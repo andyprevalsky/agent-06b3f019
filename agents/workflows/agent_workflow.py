@@ -5130,7 +5130,7 @@ class AgentWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
-                    workflow.logger.info("Sent completion SMS notification", agent_id=self.agent_id)
+                    workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")
                 except Exception as sms_error:
                     # Log but don't fail completion if SMS fails
                     workflow.logger.warning(f"Failed to send completion SMS notification: {sms_error}")

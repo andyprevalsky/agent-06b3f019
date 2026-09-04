@@ -11,7 +11,10 @@ export function isLocalBenchmarkSmsTransportMockEnabled(): boolean {
 }
 
 export function isLocalBenchmarkAgentPhoneMockEnabled(): boolean {
-  return process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1';
+  return (
+    process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1' &&
+    (process.env.NODE_ENV !== 'production' || process.env.BENCHMARK_ISOLATED_RUN === 'true')
+  );
 }
 
 export function isLocalBenchmarkWhatsAppTransportMockEnabled(): boolean {

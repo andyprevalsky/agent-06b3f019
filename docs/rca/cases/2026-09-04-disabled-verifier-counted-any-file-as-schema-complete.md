@@ -51,10 +51,10 @@ contract.
 ## Solution
 
 The disabled branch now derives its artifact predicate from declared file
-fields. It requires at least one extracted artifact and enough files to satisfy
-every singular `file_pointer` field. Mixed schemas remain compatible with the
-existing disabled-verifier behavior: non-file values can still be conveyed in
-the durable SDK event context while their required file pointer must exist.
+fields and delegates completeness to the same structured-response constructor
+used for the returned result. Schemas without file fields are artifact-complete
+without inventing an output-file requirement; any file-bearing schema must
+produce a non-null structured response, including list and multi-file shapes.
 
 The new case is explicitly registered in the spawn-Claude-code-agent blackbox
 runner. The same runner passes the incomplete two-file schema, empty schema,
@@ -67,4 +67,4 @@ the prior review cycle found this blocker.
 
 ## Reusable lesson
 
-Keep skip and fallback paths subject to the same schema-completeness predicate as the primary verifier path.
+Keep skip and fallback paths subject to the same schema-completeness predicate as the primary verifier path; never approximate a typed schema with file counts.

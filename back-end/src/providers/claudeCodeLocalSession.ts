@@ -24,13 +24,15 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'fs';
 import { join, relative, resolve, sep } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
+import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
 import { randomUUID } from './crypto';
+import { isFilePointer } from './claudeCodeLocalOwnership';
 
 const log = createLogger('ClaudeCodeLocal');
 
@@ -77,6 +79,7 @@ type LocalOutputCandidate = {
   filename: string;
   objectId: string;
   pointer?: FilePointer;
+  missing?: true;
 };
 
 type LocalSession = LocalSessionOwnership & {
@@ -129,19 +132,6 @@ function writeOwnership(ownership: LocalSessionOwnership): void {
   }
 }
 
-function isFilePointer(value: unknown): value is FilePointer {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<FilePointer>;
-  return (
-    typeof candidate.id === 'string' &&
-    typeof candidate.storage_path === 'string' &&
-    typeof candidate.original_filename === 'string' &&
-    typeof candidate.mime_type === 'string' &&
-    typeof candidate.size_bytes === 'number' &&
-    typeof candidate.created_at === 'string'
-  );
-}
-
 function isOutputCandidate(value: unknown, workDir: string): value is LocalOutputCandidate {
   if (typeof value !== 'object' || value === null) return false;
   const candidate = value as Partial<LocalOutputCandidate>;
@@ -156,6 +146,7 @@ function isOutputCandidate(value: unknown, workDir: string): value is LocalOutpu
     return false;
   }
   if (!isPathInsideWorkDir(workDir, resolve(workDir, candidate.relativePath))) return false;
+  if (candidate.missing !== undefined && candidate.missing !== true) return false;
   return candidate.pointer === undefined || isFilePointer(candidate.pointer);
 }
 
@@ -426,14 +417,26 @@ async function extractLocalFiles(
   writeOwnership(ownership);
 
   for (const candidate of ownership.outputCandidates) {
-    if (candidate.pointer) continue;
+    if (candidate.pointer || candidate.missing) continue;
     const fullPath = resolve(workDir, candidate.relativePath);
     if (!isPathInsideWorkDir(workDir, fullPath)) {
       throw new Error(
         `Local output candidate escaped its session directory: ${candidate.filename}`
       );
     }
+    if (!existsSync(fullPath)) {
+      log.warn('Local output candidate disappeared before upload', {
+        filename: candidate.filename,
+      });
+      candidate.missing = true;
+      writeOwnership(ownership);
+      continue;
+    }
     try {
+      const size = statSync(fullPath).size;
+      if (size > MAX_FILE_SIZE) {
+        throw new Error(`File size exceeds maximum of ${MAX_FILE_SIZE / 1024 / 1024}MB`);
+      }
       const content = readFileSync(fullPath);
       const { storage_path } = await uploadToStorage(
         userId,
@@ -461,11 +464,10 @@ async function extractLocalFiles(
     }
   }
 
-  return ownership.outputCandidates.map((candidate) => {
-    if (!candidate.pointer) {
-      throw new Error(`Local output file was not uploaded: ${candidate.filename}`);
-    }
-    return candidate.pointer;
+  return ownership.outputCandidates.flatMap((candidate) => {
+    if (candidate.pointer) return [candidate.pointer];
+    if (candidate.missing) return [];
+    throw new Error(`Local output file was not uploaded: ${candidate.filename}`);
   });
 }
 
@@ -632,7 +634,7 @@ async function runLocalClaudeCodeClose(
   const ownership = live ?? readOwnership(taskId);
   let outputFiles = ownership?.outputFiles ?? [];
 
-  if (ownership && ownership.outputFiles === undefined) {
+  if (ownership && ownership.outputFiles === undefined && userId) {
     outputFiles = await extractLocalFiles(ownership, userId, additionalPaths);
     ownership.outputFiles = outputFiles;
     // Upload results are part of close ownership state. Persist them before
@@ -655,9 +657,14 @@ async function runLocalClaudeCodeClose(
     },
   });
 
-  if (ownership) {
+  if (ownership?.outputFiles !== undefined) {
     clearOwnership(ownership.workDir);
     localSessions.delete(taskId);
+  } else if (ownership) {
+    // A close without identity still stops the owned process and closes the DB
+    // session, but retains candidate metadata and files for a later authorized
+    // extraction retry.
+    localSessions.set(taskId, { ...ownership, process: null });
   }
 
   return { outputFiles };
