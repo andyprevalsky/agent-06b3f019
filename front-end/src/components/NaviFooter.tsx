@@ -121,6 +121,18 @@ const NaviFooter = () => {
                 </a>
               </li>
               <li>
+                <a
+                  href="/careers"
+                  onClick={(event) => {
+                    if (!openExternalFromElectron('/careers')) return;
+                    event.preventDefault();
+                  }}
+                  className="hover:text-primary-foreground transition-colors"
+                >
+                  Careers
+                </a>
+              </li>
+              <li>
                 <Link to="/privacy" className="hover:text-primary-foreground transition-colors">
                   Privacy
                 </Link>
