@@ -833,14 +833,15 @@ async def _execute_single_task(
                 # the activity mid-stream and the retry hits the same wall.
                 start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
-                # Heartbeat-timeout is the per-chunk safety net. The LLM stream
-                # heartbeats every chunk via _safe_heartbeat; a 90 s gap means
-                # the stream is dead. Setting too-tight a value (e.g. 60 s)
-                # causes premature failures during legitimate model thinking
-                # pauses, which we observed in smoke 15 — the LLM call landed
-                # cleanly at 82 s, but heartbeat_timeout=60s killed the
-                # activity before the result could be returned.
-                heartbeat_timeout=timedelta(seconds=90),
+                # Heartbeat-timeout is the per-chunk safety net. Rose's stream
+                # guard heartbeats every ~10s (including during TTFT waits).
+                # Keep this strictly above max(ttft_timeout=90s, idle=120s) so
+                # a single stalled provider_read cannot race the activity to
+                # death — we hit that on cuda-kernel code-agent runs where
+                # dag_reasoning died with "activity Heartbeat timeout" after
+                # ~88s of silent TTFT while heartbeat_timeout was still 90s.
+                # 180s matches other LLM activities in this file.
+                heartbeat_timeout=timedelta(seconds=180),
             )
 
             # Unpack result (reasoning activity returns {"content": str, "usage": dict})
