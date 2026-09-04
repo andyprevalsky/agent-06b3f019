@@ -4911,13 +4911,19 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     # string in a list[object] field (seen on cuda-kernel-github-top100 soft-accept)
     # is not a populated ranking and must not satisfy the schema.
     if normalized in ("list[object]", "list[dict]"):
-        return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+        # Empty {} placeholders must not satisfy object-list deliverables.
+        return (
+            isinstance(value, list)
+            and len(value) > 0
+            and all(isinstance(item, dict) and bool(item) for item in value)
+        )
     if normalized == "object":
-        return isinstance(value, dict)
+        return isinstance(value, dict) and bool(value)
     if normalized and normalized.startswith("list["):
-        return isinstance(value, list)
+        return isinstance(value, list) and len(value) > 0
     if normalized == "str":
-        return isinstance(value, str)
+        # Empty strings must not soft-satisfy required str fields.
+        return isinstance(value, str) and bool(value.strip())
     if normalized == "int":
         return isinstance(value, int) and not isinstance(value, bool)
     if normalized == "float":

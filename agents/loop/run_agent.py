@@ -2191,14 +2191,12 @@ async def run_agent(
                             "Verifier infrastructure failed; accepting agent "
                             f"attempt_completion. Original error: {v_reasoning}"
                         )
-                    elif not is_plan_loop:
-                        logger.warning(
-                            "[run_agent] Verifier infrastructure failed but "
-                            "structured response is not schema-ready — not "
-                            "accepting attempt_completion "
-                            f"(consecutive={consecutive_verifier_errors})"
-                        )
                     elif consecutive_verifier_errors >= 3:
+                        # Circuit breaker must stay reachable for execute-loop
+                        # infra soft-fails that are NOT schema-ready. A prior
+                        # `elif not is_plan_loop` branch consumed every execute
+                        # path and silently disabled this guard (CodeRabbit
+                        # 2026-09-04 on #1260).
                         return {
                             "status": "error",
                             "context": context,
@@ -2210,6 +2208,13 @@ async def run_agent(
                             "cache_creation_input_tokens": cache_write_total,
                             "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
                         }
+                    elif not is_plan_loop:
+                        logger.warning(
+                            "[run_agent] Verifier infrastructure failed but "
+                            "structured response is not schema-ready — not "
+                            "accepting attempt_completion "
+                            f"(consecutive={consecutive_verifier_errors})"
+                        )
                 else:
                     consecutive_verifier_errors = 0
 

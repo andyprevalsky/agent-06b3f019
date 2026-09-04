@@ -1419,8 +1419,12 @@ async def _persist_code_agent_judge_evidence(
         action_summary=summary,
     )
     # Prefer explicit event/action cardinality so judges see non-zero steps even
-    # when only a single evidence chip is present.
-    steps_taken = max(len(events), len(summary), 1 if files else 0, 1)
+    # when only a single evidence chip is present. Do not force steps_taken=1
+    # from orchestration-only summaries with zero SDK events/files — those are
+    # lifecycle breadcrumbs, not grounded coding-agent steps.
+    steps_taken = max(len(events), 1 if files else 0)
+    if steps_taken == 0:
+        return
 
     await save_claude_code_message(
         agent_id=agent_id,
@@ -1530,14 +1534,25 @@ async def _run_verifier(
         )
         # Persist SDK/history evidence so harness step counts + declared judges
         # still see grounded coding-agent work when the LLM verifier is off.
-        await _persist_code_agent_judge_evidence(
-            agent_id=agent_id,
-            task_id=task_id,
-            code_provider=code_provider,
-            code_events=code_events,
-            output_files=extracted_output_files,
-            action_summary=action_summary,
-        )
+        # Evidence write failures must not block verifier-disabled completion
+        # when artifacts / exit_code already prove success (CodeRabbit #1260).
+        try:
+            await _persist_code_agent_judge_evidence(
+                agent_id=agent_id,
+                task_id=task_id,
+                code_provider=code_provider,
+                code_events=code_events,
+                output_files=extracted_output_files,
+                action_summary=action_summary,
+            )
+        except Exception as evidence_err:
+            logger.warning(
+                "[ClaudeCode] judge evidence persist failed; continuing "
+                "verifier-disabled completion",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(evidence_err)[:200],
+            )
         return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
     try:

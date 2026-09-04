@@ -937,6 +937,40 @@ async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
     assert result.get("verifier_progress") == 0.5
 
 
+async def test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema():
+    """Execute-loop infra soft-fails without schema-ready output must error at 3.
+
+    CodeRabbit #1260: an `elif not is_plan_loop` branch used to consume every
+    execute path and skip the consecutive>=3 circuit breaker, letting agents
+    spin until the task budget died.
+    """
+    tool_calls = [{"tool": "attempt_completion"}]
+    detected_tools = [("attempt_completion", "tc-ac-infra-cb-1", 1.0)]
+    schema = {"fields": [{"name": "repos", "type": "list[object]"}]}
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ok"}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=False,
+        max_iterations=5,
+        execute_tool_override=mock_execute_tool,
+        verifier_score=0.5,
+        verifier_reasoning=(
+            "Progress check failed: Verifier exceeded 420s total deadline"
+        ),
+        verifier_structured_response={"repos": ""},
+        response_schema=schema,
+    )
+
+    assert result["status"] == "error"
+    assert "verifier unavailable after 3 consecutive failures" in (
+        result.get("message") or ""
+    ).lower()
+
+
 async def test_estimate_tokens():
     """_estimate_tokens counts everything rendered, not just m["text"].
 
