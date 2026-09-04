@@ -310,6 +310,43 @@ test('minted identity reuses one primitive inbox and one AgentPhone number per u
   }
 });
 
+test('local benchmark AgentPhone mock provisions identity without live provider traffic', async () => {
+  const userId = await createUser('Rose Benchmark');
+  const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
+  const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
+  const previousFakeAgentPhone = process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+  const previousFetch = globalThis.fetch;
+  const calls: string[] = [];
+  process.env.AGENTPHONE_API_KEY = 'live-key-must-not-be-used';
+  process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
+  process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = '1';
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    throw new Error(`unexpected live AgentPhone fetch to ${String(input)}`);
+  }) as typeof fetch;
+
+  try {
+    const first = await getAuthOptions(userId, 'https://uber.com');
+    const second = await getAuthOptions(userId, 'https://lyft.com');
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+
+    assert(calls.length === 0, 'expected benchmark AgentPhone provisioning to stay offline');
+    assert(first.minted?.phone !== null, 'expected deterministic benchmark phone');
+    assert(first.minted?.phone === second.minted?.phone, 'expected one stable phone per user');
+    assert(identity.phone === first.minted?.phone, 'expected benchmark phone persisted');
+    assert(first.minted?.phoneProvider === 'agentphone', 'expected AgentPhone provider marker');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
+    else process.env.AGENTPHONE_BASE_URL = previousAgentPhoneBaseUrl;
+    if (previousFakeAgentPhone === undefined) delete process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+    else process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = previousFakeAgentPhone;
+    await cleanup(userId);
+  }
+});
+
 test('minted identity migrates a legacy-domain inbox onto primitive without reprovisioning AgentPhone', async () => {
   const userId = await createUser('Rose Pilot');
   const previousApiKey = process.env.PRIMITIVE_API_KEY;

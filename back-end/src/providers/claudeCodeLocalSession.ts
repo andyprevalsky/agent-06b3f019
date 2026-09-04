@@ -17,7 +17,15 @@
  */
 import { type ChildProcess, spawn } from 'child_process';
 import { createServer } from 'net';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import { join, resolve, sep } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
@@ -58,6 +66,8 @@ type LocalSessionOwnership = {
   workDir: string;
   port: number;
   pid: number | null;
+  /** Persisted before the DB close so retries never upload the same files twice. */
+  outputFiles?: FilePointer[];
 };
 
 type LocalSession = LocalSessionOwnership & {
@@ -66,17 +76,55 @@ type LocalSession = LocalSessionOwnership & {
 
 const localSessions = new Map<string, LocalSession>();
 
+export function resolveLocalSessionWorkDir(taskId: string): string {
+  if (
+    taskId.length === 0 ||
+    taskId === '.' ||
+    taskId === '..' ||
+    taskId.includes('/') ||
+    taskId.includes('\\')
+  ) {
+    throw new Error(`Invalid local Claude Code task id: ${JSON.stringify(taskId)}`);
+  }
+  return join(LOCAL_ROOT, taskId);
+}
+
 function ownershipPath(workDir: string): string {
   return join(workDir, OWNERSHIP_FILE);
 }
 
 function writeOwnership(ownership: LocalSessionOwnership): void {
   mkdirSync(ownership.workDir, { recursive: true });
-  writeFileSync(ownershipPath(ownership.workDir), JSON.stringify(ownership), 'utf8');
+  const path = ownershipPath(ownership.workDir);
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, JSON.stringify(ownership), { encoding: 'utf8', mode: 0o600 });
+    renameSync(temporaryPath, path);
+  } catch (error) {
+    try {
+      rmSync(temporaryPath, { force: true });
+    } catch {
+      // best-effort cleanup; preserve the ownership persistence error
+    }
+    throw error;
+  }
+}
+
+function isFilePointer(value: unknown): value is FilePointer {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<FilePointer>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.storage_path === 'string' &&
+    typeof candidate.original_filename === 'string' &&
+    typeof candidate.mime_type === 'string' &&
+    typeof candidate.size_bytes === 'number' &&
+    typeof candidate.created_at === 'string'
+  );
 }
 
 function readOwnership(taskId: string): LocalSessionOwnership | null {
-  const workDir = join(LOCAL_ROOT, taskId);
+  const workDir = resolveLocalSessionWorkDir(taskId);
   const path = ownershipPath(workDir);
   if (!existsSync(path)) return null;
   try {
@@ -85,7 +133,10 @@ function readOwnership(taskId: string): LocalSessionOwnership | null {
       typeof parsed.taskId !== 'string' ||
       typeof parsed.workDir !== 'string' ||
       typeof parsed.sandboxId !== 'string' ||
-      typeof parsed.port !== 'number'
+      typeof parsed.port !== 'number' ||
+      parsed.taskId !== taskId ||
+      parsed.sandboxId !== `${LOCAL_SANDBOX_PREFIX}${taskId}` ||
+      resolve(parsed.workDir) !== resolve(workDir)
     ) {
       return null;
     }
@@ -95,6 +146,10 @@ function readOwnership(taskId: string): LocalSessionOwnership | null {
       workDir: parsed.workDir,
       port: parsed.port,
       pid: typeof parsed.pid === 'number' ? parsed.pid : null,
+      outputFiles:
+        Array.isArray(parsed.outputFiles) && parsed.outputFiles.every(isFilePointer)
+          ? parsed.outputFiles
+          : undefined,
     };
   } catch {
     return null;
@@ -366,7 +421,7 @@ export async function createLocalClaudeCodeSession(params: {
 }> {
   const { taskId, agentId, goal, envs } = params;
   const sandboxId = `${LOCAL_SANDBOX_PREFIX}${taskId}`;
-  const workDir = join(LOCAL_ROOT, taskId);
+  const workDir = resolveLocalSessionWorkDir(taskId);
   mkdirSync(join(workDir, 'attachments'), { recursive: true });
   mkdirSync(join(workDir, 'output'), { recursive: true });
   mkdirSync(join(workDir, '.claude'), { recursive: true });
@@ -486,7 +541,16 @@ export async function createLocalClaudeCodeSession(params: {
       }
     }
     clearOwnership(workDir);
-    rmSync(workDir, { recursive: true, force: true });
+    try {
+      rmSync(workDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      // Rollback cleanup is best-effort. Never mask the ownership persistence
+      // failure that made this session unusable in the first place.
+      log.warn('Failed to clean local Claude Code workDir during ownership rollback', {
+        taskId,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    }
     throw ownershipError;
   }
   localSessions.set(taskId, { ...ownership, process: child });
@@ -502,9 +566,16 @@ export async function closeLocalClaudeCodeSession(
 ): Promise<{ outputFiles: FilePointer[] }> {
   const live = localSessions.get(taskId);
   const ownership = live ?? readOwnership(taskId);
-  const outputFiles = ownership
-    ? await extractLocalFiles(ownership.workDir, userId, additionalPaths)
-    : [];
+  let outputFiles = ownership?.outputFiles ?? [];
+
+  if (ownership && ownership.outputFiles === undefined) {
+    outputFiles = await extractLocalFiles(ownership.workDir, userId, additionalPaths);
+    const resumableOwnership = { ...ownership, outputFiles };
+    // Upload results are part of close ownership state. Persist them before
+    // stopping the process or updating the DB so every retry is side-effect free.
+    writeOwnership(resumableOwnership);
+    if (live) live.outputFiles = outputFiles;
+  }
 
   if (ownership) {
     await killOwnedProcess({

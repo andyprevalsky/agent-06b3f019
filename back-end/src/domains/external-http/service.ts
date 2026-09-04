@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- request validation, retry, redirect, and bounded response handling form one security boundary */
 import { lookup as lookupAtConnection } from 'node:dns';
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 import { Agent } from 'undici';
 
 import { createLogger } from '../../providers/logger';
@@ -32,28 +32,39 @@ const BODY_HEADERS = ['content-encoding', 'content-language', 'content-length', 
  * returned address here closes the DNS-rebinding gap between the friendly
  * validation error above and the connection that actually leaves the process.
  */
+const lookupPublicAddressAtConnection: LookupFunction = (hostname, options, callback) => {
+  lookupAtConnection(
+    hostname,
+    { all: true, verbatim: true, family: options.family },
+    (error, addresses) => {
+      const fail = (lookupError: NodeJS.ErrnoException | Error) => {
+        if (options.all === true) callback(lookupError, []);
+        else callback(lookupError, '', 0);
+      };
+
+      if (error) {
+        fail(error);
+        return;
+      }
+      try {
+        assertPublicResolvedAddresses(hostname, addresses);
+      } catch (addressError) {
+        fail(addressError as Error);
+        return;
+      }
+
+      if (options.all === true) {
+        callback(null, addresses);
+        return;
+      }
+      const first = addresses[0];
+      callback(null, first.address, first.family);
+    }
+  );
+};
+
 const publicAddressDispatcher = new Agent({
-  connect: {
-    lookup(hostname, options, callback) {
-      lookupAtConnection(
-        hostname,
-        { all: true, verbatim: true, family: options.family },
-        (error, addresses) => {
-          if (error) {
-            callback(error, []);
-            return;
-          }
-          try {
-            assertPublicResolvedAddresses(hostname, addresses);
-          } catch (addressError) {
-            callback(addressError as Error, []);
-            return;
-          }
-          callback(null, addresses);
-        }
-      );
-    },
-  },
+  connect: { lookup: lookupPublicAddressAtConnection },
 });
 
 export function assertPublicResolvedAddresses(

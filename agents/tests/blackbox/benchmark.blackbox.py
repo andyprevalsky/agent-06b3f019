@@ -12621,6 +12621,18 @@ def test_local_port_range_allocation_is_reserved_across_processes():
     )
 
 
+def test_local_automatic_port_range_avoids_linux_ephemeral_clients():
+    """Automatic listener ports must not race the kernel's outbound port allocator."""
+    from benchmarks import local as local_bench
+
+    base = local_bench.allocate_port_range()
+    try:
+        assert local_bench.FALLBACK_PORT_BASE_START <= base < local_bench.FALLBACK_PORT_BASE_END
+        assert base + max(local_bench.PORT_RANGE_OFFSETS) < 32768
+    finally:
+        local_bench._release_port_range(base)
+
+
 def test_local_start_services_releases_port_reservation_after_readiness():
     """A ready isolated stack must release its startup-only port reservation."""
     from unittest.mock import Mock, patch
@@ -17499,6 +17511,10 @@ async def run_all_tests():
     r.record(
         "local_port_range_cross_process_reservation",
         test_local_port_range_allocation_is_reserved_across_processes,
+    )
+    r.record(
+        "local_automatic_port_range_avoids_ephemeral_clients",
+        test_local_automatic_port_range_avoids_linux_ephemeral_clients,
     )
     r.record(
         "local_start_services_ready_port_release",

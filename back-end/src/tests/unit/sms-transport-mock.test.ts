@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import {
+  buildMockAgentPhoneNumber,
   buildMockAgentPhoneSendResult,
   buildMockSurgeSendResult,
   buildMockWhatsAppSendResult,
@@ -40,6 +41,16 @@ async function run() {
 
   const agentPhoneId = mockAgentPhoneMessageId('seed-b');
   assert.match(agentPhoneId, /^ap_msg_[0-9a-f]{12}$/);
+
+  const agentPhoneNumber = buildMockAgentPhoneNumber('benchmark-user');
+  assert.match(agentPhoneNumber.agentId, /^ap_agent_[0-9a-f]{12}$/);
+  assert.match(agentPhoneNumber.numberId, /^ap_num_[0-9a-f]{12}$/);
+  assert.match(agentPhoneNumber.phoneNumber, /^\+1555\d{7}$/);
+  assert.deepEqual(buildMockAgentPhoneNumber('benchmark-user'), agentPhoneNumber);
+  assert.notEqual(
+    buildMockAgentPhoneNumber('other-user').phoneNumber,
+    agentPhoneNumber.phoneNumber
+  );
 
   const whatsappId = mockWhatsAppMessageId('seed-c');
   assert.match(whatsappId, /^wamid\.[0-9a-f]{16}$/);
@@ -83,7 +94,7 @@ async function run() {
   if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
   else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
 
-  process.stdout.write('sms-transport-mock: 11 passed, 0 failed\n');
+  process.stdout.write('sms-transport-mock: 16 passed, 0 failed\n');
 }
 
 run().catch((error) => {

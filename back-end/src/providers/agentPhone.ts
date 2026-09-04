@@ -1,10 +1,15 @@
 import { createLogger } from './logger';
+import {
+  buildMockAgentPhoneNumber,
+  isLocalBenchmarkAgentPhoneMockEnabled,
+} from './smsTransportMock';
 
 const log = createLogger('AgentPhone');
 
 const DEFAULT_BASE_URL = 'https://api.agentphone.ai/v1';
 const DEFAULT_COUNTRY = 'US';
 const DEFAULT_AREA_CODE = '912';
+const CREATE_PHONE_TIMEOUT_MS = 10_000;
 
 export interface AgentPhoneNumber {
   agentId: string;
@@ -75,11 +80,12 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value : '';
 }
 
-async function createAgent(name: string) {
+async function createAgent(name: string, signal: AbortSignal) {
   const response = await fetch(`${baseUrl()}/agents`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({ name, voiceMode: 'webhook' }),
+    signal,
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -92,7 +98,7 @@ async function createAgent(name: string) {
   return id;
 }
 
-async function createNumber(agentId: string, areaCode: string) {
+async function createNumber(agentId: string, areaCode: string, signal: AbortSignal) {
   const response = await fetch(`${baseUrl()}/numbers`, {
     method: 'POST',
     headers: authHeaders(),
@@ -101,6 +107,7 @@ async function createNumber(agentId: string, areaCode: string) {
       areaCode,
       agentId,
     }),
+    signal,
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -122,6 +129,16 @@ export async function createAgentPhoneNumber(params: {
   agentName?: string | null;
   areaCode?: string | null;
 }): Promise<AgentPhoneNumber | null> {
+  if (isLocalBenchmarkAgentPhoneMockEnabled()) {
+    const number = buildMockAgentPhoneNumber(params.userId);
+    log.info('Mocked AgentPhone number provisioning for benchmark run', {
+      userId: params.userId,
+      agentId: number.agentId,
+      numberId: number.numberId,
+    });
+    return number;
+  }
+
   if (!isAgentPhoneConfigured()) {
     log.warn('AGENTPHONE_API_KEY missing; agent phone creation skipped', {
       userId: params.userId,
@@ -131,8 +148,11 @@ export async function createAgentPhoneNumber(params: {
 
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
-  const agentId = await createAgent(displayName);
-  const number = await createNumber(agentId, areaCode);
+  // Both provider writes share one deadline so browser auth-options cannot be
+  // held open indefinitely by either half of the provisioning sequence.
+  const signal = AbortSignal.timeout(CREATE_PHONE_TIMEOUT_MS);
+  const agentId = await createAgent(displayName, signal);
+  const number = await createNumber(agentId, areaCode, signal);
 
   return {
     agentId,

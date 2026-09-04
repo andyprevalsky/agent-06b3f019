@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -11,6 +11,7 @@ import {
   isE2bTeamBillingBlockError,
   isLocalClaudeCodeSandboxId,
   resolveLocalAttachmentPath,
+  resolveLocalSessionWorkDir,
   shouldAllowLocalClaudeCodeFallback,
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
@@ -230,6 +231,14 @@ test('close preserves ownership metadata until the database records CLOSED', asy
       true,
       'ownership must survive a failed CLOSED update so cleanup can retry'
     );
+    const ownership = JSON.parse(
+      readFileSync(join('/tmp', 'claude-code-local', taskId, 'session.json'), 'utf8')
+    ) as { outputFiles?: unknown };
+    assert.deepEqual(
+      ownership.outputFiles,
+      [],
+      'uploaded output pointers must be persisted before the fallible DB close'
+    );
   } finally {
     prisma.claudeCodeSession.update = workingUpdate;
   }
@@ -281,6 +290,16 @@ test('local attachment paths cannot escape the session attachment directory', ()
   );
   assert.throws(() => resolveLocalAttachmentPath(workDir, '../session.json'), /escapes/);
   assert.throws(() => resolveLocalAttachmentPath(workDir, '/tmp/outside.txt'), /escapes/);
+});
+
+test('local session task ids cannot escape or alias another ownership directory', () => {
+  assert.equal(
+    resolveLocalSessionWorkDir('task-owned-by-this-session'),
+    join('/tmp', 'claude-code-local', 'task-owned-by-this-session')
+  );
+  for (const taskId of ['', '.', '..', '../other-agent', 'nested/other-agent', 'nested\\other']) {
+    assert.throws(() => resolveLocalSessionWorkDir(taskId), /Invalid local Claude Code task id/);
+  }
 });
 
 test('closeLocalClaudeCodeSession extracts output files when userId is provided', async () => {
