@@ -58,13 +58,13 @@ function startTraceArchiveDeletionHeartbeat(lease: TraceArchiveDeletionLease): (
   return () => clearInterval(timer);
 }
 
-async function retryRootArchiveFinalization(agentId: string): Promise<void> {
+async function retryRootArchiveFinalization(agentId: string, ignoreGrace: boolean): Promise<void> {
   try {
     await runTraceArchiveFinalizationRetries({
       rootAgentIds: [agentId],
       batchSize: 1,
       maxConcurrency: 1,
-      ignoreGrace: true,
+      ignoreGrace,
     });
   } catch (error) {
     log.warn('Trace archive finalization retained for retry after agent deletion', {
@@ -123,7 +123,7 @@ async function deleteAgentRecursiveInternal(
     return result;
   });
   if (sealed === null) {
-    if (archiveEnabled()) await retryRootArchiveFinalization(agentId);
+    if (archiveEnabled()) await retryRootArchiveFinalization(agentId, false);
     return true;
   }
 
@@ -180,7 +180,7 @@ async function deleteAgentRecursiveInternal(
     if (sealed.traceArchiveDeletionLease !== null && workflowTerminationHandled) {
       try {
         await releaseTraceArchiveDeletion(sealed.traceArchiveDeletionLease);
-        await retryRootArchiveFinalization(agentId);
+        await retryRootArchiveFinalization(agentId, true);
       } catch (error) {
         log.warn('Trace archive deletion lease retained for retry', {
           agent_id: agentId,

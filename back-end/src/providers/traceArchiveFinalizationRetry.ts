@@ -204,6 +204,23 @@ async function retain(obligation: FinalizationObligation, error: unknown): Promi
   });
 }
 
+/** Release a claim when this worker's deadline expires before R2 work starts. */
+async function unclaim(obligation: FinalizationObligation): Promise<void> {
+  const released = await prisma.traceArchiveFinalization.updateMany({
+    where: {
+      rootAgentId: obligation.rootAgentId,
+      leaseToken: obligation.leaseToken,
+    },
+    data: {
+      leaseToken: null,
+      leaseUntil: null,
+    },
+  });
+  if (released.count !== 1) {
+    throw new Error(`Trace archive finalization lease lost for ${obligation.rootAgentId}`);
+  }
+}
+
 async function mapConcurrently<T>(
   values: T[],
   concurrency: number,
@@ -252,6 +269,11 @@ export async function runTraceArchiveFinalizationRetries(
   const failures = await mapConcurrently(claims, maxConcurrency, async (obligation) => {
     try {
       assertBeforeDeadline(options.deadlineAtMs);
+    } catch (error) {
+      await unclaim(obligation);
+      throw error;
+    }
+    try {
       await assertDeletedTreeIsTerminal(obligation.rootAgentId);
       await finalizeAgent({ rootAgentId: obligation.rootAgentId, force: true });
       await complete(obligation);

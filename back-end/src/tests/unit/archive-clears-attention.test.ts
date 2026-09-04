@@ -116,6 +116,30 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('Temporal cleanup trigger fences R2 finalization and deadline preflight is neutral', () => {
+    const cleanupMigration = readSrc(
+      'prisma',
+      'migrations',
+      '20260724002500_temporal_cleanup_utc_grace',
+      'migration.sql'
+    );
+    assert.match(
+      cleanupMigration,
+      /NEW\."deletedAt" IS NOT NULL AND OLD\."deletedAt" IS NULL/,
+      'soft-delete must atomically enqueue Temporal cleanup'
+    );
+    assert.match(cleanupMigration, /INSERT INTO "TemporalWorkflowCleanup"/);
+    assert.match(cleanupMigration, /SET "temporalCleanupPending" = true/);
+
+    const retry = readSrc('src', 'providers', 'traceArchiveFinalizationRetry.ts');
+    assert.match(retry, /if \(agent\.temporalCleanupPending\)/);
+    assert.match(
+      retry,
+      /assertBeforeDeadline\(options\.deadlineAtMs\);\s*} catch \(error\) {\s*await unclaim\(obligation\);\s*throw error;\s*}\s*try {\s*await assertDeletedTreeIsTerminal/,
+      'a deadline reached before R2 work must release the claim without retry backoff'
+    );
+  });
+
   await test('deleteAgentRecursive removes attention for parent + child', async () => {
     const userId = `archive-attn-${randomUUID()}`;
     const parentId = randomUUID();
@@ -212,7 +236,7 @@ async function main(): Promise<void> {
     }
   });
 
-  await test('failed root finalization stays durable and a repeated delete retries it', async () => {
+  await test('failed root finalization stays durable and repeated delete respects backoff', async () => {
     const userId = `archive-retry-${randomUUID()}`;
     const rootId = randomUUID();
     const testDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-retry-'));
@@ -256,6 +280,28 @@ async function main(): Promise<void> {
 
       process.env.TRACE_ARCHIVE_LOCAL_DIR = recoveredArchiveRoot;
       await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+
+      const stillRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
+        where: { rootAgentId: rootId },
+      });
+      assert.equal(stillRetained.attemptCount, 1);
+      assert.equal(stillRetained.notBefore.getTime(), retained.notBefore.getTime());
+      assert.equal(stillRetained.lastError, retained.lastError);
+      assert.deepEqual(
+        await listArchivedObjectsStrict(rootId),
+        [],
+        'an idempotent repeated delete must not bypass retry backoff'
+      );
+
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 1, finalized: 1 }
+      );
 
       assert.equal(
         await prisma.traceArchiveFinalization.findUnique({ where: { rootAgentId: rootId } }),
