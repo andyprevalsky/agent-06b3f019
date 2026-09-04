@@ -258,6 +258,118 @@ async function testPostDoesNotRetryWithoutIdempotencyKey(): Promise<void> {
   assert.equal(result.attempts, 1);
 }
 
+async function testRedirectsAreFollowedAndRevalidated(): Promise<void> {
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    urls.push(url);
+    if (url.endsWith('/start')) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: 'https://example.com/final' },
+      });
+    }
+    return jsonResponse({ landed: true });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'GET',
+    url: 'https://example.com/start',
+  });
+  assert.deepEqual(urls, ['https://example.com/start', 'https://example.com/final']);
+  assert.deepEqual(result.body, { landed: true });
+}
+
+async function testEmptyBodyAndInvalidJsonFallback(): Promise<void> {
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url =
+      typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.includes('/empty')) {
+      return new Response(null, { status: 204 });
+    }
+    return new Response('not-json', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  const empty = await executeExternalHttpRequest({
+    method: 'GET',
+    url: 'https://example.com/empty',
+  });
+  assert.equal(empty.body, '');
+  assert.equal(empty.body_encoding, 'text');
+
+  const invalid = await executeExternalHttpRequest({
+    method: 'GET',
+    url: 'https://example.com/invalid-json',
+  });
+  assert.equal(invalid.body_encoding, 'text');
+  assert.equal(invalid.body, 'not-json');
+}
+
+async function testStringPostBodyAndIdempotentRetry(): Promise<void> {
+  let postCalls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    postCalls += 1;
+    assert.equal(init?.method, 'POST');
+    assert.equal(init?.body, 'raw body');
+    if (postCalls === 1) {
+      return jsonResponse(
+        { message: 'unavailable' },
+        { status: 503, headers: { 'retry-after': new Date(Date.now() - 1000).toUTCString() } }
+      );
+    }
+    return jsonResponse({ ok: true });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'POST',
+    url: 'https://example.com/raw',
+    headers: { 'Idempotency-Key': 'k1' },
+    body: 'raw body',
+  });
+  assert.equal(postCalls, 2);
+  assert.equal(result.ok, true);
+  assert.equal(result.attempts, 2);
+}
+
+async function testTransportErrorThenSuccess(): Promise<void> {
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw new Error('ECONNRESET');
+    }
+    return jsonResponse({ recovered: true });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'GET',
+    url: 'https://example.com/flaky',
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(result.body, { recovered: true });
+}
+
+async function testOversizeDeclaredContentLength(): Promise<void> {
+  globalThis.fetch = (async () =>
+    new Response('tiny', {
+      status: 200,
+      headers: { 'content-length': String(20 * 1024 * 1024) },
+    })) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://example.com/huge',
+      }),
+    /exceeds/
+  );
+}
+
 async function main(): Promise<void> {
   await testValidation();
   await testSuccessfulJsonResponse();
@@ -268,6 +380,11 @@ async function main(): Promise<void> {
   await testTextXmlAndBinaryResponses();
   await testPostJsonBody();
   await testPostDoesNotRetryWithoutIdempotencyKey();
+  await testRedirectsAreFollowedAndRevalidated();
+  await testEmptyBodyAndInvalidJsonFallback();
+  await testStringPostBodyAndIdempotentRetry();
+  await testTransportErrorThenSuccess();
+  await testOversizeDeclaredContentLength();
   process.stdout.write('external-http unit tests passed\n');
 }
 
