@@ -1036,7 +1036,19 @@ def build_verifier_context_messages(
             # even when the agent completed correctly.
             dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
             if str(call_site or "") == "benchmark_declared_evaluator":
-                tool_text, truncated = dumped, False
+                # Evidence builders already bound content (~320k), but
+                # json.dumps(tool_payload) re-serializes and can exceed that.
+                # Cap the final TOOL_RESULT text so the provider request stays
+                # inside the declared single-turn budget (CodeRabbit #1260).
+                _declared_cap = 320_000
+                if len(dumped) > _declared_cap:
+                    tool_text = (
+                        dumped[:_declared_cap]
+                        + f"...[declared-evaluator truncated {len(dumped) - _declared_cap} chars]"
+                    )
+                    truncated = True
+                else:
+                    tool_text, truncated = dumped, False
             else:
                 tool_text, truncated = _budget_verifier_tool_result_text(
                     dumped,
@@ -4903,9 +4915,16 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if value is None:
         return False
     normalized = _normalize_schema_field_type(field_type) if field_type else None
-    if normalized in ("file_pointer", "session_file_pointer"):
+    if normalized == "session_file_pointer":
+        # Soft-accept requires the declared path — id-only stubs are incomplete.
+        return isinstance(value, dict) and bool(value.get("path"))
+    if normalized == "file_pointer":
         return isinstance(value, dict) and any(value.get(key) for key in ("id", "path", "storage_path"))
-    if normalized in ("list[file_pointer]", "list[session_file_pointer]"):
+    if normalized == "list[session_file_pointer]":
+        return isinstance(value, list) and all(
+            _has_schema_value(item, "session_file_pointer") for item in value
+        )
+    if normalized == "list[file_pointer]":
         return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
     # Structured deliverables must match the declared container type. A markdown
     # string in a list[object] field (seen on cuda-kernel-github-top100 soft-accept)

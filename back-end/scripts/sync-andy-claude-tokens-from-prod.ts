@@ -177,6 +177,19 @@ export async function syncAndyClaudeTokensFromProd(options?: {
     });
 
     if (credentialed.length === 0) {
+      // Clear stale local rows before failing — otherwise revoked/expired
+      // credentials from a prior sync remain in the local pool (CodeRabbit #1260).
+      const cleared = await local.integration.deleteMany({
+        where: {
+          userId: ANDY_CLAUDE_SMOKE_USER_ID,
+          name: 'claude_code',
+        },
+      });
+      if (cleared.count > 0) {
+        console.log(
+          `  🧹 Removed ${cleared.count} stale local Andy claude_code row(s) (no eligible prod credentials)`
+        );
+      }
       throw new Error(`No claude_code integrations with credentials found for Andy in production`);
     }
 

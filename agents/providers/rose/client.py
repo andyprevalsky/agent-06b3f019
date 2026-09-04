@@ -1099,7 +1099,11 @@ class RoseClient:
                             timed_out = True
                             break
                 finally:
-                    if timed_out and not next_item.done():
+                    # Always cancel an unfinished __anext__ on exit — including
+                    # CancelledError while awaiting asyncio.wait. Leaving it
+                    # running after the activity ends raises an unobserved
+                    # exception (CodeRabbit #1260).
+                    if not next_item.done():
                         next_item.cancel()
                         with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                             await next_item
