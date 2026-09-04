@@ -195,12 +195,28 @@ if [ -z "$OLD_QUEUE" ]; then
   exit 0
 fi
 
+# Temporal client logs INFO to stdout (logger.ts). Never assign the raw
+# command output to OPEN — a polluted multiline string never equals "0", so
+# the drain loop would burn the full 45m SLO even with an empty queue and
+# then lose the race with the GHA step timeout during machine retirement
+# (seen on run 33817062156: 0 open workflows the whole time, step killed at 60m).
+count_open_on_queue() {
+  # Capture status separately: the TS helper can print a count and still exit
+  # non-zero (e.g. prisma.$disconnect failure). Masking with `|| true` would
+  # let drain/post-clear treat that unknown state as a real integer (incl. 0).
+  local raw status
+  raw="$(npx tsx scripts/count-open-workflows-on-queue.ts --queue "$1" 2>/dev/null)" && status=0 || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf '?\n'
+    return 0
+  fi
+  printf '%s\n' "$raw" | awk '/^[0-9]+$/{n=$0} END{if (n == "") print "?"; else print n}'
+}
+
 echo "Cooperative drain of $OLD_QUEUE (timeout=${DRAIN_TIMEOUT_SECONDS}s, force-migrate after SLO)"
 drain_deadline=$((SECONDS + DRAIN_TIMEOUT_SECONDS))
 while true; do
-  OPEN="$(
-    npx tsx scripts/count-open-workflows-on-queue.ts --queue "$OLD_QUEUE" 2>/dev/null || echo "?"
-  )"
+  OPEN="$(count_open_on_queue "$OLD_QUEUE")"
   echo "  open workflows on $OLD_QUEUE: $OPEN"
   if [ "$OPEN" = "0" ]; then
     echo "✅ Old generation drained via cooperative handoff"
@@ -209,9 +225,7 @@ while true; do
   if [ "$SECONDS" -ge "$drain_deadline" ]; then
     echo "⏰ 45m SLO reached with $OPEN workflows still on $OLD_QUEUE — force-clearing stragglers"
     if ! npx tsx scripts/force-clear-generation-queue.ts --queue "$OLD_QUEUE" --execute; then
-      OPEN_AFTER="$(
-        npx tsx scripts/count-open-workflows-on-queue.ts --queue "$OLD_QUEUE" 2>/dev/null || echo "?"
-      )"
+      OPEN_AFTER="$(count_open_on_queue "$OLD_QUEUE")"
       if [ "$OPEN_AFTER" != "0" ]; then
         echo "❌ force-clear left $OPEN_AFTER workflow(s) on $OLD_QUEUE" >&2
         exit 1

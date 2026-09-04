@@ -89,7 +89,9 @@ jobs:
       # retire old-gen machines. migrate-open is break-glass after the SLO only.
       - name: Cooperative Fly deploy + generation cutover
         id: cutover
-        timeout-minutes: 60
+        # 45m drain SLO + image build/overlap + old-gen machine destroy needs
+        # headroom past 60m (run 33817062156 hit the step timeout mid-destroy).
+        timeout-minutes: 75
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           GH_TOKEN: ${{ github.token }}
