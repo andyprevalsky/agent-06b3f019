@@ -20,6 +20,46 @@ import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
+import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
+
+function scheduleTraceArchiveFinalizationRetries(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_TRACE_ARCHIVE_FINALIZATION_RETRY === '1') {
+    cronLog.info('Trace archive finalization retry disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_TRACE_ARCHIVE_FINALIZATION_RETRY',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Trace archive finalization retry already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    runTraceArchiveFinalizationRetries({
+      batchSize: 100,
+      maxConcurrency: 4,
+      deadlineAtMs: Date.now() + 50_000,
+    })
+      .then((summary) => {
+        if (summary.discovered > 0) {
+          cronLog.info('Trace archive finalization retry summary', { ...summary });
+        }
+      })
+      .catch((error) => {
+        cronLog.error('Trace archive finalization retry failed; obligations retained', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+  cronLog.info('Trace archive finalization retry scheduled (every minute)');
+}
 
 function scheduleTerminalBrowserReleaseReconcile(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -307,6 +347,7 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
  * unrelated background jobs, so each job self-gates on its DISABLE_* env flag.
  */
 export function registerCronJobs(isProduction: boolean): void {
+  scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
   scheduleTerminalBrowserReleaseReconcile(isProduction);

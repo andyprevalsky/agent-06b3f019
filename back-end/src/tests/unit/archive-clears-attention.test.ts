@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -60,7 +60,12 @@ async function main(): Promise<void> {
     assert.match(kill, /agentAttentionRequest\.deleteMany/);
     assert.match(kill, /deletedAt:\s*new Date\(\)/);
     assert.match(kill, /cleanupAgentSessions/);
-    assert.match(kill, /finalizeAgent\(\{ rootAgentId: agentId, force: true \}\)/);
+    assert.match(kill, /enqueueTraceArchiveFinalization\(tx, agentId\)/);
+    assert.match(kill, /runTraceArchiveFinalizationRetries/);
+    assert.match(
+      readSrc('src', 'serverCron.ts'),
+      /scheduleTraceArchiveFinalizationRetries\(isProduction\)/
+    );
     // Soft-delete under workflow-generation lock before recursing children so a
     // concurrent child create cannot commit after the descendant snapshot.
     assert.match(kill, /lockAgentWorkflowGeneration/);
@@ -186,6 +191,74 @@ async function main(): Promise<void> {
       await prisma.agent.deleteMany({ where: { id: { in: [parentId, childId] } } });
       await prisma.user.deleteMany({ where: { userId } });
       rmSync(archiveDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('failed root finalization stays durable and a repeated delete retries it', async () => {
+    const userId = `archive-retry-${randomUUID()}`;
+    const rootId = randomUUID();
+    const testDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-retry-'));
+    const invalidArchiveRoot = join(testDir, 'not-a-directory');
+    const recoveredArchiveRoot = join(testDir, 'recovered');
+    writeFileSync(invalidArchiveRoot, 'block mkdir');
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = invalidArchiveRoot;
+
+    await prisma.user.create({
+      data: { userId, phone: `+1554${String(Date.now()).slice(-7)}` },
+    });
+    await prisma.agent.create({
+      data: {
+        id: rootId,
+        userId,
+        goal: 'root archive retry',
+        status: 'ACTIVE',
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+
+    try {
+      await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+
+      const retained = await prisma.traceArchiveFinalization.findUnique({
+        where: { rootAgentId: rootId },
+      });
+      assert.ok(retained, 'failed R2 finalization must retain an outbox row');
+      assert.equal(retained.attemptCount, 1);
+      assert.ok(retained.lastError);
+      assert.ok(
+        (await prisma.agent.findUniqueOrThrow({ where: { id: rootId } })).deletedAt,
+        'the retry obligation must survive after the root is already soft-deleted'
+      );
+
+      process.env.TRACE_ARCHIVE_LOCAL_DIR = recoveredArchiveRoot;
+      await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+
+      assert.equal(
+        await prisma.traceArchiveFinalization.findUnique({ where: { rootAgentId: rootId } }),
+        null,
+        'successful retry must clear the durable obligation'
+      );
+      const paths = new Set((await listArchivedObjectsStrict(rootId)).map((object) => object.path));
+      assert.ok(paths.has('db/end.fixture.json.gz.enc'));
+      assert.ok(paths.has('manifest.json.gz.enc'));
+      assert.ok(paths.has('manifest.public.json'));
+      assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: rootId } });
+      await prisma.user.deleteMany({ where: { userId } });
+      rmSync(testDir, { recursive: true, force: true });
       if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
       else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
       if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;

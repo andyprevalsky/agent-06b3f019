@@ -22,7 +22,10 @@ import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { archiveEnabled } from './traceArchive';
-import { finalizeAgent } from './traceArchiveLifecycle';
+import {
+  enqueueTraceArchiveFinalization,
+  runTraceArchiveFinalizationRetries,
+} from './traceArchiveFinalizationRetry';
 
 const log = createLogger('AgentKill');
 
@@ -35,6 +38,22 @@ interface SealedAgentKill {
   temporalWorkflowId: string | null;
   parentAgentId: string | null;
   childIds: string[];
+}
+
+async function retryRootArchiveFinalization(agentId: string): Promise<void> {
+  try {
+    await runTraceArchiveFinalizationRetries({
+      rootAgentIds: [agentId],
+      batchSize: 1,
+      maxConcurrency: 1,
+      ignoreGrace: true,
+    });
+  } catch (error) {
+    log.warn('Trace archive finalization retained for retry after agent deletion', {
+      agent_id: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
@@ -67,6 +86,9 @@ export async function deleteAgentRecursive(
       where: { id: agentId },
       data: { deletedAt: new Date() },
     });
+    if (agent.parentAgentId === null && archiveEnabled()) {
+      await enqueueTraceArchiveFinalization(tx, agentId);
+    }
     const result: SealedAgentKill = {
       temporalWorkflowId: agent.temporalWorkflowId,
       parentAgentId: agent.parentAgentId,
@@ -75,6 +97,7 @@ export async function deleteAgentRecursive(
     return result;
   });
   if (sealed === null) {
+    if (archiveEnabled()) await retryRootArchiveFinalization(agentId);
     return;
   }
 
@@ -120,14 +143,7 @@ export async function deleteAgentRecursive(
   // goal hash and only removed by the explicit fast-cache purge endpoint.
 
   if (sealed.parentAgentId === null && archiveEnabled()) {
-    try {
-      await finalizeAgent({ rootAgentId: agentId, force: true });
-    } catch (error) {
-      log.warn('Trace archive finalization unavailable after agent deletion', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await retryRootArchiveFinalization(agentId);
   }
 
   log.info('Deleted agent', { agent_id: agentId, terminate_reason: terminateReason });
