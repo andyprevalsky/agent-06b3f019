@@ -4,11 +4,16 @@ import { prisma } from './database';
 import { archiveEnabled } from './traceArchive';
 import { finalizeAgent } from './traceArchiveLifecycle';
 
-const INITIAL_GRACE_MS = 120_000;
 const RETRY_DELAY_MS = 60_000;
 const LEASE_MS = 10 * 60_000;
+export const TRACE_ARCHIVE_DELETION_LEASE_MS = 2 * 60_000;
 
 interface FinalizationObligation {
+  rootAgentId: string;
+  leaseToken: string;
+}
+
+export interface TraceArchiveDeletionLease {
   rootAgentId: string;
   leaseToken: string;
 }
@@ -33,18 +38,53 @@ export interface TraceArchiveFinalizationResult {
 export async function enqueueTraceArchiveFinalization(
   tx: Prisma.TransactionClient,
   rootAgentId: string
-): Promise<void> {
-  const notBefore = new Date(Date.now() + INITIAL_GRACE_MS);
+): Promise<TraceArchiveDeletionLease> {
+  const now = Date.now();
+  const leaseToken = randomUUID();
   await tx.traceArchiveFinalization.upsert({
     where: { rootAgentId },
-    create: { rootAgentId, notBefore },
+    create: {
+      rootAgentId,
+      notBefore: new Date(now),
+      leaseToken,
+      leaseUntil: new Date(now + TRACE_ARCHIVE_DELETION_LEASE_MS),
+    },
     update: {
-      notBefore,
-      leaseToken: null,
-      leaseUntil: null,
+      notBefore: new Date(now),
+      leaseToken,
+      leaseUntil: new Date(now + TRACE_ARCHIVE_DELETION_LEASE_MS),
       lastError: null,
     },
   });
+  return { rootAgentId, leaseToken };
+}
+
+/** Keep a live recursive deletion from being mistaken for an abandoned owner. */
+export async function heartbeatTraceArchiveDeletion(
+  lease: TraceArchiveDeletionLease
+): Promise<void> {
+  const updated = await prisma.traceArchiveFinalization.updateMany({
+    where: lease,
+    data: { leaseUntil: new Date(Date.now() + TRACE_ARCHIVE_DELETION_LEASE_MS) },
+  });
+  if (updated.count !== 1) {
+    throw new Error(`Trace archive deletion lease lost for ${lease.rootAgentId}`);
+  }
+}
+
+/** Make the obligation claimable only after recursive deletion has completed. */
+export async function releaseTraceArchiveDeletion(lease: TraceArchiveDeletionLease): Promise<void> {
+  const released = await prisma.traceArchiveFinalization.updateMany({
+    where: lease,
+    data: {
+      notBefore: new Date(),
+      leaseToken: null,
+      leaseUntil: null,
+    },
+  });
+  if (released.count !== 1) {
+    throw new Error(`Trace archive deletion lease lost for ${lease.rootAgentId}`);
+  }
 }
 
 function boundedInteger(value: number | undefined, fallback: number, label: string): number {
@@ -68,7 +108,7 @@ async function candidates(options: TraceArchiveFinalizationOptions, batchSize: n
     where: {
       ...(options.rootAgentIds === undefined ? {} : { rootAgentId: { in: options.rootAgentIds } }),
       ...(options.ignoreGrace === true ? {} : { notBefore: { lte: now } }),
-      OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
+      OR: [{ leaseToken: null }, { leaseUntil: { lt: now } }],
     },
     orderBy: [{ notBefore: 'asc' }, { rootAgentId: 'asc' }],
     take: batchSize,
@@ -85,7 +125,7 @@ async function claim(
     where: {
       rootAgentId: candidate.rootAgentId,
       ...(options.ignoreGrace === true ? {} : { notBefore: { lte: now } }),
-      OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }],
+      OR: [{ leaseToken: null }, { leaseUntil: { lt: now } }],
     },
     data: {
       leaseToken,
@@ -93,6 +133,34 @@ async function claim(
     },
   });
   return claimed.count === 1 ? { rootAgentId: candidate.rootAgentId, leaseToken } : null;
+}
+
+async function assertDeletedTreeIsTerminal(rootAgentId: string): Promise<void> {
+  const seen = new Set<string>();
+  let frontier = [rootAgentId];
+  while (frontier.length > 0) {
+    const agents = await prisma.agent.findMany({
+      where: { id: { in: frontier } },
+      select: { id: true, deletedAt: true, temporalCleanupPending: true },
+    });
+    if (agents.length !== frontier.length) {
+      throw new Error(`Trace archive deletion tree is incomplete for ${rootAgentId}`);
+    }
+    for (const agent of agents) {
+      seen.add(agent.id);
+      if (agent.deletedAt === null) {
+        throw new Error(`Trace archive agent ${agent.id} is not deleted`);
+      }
+      if (agent.temporalCleanupPending) {
+        throw new Error(`Trace archive agent ${agent.id} still has Temporal cleanup pending`);
+      }
+    }
+    const children = await prisma.agent.findMany({
+      where: { parentAgentId: { in: frontier } },
+      select: { id: true },
+    });
+    frontier = children.map((child) => child.id).filter((id) => !seen.has(id));
+  }
 }
 
 async function complete(obligation: FinalizationObligation): Promise<void> {
@@ -171,6 +239,7 @@ export async function runTraceArchiveFinalizationRetries(
   const failures = await mapConcurrently(claims, maxConcurrency, async (obligation) => {
     try {
       assertBeforeDeadline(options.deadlineAtMs);
+      await assertDeletedTreeIsTerminal(obligation.rootAgentId);
       await finalizeAgent({ rootAgentId: obligation.rootAgentId, force: true });
       await complete(obligation);
       finalized += 1;

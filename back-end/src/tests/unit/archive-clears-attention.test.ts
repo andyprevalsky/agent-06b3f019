@@ -20,6 +20,12 @@ import { prisma } from '../../providers/database';
 import { deleteAgentRecursive } from '../../providers/agentKill';
 import { listArchivedObjectsStrict } from '../../providers/traceArchive';
 import { inspectFinalizedManifest } from '../../providers/traceArchiveManifest';
+import {
+  enqueueTraceArchiveFinalization,
+  releaseTraceArchiveDeletion,
+  runTraceArchiveFinalizationRetries,
+  type TraceArchiveDeletionLease,
+} from '../../providers/traceArchiveFinalizationRetry';
 
 let passed = 0;
 const failures: string[] = [];
@@ -259,6 +265,115 @@ async function main(): Promise<void> {
       await prisma.agent.deleteMany({ where: { id: rootId } });
       await prisma.user.deleteMany({ where: { userId } });
       rmSync(testDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('finalization waits for deletion ownership and terminal descendants', async () => {
+    const userId = `archive-ordering-${randomUUID()}`;
+    const rootId = randomUUID();
+    const childId = randomUUID();
+    const archiveDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-ordering-'));
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
+
+    await prisma.user.create({
+      data: { userId, phone: `+1553${String(Date.now()).slice(-7)}` },
+    });
+    await prisma.agent.create({
+      data: {
+        id: rootId,
+        userId,
+        goal: 'root archive ordering',
+        status: 'ACTIVE',
+        deletedAt: new Date(),
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+    await prisma.agent.create({
+      data: {
+        id: childId,
+        userId,
+        parentAgentId: rootId,
+        goal: 'child archive ordering',
+        status: 'ACTIVE',
+        deletedAt: new Date(),
+        temporalCleanupPending: true,
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+
+    try {
+      let deletionLease: TraceArchiveDeletionLease | null = null;
+      await prisma.$transaction(async (tx) => {
+        deletionLease = await enqueueTraceArchiveFinalization(tx, rootId);
+      });
+      assert.ok(deletionLease);
+
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 0, finalized: 0 },
+        'an active recursive deletion lease must not be claimable'
+      );
+
+      await releaseTraceArchiveDeletion(deletionLease);
+      await assert.rejects(
+        runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        AggregateError,
+        'a descendant Temporal cleanup obligation must block the end fixture'
+      );
+      assert.equal(
+        (
+          await prisma.traceArchiveFinalization.findUniqueOrThrow({
+            where: { rootAgentId: rootId },
+          })
+        ).attemptCount,
+        1
+      );
+
+      await prisma.agent.update({
+        where: { id: childId },
+        data: { temporalCleanupPending: false },
+      });
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 1, finalized: 1 }
+      );
+      assert.equal(
+        await prisma.traceArchiveFinalization.findUnique({ where: { rootAgentId: rootId } }),
+        null
+      );
+      assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: { in: [childId, rootId] } } });
+      await prisma.user.deleteMany({ where: { userId } });
+      rmSync(archiveDir, { recursive: true, force: true });
       if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
       else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
       if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
