@@ -186,20 +186,24 @@ const tests: Array<[string, () => Promise<void>]> = [
         }
         if (
           connected.status === 502 &&
-          (/invalid or expired organization token/i.test(JSON.stringify(connected.data)) ||
-            /could not obtain an agentcard organization mcp access token/i.test(
-              JSON.stringify(connected.data)
-            ) ||
-            /timed out acquiring an agentcard organization mcp access token/i.test(
-              JSON.stringify(connected.data)
-            ) ||
-            /could not reach the agentcard organization mcp token endpoint/i.test(
-              JSON.stringify(connected.data)
-            ))
+          /invalid or expired organization token|invalid client secret|Could not obtain an AgentCard Organization MCP access token|Timed out acquiring an AgentCard Organization MCP access token|Could not reach the AgentCard Organization MCP token endpoint/i.test(
+            JSON.stringify(connected.data)
+          )
         ) {
           writeLine(
             `⚠️  SKIP: AgentCard sandbox org token unavailable from provider ` +
               `(${JSON.stringify(connected.data)}); credential-infra precondition, ` +
+              `not a code regression — connect/reset assertions skipped.`
+          );
+          return;
+        }
+        if (
+          (connected.status === 502 || connected.status === 503) &&
+          /temporarily unavailable|service unavailable/i.test(JSON.stringify(connected.data))
+        ) {
+          writeLine(
+            `⚠️  SKIP: AgentCard sandbox organization MCP is temporarily unavailable ` +
+              `(${JSON.stringify(connected.data)}); provider-infra precondition, ` +
               `not a code regression — connect/reset assertions skipped.`
           );
           return;

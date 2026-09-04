@@ -227,6 +227,28 @@ def test_world_model_scope_partitions_simulated_runs(monkeypatch):
     assert normalize.build_key("llm", "goal", "detail") != sim_key
 
 
+def test_canonical_messages_ignore_planner_reference_plans_churn():
+    """Retrieved reference plans drift as the archive grows; they must not key planner replays."""
+
+    def request(reference_block: str):
+        return {
+            "messages": [
+                {"role": "system", "content": "static planner prompt"},
+                {"role": "user", "content": "GOAL: same goal\n\nPlan this goal into tasks."},
+                {"role": "user", "content": reference_block},
+            ]
+        }
+
+    with_alpha = request("# Reference Plans\n\n## Reference 1 — similarity 0.80\nGoal: alpha\n- 0 [reasoning] a")
+    with_beta = request("# Reference Plans\n\n## Reference 1 — similarity 0.61\nGoal: beta\n- 0 [spawn_browser_agent] b")
+    assert normalize.canonical_messages(with_alpha) == normalize.canonical_messages(with_beta)
+    assert normalize.position_request_fingerprint({**with_alpha, "pool": "rose-1-ultra"}) == (
+        normalize.position_request_fingerprint({**with_beta, "pool": "rose-1-ultra"})
+    )
+    # A genuinely different user turn still changes the key.
+    assert normalize.canonical_messages(with_alpha) != normalize.canonical_messages(request("unrelated user turn"))
+
+
 def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_churn():
     def request(recent_message: str, integrations: list[str], user_text: str = "same goal"):
         return {

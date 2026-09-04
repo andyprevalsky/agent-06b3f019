@@ -320,6 +320,7 @@ export async function updateIntegrationStatus(
 export {
   deleteIntegration,
   findIntegrationByUserAndName,
+  persistRecoveredIntegrationAccountId,
   updateIntegration,
 } from './repo.integration';
 

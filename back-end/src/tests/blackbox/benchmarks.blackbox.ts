@@ -597,8 +597,7 @@ interface TestGroup {
 
 async function runAll() {
   console.log('Benchmarks Black-Box Tests\n');
-  console.log(`Testing against: ${BASE_URL}`);
-  console.log(`Case concurrency: ${CASE_CONCURRENCY}\n`);
+  console.log(`Testing against: ${BASE_URL}; case concurrency: ${CASE_CONCURRENCY}\n`);
 
   // Parallel groups — safe for concurrent execution
   const parallelGroups: TestGroup[] = [

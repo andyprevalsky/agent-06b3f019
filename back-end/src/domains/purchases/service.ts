@@ -1,12 +1,8 @@
-import {
-  createCardProviderForAgent,
-  isCardLive,
-  type CardProvider,
-  type CardProviderDetailsResult,
-} from '../../providers/card-provider';
+import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { closedCardIndicatesMerchantSpend, tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
@@ -63,32 +59,6 @@ function isStaleChargingPurchase(purchase: PurchaseSpend, now: Date): boolean {
     purchase.status === PurchaseSpendStatus.CHARGING &&
     now.getTime() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
   );
-}
-
-/**
- * Returns the card details only if the card is still live; `null` if it has been
- * settled/closed/deleted or can't be read. Fail-safe: an unreadable card is treated as consumed
- * so we re-prompt instead of silently re-issuing a dead, already-charged card.
- */
-async function tryGetLiveCardDetails(
-  userId: string,
-  agentId: string | null,
-  cardId: string,
-  cardProvider?: CardProvider
-): Promise<CardProviderDetailsResult | null> {
-  // Provider selection may perform a database lookup. Let those errors propagate so a transient
-  // benchmark-classification failure cannot be mistaken for a consumed card and trigger billing.
-  const activeCardProvider = cardProvider ?? (await createCardProviderForAgent(userId, agentId));
-  try {
-    const details = await activeCardProvider.getDetails(cardId);
-    return isCardLive(details) ? details : null;
-  } catch (error) {
-    log.warn('Reuse liveness check failed; treating card as consumed', {
-      card_id: cardId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
 }
 
 export async function lookupPurchase(

@@ -1328,8 +1328,12 @@ async def _run_verifier(
 
     if code_agent_verifier_disabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
-        # both extracted output artifacts and a process/completion success
-        # signal. A crashed process can leave stale partial files behind.
+        # both extracted /home/user/output artifacts and a process/completion
+        # success signal. A crashed process can leave stale partial files
+        # behind. Surface the same SDK-event JSON the LLM verifier would have
+        # read; a one-line skip note with no Bash/Write evidence made the parent
+        # treat a completed Collatz session as empty and re-spawn until the
+        # smoke cap (claude-code-agent 04977ce8, 2026-09-04).
         has_artifacts = bool(extracted_output_files)
         has_success_signal = attempt_completion or exit_code == 0
         score = 1.0 if has_artifacts and has_success_signal else 0.5
@@ -1339,6 +1343,16 @@ async def _run_verifier(
             f", artifacts={len(extracted_output_files)})."
             + ("" if has_artifacts else " No output artifacts extracted - incomplete.")
         )
+        terminal_output = (terminal.get_display() or "").strip()
+        if terminal_output:
+            v_reasoning = f"{v_reasoning}\n\nTerminal output:\n\n{terminal_output}"
+        event_context = _build_code_event_context(
+            code_events=code_events or [],
+            output_files=extracted_output_files,
+            action_summary=action_summary,
+        )
+        if event_context:
+            v_reasoning = f"{v_reasoning}\n\nCode-agent SDK event JSON:\n\n{event_context}"
         logger.info(
             "[ClaudeCode] Verifier skipped via ROSE_DISABLE_CODE_AGENT_VERIFIER",
             agent_id=agent_id,

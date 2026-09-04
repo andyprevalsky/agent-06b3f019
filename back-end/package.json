@@ -20,6 +20,7 @@
     "clear:blueprints": "tsx scripts/clear-blueprints.ts",
     "getmessages:all": "tsx scripts/get-messages-all.ts",
     "backfill:pricing": "tsx scripts/backfill-agent-pricing.ts",
+    "backfill:trace-manifests": "tsx scripts/backfill-trace-archive-manifests.ts",
     "test:blackbox": "bash scripts/run-blackbox-tests.sh",
     "test:api": "bash scripts/run-blackbox-tests.sh benchmarks,benchmarks-test-prompts,data,data-coverage,data-grep",
     "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",

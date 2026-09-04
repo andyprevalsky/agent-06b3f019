@@ -1391,6 +1391,69 @@ async def test_run_verifier_disabled_by_env_flag():
     assert called["check_progress"] == 0
 
 
+async def test_run_verifier_disabled_includes_sdk_event_stdout():
+    """Disabled verifier must still hand Bash/Write stdout to the parent.
+
+    Repro for smoke claude-code-agent 04977ce8 (2026-09-04): Claude Code wrote
+    collatz_27.py and printed the sequence, but the skip path returned only
+    'verifier disabled' with structured_response=null. The parent then spawned
+    explore + two more CC sessions and hit the 164s cap.
+    """
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    stdout = "27\n82\n41\n124\n62\n31\n94\n47\n142\n71\n214\n107\n322\n161\n484\n242\n121\n364\n182\n91\n274\n137\n412\n206\n103\n310\n155\n466\n233\n700\n350\n175\n526\n263\n790\n395\n1186\n593\n1780\n890\n445\n1336\n668\n334\n167\n502\n251\n754\n377\n1132\n566\n283\n850\n425\n1276\n638\n319\n958\n479\n1438\n719\n2158\n1079\n3238\n1619\n4858\n2429\n7288\n3644\n1822\n911\n2734\n1367\n4102\n2051\n6154\n3077\n9232\n4616\n2308\n1154\n577\n1732\n866\n433\n1300\n650\n325\n976\n488\n244\n122\n61\n184\n92\n46\n23\n70\n35\n106\n53\n160\n80\n40\n20\n10\n5\n16\n8\n4\n2\n1\nTotal steps: 111"
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+    called = {"check_progress": 0}
+
+    async def fake_activity(*a, **kw):
+        called["check_progress"] += 1
+        raise AssertionError("verifier LLM must not be called when disabled")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, struct, itok, otok = await service._run_verifier(
+            agent_id="04977ce8-c7e5-4334-ad44-faf4c47c0e62",
+            task_id="6c70a926-7382-4afd-9538-d2d3a8039d70",
+            goal="Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27.",
+            model="rose-labs/rose-1-ultra",
+            terminal=terminal,
+            action_summary=["Created E2B sandbox", "Agentic loop finished: 0 interactions"],
+            output_schema={
+                "fields": [
+                    {"name": "stdout", "type": "str", "required": True},
+                    {"name": "collatz_sequence", "type": "list[int]", "required": True},
+                    {"name": "total_steps", "type": "int", "required": True},
+                    {"name": "python_script", "type": "file_pointer", "required": True},
+                ]
+            },
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            code_events=[
+                {"type": "tool_use", "provider": "claude", "tool": "Write", "input": {"path": "/home/user/output/collatz_27.py"}},
+                {"type": "tool_result", "provider": "claude", "status": "completed"},
+                {"type": "tool_use", "provider": "claude", "tool": "Bash", "input": {"command": "python collatz_27.py"}},
+                {"type": "tool_result", "provider": "claude", "content": stdout},
+                {"type": "result", "provider": "claude", "status": "completed", "text": stdout},
+            ],
+            output_files=[{"original_filename": "collatz_27.py", "mime_type": "application/octet-stream", "size_bytes": 414}],
+        )
+
+    assert called["check_progress"] == 0
+    assert score == 1.0
+    assert "verifier disabled" in reasoning.lower(), reasoning
+    assert "Total steps: 111" in reasoning, reasoning
+    assert "code_agent_events" in reasoning, reasoning
+    assert struct is None
+    assert itok == 0 and otok == 0
+
+
 async def test_run_verifier_exception_fallback():
     """Exception returns 0.5 score and assumes partial completion."""
     from domains.spawn_claude_code_agent import service
@@ -3067,6 +3130,11 @@ async def run_all_tests():
     await r.record_async("handle_reconnect_health_none", test_handle_reconnect_exhausted_health_none)
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
+    await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
+    await r.record_async(
+        "run_verifier_disabled_includes_sdk_stdout",
+        test_run_verifier_disabled_includes_sdk_event_stdout,
+    )
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
     await r.record_async(
         "run_verifier_codex_event_json",

@@ -2,6 +2,7 @@ import { DeleteObjectsCommand, ListObjectsV2Command, type S3Client } from '@aws-
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ArchiveBundleDeleteResult, ArchivedObjectSummary } from './traceArchive';
+import { withTraceArchiveRequestTimeout } from './traceArchiveRequest';
 
 export function listLocalArchivedObjects(params: {
   localArchiveRoot: string;
@@ -43,12 +44,15 @@ export async function listR2ArchivedObjects(params: {
   const results: ArchivedObjectSummary[] = [];
   let continuationToken: string | undefined;
   do {
-    const response = await params.client.send(
-      new ListObjectsV2Command({
-        Bucket: params.bucket,
-        Prefix: params.objectPrefix,
-        ContinuationToken: continuationToken,
-      })
+    const response = await withTraceArchiveRequestTimeout((abortSignal) =>
+      params.client.send(
+        new ListObjectsV2Command({
+          Bucket: params.bucket,
+          Prefix: params.objectPrefix,
+          ContinuationToken: continuationToken,
+        }),
+        { abortSignal }
+      )
     );
     for (const item of response.Contents ?? []) {
       if (item.Key === undefined || item.Key.endsWith('.meta.json')) continue;
@@ -70,12 +74,15 @@ async function listR2ObjectKeys(params: {
   const keys: string[] = [];
   let continuationToken: string | undefined;
   do {
-    const response = await params.client.send(
-      new ListObjectsV2Command({
-        Bucket: params.bucket,
-        Prefix: params.objectPrefix,
-        ContinuationToken: continuationToken,
-      })
+    const response = await withTraceArchiveRequestTimeout((abortSignal) =>
+      params.client.send(
+        new ListObjectsV2Command({
+          Bucket: params.bucket,
+          Prefix: params.objectPrefix,
+          ContinuationToken: continuationToken,
+        }),
+        { abortSignal }
+      )
     );
     for (const item of response.Contents ?? []) {
       if (item.Key !== undefined) keys.push(item.Key);
@@ -97,14 +104,17 @@ export async function deleteR2ArchivedBundle(params: {
   for (let index = 0; index < keys.length; index += 1000) {
     const chunk = keys.slice(index, index + 1000);
     if (chunk.length === 0) continue;
-    await params.client.send(
-      new DeleteObjectsCommand({
-        Bucket: params.bucket,
-        Delete: {
-          Objects: chunk.map((Key) => ({ Key })),
-          Quiet: true,
-        },
-      })
+    await withTraceArchiveRequestTimeout((abortSignal) =>
+      params.client.send(
+        new DeleteObjectsCommand({
+          Bucket: params.bucket,
+          Delete: {
+            Objects: chunk.map((Key) => ({ Key })),
+            Quiet: true,
+          },
+        }),
+        { abortSignal }
+      )
     );
   }
   return { rootAgentId: params.rootAgentId, backend: 'r2', deletedObjectCount: keys.length };

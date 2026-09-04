@@ -1199,6 +1199,56 @@ async def test_batch_retries_on_429():
     teardown_mock()
 
 
+def test_tokyo_wait_for_llm_call_repro_reconstructs_the_bad_turn():
+    """Prod Tokyo child called wait_for after explore already returned 14,303,513."""
+    import json
+
+    from benchmarks.repro.replay_tokyo_wait_for_llm_call import FIXTURE, build_messages
+
+    fixture = json.loads(FIXTURE.read_text())
+    assert fixture["repro_id"] == "spawn-sub-agents-tokyo-wait-for-after-explore"
+    assert fixture["source_agent_id"] == "2f7323fb-062e-4e4a-bfe2-575b21342c62"
+    bad = fixture["observed_bad_model_output"]["tool_calls"][0]
+    assert bad["tool"] == "wait_for"
+    assert bad["description"] == "Confirming completed official research"
+    assert bad["until_timestamp"] == "2026-09-03T06:22:01+00:00"
+    assert fixture["observed_bad_model_output"]["error"] == (
+        "Timestamp 2026-09-03T06:22:01+00:00 is in the past."
+    )
+    expected = fixture["expected_correct_output"]
+    assert expected["tool_calls"][0]["tool"] == "attempt_completion"
+    assert expected["structured_response"]["population"] == 14303513
+
+    messages = build_messages(fixture)
+    assert messages[0]["role"] == "system"
+    roles = [m["role"] for m in messages]
+    assert roles[1:] == ["user", "assistant", "tool"]
+    tool_text = messages[-1]["content"]
+    assert "14,303,513" in tool_text
+    assert "Tokyo" in tool_text
+    assert messages[-1]["role"] == "tool"
+
+
+def test_spawn_sub_agents_benchmark_forces_fast_cache_off():
+    """spawn-sub-agents must not replay Fast Mode traces; the Tokyo wait_for stall was a live Codex call."""
+    import os
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _resolved_fast_mode_cache
+
+    previous = os.environ.get("BENCHMARK_FAST_MODE_CACHE")
+    os.environ["BENCHMARK_FAST_MODE_CACHE"] = "true"
+    try:
+        task = get_task_by_name("spawn-sub-agents")
+        assert task.fast_cache == "off"
+        assert _resolved_fast_mode_cache(task) is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_FAST_MODE_CACHE", None)
+        else:
+            os.environ["BENCHMARK_FAST_MODE_CACHE"] = previous
+
+
 async def run_all_tests():
     print("spawn-sub-agents blackbox tests:")
     r = BlackboxResult()
@@ -1259,6 +1309,14 @@ async def run_all_tests():
     r.record("batch_result_zero", test_build_spawn_result_from_batch_zero_results)
     r.record("batch_result_unknown_status", test_build_spawn_result_from_batch_unknown_status_treated_as_starting_up)
     await r.record_async("batch_retries_on_429", test_batch_retries_on_429)
+    r.record(
+        "tokyo_wait_for_llm_call_repro",
+        test_tokyo_wait_for_llm_call_repro_reconstructs_the_bad_turn,
+    )
+    r.record(
+        "spawn_sub_agents_fast_cache_off",
+        test_spawn_sub_agents_benchmark_forces_fast_cache_off,
+    )
     teardown_mock()
     return r.all_passed
 

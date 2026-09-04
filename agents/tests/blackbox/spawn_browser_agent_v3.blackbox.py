@@ -19849,6 +19849,10 @@ async def run_all_tests():
         test_alchemy_evaluate_js_completes_on_healthy_canvas,
     )
     await r.record_async(
+        "evaluate_awaits_promises",
+        test_evaluate_awaits_promises,
+    )
+    await r.record_async(
         "renderer_block_matches_evaluate_timeout_recovery_signature",
         test_renderer_block_matches_evaluate_timeout_recovery_signature,
     )
@@ -19934,6 +19938,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_download_persister_ignores_network_fetch",
         test_browser_download_persister_ignores_network_fetch_heuristics,
+    )
+    await r.record_async(
+        "browser_download_persister_rebinds_listeners",
+        test_browser_download_persister_rebinds_listeners_on_new_cdp_client,
+    )
+    await r.record_async(
+        "chrome_download_trusts_inline_disposition_png",
+        test_chrome_download_trusts_inline_disposition_png,
+    )
+    await r.record_async(
+        "materialize_prefers_provider_file_path",
+        test_materialize_prefers_provider_file_path_before_page_fetch,
     )
     r.record(
         "dom_service_defaults_downloads_path_from_env",
@@ -20144,6 +20160,10 @@ async def run_all_tests():
         "execute_goto_err_aborted_persists_download",
         test_execute_goto_err_aborted_persists_attachment_download,
     )
+    await r.record_async(
+        "goto_err_aborted_persists_download_to_session",
+        test_goto_err_aborted_persists_download_to_session,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
@@ -20218,6 +20238,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_active_tab_url",
         test_browser_agent_recording_captures_visible_active_tab_url,
+    )
+    await r.record_async(
+        "browser_agent_recording_mark_survives_wiped_frames_dir",
+        test_browser_agent_recording_mark_survives_wiped_frames_dir,
     )
     await r.record_async(
         "browser_agent_recording_disabled_env",
@@ -20310,6 +20334,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_cleanup_scheduler_nonblocking",
         test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
+    )
+    await r.record_async(
+        "browser_cleanup_emits_task_complete_terminal",
+        test_browser_cleanup_emits_task_complete_terminal_for_fe_chip,
+    )
+    await r.record_async(
+        "browser_cleanup_skips_task_complete_when_paused",
+        test_browser_cleanup_skips_task_complete_when_paused_for_resume,
+    )
+    r.record(
+        "browser_activity_finally_skips_terminal_on_pause",
+        test_browser_activity_finally_skips_terminal_on_pause_for_resume,
     )
     await r.record_async(
         "drain_background_browser_cleanups",

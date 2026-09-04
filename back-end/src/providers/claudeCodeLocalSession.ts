@@ -16,7 +16,7 @@
  * outputs and terminate a surviving server after a backend restart.
  */
 import { type ChildProcess, spawn } from 'child_process';
-import { createServer } from 'net';
+import { createServer, Socket } from 'net';
 import {
   existsSync,
   mkdirSync,

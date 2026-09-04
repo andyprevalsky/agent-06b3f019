@@ -55,7 +55,11 @@ function extractCardholders(result: unknown): AgentCardSandboxCardholder[] {
   const structured = asRecord(outer?.structuredContent) ?? outer;
   const raw = structured?.cardholders;
   if (!Array.isArray(raw)) {
-    throw new Error('AgentCard list_cardholders returned no cardholders array');
+    const outerKeys = outer ? Object.keys(outer).join(',') : 'non-object';
+    const structuredKeys = structured ? Object.keys(structured).join(',') : 'none';
+    throw new Error(
+      `AgentCard list_cardholders returned no cardholders array (outer=${outerKeys}; structured=${structuredKeys})`
+    );
   }
   return raw.flatMap((item) => {
     const record = asRecord(item);

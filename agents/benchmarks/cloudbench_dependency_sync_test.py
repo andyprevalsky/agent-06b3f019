@@ -7196,102 +7196,137 @@ printf '%s' "$tok"
     assert result.stdout == "good-token", result.stdout + result.stderr
 
 
-def test_refresh_deps_controller_auth_header_fetches_private_repo(
-    tmp_path: Path,
-) -> None:
-    """Owning-boundary repro: empty AUTH_HDR fails an authenticated fetch;
-    the controller header succeeds. Mirrors the warm-box failure without Fly
-    or depending on the current visibility of the production repository."""
-    resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
-    resolved = subprocess.run(
+def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path) -> None:
+    """Owning-boundary repro: empty AUTH_HDR fails private fetch; controller
+    header succeeds. Mirrors the warm-box failure mode without Fly."""
+    seed_repo = tmp_path / "seed"
+    private_repo = tmp_path / "private.git"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed_repo)], check=True)
+    (seed_repo / "README").write_text("private fixture\n")
+    subprocess.run(["git", "-C", str(seed_repo), "add", "README"], check=True)
+    subprocess.run(
         [
-            "bash",
+            "git",
+            "-C",
+            str(seed_repo),
             "-c",
-            f"source {shlex.quote(str(resolver))}; "
-            f"cloudbench_resolve_github_token {shlex.quote(str(ROOT))}",
+            "user.name=Cloudbench Test",
+            "-c",
+            "user.email=cloudbench@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
         ],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
+        check=True,
     )
-    assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
-    token = resolved.stdout.strip()
-    assert token, "canonical controller GitHub token resolver returned an empty token"
-    auth = "Authorization: Basic " + base64.b64encode(
-        f"x-access-token:{token}".encode()
-    ).decode()
-    commit = "0123456789abcdef0123456789abcdef01234567"
-    requests = {"rejected": 0, "authorized": 0}
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed_repo), str(private_repo)], check=True)
+    subprocess.run(["git", "--git-dir", str(private_repo), "update-server-info"], check=True)
 
-    class PrivateGitHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            if self.headers.get("Authorization") != auth.removeprefix(
-                "Authorization: "
-            ):
-                requests["rejected"] += 1
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="private-repo"')
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
+    token = "test-controller-token"
+    auth = "Authorization: Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    observed_auth: list[str] = []
 
-            requests["authorized"] += 1
-            path = self.path.partition("?")[0]
-            if path == "/rose.git/info/refs":
-                body = f"{commit}\trefs/heads/main\n".encode()
-            elif path == "/rose.git/HEAD":
-                body = b"ref: refs/heads/main\n"
-            else:
-                self.send_error(404)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        def do_GET(self) -> None:
+            request_auth = self.headers.get("Authorization", "")
+            observed_auth.append(request_auth)
+            if self.path == "/repos/Rose-Ai-Labs/rose":
+                if request_auth == f"Bearer {token}":
+                    self._send(200, b'{"private":true}', "application/json")
+                else:
+                    self._send(401, b'{"message":"Bad credentials"}', "application/json")
+                return
+            if request_auth != auth.removeprefix("Authorization: "):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="private-git"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            relative = self.path.partition("?")[0].lstrip("/")
+            target = (tmp_path / relative).resolve()
+            try:
+                target.relative_to(tmp_path.resolve())
+            except ValueError:
+                self._send(403, b"")
+                return
+            if not target.is_file():
+                self._send(404, b"")
+                return
+            self._send(200, target.read_bytes())
+
         def log_message(self, *_args) -> None:
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), PrivateGitHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/rose.git"
-    isolated_home = tmp_path / "home"
-    isolated_home.mkdir()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
     env = {
         **os.environ,
+        "CLOUDBENCH_GITHUB_REPO_API": f"{base_url}/repos/Rose-Ai-Labs/rose",
+        "CLOUDBENCH_GITHUB_TOKEN": token,
+        "CLOUDBENCH_GITHUB_TOKEN_B64": "",
+        "GITHUB_DISPATCH_TOKEN": "",
+        "GITHUB_TOKEN": "",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
-        "HOME": str(isolated_home),
+        "HOME": str(tmp_path / "client-home"),
     }
     base = ["git", "-c", "credential.helper="]
     try:
+        resolved = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {shlex.quote(str(resolver))}; "
+                f"cloudbench_resolve_github_token {shlex.quote(str(ROOT))}",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+            timeout=30,
+        )
+        assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
+        assert resolved.stdout.strip() == token, "canonical controller GitHub token resolver returned the wrong token"
+
+        url = f"{base_url}/private.git"
+        observed_auth.clear()
         bug = subprocess.run(
             base + ["-c", "http.extraheader=", "ls-remote", url, "HEAD"],
             text=True,
             capture_output=True,
-            cwd=isolated_home,
+            cwd=env["HOME"],
             env=env,
             timeout=30,
             check=False,
         )
         assert bug.returncode != 0
-        assert requests["rejected"] > 0
+        assert observed_auth and auth.removeprefix("Authorization: ") not in observed_auth
+
+        observed_auth.clear()
         fixed = subprocess.run(
             base + ["-c", f"http.extraheader={auth}", "ls-remote", url, "HEAD"],
             text=True,
             capture_output=True,
-            cwd=isolated_home,
+            cwd=env["HOME"],
             env=env,
             timeout=30,
             check=False,
         )
         assert fixed.returncode == 0, fixed.stderr
-        assert requests["authorized"] > 0
-        assert fixed.stdout.strip().splitlines() == [f"{commit}\tHEAD"]
+        assert auth.removeprefix("Authorization: ") in observed_auth
+        assert re.match(r"^[0-9a-f]{40}\s+HEAD$", fixed.stdout.strip().splitlines()[0])
     finally:
         server.shutdown()
         server.server_close()
