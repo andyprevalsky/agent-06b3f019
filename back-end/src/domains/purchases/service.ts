@@ -2,7 +2,7 @@ import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
-import { closedCardIndicatesMerchantSpend, tryGetLiveCardDetails } from './cardLiveness';
+import { tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,

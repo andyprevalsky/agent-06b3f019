@@ -540,15 +540,6 @@ async function resolvePoolingForCredentialSync(
   return resolveSyncedPoolingEnabled({ accountDefault, existing });
 }
 
-async function persistRecoveredIntegrationAccountId(
-  userId: string,
-  name: 'claude_code' | 'gpt_code',
-  recoveredAccountId: string | null
-): Promise<void> {
-  if (recoveredAccountId === null || recoveredAccountId === '') return;
-  await repo.persistRecoveredIntegrationAccountId(userId, name, recoveredAccountId);
-}
-
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
   const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
   if (!check.ok) {

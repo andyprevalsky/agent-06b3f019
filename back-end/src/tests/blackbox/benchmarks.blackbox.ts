@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-/* eslint-disable max-lines -- one read-only endpoint contract with a shared concurrent runner */
+
 /**
  * Black-box tests for /api/benchmarks
  *
