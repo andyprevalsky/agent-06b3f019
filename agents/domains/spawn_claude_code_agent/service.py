@@ -746,7 +746,10 @@ async def _run_agentic_loop(  # noqa: C901
             else:
                 # Non-wait tool (e.g. long Bash) — stretch while in-flight so
                 # silence during execution is not mistaken for a hung CLI.
-                wait_tool_armed = False
+                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup often
+                # precede Bash, and the post-wait stretch must survive those
+                # follow-on tools (otherwise tool_result restores the short
+                # 180s window and kills the wait).
                 if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
                     logger.info(
                         "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
@@ -762,6 +765,12 @@ async def _run_agentic_loop(  # noqa: C901
             if in_flight_tool_count == 0 and not wait_tool_armed:
                 # All tools finished and no post-wait stretch armed — restore
                 # the short hung-CLI window.
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        elif event_type == "result":
+            # SDK declared completion — drop wait arm so a hung process after
+            # result is reaped on the short idle window, not 900s.
+            wait_tool_armed = False
+            if in_flight_tool_count == 0:
                 effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
