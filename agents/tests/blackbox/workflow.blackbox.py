@@ -5321,6 +5321,7 @@ async def test_workflow_mark_complete_happy_path():
     wf.goal = "finish goal"
     wf.model = "rose-1-lite"
     wf.parent_workflow_id = "parent-mc"
+    wf.root_agent_id = "root-complete-1"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
     wf.token_count = 100
     wf.tokens_in = 70
@@ -5354,6 +5355,8 @@ async def test_workflow_mark_complete_happy_path():
         )
         mark_finished_index = next(i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished")
         assert final_summary_index < mark_finished_index
+        mark_finished_args = fake.activity_calls[mark_finished_index][1]
+        assert mark_finished_args[-1] == "root-complete-1"
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names

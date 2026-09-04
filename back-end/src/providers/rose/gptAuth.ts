@@ -18,12 +18,7 @@
 import { createHash } from 'node:crypto';
 
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
-import {
-  RoseAuthError,
-  RoseInvalidRequest,
-  RoseRateLimitError,
-  RoseServerError,
-} from './errors';
+import { RoseAuthError, RoseInvalidRequest, RoseRateLimitError, RoseServerError } from './errors';
 import type { PoolSpec } from './pools';
 import {
   boundedRateLimitBackoffMs,

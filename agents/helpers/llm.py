@@ -38,7 +38,7 @@ from helpers.messages import (
     stream_plan_event,
     stream_tool_event,
 )
-from helpers.tracing import backend_api_headers, current_request_id, traced
+from helpers.tracing import backend_api_headers, current_request_id, span, traced
 from helpers.workflow_generation import workflow_generation_headers
 from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache.client import (
@@ -54,6 +54,7 @@ from providers.fast_cache.context import (
 from providers.fast_cache.context import (
     set_context as set_fast_cache_context,
 )
+from providers.planner_rag.retrieval import RetrievalResult, insert_reference_plans
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -6746,6 +6747,41 @@ async def mark_gpt_token_rate_limited_activity(
     return False
 
 
+_PLANNER_GOAL_PREFIX = "GOAL: "
+_PLANNER_GOAL_SUFFIX = "\n\nPlan this goal into tasks."
+
+
+def _planner_goal_from_messages(messages: List[Dict[str, Any]], *, fallback: Optional[str]) -> str:
+    """Recover the user goal the planner is asked to plan.
+
+    ``build_planner_messages`` prepends ``GOAL: <goal>\n\nPlan this goal into
+    tasks.`` as the first user message; fall back to the durable Agent-row goal.
+    """
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.startswith(_PLANNER_GOAL_PREFIX):
+            goal = content[len(_PLANNER_GOAL_PREFIX) :]
+            if goal.endswith(_PLANNER_GOAL_SUFFIX):
+                goal = goal[: -len(_PLANNER_GOAL_SUFFIX)]
+            return goal.strip()
+        break
+    return (fallback or "").strip()
+
+
+async def _retrieve_planner_reference_plans(
+    *, goal: str, user_id: Optional[str], agent_id: Optional[str]
+) -> Optional["RetrievalResult"]:
+    """Retrieve reference plans for the planner (traced, best-effort). None when disabled."""
+    from providers.planner_rag import planner_rag_enabled, retrieve_reference_plans
+
+    if not goal or not planner_rag_enabled():
+        return None
+    async with span("planner_rag_retrieve", call_site="planner", agent_id=agent_id, goal_chars=len(goal)):
+        return await retrieve_reference_plans(goal, user_id=user_id, exclude_root_agent_id=agent_id)
+
+
 @activity.defn
 @traced("call_planner_llm_activity")
 async def call_planner_llm_activity(
@@ -6830,11 +6866,29 @@ async def call_planner_llm_activity(
 
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
-    # Resolve context pointers
-    full_messages = await resolve_pointers_in_messages(
-        full_messages,
-        user_id=claude_token_user_id or gpt_token_user_id,
+    planner_user_id = claude_token_user_id or gpt_token_user_id
+    # Resolve context pointers and retrieve reference plans (RAG over the trace
+    # archive, keyed by the user goal) concurrently. The reference block is
+    # injected as a *user* message after the GOAL message — never into the
+    # system prompt — so the static system prefix / tools cache keys are
+    # byte-identical with or without retrieval (see insert_reference_plans).
+    full_messages, planner_rag = await asyncio.gather(
+        resolve_pointers_in_messages(full_messages, user_id=planner_user_id),
+        _retrieve_planner_reference_plans(
+            goal=_planner_goal_from_messages(messages, fallback=fast_mode_goal),
+            user_id=planner_user_id,
+            agent_id=agent_id,
+        ),
     )
+    if planner_rag is not None:
+        full_messages = insert_reference_plans(full_messages, planner_rag.message)
+        logger.info(
+            f"[TIMING] Planner RAG retrieval: {planner_rag.timing_ms.get('total', 0.0):.1f}ms "
+            f"(index_load={planner_rag.timing_ms.get('index_load', 0.0):.1f}ms, "
+            f"query={planner_rag.timing_ms.get('query', 0.0):.1f}ms, hits={len(planner_rag.hits)}, "
+            f"corpus={planner_rag.corpus_size}, source={planner_rag.source}, "
+            f"injected_chars={len(planner_rag.message or '')})"
+        )
 
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
     logger.info(f"[TIMING] Planner input: {len(full_messages)} messages, {total_chars} chars total")
@@ -6923,6 +6977,7 @@ async def call_planner_llm_activity(
         actual_model = usage.get("actual_model", model)
         return {
             "result": result.model_dump(),
+            "planner_rag": planner_rag.summary() if planner_rag is not None else None,
             "usage": {
                 "llm": [
                     {

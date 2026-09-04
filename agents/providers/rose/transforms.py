@@ -364,7 +364,13 @@ def transform_messages_for_anthropic(
             and not _is_tool_result_message(prev)
             and not _is_tool_result_message(msg)
         ):
-            prev["content"] = _as_content_blocks(prev.get("content")) + _as_content_blocks(msg.get("content"))
+            # Merge into a copy: `prev` may be the caller's own dict, and
+            # RoseClient reuses the same messages list for the waterfall
+            # fallback after a claudeAuth failure.
+            merged[-1] = {
+                **prev,
+                "content": _as_content_blocks(prev.get("content")) + _as_content_blocks(msg.get("content")),
+            }
         else:
             merged.append(msg)
 
