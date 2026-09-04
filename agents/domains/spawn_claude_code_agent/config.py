@@ -51,6 +51,18 @@ SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
     {"Bash", "Task", "TaskOutput"}
 )
 
+# After the SDK emits type=result (CLI declared completion), do not let
+# Bash/Task/ScheduleWakeup re-arm the 900s stretch. Healthy sessions exit
+# within ~1s of result (cuda k=3 r31 a1); zombie sessions that keep tooling
+# after result (r31 a2: result → ScheduleWakeup/Bash → Max runtime, 0
+# artifacts) must fall back to the short idle window so the parent can retry
+# inside the bench budget instead of burning 2×1800s.
+#
+# Absolute backstop if stdout keeps refreshing last_output_time after result
+# (prevents idle from ever firing): end the monitor this many seconds after
+# the *first* SDK result regardless of stretch/idle.
+SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent

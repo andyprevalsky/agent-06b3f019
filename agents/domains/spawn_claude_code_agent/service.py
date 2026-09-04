@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     SDK_IDLE_TIMEOUT_S,
+    SDK_POST_RESULT_EXIT_GRACE_S,
     SDK_POST_RESULT_STRETCH_TOOL_NAMES,
     SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
     SDK_WAIT_TOOL_NAMES,
@@ -679,6 +680,9 @@ async def _run_agentic_loop(  # noqa: C901
     effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
     wait_tool_armed = False
     in_flight_tool_count = 0
+    # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
+    # grace backstop ends the monitor if the CLI never exits.
+    sdk_result_at: float | None = None
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -722,7 +726,7 @@ async def _run_agentic_loop(  # noqa: C901
 
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
-        nonlocal wait_tool_armed, in_flight_tool_count
+        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -734,7 +738,12 @@ async def _run_agentic_loop(  # noqa: C901
         tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         if event_type == "tool_use" and isinstance(tool_name, str):
             in_flight_tool_count += 1
-            if tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
+            if sdk_result_at is not None:
+                # SDK already declared completion — do not re-arm the 900s
+                # stretch (r31 a2: result → Bash/ScheduleWakeup re-armed stretch
+                # → Max runtime, 0 artifacts). Keep the short idle window.
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+            elif tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
                 # Wait tools AND Bash/Task/TaskOutput: arm post-result stretch.
                 # Bash often returns tool_result while background work continues
                 # with no further WS events; without arming, tool_result snaps
@@ -753,6 +762,7 @@ async def _run_agentic_loop(  # noqa: C901
                         tool_name=tool_name,
                         idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
                     )
+                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
             else:
                 # Non-wait tool (e.g. Write) — stretch while in-flight so
                 # silence during execution is not mistaken for a hung CLI.
@@ -768,20 +778,31 @@ async def _run_agentic_loop(  # noqa: C901
                         tool_name=tool_name,
                         idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
                     )
-            effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
         elif event_type == "tool_result":
             if in_flight_tool_count > 0:
                 in_flight_tool_count -= 1
-            if in_flight_tool_count == 0 and not wait_tool_armed:
+            if sdk_result_at is not None:
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+            elif in_flight_tool_count == 0 and not wait_tool_armed:
                 # All tools finished and no post-wait stretch armed — restore
                 # the short hung-CLI window.
                 effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         elif event_type == "result":
             # SDK declared completion — drop wait arm so a hung process after
-            # result is reaped on the short idle window, not 900s.
+            # result is reaped on the short idle window, not 900s. Record the
+            # first result time for the exit-grace backstop (r31 a2/a3).
             wait_tool_armed = False
-            if in_flight_tool_count == 0:
-                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+            if sdk_result_at is None:
+                sdk_result_at = safe_time()
+                logger.info(
+                    "[ClaudeCode] SDK result observed; arming post-result exit grace",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                    status=event.get("status"),
+                )
+            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -821,6 +842,28 @@ async def _run_agentic_loop(  # noqa: C901
             if elapsed > MAX_RUNTIME_S:
                 logger.warning("[ClaudeCode] Max runtime exceeded", agent_id=agent_id, task_id=task_id, elapsed=elapsed)
                 action_summary.append(f"Max runtime exceeded ({int(elapsed)}s)")
+                break
+
+            # After the first SDK result, healthy CLIs exit in <1s. If the
+            # process is still alive past the grace window (stdout may keep
+            # refreshing last_output_time so short idle never fires), end the
+            # session so the parent can retry inside the bench budget.
+            if (
+                sdk_result_at is not None
+                and exit_code is None
+                and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
+            ):
+                grace_elapsed = safe_time() - sdk_result_at
+                logger.warning(
+                    "[ClaudeCode] Post-result exit grace exceeded",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                    since_result_s=grace_elapsed,
+                )
+                action_summary.append(
+                    f"Post-result exit grace exceeded ({int(grace_elapsed)}s after SDK result)"
+                )
                 break
 
             if ws_client.reconnects_exhausted:
