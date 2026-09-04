@@ -178,5 +178,5 @@ async function main(): Promise<void> {
 }
 
 void main().then(() => {
-  console.log('careers-application: all assertions passed');
+  process.stdout.write('careers-application: all assertions passed\n');
 });

@@ -56,4 +56,4 @@ assert.equal(
   'Duplicate role slug in the front-end careers catalog; /careers/:slug would render the first match only.'
 );
 
-console.log(`careers-role-slug-sync: ${backend.length} role slugs in sync`);
+process.stdout.write(`careers-role-slug-sync: ${backend.length} role slugs in sync\n`);
