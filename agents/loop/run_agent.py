@@ -2183,16 +2183,19 @@ async def run_agent(
                     # path and trip the consecutive-error circuit breaker —
                     # otherwise the first verifier outage reports completed
                     # with no deliverable check (CodeRabbit #1260).
+                    _verified_schema = verifier_result.get("resolved_response_schema")
+                    if not isinstance(_verified_schema, dict):
+                        _verified_schema = response_schema
                     _schema_fields = (
-                        (response_schema or {}).get("fields")
-                        if isinstance(response_schema, dict)
+                        _verified_schema.get("fields")
+                        if isinstance(_verified_schema, dict)
                         else None
                     ) or []
                     if (
                         not is_plan_loop
                         and _schema_fields
                         and _structured_response_ready_for_infra_soft_accept(
-                            structured_response, response_schema
+                            structured_response, _verified_schema
                         )
                     ):
                         logger.warning(
@@ -2783,4 +2786,9 @@ async def _run_verifier(
         )
 
     logger.info(f"Verifier score: {score * 100:.1f}%")
+    # Surface the schema the verifier actually judged against so soft-accept
+    # does not re-validate against a stale static response_schema when
+    # get_response_schema resolved a different field set (CodeRabbit #1260).
+    if isinstance(result, dict):
+        result["resolved_response_schema"] = current_response_schema
     return result
