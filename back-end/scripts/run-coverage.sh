@@ -218,20 +218,41 @@ COV_TMP="$BACKEND_DIR/coverage/tmp"
 # workspace allocation. Port arithmetic outside that allocation is only a
 # preference and can collide with a sibling workspace whose valid service has
 # not started yet. A process-bound advisory lock closes the check/start race
-# between cooperating processes without leaving stale reservations, while lsof
-# protects against an ordinary listener already using an owned port.
+# between cooperating processes without leaving stale reservations, while a
+# listener probe protects against an ordinary listener already using an owned
+# port. That probe must never silently degrade: when lsof is absent its
+# "command not found" exit is indistinguishable from "port is free", which
+# handed out occupied ports on Linux images without it.
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
 COV_PORT_START="${BACKEND_COVERAGE_START_PORT:-$((BASE_PORT + 7))}"
 COV_PORT_END="${BACKEND_COVERAGE_END_PORT:-$((BASE_PORT + 8))}"
 COV_PORT_LOCK_ROOT="${BACKEND_COVERAGE_PORT_LOCK_ROOT:-$ROOT_DIR/.context/test-runs/.port-locks}"
 mkdir -p "$COV_PORT_LOCK_ROOT"
 
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnH "sport = :$port" 2>/dev/null | grep -q .
+    return $?
+  fi
+  # No socket-inspection tool available (common on slim Linux CI/sandbox
+  # images). A bash /dev/tcp connect needs no external binary.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 reserve_coverage_port() {
   local candidate="$1"
   while ((candidate <= COV_PORT_END)); do
     local lock_file="$COV_PORT_LOCK_ROOT/$candidate.lock"
     if acquire_process_lock "$lock_file"; then
-      if lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+      if port_in_use "$candidate"; then
         release_process_lock "$ACQUIRED_LOCK_KEEPER_PID"
       else
         COV_PORT="$candidate"

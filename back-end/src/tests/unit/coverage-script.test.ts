@@ -97,10 +97,25 @@ assert.match(
   'coverage must re-export GITHUB_DISPATCH_TOKEN from .env for external-http blackbox'
 );
 
+// The preflight must only ever count *listening* sockets: an outbound
+// connection that happens to use the same local port must not make the port
+// look taken. Each probe in the fallback chain has to preserve that, and the
+// chain has to exist -- when lsof is absent, its "command not found" exit is
+// indistinguishable from "port is free", which handed out occupied ports.
 assert.match(
   coverageScript,
-  /lsof -tiTCP:"\$candidate" -sTCP:LISTEN/,
+  /lsof -tiTCP:"\$port" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
+);
+assert.match(
+  coverageScript,
+  /ss -ltnH/,
+  'coverage port preflight ss fallback must list listening sockets only'
+);
+assert.match(
+  coverageScript,
+  /if port_in_use "\$candidate"; then/,
+  'coverage port reservation must go through the portable port_in_use probe'
 );
 assert.match(
   coverageScript,
