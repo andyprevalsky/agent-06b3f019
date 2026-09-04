@@ -5168,6 +5168,41 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
 
 
+def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
+    """Deliverable ranking JSON must not be head+tail truncated for verifier_execute.
+
+    Regression (cuda-kernel-github-top100 r28): top100_cuda_repos_fresh.json (~45k)
+    exceeded VERIFIER_MAX_INLINE_FILE_CHARS=40k, so ranks ~47–57 vanished and the
+    in-agent verifier scored 0.5 despite a complete on-disk deliverable.
+    """
+    import json
+    from helpers.llm import (
+        VERIFIER_MAX_INLINE_FILE_CHARS,
+        _truncate_text_for_verifier_inline,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/cuda-repo-{i}",
+            "repo_url": f"https://github.com/org/cuda-repo-{i}",
+            "stars": 100000 - i,
+            "description": f"CUDA kernel library {i} " + ("x" * 200),
+        }
+        for i in range(1, 101)
+    ]
+    payload = json.dumps({"repos": repos}, indent=2)
+    assert len(payload) > 40_000
+    assert len(payload) < VERIFIER_MAX_INLINE_FILE_CHARS
+    kept = _truncate_text_for_verifier_inline(
+        payload, max_chars=VERIFIER_MAX_INLINE_FILE_CHARS, filename="top100_cuda_repos_fresh.json"
+    )
+    assert "verifier truncated" not in kept
+    assert '"rank": 1' in kept or '"rank":1' in kept
+    assert '"rank": 50' in kept or '"rank":50' in kept
+    assert '"rank": 100' in kept or '"rank":100' in kept
+
+
 def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
     """spawn_agent ranking dumps must not inflate verifier_execute past Rose deadlines.
 

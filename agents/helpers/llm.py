@@ -1205,8 +1205,11 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
 # Rose streams mid-JSON past the attempt deadline, soft-fails score=0.5, and the
 # finished agent is bounced back into execute (cuda-kernel top100). Cap verifier
 # inlining separately; prefer deliverable-looking filenames within the budget.
-VERIFIER_MAX_INLINE_FILE_CHARS = 40_000
-VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 48_000
+# Deliverable ranking artifacts (e.g. top100_cuda_repos_fresh.json ~45–80k)
+# must stay fully inlined. The prior 40k/48k caps head+tailed mid-ranks and
+# made verifier_execute score 0.5 despite a complete on-disk deliverable.
+VERIFIER_MAX_INLINE_FILE_CHARS = 120_000
+VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 160_000
 _VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
     r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
     re.IGNORECASE,
