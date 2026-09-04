@@ -12,6 +12,7 @@ symptoms:
   - structured response is null while verifier score reports success
   - incomplete output schema passes when ROSE_DISABLE_CODE_AGENT_VERIFIER is set
   - mixed primitive/file schemas discard valid extracted file artifacts
+  - failed code processes emit successful-work evidence chips for judges
 tags:
   - claude-code
   - verifier
@@ -59,6 +60,12 @@ produce a non-null structured response, including list and multi-file shapes.
 The constructor skips primitive fields it cannot infer while still filling and
 validating every declared file field. Thus a mixed schema preserves valid file
 artifacts without mistaking one file for multiple required pointers.
+
+The later main-sync evidence path is gated on the same process-success signal.
+Files left behind by a failed process remain diagnostic context but no longer
+produce non-orchestration success chips that inflate a declared judge's code
+step count. The aggregate blackbox pins the exact evidence cardinality across
+successful and failed Claude/Codex sessions.
 
 The new case is explicitly registered in the spawn-Claude-code-agent blackbox
 runner. The same runner passes the incomplete two-file schema, empty schema,

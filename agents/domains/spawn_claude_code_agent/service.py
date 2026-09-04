@@ -1567,26 +1567,29 @@ async def _run_verifier(
             score=score,
         )
         # Persist SDK/history evidence so harness step counts + declared judges
-        # still see grounded coding-agent work when the LLM verifier is off.
-        # Evidence write failures must not block verifier-disabled completion
-        # when artifacts / exit_code already prove success (CodeRabbit #1260).
-        try:
-            await _persist_code_agent_judge_evidence(
-                agent_id=agent_id,
-                task_id=task_id,
-                code_provider=code_provider,
-                code_events=code_events,
-                output_files=extracted_output_files,
-                action_summary=action_summary,
-            )
-        except Exception as evidence_err:
-            logger.warning(
-                "[ClaudeCode] judge evidence persist failed; continuing "
-                "verifier-disabled completion",
-                agent_id=agent_id,
-                task_id=task_id,
-                error=str(evidence_err)[:200],
-            )
+        # still see grounded successful work when the LLM verifier is off. A
+        # failed process may leave files behind, but those are not completion
+        # evidence and must not inflate the judge's successful step count.
+        if has_success_signal:
+            try:
+                await _persist_code_agent_judge_evidence(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    code_provider=code_provider,
+                    code_events=code_events,
+                    output_files=extracted_output_files,
+                    action_summary=action_summary,
+                )
+            except Exception as evidence_err:
+                # Evidence write failures must not block verifier-disabled
+                # completion when artifacts / exit_code already prove success.
+                logger.warning(
+                    "[ClaudeCode] judge evidence persist failed; continuing "
+                    "verifier-disabled completion",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=str(evidence_err)[:200],
+                )
         return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
     try:
