@@ -7282,6 +7282,7 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "HOME": str(tmp_path / "client-home"),
     }
+    Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     base = ["git", "-c", "credential.helper="]
     try:
         resolved = subprocess.run(
