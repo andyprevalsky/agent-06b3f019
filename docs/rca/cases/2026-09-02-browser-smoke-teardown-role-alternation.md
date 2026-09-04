@@ -46,6 +46,10 @@ mutate the spawn tool result the context validator / model transcript require.
 Smoke aborted on context validation while the durable FE agent had already
 succeeded; failure was harness dual-write, not task failure.
 
+## Human feedback
+
+None recorded.
+
 ## Reusable lesson
 
 FE-only side effects that reuse a toolCallId must be excluded from the model

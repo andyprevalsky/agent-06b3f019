@@ -123,12 +123,16 @@ def test_local_store_writes_ciphertext_and_metadata():
             artifact_path = Path(result["ref"])
             assert artifact_path.exists()
             metadata = json.loads(Path(str(artifact_path) + ".meta.json").read_text())
-            assert json.loads(decrypt_and_validate_artifact(artifact_path.read_bytes(), metadata).decode("utf-8")) == {"ok": True}
+            assert json.loads(decrypt_and_validate_artifact(artifact_path.read_bytes(), metadata).decode("utf-8")) == {
+                "ok": True
+            }
             stored = read_local_artifact(root_agent_id="agent-1", path="llm/demo.json.gz.enc")
             assert stored is not None
             stored_ciphertext, stored_metadata = stored
             assert stored_metadata == metadata
-            assert json.loads(decrypt_and_validate_artifact(stored_ciphertext, stored_metadata).decode("utf-8")) == {"ok": True}
+            assert json.loads(decrypt_and_validate_artifact(stored_ciphertext, stored_metadata).decode("utf-8")) == {
+                "ok": True
+            }
         finally:
             restore()
 
@@ -241,10 +245,15 @@ def test_local_artifact_listing_hides_transaction_and_temporary_files():
         try:
             (bundle / "visible.json.gz.enc").write_bytes(b"ciphertext")
             (bundle / "visible.json.gz.enc.meta.json").write_text("{}")
+            (bundle / "trace.transaction.json").write_bytes(b"valid-artifact")
+            (bundle / "trace.transaction.json.meta.json").write_text("{}")
             (bundle / "hidden.json.gz.enc.transaction").write_bytes(b"transaction")
             (bundle / "hidden.json.gz.enc.transaction.123.tmp").write_bytes(b"temporary")
 
-            assert list_local_artifact_paths("agent-listing") == ["llm/visible.json.gz.enc"]
+            assert list_local_artifact_paths("agent-listing") == [
+                "llm/trace.transaction.json",
+                "llm/visible.json.gz.enc",
+            ]
         finally:
             restore()
 
@@ -814,6 +823,203 @@ async def test_worker_async_writes_defer_off_event_loop_and_complete():
             restore()
 
 
+async def test_terminal_flush_waits_for_accepted_root_writes():
+    """A terminal snapshot cannot overtake jobs already accepted for its root."""
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json, flush_archive_writes
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
+        old_executor = trace_archive._ARCHIVE_EXECUTOR
+        original_store = trace_archive.store_encrypted_artifact
+        executor = ThreadPoolExecutor(max_workers=1)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocked_store(**kwargs):
+            entered.set()
+            assert release.wait(timeout=5), "test did not release the archive store"
+            return original_store(**kwargs)
+
+        try:
+            os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+            trace_archive._ARCHIVE_EXECUTOR = executor
+            trace_archive.store_encrypted_artifact = _blocked_store
+            accepted = archive_json(
+                root_agent_id="agent-terminal-flush",
+                path="llm/late.json.gz.enc",
+                payload={"late": True},
+            )
+            assert accepted is not None
+            assert await asyncio.to_thread(entered.wait, 2)
+
+            flush_task = asyncio.create_task(asyncio.to_thread(flush_archive_writes, "agent-terminal-flush", 3.0))
+            await asyncio.sleep(0.05)
+            assert not flush_task.done(), "terminal flush returned before the accepted write settled"
+            release.set()
+            assert await flush_task is True
+
+            artifact = Path(tmp) / "agent-terminal-flush" / "llm" / "late.json.gz.enc"
+            assert artifact.exists(), "terminal snapshot boundary did not wait for the artifact"
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+            trace_archive.store_encrypted_artifact = original_store
+            trace_archive._ARCHIVE_EXECUTOR = old_executor
+            if old_flag is None:
+                os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = old_flag
+            restore()
+
+
+def test_terminal_flush_ignores_transaction_temporary_files():
+    """Crash-recovery bookkeeping is not a pending upload artifact."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        try:
+            transaction = (
+                trace_archive._outbox_root()
+                / "agent-transaction-only"
+                / "llm"
+                / "late.json.gz.enc.transaction.123.456.tmp"
+            )
+            transaction.parent.mkdir(parents=True, exist_ok=True)
+            transaction.write_text("temporary recovery state")
+            assert not trace_archive._root_outbox_has_artifacts("agent-transaction-only")
+        finally:
+            restore()
+
+
+def test_outbox_drain_recovers_interrupted_artifact_transactions():
+    """Durable transactions survive crashes before either pair member exists."""
+    import helpers.trace_archive as trace_archive
+
+    for state in ("transaction-only", "ciphertext-only"):
+        with tempfile.TemporaryDirectory() as tmp:
+            restore = _with_archive_env(str(Path(tmp) / "archive"))
+            original_post = trace_archive._post_backend_artifact
+            posts = []
+            try:
+                ciphertext = f"pending-{state}".encode()
+                metadata = {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()}
+                target = trace_archive._outbox_root() / f"agent-{state}" / "llm" / "pending.json.gz.enc"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                transaction = trace_archive._artifact_transaction_path(target)
+                transaction.write_bytes(trace_archive._encode_artifact_transaction(ciphertext, metadata))
+                if state == "ciphertext-only":
+                    target.write_bytes(ciphertext)
+
+                trace_archive._post_backend_artifact = lambda **kwargs: posts.append(kwargs) or "r2://stored"
+                assert trace_archive._root_outbox_has_artifacts(f"agent-{state}")
+                assert (
+                    trace_archive._drain_backend_outbox(
+                        root_agent_id=f"agent-{state}",
+                    )
+                    == 1
+                )
+                assert len(posts) == 1
+                assert posts[0]["ciphertext"] == ciphertext
+                assert not target.exists()
+                assert not transaction.exists()
+                assert not target.with_suffix(target.suffix + ".meta.json").exists()
+                assert not trace_archive._root_outbox_has_artifacts(f"agent-{state}")
+            finally:
+                trace_archive._post_backend_artifact = original_post
+                restore()
+
+
+def test_outbox_drain_preserves_transaction_in_valid_artifact_name():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        posts = []
+        try:
+            ciphertext = b"valid-transaction-name"
+            trace_archive._write_outbox(
+                "agent-valid-name",
+                "llm/trace.transaction.json",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: posts.append(kwargs) or "r2://stored"
+            assert trace_archive._drain_backend_outbox(root_agent_id="agent-valid-name") == 1
+            assert len(posts) == 1
+            assert posts[0]["path"] == "llm/trace.transaction.json"
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
+def test_outbox_drain_honors_expired_terminal_deadline():
+    """A terminal flush cannot begin another HTTP upload after its deadline."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        posts = []
+        try:
+            ciphertext = b"pending"
+            trace_archive._write_outbox(
+                "agent-expired-flush",
+                "llm/pending.json.gz.enc",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: posts.append(kwargs) or "r2://unexpected"
+            drained = trace_archive._drain_backend_outbox(
+                limit=64,
+                root_agent_id="agent-expired-flush",
+                deadline=time.monotonic() - 1.0,
+            )
+            assert drained == 0
+            assert posts == []
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
+def test_outbox_drain_bounds_upload_by_remaining_terminal_deadline():
+    """Each upload receives only the terminal flush budget that remains."""
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        upload_budgets = []
+        try:
+            ciphertext = b"pending"
+            trace_archive._write_outbox(
+                "agent-bounded-flush",
+                "llm/pending.json.gz.enc",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: (
+                upload_budgets.append(kwargs["timeout_s"]) or "r2://stored"
+            )
+            deadline = time.monotonic() + 1.0
+            assert (
+                trace_archive._drain_backend_outbox(
+                    limit=64,
+                    root_agent_id="agent-bounded-flush",
+                    deadline=deadline,
+                )
+                == 1
+            )
+            assert len(upload_budgets) == 1
+            assert 0 < upload_budgets[0] <= 1.0
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
 async def test_deferred_json_payload_factory_runs_off_event_loop():
     import asyncio
     import time as time_mod
@@ -876,6 +1082,7 @@ async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
         os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
         original_store = trace_archive.store_encrypted_artifact
         try:
+
             def _slow_store(**kwargs):
                 time_mod.sleep(0.2)
                 return original_store(**kwargs)
@@ -1115,7 +1322,9 @@ def test_prod_backend_failure_outbox_avoids_filesystem_root_context():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        shutil.rmtree(trace_archive._PROD_FALLBACK_LOCAL_ROOT.parent / "trace-archive-outbox" / agent_id, ignore_errors=True)
+        shutil.rmtree(
+            trace_archive._PROD_FALLBACK_LOCAL_ROOT.parent / "trace-archive-outbox" / agent_id, ignore_errors=True
+        )
         teardown_mock()
 
 
@@ -1178,7 +1387,9 @@ async def test_browser_http_cache_ops_do_not_archive():
         )
         assert calls == []
         await fast_cache_client._archive_cache_write("fastmode:v42:llm:gh:site:c:abc", "llm", "gh", {"v": 1}, None)
-        await fast_cache_client._archive_cache_read("fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None)
+        await fast_cache_client._archive_cache_read(
+            "fastmode:v42:llm:gh:site:c:abc", hit=True, value={"v": 1}, blob_path=None
+        )
         assert len(calls) == 2
     finally:
         fast_cache_client.archive_json_deferred = old_deferred_archive
@@ -1240,15 +1451,51 @@ async def run_all_tests():
     )
     r.record("outbox_drain_does_not_delete_newer_generation", test_outbox_drain_does_not_delete_newer_generation)
     r.record("local_store_gold_io_validates_integrity", test_local_store_gold_io_validates_integrity)
-    r.record("observability_writes_dev_dump_and_archive_updates", test_observability_writes_dev_dump_and_archive_updates)
-    r.record("observability_archives_subagent_dumps_under_root_bundle", test_observability_archives_subagent_dumps_under_root_bundle)
+    r.record(
+        "observability_writes_dev_dump_and_archive_updates", test_observability_writes_dev_dump_and_archive_updates
+    )
+    r.record(
+        "observability_archives_subagent_dumps_under_root_bundle",
+        test_observability_archives_subagent_dumps_under_root_bundle,
+    )
     r.record("prod_worker_posts_encrypted_artifact_to_backend", test_prod_worker_posts_encrypted_artifact_to_backend)
-    await r.record_async("fast_cache_write_archives_without_replay_reads_or_backend_success", test_fast_cache_write_archives_without_replay_reads_or_backend_success)
-    await r.record_async("fast_cache_read_archives_hit_response_for_replay", test_fast_cache_read_archives_hit_response_for_replay)
-    await r.record_async("fast_cache_archive_uses_resolved_root_agent_id", test_fast_cache_archive_uses_resolved_root_agent_id)
+    await r.record_async(
+        "fast_cache_write_archives_without_replay_reads_or_backend_success",
+        test_fast_cache_write_archives_without_replay_reads_or_backend_success,
+    )
+    await r.record_async(
+        "fast_cache_read_archives_hit_response_for_replay", test_fast_cache_read_archives_hit_response_for_replay
+    )
+    await r.record_async(
+        "fast_cache_archive_uses_resolved_root_agent_id", test_fast_cache_archive_uses_resolved_root_agent_id
+    )
     await r.record_async(
         "worker_async_writes_defer_off_event_loop_and_complete",
         test_worker_async_writes_defer_off_event_loop_and_complete,
+    )
+    await r.record_async(
+        "terminal_flush_waits_for_accepted_root_writes",
+        test_terminal_flush_waits_for_accepted_root_writes,
+    )
+    r.record(
+        "terminal_flush_ignores_transaction_temporary_files",
+        test_terminal_flush_ignores_transaction_temporary_files,
+    )
+    r.record(
+        "outbox_drain_recovers_interrupted_artifact_transactions",
+        test_outbox_drain_recovers_interrupted_artifact_transactions,
+    )
+    r.record(
+        "outbox_drain_preserves_transaction_in_valid_artifact_name",
+        test_outbox_drain_preserves_transaction_in_valid_artifact_name,
+    )
+    r.record(
+        "outbox_drain_honors_expired_terminal_deadline",
+        test_outbox_drain_honors_expired_terminal_deadline,
+    )
+    r.record(
+        "outbox_drain_bounds_upload_by_remaining_terminal_deadline",
+        test_outbox_drain_bounds_upload_by_remaining_terminal_deadline,
     )
     await r.record_async(
         "deferred_json_payload_factory_runs_off_event_loop",
