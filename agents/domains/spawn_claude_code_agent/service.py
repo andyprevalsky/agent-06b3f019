@@ -736,9 +736,25 @@ async def _run_agentic_loop(  # noqa: C901
                 completed_codex_turns += 1
         event_type = event.get("type")
         tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
-        if event_type == "tool_use" and isinstance(tool_name, str):
+        # Count every tool_use toward in-flight, even when name is missing /
+        # non-string — tool_result always decrements, and a name-gated
+        # increment made those paths asymmetric (CodeRabbit #1260).
+        if event_type == "tool_use":
             in_flight_tool_count += 1
-            if sdk_result_at is not None:
+            if not isinstance(tool_name, str):
+                # Nameless tool_use: still stretch the in-flight idle window.
+                if sdk_result_at is not None:
+                    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+                elif effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    logger.info(
+                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=str(tool_name),
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+                    effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+            elif sdk_result_at is not None:
                 # SDK already declared completion — do not re-arm the 900s
                 # stretch (r31 a2: result → Bash/ScheduleWakeup re-armed stretch
                 # → Max runtime, 0 artifacts). Keep the short idle window.
