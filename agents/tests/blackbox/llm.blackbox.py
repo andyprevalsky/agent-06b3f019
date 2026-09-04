@@ -3334,13 +3334,14 @@ async def test_call_llm_verifier_uses_large_output_cap():
 async def test_call_llm_verifier_caps_declared_evaluator_output():
     """Declared-evaluator judges must not reserve the 16000-token OpenRouter cap.
 
-    OpenRouter 402s when remaining credits cannot cover max_tokens. A score JSON
-    fits in 512 tokens; keep the large cap for live agent verifiers.
+    OpenRouter 402s when remaining credits cannot cover max_tokens. Score JSON is
+    small, but reasoning models need headroom before the JSON lands — keep a
+    mid-size cap (not the full live-verifier 16000).
     """
     import httpx
     from config import load_config
     from helpers.httpx_capture import set_mock_handler
-    from helpers.llm import DECLARED_EVALUATOR_MAX_TOKENS, _call_llm_verifier
+    from helpers.llm import DECLARED_EVALUATOR_MAX_TOKENS, VERIFIER_MAX_TOKENS, _call_llm_verifier
 
     seen_max_tokens = []
     body = _sse_body(
@@ -3369,7 +3370,8 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
     provider_max_tokens = [value for value in seen_max_tokens if value is not None]
     assert provider_max_tokens
     assert all(value == DECLARED_EVALUATOR_MAX_TOKENS for value in provider_max_tokens)
-    assert DECLARED_EVALUATOR_MAX_TOKENS == 512
+    assert DECLARED_EVALUATOR_MAX_TOKENS == 4096
+    assert DECLARED_EVALUATOR_MAX_TOKENS < VERIFIER_MAX_TOKENS
 
 
 async def test_call_llm_verifier_bounds_provider_stream_time():

@@ -9577,6 +9577,37 @@ async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dic
     }
 
 
+async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
+    """Fetch GPT/Codex OAuth for harness-side declared judges.
+
+    Same failure mode as Claude: post-run ``check_progress`` previously omitted
+    GPT OAuth, so Rose used the org OpenAI API key (often credit-exhausted) then
+    OpenRouter waterfall. Reasoning models there hit the declared-evaluator
+    max_tokens ceiling with reasoning-only streams and failed the judge even when
+    the agent completed successfully. Pass the user's GPT token so the judge
+    shares the agent auth path (direct_auth:gpt).
+    """
+    from helpers.llm import fetch_gpt_code_token_activity
+
+    resolved_user_id = (user_id or "").strip() or _current_benchmark_user_id()
+    if not resolved_user_id:
+        return {}
+    try:
+        token_data = await fetch_gpt_code_token_activity(resolved_user_id)
+    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+        print(f"    ⚠ Declared-judge GPT auth fetch failed: {exc}")
+        return {}
+    if not token_data or not token_data.get("accessToken"):
+        return {}
+    return {
+        "gpt_token": token_data["accessToken"],
+        "gpt_account_id": token_data.get("accountId"),
+        "gpt_token_source": token_data.get("source"),
+        "gpt_token_pool_id": token_data.get("poolTokenId"),
+        "gpt_token_user_id": resolved_user_id,
+    }
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -9631,6 +9662,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         or _current_benchmark_user_id()
     )
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
+    gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
     return await check_progress(
         context=[
             {
@@ -9647,6 +9679,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         call_site="benchmark_declared_evaluator",
         agent_id=agent.get("agent_id") or agent.get("id"),
         **claude_auth,
+        **gpt_auth,
     )
 
 

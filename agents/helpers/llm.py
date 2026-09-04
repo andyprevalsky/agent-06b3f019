@@ -5282,10 +5282,14 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
-# Declared-evaluator judges return a short score JSON. OpenRouter reserves
-# max_tokens against remaining credits, so a 16000-token reservation 402s
-# an otherwise cheap cached judge when the account is low.
-DECLARED_EVALUATOR_MAX_TOKENS = 512
+# Declared-evaluator judges return a short score JSON, but reasoning models
+# (kimi-k3 / gpt-5.x-sol waterfall) often burn hundreds of tokens on reasoning
+# before emitting that JSON. 512 caused finish_reason=length with reasoning-only
+# streams and "No JSON content received" false fails on otherwise-good agent
+# runs (cuda-kernel-github-top100-code-agent k=3, 2026-09-04). Keep well under
+# VERIFIER_MAX_TOKENS so OpenRouter still does not 402 on a low credit balance
+# when the reservation is checked against remaining credits.
+DECLARED_EVALUATOR_MAX_TOKENS = 4096
 
 
 def max_tokens_for_verifier_call_site(call_site: str) -> int:
