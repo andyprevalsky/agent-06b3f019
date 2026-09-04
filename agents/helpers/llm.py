@@ -4902,10 +4902,60 @@ def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
 def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if value is None:
         return False
-    if field_type in ("file_pointer", "session_file_pointer"):
+    normalized = _normalize_schema_field_type(field_type) if field_type else None
+    if normalized in ("file_pointer", "session_file_pointer"):
         return isinstance(value, dict) and any(value.get(key) for key in ("id", "path", "storage_path"))
-    if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
+    if normalized in ("list[file_pointer]", "list[session_file_pointer]"):
         return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
+    # Structured deliverables must match the declared container type. A markdown
+    # string in a list[object] field (seen on cuda-kernel-github-top100 soft-accept)
+    # is not a populated ranking and must not satisfy the schema.
+    if normalized in ("list[object]", "list[dict]"):
+        return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+    if normalized == "object":
+        return isinstance(value, dict)
+    if normalized and normalized.startswith("list["):
+        return isinstance(value, list)
+    if normalized == "str":
+        return isinstance(value, str)
+    if normalized == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if normalized == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if normalized == "bool":
+        return isinstance(value, bool)
+    return True
+
+
+def _structured_response_ready_for_infra_soft_accept(
+    structured_response: Any,
+    response_schema: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether an infra soft-fail may accept attempt_completion.
+
+    Infrastructure timeouts are not a judgment that the deliverable is missing,
+    but accepting completion still requires a schema-shaped structured response.
+    Without this gate, soft-accept can COMPLETE agents whose ``repos`` field is a
+    truncated markdown string and fail the harness declared evaluator at progress=0.
+    When no response_schema is configured, preserve the prior accept-on-infra-fail
+    behavior.
+    """
+    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
+    if not fields:
+        return True
+    if not _structured_response_satisfies_schema(structured_response, response_schema):
+        return False
+    # Require non-empty lists so an empty repos=[] extraction cannot soft-complete.
+    for field in fields:
+        if not isinstance(field, dict):
+            return False
+        name = field.get("name")
+        field_type = _normalize_schema_field_type(field.get("type"))
+        if not isinstance(name, str) or not field_type or not field_type.startswith("list["):
+            continue
+        value = structured_response.get(name)
+        if not isinstance(value, list) or len(value) == 0:
+            return False
     return True
 
 

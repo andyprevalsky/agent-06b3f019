@@ -34,6 +34,7 @@ from helpers.llm import (
     LLMStructuredOutputError,
     _completed_child_task_structured_response,
     _pending_llm_context,
+    _structured_response_ready_for_infra_soft_accept,
     build_llm_messages,
     call_llm_activity,
     call_llm_structured_streaming,
@@ -2170,10 +2171,16 @@ async def run_agent(
                     # budget — even when the ranking deliverable is already in
                     # context. Infrastructure failure is not a judgment that the
                     # deliverable is missing: accept the agent's completion
-                    # claim on the first infra soft-fail (execute loop only).
+                    # claim on the first infra soft-fail (execute loop only)
+                    # WHEN the structured response already covers the schema.
+                    # Soft-accepting without a schema-shaped deliverable
+                    # COMPLETED r30 a1 with repos as truncated markdown and the
+                    # harness declared evaluator scored progress=0.
                     # Plan-loop verification still soft-fails and continues so a
                     # broken plan cannot skip review by starving the verifier.
-                    if not is_plan_loop:
+                    if not is_plan_loop and _structured_response_ready_for_infra_soft_accept(
+                        structured_response, response_schema
+                    ):
                         logger.warning(
                             "[run_agent] Accepting attempt_completion after "
                             "verifier infrastructure failure "
@@ -2183,6 +2190,13 @@ async def run_agent(
                         v_reasoning = (
                             "Verifier infrastructure failed; accepting agent "
                             f"attempt_completion. Original error: {v_reasoning}"
+                        )
+                    elif not is_plan_loop:
+                        logger.warning(
+                            "[run_agent] Verifier infrastructure failed but "
+                            "structured response is not schema-ready — not "
+                            "accepting attempt_completion "
+                            f"(consecutive={consecutive_verifier_errors})"
                         )
                     elif consecutive_verifier_errors >= 3:
                         return {
