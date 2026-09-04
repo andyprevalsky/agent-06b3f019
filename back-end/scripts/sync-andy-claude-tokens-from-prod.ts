@@ -166,6 +166,10 @@ export async function syncAndyClaudeTokensFromProd(options?: {
         ).map((row) => ({ ...row, accountId: '', accountEmail: null }));
 
     const credentialed = integrations.filter((integration) => {
+      // Never seed revoked/expired rows into local benches — an inactive
+      // Anthropic OAuth token (401 on /v1/models) will poison Claude Code
+      // spawn for the whole k-run if it lands in the pool ahead of good keys.
+      if (!integration.isActive || integration.status !== 'CONNECTED') return false;
       const config = integration.config;
       if (!config || typeof config !== 'object') return false;
       const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
