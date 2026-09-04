@@ -1058,20 +1058,77 @@ class RoseClient:
                     progress_timeout = ttft_budget
                 wait_timeout = min(r, progress_timeout)
                 outer_deadline_limited = r <= progress_timeout
+                # Slice long waits so Temporal heartbeats keep firing during
+                # TTFT / mid-stream idle gaps. Without this, a single
+                # wait_for up to ttft_timeout_s (90s) or idle_timeout_s (120s)
+                # can outrun reasoning's activity heartbeat_timeout and
+                # cancel the activity mid-call (seen as "activity Heartbeat
+                # timeout" on dag_reasoning while provider_read was still
+                # blocked on the first token).
+                wait_deadline = time.monotonic() + wait_timeout
+                chunk = None
+                timed_out = False
+                # Do NOT use asyncio.wait_for for sliced waits — on timeout it
+                # cancels the pending __anext__ and permanently closes the
+                # upstream async generator. Use asyncio.wait so heartbeats can
+                # fire while the same __anext__ awaitable stays outstanding.
+                next_item = asyncio.ensure_future(it.__anext__())
                 try:
-                    chunk = await asyncio.wait_for(it.__anext__(), timeout=wait_timeout)
-                except asyncio.TimeoutError as exc:
+                    while True:
+                        slice_timeout = min(
+                            _HEARTBEAT_INTERVAL_S,
+                            wait_deadline - time.monotonic(),
+                        )
+                        if slice_timeout <= 0:
+                            timed_out = True
+                            break
+                        done, _pending = await asyncio.wait({next_item}, timeout=slice_timeout)
+                        if next_item in done:
+                            try:
+                                chunk = next_item.result()
+                            except StopAsyncIteration:
+                                return
+                            break
+                        now = time.monotonic()
+                        if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
+                            _safe_heartbeat(
+                                f"rose.complete waiting call_site={call_site} request_id={rid}"
+                            )
+                            last_heartbeat = now
+                        if now >= wait_deadline:
+                            timed_out = True
+                            break
+                finally:
+                    # If the chunk landed in the same tick as the deadline,
+                    # consume it instead of reporting a stall (CodeRabbit #1260).
+                    if timed_out and next_item.done() and not next_item.cancelled():
+                        try:
+                            chunk = next_item.result()
+                            timed_out = False
+                        except StopAsyncIteration:
+                            chunk = None
+                            timed_out = False
+                    # Always cancel an unfinished __anext__ on exit — including
+                    # CancelledError while awaiting asyncio.wait. Leaving it
+                    # running after the activity ends raises an unobserved
+                    # exception (CodeRabbit #1260).
+                    if not next_item.done():
+                        next_item.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                            await next_item
+                if chunk is None and not timed_out:
+                    return
+                if timed_out:
                     if outer_deadline_limited:
                         raise RoseDeadlineError(
                             f"rose.complete deadline exceeded after {deadline_s}s"
-                        ) from exc
+                        )
                     if saw_productive_chunk:
                         raise RoseDeadlineError(
                             f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
-                        ) from exc
-                    raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s") from exc
-                except StopAsyncIteration:
-                    return
+                        )
+                    raise RoseStallError(f"rose.complete TTFT exceeded {ttft_budget}s")
+                assert chunk is not None
                 now = time.monotonic()
                 chunk_kind = str(chunk.kind)
                 chunk_counts[chunk_kind] = chunk_counts.get(chunk_kind, 0) + 1

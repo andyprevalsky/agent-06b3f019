@@ -5414,6 +5414,47 @@ async def test_client_ttft_timeout_waits_for_first_productive_chunk():
     assert raised
 
 
+async def test_client_heartbeats_during_ttft_wait():
+    """Long TTFT waits must keep Temporal heartbeats alive.
+
+    Regression: a single wait_for(ttft_timeout_s=90) with no intermediate
+    heartbeats raced reasoning's activity heartbeat_timeout=90s and cancelled
+    dag_reasoning mid-call during cuda-kernel code-agent runs.
+    """
+    heartbeats: list[str] = []
+
+    async def slow_ttft_then_content(**kwargs):
+        await asyncio.sleep(0.35)
+        yield StreamChunk(kind="content", data={"text": "hello"})
+        yield StreamChunk(kind="done", data={})
+
+    async def skip_api_key(**kwargs):
+        raise RoseStallError("skip funded api key for unit test")
+        yield  # pragma: no cover — make this an async generator
+
+    client = RoseClient(openrouter_key="ork-x")
+    with (
+        patch("providers.rose.client._try_openai_api_key", skip_api_key),
+        patch("providers.rose.client._try_anthropic_api_key", skip_api_key),
+        patch("providers.rose.client.waterfall_complete", slow_ttft_then_content),
+        patch("providers.rose.client._HEARTBEAT_INTERVAL_S", 0.05),
+        patch("providers.rose.client._safe_heartbeat", side_effect=lambda msg: heartbeats.append(msg)),
+    ):
+        texts = []
+        async for chunk in client.complete(
+            pool="rose-1-lite",
+            messages=[{"role": "user", "content": "hi"}],
+            call_site="test-ttft-heartbeat",
+            ttft_timeout_s=2.0,
+            idle_timeout_s=2.0,
+        ):
+            if chunk.kind == "content":
+                texts.append(chunk.data.get("text"))
+    assert texts == ["hello"]
+    waiting = [h for h in heartbeats if "waiting" in h]
+    assert waiting, f"expected waiting heartbeats during TTFT, got {heartbeats!r}"
+
+
 async def test_client_allows_idle_gap_within_idle_window_after_first_chunk():
     """Idle gaps shorter than `idle_timeout_s` are tolerated after first content."""
 
@@ -6533,6 +6574,7 @@ async def run_all_tests():
     await r.record_async("client_gpt_pydantic_text_format", test_client_plain_pydantic_model_uses_gpt_text_format)
     await r.record_async("client_deadline_enforced", test_client_deadline_enforced)
     await r.record_async("client_ttft_timeout", test_client_ttft_timeout_waits_for_first_productive_chunk)
+    await r.record_async("client_heartbeats_during_ttft_wait", test_client_heartbeats_during_ttft_wait)
     await r.record_async(
         "client_allows_idle_within_window",
         test_client_allows_idle_gap_within_idle_window_after_first_chunk,

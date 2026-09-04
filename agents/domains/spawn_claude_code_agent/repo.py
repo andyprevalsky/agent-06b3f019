@@ -43,6 +43,9 @@ async def save_claude_code_message(
     github_repo_url: Optional[str] = None,
     code_provider: str = "claude",
     completed_turns: Optional[int] = None,
+    tool_name: Optional[str] = None,
+    agent_type: Optional[str] = None,
+    steps_taken: Optional[int] = None,
 ) -> None:
     """Save Claude Code sub-action message directly to DB via back-end API."""
     config = load_config()
@@ -50,7 +53,7 @@ async def save_claude_code_message(
 
     metadata: dict[str, Any] = {
         "toolCallId": unique_tool_call_id,
-        "toolName": "spawn_claude_code_agent",
+        "toolName": tool_name or "spawn_claude_code_agent",
         "toolStatus": status.value,
         "title": title,
         "task_id": task_id,
@@ -75,6 +78,13 @@ async def save_claude_code_message(
     if completed_turns is not None:
         metadata["completed_turns"] = max(0, int(completed_turns))
 
+    # Non-orchestration evidence chips (SDK events / history) need an explicit
+    # agentType so harness `_agent_class_step_counts` attributes them to `code`.
+    if agent_type:
+        metadata["agentType"] = agent_type
+
+    if steps_taken is not None:
+        metadata["steps_taken"] = max(0, int(steps_taken))
     # Intermediate chip rows (progress, task_started, system) are child-scoped
     # UI and must stay out of the parent LLM context via subAgentId.
     # Parent-facing task_complete terminals reuse the spawn toolCallId — if they

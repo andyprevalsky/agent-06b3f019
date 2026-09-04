@@ -2992,6 +2992,45 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     )
 
 
+def test_declared_evaluator_evidence_includes_structured_output_first():
+    """Structured response-schema output must lead declared-judge evidence.
+
+    Regression (cuda-kernel-github-top100): completion cards alone were large enough
+    that verifier TOOL_RESULT budgeting head+tailed the repo list. Preferring the
+    compact structured_output payload keeps all 100 ranks visible to the judge.
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/r{i}",
+            "repo_url": f"https://github.com/org/r{i}",
+            "stars": 1000 - i,
+            "description": f"repo {i}",
+        }
+        for i in range(1, 101)
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {
+                "agent_id": "agent-structured",
+                "status": "COMPLETED",
+                "structured_output": {"repos": repos},
+            },
+            "messages": [],
+            "_benchmark": {"approvals_triggered": 0},
+        }
+    )
+    assert evidence, evidence
+    first = evidence[0]
+    assert first.get("metadata", {}).get("evidence_type") == "structured_output"
+    text = first.get("text") or ""
+    assert "org/r1" in text
+    assert "org/r50" in text
+    assert "org/r100" in text
+
+
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -15536,6 +15575,78 @@ def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
     assert "recorded 0 trajectory step(s)" in reason
 
 
+
+def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
+    """Non-orchestration code-agent evidence chips must produce step_count > 0.
+
+    When ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier, spawn chips
+    alone leave every code agent at 0 steps and declared judges fail. Persisted
+    `code_agent_sdk_events` / `claude_code_history` chips (agentType=code) are
+    the grounded trajectory the harness expects.
+    """
+    from benchmarks.run_benchmark import _agent_class_step_counts
+
+    task_id = "code-task-1"
+    spawn_call_id = "spawn-call-1"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_claude_code_agent",
+                        "type": "code",
+                        "tool_call_id": spawn_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "toolCallId": spawn_call_id,
+                "task_id": task_id,
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Code-agent SDK event JSON:\n\n{\"events\":[1]}",
+            "metadata": {
+                "toolName": "code_agent_sdk_events",
+                "toolCallId": "evidence-sdk-1",
+                "task_id": task_id,
+                "subAgentId": task_id,
+                "agentType": "code",
+                "steps_taken": 3,
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Execution Summary:\n\ncurl api.github.com",
+            "metadata": {
+                "toolName": "claude_code_history",
+                "toolCallId": "evidence-hist-1",
+                "task_id": task_id,
+                "subAgentId": task_id,
+                "agentType": "code",
+                "steps_taken": 3,
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert "code" in counts, counts
+    # Union should attach evidence to the spawn/task instance.
+    assert any(v > 0 for v in counts["code"].values()), counts
+    assert counts["code"].get(task_id, counts["code"].get(spawn_call_id, 0)) > 0, counts
+
+
+
 def test_browser_min_steps_is_per_instance_not_aggregate():
     """Five steps on one browser cannot cover a second under-worked browser."""
     from benchmarks.run_benchmark import (
@@ -17860,6 +17971,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
+    )
+    r.record(
+        "declared_evaluator_evidence_includes_structured_output_first",
+        test_declared_evaluator_evidence_includes_structured_output_first,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",

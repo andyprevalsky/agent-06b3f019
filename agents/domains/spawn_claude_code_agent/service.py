@@ -27,6 +27,10 @@ from domains.spawn_claude_code_agent.config import (
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     SDK_IDLE_TIMEOUT_S,
+    SDK_POST_RESULT_EXIT_GRACE_S,
+    SDK_POST_RESULT_STRETCH_TOOL_NAMES,
+    SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+    SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
     code_agent_verifier_disabled,
 )
@@ -671,6 +675,14 @@ async def _run_agentic_loop(  # noqa: C901
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
+    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use and
+    # while any tool is in-flight (tool_use awaiting tool_result).
+    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+    wait_tool_armed = False
+    in_flight_tool_count = 0
+    # Wall-clock of first SDK type=result. Stretch must not re-arm after this;
+    # grace backstop ends the monitor if the CLI never exits.
+    sdk_result_at: float | None = None
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -713,7 +725,8 @@ async def _run_agentic_loop(  # noqa: C901
         pending_output = True
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns, last_output_time
+        nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
+        nonlocal wait_tool_armed, in_flight_tool_count, sdk_result_at
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -721,12 +734,97 @@ async def _run_agentic_loop(  # noqa: C901
             if key not in completed_codex_turn_keys:
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
+        event_type = event.get("type")
+        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
+        # Count every tool_use toward in-flight, even when name is missing /
+        # non-string — tool_result always decrements, and a name-gated
+        # increment made those paths asymmetric (CodeRabbit #1260).
+        if event_type == "tool_use":
+            in_flight_tool_count += 1
+            if not isinstance(tool_name, str):
+                # Nameless tool_use: still stretch the in-flight idle window.
+                if sdk_result_at is not None:
+                    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+                elif effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    logger.info(
+                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=str(tool_name),
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+                    effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+            elif sdk_result_at is not None:
+                # SDK already declared completion — do not re-arm the 900s
+                # stretch (r31 a2: result → Bash/ScheduleWakeup re-armed stretch
+                # → Max runtime, 0 artifacts). Keep the short idle window.
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+            elif tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
+                # Wait tools AND Bash/Task/TaskOutput: arm post-result stretch.
+                # Bash often returns tool_result while background work continues
+                # with no further WS events; without arming, tool_result snaps
+                # idle back to 180s and kills the session (cuda k=3 r24).
+                wait_tool_armed = True
+                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    reason = (
+                        "wait tool"
+                        if tool_name in SDK_WAIT_TOOL_NAMES
+                        else "post-result stretch tool"
+                    )
+                    logger.info(
+                        f"[ClaudeCode] Extending SDK idle timeout for {reason}",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=tool_name,
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+            else:
+                # Non-wait tool (e.g. Write) — stretch while in-flight so
+                # silence during execution is not mistaken for a hung CLI.
+                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup/Bash often
+                # precede follow-on tools, and the post-result stretch must
+                # survive those (otherwise tool_result restores the short
+                # 180s window and kills the wait/background work).
+                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    logger.info(
+                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=tool_name,
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+        elif event_type == "tool_result":
+            if in_flight_tool_count > 0:
+                in_flight_tool_count -= 1
+            if sdk_result_at is not None:
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+            elif in_flight_tool_count == 0 and not wait_tool_armed:
+                # All tools finished and no post-wait stretch armed — restore
+                # the short hung-CLI window.
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+        elif event_type == "result":
+            # SDK declared completion — drop wait arm so a hung process after
+            # result is reaped on the short idle window, not 900s. Record the
+            # first result time for the exit-grace backstop (r31 a2/a3).
+            wait_tool_armed = False
+            if sdk_result_at is None:
+                sdk_result_at = safe_time()
+                logger.info(
+                    "[ClaudeCode] SDK result observed; arming post-result exit grace",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                    status=event.get("status"),
+                )
+            effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
             agent_id=agent_id,
             task_id=task_id,
-            event_type=event.get("type"),
+            event_type=event_type,
             provider=event.get("provider"),
         )
 
@@ -762,6 +860,28 @@ async def _run_agentic_loop(  # noqa: C901
                 action_summary.append(f"Max runtime exceeded ({int(elapsed)}s)")
                 break
 
+            # After the first SDK result, healthy CLIs exit in <1s. If the
+            # process is still alive past the grace window (stdout may keep
+            # refreshing last_output_time so short idle never fires), end the
+            # session so the parent can retry inside the bench budget.
+            if (
+                sdk_result_at is not None
+                and exit_code is None
+                and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
+            ):
+                grace_elapsed = safe_time() - sdk_result_at
+                logger.warning(
+                    "[ClaudeCode] Post-result exit grace exceeded",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grace_s=SDK_POST_RESULT_EXIT_GRACE_S,
+                    since_result_s=grace_elapsed,
+                )
+                action_summary.append(
+                    f"Post-result exit grace exceeded ({int(grace_elapsed)}s after SDK result)"
+                )
+                break
+
             if ws_client.reconnects_exhausted:
                 await _handle_reconnect_exhausted(sandbox_id, agent_id, task_id, action_summary, code_provider)
 
@@ -770,8 +890,10 @@ async def _run_agentic_loop(  # noqa: C901
             # Autonomous CC waits for SDK exit after the first silence observation
             # (parent-LLM nudge is intentionally skipped). If the CLI then goes
             # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
+            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup
+            # and while any tool is in-flight (awaiting tool_result).
             if (
-                silence_duration >= SDK_IDLE_TIMEOUT_S
+                silence_duration >= effective_idle_timeout_s
                 and not pending_output
                 and ws_connected
                 and exit_code is None
@@ -781,7 +903,7 @@ async def _run_agentic_loop(  # noqa: C901
                     agent_id=agent_id,
                     task_id=task_id,
                     silence_s=silence_duration,
-                    idle_limit_s=SDK_IDLE_TIMEOUT_S,
+                    idle_limit_s=effective_idle_timeout_s,
                 )
                 action_summary.append(
                     f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"
@@ -1282,6 +1404,70 @@ def _build_code_event_context(
     return json.dumps(evidence, ensure_ascii=False, indent=2)
 
 
+async def _persist_code_agent_judge_evidence(
+    *,
+    agent_id: str,
+    task_id: str,
+    code_provider: str,
+    code_events: list[Dict[str, Any]] | None,
+    output_files: list[Dict[str, Any]] | None,
+    action_summary: list[str],
+) -> None:
+    """Persist non-orchestration code-agent evidence for harness judges.
+
+    Orchestration chips use ``toolName=spawn_claude_code_agent`` and therefore
+    contribute 0 leaf steps to ``_agent_class_step_counts``. When the LLM
+    verifier is skipped, nothing else records coding-agent work, so declared
+    judges see every code agent at step_count=0 and fail "coding-agent fetch"
+    criteria. These TOOL messages use distinct non-orchestration tool names +
+    ``agentType=code`` + ``task_id``/``subAgentId`` so they count as grounded
+    code-agent steps and remain readable in the trajectory.
+    """
+    events = code_events or []
+    files = output_files or []
+    summary = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
+    if not events and not files and not summary:
+        return
+
+    event_context = _build_code_event_context(
+        code_events=events,
+        output_files=files,
+        action_summary=summary,
+    )
+    # Prefer explicit event/action cardinality so judges see non-zero steps even
+    # when only a single evidence chip is present. Do not force steps_taken=1
+    # from orchestration-only summaries with zero SDK events/files — those are
+    # lifecycle breadcrumbs, not grounded coding-agent steps.
+    steps_taken = max(len(events), 1 if files else 0)
+    if steps_taken == 0:
+        return
+
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title="🧾 Code-agent SDK events",
+        task_id=task_id,
+        message=f"Code-agent SDK event JSON:\n\n{event_context}",
+        status=MessageStatus.FINISHED,
+        action_type="system",
+        code_provider=code_provider,
+        tool_name="code_agent_sdk_events",
+        agent_type="code",
+        steps_taken=steps_taken,
+    )
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title="🧾 Code-agent execution summary",
+        task_id=task_id,
+        message="Execution Summary:\n\n" + "\n".join(summary[-20:]),
+        status=MessageStatus.FINISHED,
+        action_type="system",
+        code_provider=code_provider,
+        tool_name="claude_code_history",
+        agent_type="code",
+        steps_taken=steps_taken,
+    )
+
+
 async def _run_verifier(
     *,
     agent_id: str,
@@ -1380,6 +1566,27 @@ async def _run_verifier(
             has_structured_from_files=bool(output_file_structured),
             score=score,
         )
+        # Persist SDK/history evidence so harness step counts + declared judges
+        # still see grounded coding-agent work when the LLM verifier is off.
+        # Evidence write failures must not block verifier-disabled completion
+        # when artifacts / exit_code already prove success (CodeRabbit #1260).
+        try:
+            await _persist_code_agent_judge_evidence(
+                agent_id=agent_id,
+                task_id=task_id,
+                code_provider=code_provider,
+                code_events=code_events,
+                output_files=extracted_output_files,
+                action_summary=action_summary,
+            )
+        except Exception as evidence_err:
+            logger.warning(
+                "[ClaudeCode] judge evidence persist failed; continuing "
+                "verifier-disabled completion",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=str(evidence_err)[:200],
+            )
         return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 
     try:
