@@ -24,7 +24,6 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from 'fs';
 import { join, relative, resolve, sep } from 'path';
@@ -32,6 +31,7 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
 import { randomUUID } from './crypto';
+import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLocalFileRead';
 import { isFilePointer } from './claudeCodeLocalOwnership';
 
 const log = createLogger('ClaudeCodeLocal');
@@ -424,20 +424,10 @@ async function extractLocalFiles(
         `Local output candidate escaped its session directory: ${candidate.filename}`
       );
     }
-    if (!existsSync(fullPath)) {
-      log.warn('Local output candidate disappeared before upload', {
-        filename: candidate.filename,
-      });
-      candidate.missing = true;
-      writeOwnership(ownership);
-      continue;
-    }
     try {
-      const size = statSync(fullPath).size;
-      if (size > MAX_FILE_SIZE) {
-        throw new Error(`File size exceeds maximum of ${MAX_FILE_SIZE / 1024 / 1024}MB`);
-      }
-      const content = readFileSync(fullPath);
+      // Open with O_NOFOLLOW, then validate and read the same descriptor. Path
+      // checks followed by stat/read can otherwise be swapped to a symlink.
+      const content = readRegularFileNoFollow(fullPath, MAX_FILE_SIZE);
       const { storage_path } = await uploadToStorage(
         userId,
         content,
@@ -457,6 +447,14 @@ async function extractLocalFiles(
       // leave earlier pointers reusable while outputFiles remains incomplete.
       writeOwnership(ownership);
     } catch (fileErr) {
+      if (isMissingLocalFileError(fileErr)) {
+        log.warn('Local output candidate disappeared before upload', {
+          filename: candidate.filename,
+        });
+        candidate.missing = true;
+        writeOwnership(ownership);
+        continue;
+      }
       log.error(`Failed to extract local output file ${candidate.filename}`, {
         error: fileErr instanceof Error ? fileErr.message : String(fileErr),
       });

@@ -38,10 +38,13 @@ statements as one state transition without a shared serialization owner.
 
 ## Solution
 
-Both transitions now acquire the same transaction-scoped advisory lock keyed by
-purchase ID. The reclaim CAS also rejects an already-cleared purchase, so either
-ordering has a reciprocal guard. Deterministic database tests hold the shared
-lock to force each ordering and assert that no impossible state commits.
+Every transition into `RECLAIMING`—initial claim, direct mark, and stale-lease
+retry—and the competing clear transition now acquires the same
+transaction-scoped advisory lock keyed by purchase ID. Every reclaim CAS also
+rejects an already-cleared purchase, so either ordering has a reciprocal guard.
+Deterministic database tests hold the shared lock to force each ordering and
+invoke all three reclaim entry points after `CLEARED`, asserting that no
+impossible state commits.
 
 ## Human feedback
 

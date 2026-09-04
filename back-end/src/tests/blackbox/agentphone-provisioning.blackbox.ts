@@ -13,6 +13,14 @@ async function main(): Promise<void> {
   let agentCreates = 0;
   let numberCreates = 0;
   const pageSignals: AbortSignal[] = [];
+  let markAgentCreateStarted!: () => void;
+  const agentCreateStarted = new Promise<void>((resolve) => {
+    markAgentCreateStarted = resolve;
+  });
+  let releaseAgentCreate!: () => void;
+  const agentCreateGate = new Promise<void>((resolve) => {
+    releaseAgentCreate = resolve;
+  });
   process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
   process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
 
@@ -39,6 +47,8 @@ async function main(): Promise<void> {
       agentCreates += 1;
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       providerAgent = { id: 'agt-concurrent', description: body.description, numbers: [] };
+      markAgentCreateStarted();
+      await agentCreateGate;
       throw new DOMException('provider response was lost', 'AbortError');
     }
     if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
@@ -54,10 +64,17 @@ async function main(): Promise<void> {
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   await prisma.agentIdentity.create({ data: { userId, email: `${userId}@example.test` } });
   try {
-    const [first, second] = await Promise.all([
-      createAgentPhoneNumber({ userId }),
-      createAgentPhoneNumber({ userId }),
-    ]);
+    const firstProvision = createAgentPhoneNumber({ userId });
+    await agentCreateStarted;
+    const committedLease = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+    assert.match(
+      committedLease.phoneProvider ?? '',
+      /^agentphone:provisioning:/,
+      'the cross-replica lease must commit before provider I/O waits'
+    );
+    const secondProvision = createAgentPhoneNumber({ userId });
+    releaseAgentCreate();
+    const [first, second] = await Promise.all([firstProvision, secondProvision]);
     assert.equal(agentCreates, 1, 'serialized callers must create one provider agent');
     assert.equal(numberCreates, 1, 'serialized callers must create one provider number');
     assert.equal(first?.agentId, second?.agentId, 'both callers must reuse the persisted agent');

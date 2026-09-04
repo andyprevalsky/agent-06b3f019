@@ -9,8 +9,10 @@ import {
   recordPurchaseWalletFunding,
 } from '../../providers/purchase-wallet-funding';
 import {
+  claimWalletFundingReclaimRetry,
   findWalletFundingByPurchaseId,
   lockPurchaseWalletTransition,
+  markWalletFundingReclaiming,
 } from '../../providers/purchase-wallet-funding-repo';
 
 const createdUserIds: string[] = [];
@@ -80,11 +82,48 @@ async function reclaimCannotClaimClearedPurchase(): Promise<void> {
   assert.equal(funding?.status, PurchaseWalletFundingStatus.FUNDED);
 }
 
+async function everyReclaimEntryPointRejectsClearedPurchase(): Promise<void> {
+  const directPurchase = await seedHeldPurchase();
+  const directFunding = await findWalletFundingByPurchaseId(directPurchase.id);
+  assert.ok(directFunding);
+  assert.equal((await markHeldPurchaseClearedIfNoReclaim(directPurchase.id)).count, 1);
+  const direct = await markWalletFundingReclaiming(directFunding.id, {
+    reclaimIdempotencyKey: `reclaim-${randomUUID()}`,
+    reclaimLeaseToken: `lease-${randomUUID()}`,
+    expectedReclaimLeaseToken: null,
+    allowConsumed: false,
+    allowReclaiming: false,
+  });
+  assert.equal(direct.count, 0, 'direct reclaim transition must reject a CLEARED purchase');
+
+  const retryPurchase = await seedHeldPurchase();
+  const retryFunding = await findWalletFundingByPurchaseId(retryPurchase.id);
+  assert.ok(retryFunding);
+  assert.equal((await markHeldPurchaseClearedIfNoReclaim(retryPurchase.id)).count, 1);
+  const retry = await claimWalletFundingReclaimRetry(retryFunding.id, {
+    reclaimIdempotencyKey: `reclaim-${randomUUID()}`,
+    reclaimLeaseToken: `lease-${randomUUID()}`,
+    staleReclaimingBefore: new Date(Date.now() + 60_000),
+  });
+  assert.equal(retry.count, 0, 'retry reclaim transition must reject a CLEARED purchase');
+
+  const current = await Promise.all([
+    findWalletFundingByPurchaseId(directPurchase.id),
+    findWalletFundingByPurchaseId(retryPurchase.id),
+  ]);
+  assert.deepEqual(
+    current.map((funding) => funding?.status),
+    [PurchaseWalletFundingStatus.FUNDED, PurchaseWalletFundingStatus.FUNDED]
+  );
+}
+
 async function main(): Promise<void> {
   await clearingWaitsForReclaimTransition();
   process.stdout.write('  PASS purchase clearing serializes behind reclaim\n');
   await reclaimCannotClaimClearedPurchase();
   process.stdout.write('  PASS reclaim cannot claim a CLEARED purchase\n');
+  await everyReclaimEntryPointRejectsClearedPurchase();
+  process.stdout.write('  PASS every reclaim entry point rejects a CLEARED purchase\n');
 }
 
 main()

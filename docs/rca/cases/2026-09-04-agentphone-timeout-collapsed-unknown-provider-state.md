@@ -60,17 +60,21 @@ number creation's entire budget.
 Every provider request, including every reconciliation page, now has its own
 bounded signal. Agent creation carries a deterministic SHA-256 provisioning
 marker in its description. Rose acquires a database advisory lock keyed by user
-across backend replicas, rechecks the user's persisted provider identity under
-that lock, and writes the provider agent/number IDs before releasing it. A
-waiting replica therefore reuses the exact persisted resource.
+only long enough to claim a committed provisioning lease. Provider HTTP then
+runs outside the transaction, so a slow or timed-out request cannot consume a
+database connection for its entire duration. Completion uses another short
+locked transaction to exchange the exact lease marker for the provider
+agent/number IDs. A waiting replica therefore reuses the persisted resource.
 
 The first implementation scanned the entire provider account before every new
 create. The live blackbox exposed that this is not a viable absence proof once
 the account exceeds 10,000 agents. Ordinary first-time provisioning now creates
-directly under the lock; paginated marker reconciliation is reserved for an
-ambiguous create outcome. When `total` is absent, full pages continue until an
-empty or short page, and an exhausted bound still fails closed instead of
-claiming a complete scan.
+directly after the lease commits; paginated marker reconciliation is reserved
+for an ambiguous create outcome. An uncertain failure writes a recovery marker,
+and a crashed owner's lease expires into the same recovery-only path, so no
+successor creates until a full marker scan proves absence. When `total` is
+absent, full pages continue until an empty or short page. Agent-count and
+elapsed-time bounds both fail closed instead of claiming a complete scan.
 
 If number creation is ambiguous, Rose reads the known agent. It recovers an
 attached active number, or deletes the newly created agent after the provider
@@ -81,9 +85,12 @@ surfaced so a later request can retry against the same marker instead of
 creating untracked state.
 
 The recovery, cleanup, and fail-closed blackboxes all pass through the standard
-backend blackbox runner. Synthetic AgentPhone provisioning additionally requires
-an explicit isolated benchmark or a non-production process, so a leaked flag
-cannot persist phantom provider identities in production.
+backend blackbox runner. The concurrency case pauses provider creation and
+asserts that another database client can already observe the committed lease,
+then proves two callers create only one provider agent and number. Synthetic
+AgentPhone provisioning additionally requires an explicit isolated benchmark or
+a non-production process, so a leaked flag cannot persist phantom provider
+identities in production.
 
 ## Human feedback
 
@@ -92,4 +99,4 @@ the prior review cycle found this blocker.
 
 ## Reusable lesson
 
-Never turn an ambiguous non-idempotent provider write into fallback success until exact reconciliation or compensating cleanup proves the external outcome.
+Never hold a database transaction across provider I/O; commit a recoverable lease first, and never turn an ambiguous non-idempotent write into fallback success until exact reconciliation or compensating cleanup proves the external outcome.

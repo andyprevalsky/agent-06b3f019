@@ -11,6 +11,7 @@ symptoms:
   - overlapping local Claude Code closes upload outputs and update CLOSED twice
   - one failed output upload is silently persisted as a complete partial outputFiles list
   - retry skips a missing local Claude Code output file
+  - a checked output path can be replaced with a symlink before upload
 tags:
   - claude-code
   - local-session
@@ -82,6 +83,12 @@ process and records the database close but retains ownership and files without
 setting `outputFiles`; a later close with identity can therefore finish the
 authorized extraction.
 
+File extraction opens each candidate with `O_NOFOLLOW`, validates that exact
+descriptor as a regular file, and performs a size-bounded read from the same
+descriptor. This removes the path-check/stat/read symlink race. The permanent
+close blackbox places a symlink to another agent's file in the output directory
+and proves that no upload is attempted.
+
 ## Human feedback
 
 The user insisted the isolation work be finished, cemented, and deployed after
@@ -89,4 +96,4 @@ the prior review cycle found this blocker.
 
 ## Reusable lesson
 
-Give every retriable side-effect workflow one keyed owner and persist per-item progress before treating its aggregate result as complete.
+Give every retriable side-effect workflow one keyed owner, persist per-item progress, and validate/read untrusted files through one non-following descriptor before treating the aggregate result as complete.

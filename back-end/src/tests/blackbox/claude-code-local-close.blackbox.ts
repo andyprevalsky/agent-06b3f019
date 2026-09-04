@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from 'node:fs';
@@ -228,6 +229,25 @@ test('an oversized candidate fails before the file is loaded or uploaded', async
   );
   assert.equal(uploadCalls, 0, 'oversized output must be rejected before upload');
   rmSync(oversizedPath);
+  await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+});
+
+test('a symlink candidate is never followed or uploaded', async () => {
+  const taskId = `close-symlink-output-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  const outsidePath = join(fixtureDir, `outside-${taskId}.txt`);
+  const symlinkPath = join(workDir, 'output', 'leak.txt');
+  writeFileSync(outsidePath, 'belongs to another agent');
+  symlinkSync(outsidePath, symlinkPath);
+  let uploadCalls = 0;
+  globalThis.fetch = (async () => {
+    uploadCalls += 1;
+    return new Response(JSON.stringify({ Key: 'unexpected' }), { status: 200 });
+  }) as typeof fetch;
+
+  await assert.rejects(() => closeLocalClaudeCodeSession(taskId, 'user-local-close'));
+  assert.equal(uploadCalls, 0, 'a symlink target must never cross the upload boundary');
+  rmSync(symlinkPath);
   await closeLocalClaudeCodeSession(taskId, 'user-local-close');
 });
 

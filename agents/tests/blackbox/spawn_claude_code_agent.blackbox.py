@@ -562,13 +562,31 @@ def test_structured_response_from_output_files_single_pointer():
 
 
 def test_structured_response_from_output_files_rejects_non_file_schema():
-    """The deterministic file path shortcut only handles pure file output schemas."""
+    """The deterministic shortcut returns nothing when a schema has no file fields."""
     from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
 
     schema = {"fields": [{"name": "summary", "type": "string"}]}
     files = [{"original_filename": "report.txt"}]
 
     assert _structured_response_from_output_files(schema, files) is None
+
+
+def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
+    """Primitive fields do not prevent extracted files from satisfying file artifacts."""
+    from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
+
+    schema = {
+        "fields": [
+            {"name": "summary", "type": "string"},
+            {"name": "report", "type": "file_pointer"},
+            {"name": "count", "type": "int"},
+        ]
+    }
+    files = [{"original_filename": "report.txt"}]
+
+    assert _structured_response_from_output_files(schema, files) == {
+        "report": {"path": "/home/user/output/report.txt"}
+    }
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
@@ -1494,11 +1512,11 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
         )
 
     assert called["check_progress"] == 0
-    assert score == 0.5
+    assert score == 1.0
     assert "verifier disabled" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning
-    assert struct is None
+    assert struct == {"python_script": {"path": "/home/user/output/collatz_27.py"}}
     assert itok == 0 and otok == 0
 
 
@@ -3114,6 +3132,10 @@ async def run_all_tests():
     r.record("extract_paths_non_dict", test_extract_additional_paths_non_dict_value)
     r.record("structured_from_output_single", test_structured_response_from_output_files_single_pointer)
     r.record("structured_from_output_rejects_non_file", test_structured_response_from_output_files_rejects_non_file_schema)
+    r.record(
+        "structured_from_output_mixed_schema",
+        test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
+    )
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)

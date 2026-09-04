@@ -1255,7 +1255,7 @@ def _structured_response_from_output_files(
         elif field_type == "list[file_pointer]":
             structured[name] = [{"path": _remote_path_for_output_file(fp)} for fp in output_files]
         else:
-            return None
+            continue
 
     return structured or None
 

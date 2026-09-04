@@ -11,6 +11,7 @@ symptoms:
   - disabled code-agent verifier scores 1.0 when one of two required files exists
   - structured response is null while verifier score reports success
   - incomplete output schema passes when ROSE_DISABLE_CODE_AGENT_VERIFIER is set
+  - mixed primitive/file schemas discard valid extracted file artifacts
 tags:
   - claude-code
   - verifier
@@ -55,6 +56,9 @@ fields and delegates completeness to the same structured-response constructor
 used for the returned result. Schemas without file fields are artifact-complete
 without inventing an output-file requirement; any file-bearing schema must
 produce a non-null structured response, including list and multi-file shapes.
+The constructor skips primitive fields it cannot infer while still filling and
+validating every declared file field. Thus a mixed schema preserves valid file
+artifacts without mistaking one file for multiple required pointers.
 
 The new case is explicitly registered in the spawn-Claude-code-agent blackbox
 runner. The same runner passes the incomplete two-file schema, empty schema,
@@ -67,4 +71,4 @@ the prior review cycle found this blocker.
 
 ## Reusable lesson
 
-Keep skip and fallback paths subject to the same schema-completeness predicate as the primary verifier path; never approximate a typed schema with file counts.
+Keep skip and fallback paths subject to the same file-field completeness predicate as the primary verifier path; preserve supported fields in mixed schemas and never approximate typed requirements with raw file counts.
