@@ -1,13 +1,5 @@
 import { AGENTCARD_MCP_RESOURCE } from './config';
-import { mcpCallTool } from './runtime';
 
-const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
-const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
-const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
-/** AgentCard's client-credentials grant intermittently returns 5xx ("Token grant failed"). */
-const TOKEN_GRANT_MAX_ATTEMPTS = 10;
-const TOKEN_GRANT_BASE_DELAY_MS = 200;
-const TOKEN_GRANT_MAX_DELAY_MS = 1_000;
 /**
  * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
  * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
@@ -41,6 +33,9 @@ const TOKEN_GRANT_MAX_DELAY_MS = 1_000;
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
+const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
+const ORG_MCP_AUTH_RETRY_ATTEMPTS = 3;
+const ORG_MCP_AUTH_RETRY_DELAY_MS = 250;
 
 /**
  * One rate-limit retry budget, anchored now.
@@ -52,13 +47,6 @@ const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
  */
 export function orgRetryDeadlineAtMs(): number {
   return Date.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
-}
-
-function orgTokenTimeoutMs(): number {
-  const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
-  if (!raw) return DEFAULT_ORG_TOKEN_TIMEOUT_MS;
-  const value = Number(raw);
-  return Number.isInteger(value) && value > 0 ? value : DEFAULT_ORG_TOKEN_TIMEOUT_MS;
 }
 
 type FetchLike = typeof fetch;
@@ -142,6 +130,32 @@ function looksLikeRateLimitError(error: unknown): boolean {
   );
 }
 
+function looksLikeTransientUnavailableError(error: unknown): boolean {
+  return /temporarily unavailable|service unavailable/i.test(errorMessage(error));
+}
+
+function shouldRetryOrgMcpError(error: unknown): boolean {
+  return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
+}
+
+function mcpStructuredResultIsTransientlyUnavailable(result: unknown): string | undefined {
+  if (typeof result !== 'object' || result === null) return undefined;
+  const record = result as Record<string, unknown>;
+  const structured =
+    typeof record.structuredContent === 'object' && record.structuredContent !== null
+      ? (record.structuredContent as Record<string, unknown>)
+      : record;
+  const message = typeof structured.message === 'string' ? structured.message : '';
+  const status = structured.status;
+  if (
+    (status === 'error' || status === 'unavailable') &&
+    /temporarily unavailable|service unavailable/i.test(message)
+  ) {
+    return message;
+  }
+  return undefined;
+}
+
 /**
  * AgentCard reports `retryAfter` as an ABSOLUTE epoch-milliseconds window reset, not a duration.
  *
@@ -173,6 +187,120 @@ function rateLimitDelayMs(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * AgentCard Organization MCP authenticates with the `acs_…` client secret as the
+ * Bearer token (the token endpoint's JWT is `scope: api` and MCP rejects it).
+ * `initialize` 401s on a healthy secret while `tools/call` succeeds, so the org
+ * runtime posts JSON-RPC tools/call directly instead of using the MCP SDK session.
+ */
+function parseMcpJsonRpcFrames(bodyText: string): Record<string, unknown>[] {
+  const trimmed = bodyText.trim();
+  if (trimmed.startsWith('{')) {
+    return [JSON.parse(trimmed) as Record<string, unknown>];
+  }
+  const frames: Record<string, unknown>[] = [];
+  for (const line of trimmed.split(/\r?\n/)) {
+    if (!line.startsWith('data:')) continue;
+    const payload = line.slice('data:'.length).trim();
+    if (payload === '' || payload === '[DONE]' || !payload.startsWith('{')) continue;
+    try {
+      frames.push(JSON.parse(payload) as Record<string, unknown>);
+    } catch {
+      // Streamable HTTP may emit a non-JSON endpoint URL as the first data line.
+    }
+  }
+  return frames;
+}
+
+function selectMcpJsonRpcFrame(
+  frames: Record<string, unknown>[],
+  bodyText: string
+): Record<string, unknown> {
+  const withResult = [...frames].reverse().find((frame) => 'result' in frame);
+  if (withResult !== undefined) return withResult;
+  const withError = [...frames]
+    .reverse()
+    .find((frame) => frame.error !== undefined && frame.error !== null);
+  if (withError !== undefined) return withError;
+  return frames.at(-1) ?? { message: bodyText.trim() };
+}
+
+async function callOrgMcpTool(
+  accessToken: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  fetchImpl: FetchLike = fetch
+): Promise<unknown> {
+  let lastError: AgentCardOrgRuntimeError | undefined;
+  for (let attempt = 1; attempt <= ORG_MCP_AUTH_RETRY_ATTEMPTS; attempt += 1) {
+    const response = await fetchImpl(AGENTCARD_MCP_RESOURCE, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        accept: 'application/json, text/event-stream',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: toolName, arguments: args },
+      }),
+      signal: AbortSignal.timeout(ORG_MCP_TOOL_TIMEOUT_MS),
+    });
+    const bodyText = await response.text();
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = selectMcpJsonRpcFrame(parseMcpJsonRpcFrames(bodyText), bodyText);
+    } catch {
+      parsed = { message: bodyText };
+    }
+    const rpcError = parsed.error;
+    const hasRpcError = rpcError !== undefined && rpcError !== null && rpcError !== '';
+    const errorText =
+      typeof rpcError === 'string'
+        ? rpcError
+        : rpcError && typeof rpcError === 'object' && 'message' in rpcError
+          ? String((rpcError as { message: unknown }).message)
+          : typeof parsed.message === 'string'
+            ? parsed.message
+            : bodyText.slice(0, 200);
+    if (!response.ok || hasRpcError) {
+      lastError = new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} failed: ${errorText}`,
+        response.status >= 400 && response.status < 500 ? response.status : 502,
+        response.status === 401 || response.status === 403
+          ? 'agentcard_org_mcp_unauthorized'
+          : 'agentcard_org_mcp_unavailable',
+        { status: response.status, error: rpcError, message: parsed.message }
+      );
+      if (
+        attempt === ORG_MCP_AUTH_RETRY_ATTEMPTS ||
+        (response.status !== 401 && response.status !== 403)
+      ) {
+        throw lastError;
+      }
+      await delay(ORG_MCP_AUTH_RETRY_DELAY_MS);
+      continue;
+    }
+    if ('result' in parsed) return parsed.result;
+    throw new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} failed: missing JSON-RPC result`,
+      502,
+      'agentcard_org_mcp_unavailable',
+      { status: response.status, message: parsed.message }
+    );
+  }
+  throw (
+    lastError ??
+    new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP ${toolName} failed`,
+      502,
+      'agentcard_org_mcp_unavailable'
+    )
+  );
 }
 
 /**
@@ -210,16 +338,6 @@ function detachedCopy(value: unknown): unknown {
 }
 
 export class AgentCardOrgRuntime {
-  private cachedToken?: { accessToken: string; expiresAtMs: number };
-  /**
-   * Client-credential tokens can enter their refresh window while several org
-   * reads are fanned out together (for example, the payment lifecycle reads a
-   * card and two transfer views concurrently). Coalesce that burst into one
-   * token exchange. Besides avoiding needless load, this prevents one member
-   * of the burst timing out after its siblings have already refreshed the same
-   * credential.
-   */
-  private inFlightToken?: Promise<string>;
   /**
    * In-flight idempotent reads, keyed by tool + args. The organization MCP throttle is shared by
    * EVERY org caller at 120 requests/minute, and Rose fans identical reads out constantly: each
@@ -229,16 +347,23 @@ export class AgentCardOrgRuntime {
    * concurrent agents grow rather than scaling with them.
    */
   private readonly inFlightReads = new Map<string, Promise<unknown>>();
+  private readonly toolCaller: TokenMcpToolCaller;
+  private readonly fetchImpl: FetchLike;
 
-  constructor(
-    private readonly toolCaller: TokenMcpToolCaller = mcpCallTool,
-    private readonly fetchImpl: FetchLike = fetch
-  ) {}
+  constructor(toolCaller?: TokenMcpToolCaller, fetchImpl: FetchLike = fetch) {
+    this.fetchImpl = fetchImpl;
+    this.toolCaller =
+      toolCaller ??
+      ((accessToken, toolName, args) =>
+        callOrgMcpTool(accessToken, toolName, args, this.fetchImpl));
+  }
 
   /**
-   * Calls an organization MCP tool, transparently recovering from the two failure modes that are
-   * expected on a healthy provider: an expired token (refresh once) and a throttled request window
-   * (wait for the window to refill, bounded). Everything else propagates untouched.
+   * Calls an organization MCP tool, transparently recovering from the failure modes that are
+   * expected on a healthy provider: a flaky MCP 401/403 on `tools/call` (retry once), a throttled
+   * request window (wait for the window to refill, bounded), and a structured
+   * `{status:"error", message:"…temporarily unavailable"}` tools/call result (HTTP 200 with a
+   * sandbox outage). Everything else propagates untouched.
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
@@ -269,13 +394,23 @@ export class AgentCardOrgRuntime {
     args: Record<string, unknown>,
     deadlineAtMs: number
   ): Promise<unknown> {
-    let lastRateLimitError: unknown;
+    let lastRetryError: unknown;
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       try {
-        return await this.callToolOnce(toolName, args);
+        const result = await this.callToolOnce(toolName, args);
+        const transient = mcpStructuredResultIsTransientlyUnavailable(result);
+        if (transient !== undefined) {
+          throw new AgentCardOrgRuntimeError(
+            `AgentCard Organization MCP ${toolName} is temporarily unavailable: ${transient}`,
+            503,
+            'agentcard_org_mcp_unavailable',
+            { tool: toolName, message: transient }
+          );
+        }
+        return result;
       } catch (error) {
-        if (!looksLikeRateLimitError(error)) throw error;
-        lastRateLimitError = error;
+        if (!shouldRetryOrgMcpError(error)) throw error;
+        lastRetryError = error;
         if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) break;
         // Derived from the deadline, not decremented locally: time spent inside the throttled call
         // itself counts against the budget too, and a shared deadline already reflects every wait
@@ -284,6 +419,18 @@ export class AgentCardOrgRuntime {
         if (waitMs === null) break;
         await delay(waitMs);
       }
+    }
+    if (
+      looksLikeTransientUnavailableError(lastRetryError) &&
+      !looksLikeRateLimitError(lastRetryError)
+    ) {
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} is temporarily unavailable ` +
+          `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+        503,
+        'agentcard_org_mcp_unavailable',
+        { tool: toolName, error: errorMessage(lastRetryError) }
+      );
     }
     // Keep the words "rate limit" in the message: callers that already detect provider throttling
     // by message text (the wallet-funding release observer) must keep recognising this outcome.
@@ -294,179 +441,40 @@ export class AgentCardOrgRuntime {
     // to characterise.
     throw new AgentCardOrgRuntimeError(
       `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
-        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRateLimitError)}`,
+        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
-      { tool: toolName, error: errorMessage(lastRateLimitError) }
+      { tool: toolName, error: errorMessage(lastRetryError) }
     );
   }
 
   private async callToolOnce(toolName: string, args: Record<string, unknown>): Promise<unknown> {
-    const accessToken = await this.getAccessToken();
+    const accessToken = this.getAccessToken();
     try {
       return await this.toolCaller(accessToken, toolName, args);
     } catch (error) {
       if (!hasClientCredentials() || !looksLikeAuthError(error)) throw error;
-      this.cachedToken = undefined;
-      return this.toolCaller(await this.getAccessToken(true), toolName, args);
+      return this.toolCaller(this.getAccessToken(), toolName, args);
     }
   }
 
-  private async getAccessToken(forceClientCredentials = false): Promise<string> {
+  /**
+   * Organization MCP takes the `acs_…` client secret as Bearer. JWT exchange is
+   * the user-OAuth path; those tokens come back `scope: api` and MCP 401s them.
+   */
+  private getAccessToken(): string {
+    if (hasClientCredentials()) {
+      return requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET');
+    }
     const direct = directAccessToken();
-    if (!forceClientCredentials && !hasClientCredentials() && direct !== undefined) return direct;
-
-    const cachedToken = this.cachedToken;
-    if (cachedToken !== undefined && cachedToken.expiresAtMs > Date.now() + 60_000) {
-      return cachedToken.accessToken;
-    }
-
-    // A forced refresh must start its OWN exchange. It only ever runs after the MCP rejected the
-    // token we just sent, and an exchange that was already in flight when that rejection arrived
-    // can resolve to that very token (client-credential endpoints re-serve a still-unexpired token
-    // for the same client). Joining it would resend the rejected credential and fail again — the
-    // reachable case being the concurrent read fan-out, where one member of a burst gets a 401
-    // while a sibling's proactive refresh is still pending.
-    //
-    // When a still-valid cached token can cover this call, proactive refresh is best-effort: one
-    // attempt, then fall back. Retrying 5xx here only burns the shared org token budget and delays
-    // every lifecycle fanout that can already succeed on the cache. Cold start and forced refresh
-    // keep the full retry budget — those have no usable fallback.
-    const canFallBackToCache =
-      !forceClientCredentials &&
-      cachedToken !== undefined &&
-      cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS;
-    const maxAttempts = canFallBackToCache ? 1 : TOKEN_GRANT_MAX_ATTEMPTS;
-    let tokenPromise = this.inFlightToken;
-    if (tokenPromise === undefined || forceClientCredentials) {
-      tokenPromise = this.fetchAccessToken(maxAttempts).finally(() => {
-        if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
-      });
-      this.inFlightToken = tokenPromise;
-    }
-
-    try {
-      return await tokenPromise;
-    } catch (error) {
-      // A proactive refresh must not turn a still-valid organization token into
-      // an outage when AgentCard's token endpoint is temporarily unavailable.
-      // Forced refreshes follow an MCP auth rejection, so they must never reuse
-      // the rejected token.
-      if (
-        !forceClientCredentials &&
-        cachedToken !== undefined &&
-        cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS &&
-        error instanceof AgentCardOrgRuntimeError &&
-        error.code === 'agentcard_org_token_unavailable'
-      ) {
-        return cachedToken.accessToken;
-      }
-      throw error;
-    }
-  }
-
-  private async fetchAccessToken(maxAttempts = TOKEN_GRANT_MAX_ATTEMPTS): Promise<string> {
-    const attempts = Math.max(1, Math.min(maxAttempts, TOKEN_GRANT_MAX_ATTEMPTS));
-    let lastError: AgentCardOrgRuntimeError | undefined;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        return await this.fetchAccessTokenOnce();
-      } catch (error) {
-        if (!(error instanceof AgentCardOrgRuntimeError)) throw error;
-        lastError = error;
-        if (!isRetryableOrgTokenError(error) || attempt === attempts) {
-          throw error;
-        }
-        await delay(
-          Math.min(TOKEN_GRANT_MAX_DELAY_MS, TOKEN_GRANT_BASE_DELAY_MS * 2 ** (attempt - 1))
-        );
-      }
-    }
-    throw (
-      lastError ??
-      new AgentCardOrgRuntimeError(
-        'Could not obtain an AgentCard Organization MCP access token',
-        502,
-        'agentcard_org_token_unavailable'
-      )
+    if (direct !== undefined) return direct;
+    throw new AgentCardOrgRuntimeError(
+      'Missing AGENTCARD_ORG_OAUTH_CLIENT_ID environment variable for AgentCard Organization MCP',
+      409,
+      'agentcard_org_mcp_unavailable',
+      { missingEnv: 'AGENTCARD_ORG_OAUTH_CLIENT_ID' }
     );
   }
-
-  private async fetchAccessTokenOnce(): Promise<string> {
-    let response: Awaited<ReturnType<FetchLike>>;
-    try {
-      response = await this.fetchImpl(
-        process.env.AGENTCARD_ORG_TOKEN_ENDPOINT?.trim() || DEFAULT_ORG_TOKEN_ENDPOINT,
-        {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/x-www-form-urlencoded',
-            accept: 'application/json',
-          },
-          body: new URLSearchParams({
-            grant_type: 'client_credentials',
-            client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID'),
-            client_secret: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET'),
-            // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
-            // Prefer live env so a late dotenv load cannot freeze a wrong module-init default.
-            resource: (process.env.AGENTCARD_MCP_URL?.trim() || AGENTCARD_MCP_RESOURCE).replace(
-              /\/+$/,
-              ''
-            ),
-          }),
-          // Fail fast instead of hanging wallet funding/monitoring/reconciliation if the token
-          // endpoint stalls.
-          signal: AbortSignal.timeout(orgTokenTimeoutMs()),
-        }
-      );
-    } catch (error) {
-      if (error instanceof AgentCardOrgRuntimeError) throw error;
-      const timedOut = error instanceof Error && error.name === 'TimeoutError';
-      throw new AgentCardOrgRuntimeError(
-        timedOut
-          ? 'Timed out acquiring an AgentCard Organization MCP access token'
-          : 'Could not reach the AgentCard Organization MCP token endpoint',
-        timedOut ? 504 : 502,
-        'agentcard_org_token_unavailable',
-        { error: error instanceof Error ? error.message : String(error) }
-      );
-    }
-    const bodyText = await response.text();
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(bodyText) as Record<string, unknown>;
-    } catch {
-      body = { message: bodyText };
-    }
-    if (!response.ok || typeof body.access_token !== 'string') {
-      throw new AgentCardOrgRuntimeError(
-        'Could not obtain an AgentCard Organization MCP access token',
-        response.status >= 400 && response.status < 500 ? response.status : 502,
-        'agentcard_org_token_unavailable',
-        {
-          status: response.status,
-          error: body.error,
-          errorDescription: body.error_description,
-          message: body.message,
-        }
-      );
-    }
-    const expiresInSeconds =
-      typeof body.expires_in === 'number' && Number.isFinite(body.expires_in)
-        ? body.expires_in
-        : 3600;
-    this.cachedToken = {
-      accessToken: body.access_token,
-      expiresAtMs: Date.now() + expiresInSeconds * 1000,
-    };
-    return this.cachedToken.accessToken;
-  }
-}
-
-function isRetryableOrgTokenError(error: AgentCardOrgRuntimeError): boolean {
-  if (error.code !== 'agentcard_org_token_unavailable') return false;
-  // Provider 5xx is remapped to 502; timeouts are 504. Do not retry auth/config 4xx.
-  return error.status === 502 || error.status === 503 || error.status === 504;
 }
 
 const runtime = new AgentCardOrgRuntime();

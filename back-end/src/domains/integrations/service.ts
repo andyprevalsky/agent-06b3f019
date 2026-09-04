@@ -32,7 +32,6 @@ import {
   markGptPoolTokenRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
-import { prisma } from '../../providers/database';
 import { getValidAccessToken } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
@@ -543,15 +542,7 @@ async function persistRecoveredIntegrationAccountId(
   recoveredAccountId: string | null
 ): Promise<void> {
   if (recoveredAccountId === null || recoveredAccountId === '') return;
-  const conflict = await prisma.integration.findFirst({
-    where: { userId, name, accountId: recoveredAccountId },
-    select: { id: true },
-  });
-  if (conflict !== null) return;
-  await prisma.integration.updateMany({
-    where: { userId, name, accountId: '' },
-    data: { accountId: recoveredAccountId },
-  });
+  await repo.persistRecoveredIntegrationAccountId(userId, name, recoveredAccountId);
 }
 
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {

@@ -231,7 +231,10 @@ test('credential recovery heals accountless needs_reconnect chips', async () => 
   const chip = await prisma.computeAccountConnection.findFirst({
     where: { userId, provider: 'claude', accountId: legacyAccountId },
   });
-  assert(chip?.state === 'connected', `expected connected after accountless heal, got ${chip?.state}`);
+  assert(
+    chip?.state === 'connected',
+    `expected connected after accountless heal, got ${chip?.state}`
+  );
   assert(chip?.lastErrorReason === null, 'healed chip must clear lastErrorReason');
 });
 

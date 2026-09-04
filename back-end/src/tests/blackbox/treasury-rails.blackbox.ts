@@ -24,6 +24,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCallerOverrides';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { extractAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
@@ -32,6 +33,8 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { planFloatReplenish } from '../../providers/brex/replenish';
+
+loadDotenvWithCallerOverrides();
 
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -201,6 +204,12 @@ async function main(): Promise<void> {
     ) {
       console.log(
         'SKIP treasury-rails: AgentCard org token unavailable from provider (credential-infra precondition)'
+      );
+      return;
+    }
+    if (/temporarily unavailable|service unavailable/i.test(message)) {
+      console.log(
+        'SKIP treasury-rails: AgentCard sandbox get_company_wallet is temporarily unavailable (provider-infra precondition)'
       );
       return;
     }
@@ -387,13 +396,14 @@ void main().catch((error: unknown) => {
   // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
   // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
   if (
+    /temporarily unavailable|service unavailable/i.test(message) ||
     /invalid or expired organization token/i.test(message) ||
     /could not obtain an agentcard organization mcp access token/i.test(message) ||
     /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
     /could not reach the agentcard organization mcp token endpoint/i.test(message)
   ) {
     console.log(
-      'SKIP treasury-rails: AgentCard org token unavailable mid-flight (credential-infra precondition)'
+      'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'
     );
     process.exit(0);
   }
