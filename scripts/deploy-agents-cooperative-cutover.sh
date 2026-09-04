@@ -241,8 +241,10 @@ echo "Retiring old-generation machines (hash=${CURRENT_HASH:-unknown})"
 if [ -n "$CURRENT_HASH" ]; then
   for ID in $(machine_ids_for_hash "$CURRENT_HASH"); do
     echo "  stopping+destroying old-gen machine $ID"
-    flyctl machines stop "$ID" -a "$APP" || true
-    flyctl machines destroy "$ID" -a "$APP" --force || true
+    # Bound each call — a hung stop/destroy previously burned the whole GHA
+    # step after drain had already succeeded (pointer flipped, old queue=0).
+    timeout 120 flyctl machines stop "$ID" -a "$APP" || true
+    timeout 120 flyctl machines destroy "$ID" -a "$APP" --force || true
   done
 fi
 

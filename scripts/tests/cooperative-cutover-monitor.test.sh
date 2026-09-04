@@ -69,7 +69,7 @@ got="$(extract_open_with_status $'0' 0)"
 [ "$got" = "0" ] || fail "successful count-script status must keep integer (got: $got)"
 
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
-require_text "$WORKFLOW" 'timeout-minutes: 75' \
+require_text "$WORKFLOW" 'timeout-minutes: 90' \
   "cutover step must allow >60m headroom past the 45m drain SLO"
 
 echo "cooperative cutover monitor structural tests: PASS"

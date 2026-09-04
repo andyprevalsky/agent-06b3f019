@@ -454,8 +454,10 @@ require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'registry.fly.
   "cutover must construct image ref from app + image label (flyctl deploy has no --json)"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--build-only' \
   "surface-change cutover must build/push without replacing old-gen machines first"
-require_text "$ROOT/agents/fly.toml" 'kill_timeout = "35m"' \
-  "Fly must allow in-flight activities (incl. 30m browser) to finish on SIGTERM"
+require_text "$ROOT/agents/fly.toml" 'kill_timeout = "5m"' \
+  "Fly kill_timeout must stay within the Machines 5m stop_config.timeout cap"
+require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'timeout 120' \
+  "old-gen retire must bound stop/destroy so a hung flyctl cannot burn the GHA step"
 require_text "$ROOT/agents/worker.py" 'graceful_shutdown_timeout' \
   "Temporal worker must wait for in-flight activities on shutdown"
 require_text "$ROOT/agents/loop/run_agent.py" 'generation_handoff' \
