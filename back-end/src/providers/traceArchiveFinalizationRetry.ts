@@ -5,12 +5,14 @@ import { archiveEnabled } from './traceArchive';
 import { finalizeAgent } from './traceArchiveLifecycle';
 
 const RETRY_DELAY_MS = 60_000;
+const MAX_RETRY_DELAY_MS = 60 * 60_000;
 const LEASE_MS = 10 * 60_000;
 export const TRACE_ARCHIVE_DELETION_LEASE_MS = 2 * 60_000;
 
 interface FinalizationObligation {
   rootAgentId: string;
   leaseToken: string;
+  attemptCount: number;
 }
 
 export interface TraceArchiveDeletionLease {
@@ -132,7 +134,13 @@ async function claim(
       leaseUntil: new Date(now.getTime() + LEASE_MS),
     },
   });
-  return claimed.count === 1 ? { rootAgentId: candidate.rootAgentId, leaseToken } : null;
+  return claimed.count === 1
+    ? {
+        rootAgentId: candidate.rootAgentId,
+        leaseToken,
+        attemptCount: candidate.attemptCount,
+      }
+    : null;
 }
 
 async function assertDeletedTreeIsTerminal(rootAgentId: string): Promise<void> {
@@ -176,6 +184,11 @@ async function complete(obligation: FinalizationObligation): Promise<void> {
 }
 
 async function retain(obligation: FinalizationObligation, error: unknown): Promise<void> {
+  const attemptNumber = obligation.attemptCount + 1;
+  const retryDelayMs = Math.min(
+    RETRY_DELAY_MS * 2 ** Math.min(attemptNumber - 1, 16),
+    MAX_RETRY_DELAY_MS
+  );
   await prisma.traceArchiveFinalization.updateMany({
     where: {
       rootAgentId: obligation.rootAgentId,
@@ -184,7 +197,7 @@ async function retain(obligation: FinalizationObligation, error: unknown): Promi
     data: {
       leaseToken: null,
       leaseUntil: null,
-      notBefore: new Date(Date.now() + RETRY_DELAY_MS),
+      notBefore: new Date(Date.now() + retryDelayMs),
       attemptCount: { increment: 1 },
       lastError: (error instanceof Error ? error.message : String(error)).slice(0, 4_000),
     },

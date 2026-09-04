@@ -68,6 +68,12 @@ async function main(): Promise<void> {
     assert.match(kill, /cleanupAgentSessions/);
     assert.match(kill, /enqueueTraceArchiveFinalization\(tx, agentId\)/);
     assert.match(kill, /runTraceArchiveFinalizationRetries/);
+    assert.match(kill, /workflowTerminationHandled = false/);
+    assert.match(
+      kill,
+      /sealed\.traceArchiveDeletionLease !== null && workflowTerminationHandled/,
+      'unexpected workflow termination failures must retain the R2 finalization lease'
+    );
     assert.match(
       readSrc('src', 'serverCron.ts'),
       /scheduleTraceArchiveFinalizationRetries\(isProduction\)/
@@ -350,6 +356,28 @@ async function main(): Promise<void> {
           })
         ).attemptCount,
         1
+      );
+      const beforeSecondFailure = Date.now();
+      await assert.rejects(
+        runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        AggregateError
+      );
+      const twiceRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
+        where: { rootAgentId: rootId },
+      });
+      assert.equal(twiceRetained.attemptCount, 2);
+      assert.ok(
+        twiceRetained.notBefore.getTime() >= beforeSecondFailure + 110_000,
+        'the second failure must back off for approximately two minutes'
+      );
+      assert.ok(
+        twiceRetained.notBefore.getTime() <= Date.now() + 125_000,
+        'the second failure backoff must remain bounded'
       );
 
       await prisma.agent.update({

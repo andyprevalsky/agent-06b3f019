@@ -83,6 +83,13 @@ export async function deleteAgentRecursive(
   agentId: string,
   options: DeleteAgentOptions = {}
 ): Promise<void> {
+  await deleteAgentRecursiveInternal(agentId, options);
+}
+
+async function deleteAgentRecursiveInternal(
+  agentId: string,
+  options: DeleteAgentOptions
+): Promise<boolean> {
   const terminateReason = options.terminateReason ?? 'Agent deleted by user';
 
   // Soft-delete under the same generation lock child-create uses, then snapshot
@@ -117,16 +124,19 @@ export async function deleteAgentRecursive(
   });
   if (sealed === null) {
     if (archiveEnabled()) await retryRootArchiveFinalization(agentId);
-    return;
+    return true;
   }
 
   const stopArchiveHeartbeat =
     sealed.traceArchiveDeletionLease === null
       ? null
       : startTraceArchiveDeletionHeartbeat(sealed.traceArchiveDeletionLease);
+  let workflowTerminationHandled = true;
   try {
     for (const childId of sealed.childIds) {
-      await deleteAgentRecursive(childId, options);
+      if (!(await deleteAgentRecursiveInternal(childId, options))) {
+        workflowTerminationHandled = false;
+      }
     }
 
     await cleanupAgentSessions(agentId);
@@ -150,6 +160,7 @@ export async function deleteAgentRecursive(
             reason: msg,
           });
         } else {
+          workflowTerminationHandled = false;
           log.warn('Failed to terminate workflow', {
             agent_id: agentId,
             workflow_id: sealed.temporalWorkflowId,
@@ -166,7 +177,7 @@ export async function deleteAgentRecursive(
     // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
     // goal hash and only removed by the explicit fast-cache purge endpoint.
 
-    if (sealed.traceArchiveDeletionLease !== null) {
+    if (sealed.traceArchiveDeletionLease !== null && workflowTerminationHandled) {
       try {
         await releaseTraceArchiveDeletion(sealed.traceArchiveDeletionLease);
         await retryRootArchiveFinalization(agentId);
@@ -176,9 +187,14 @@ export async function deleteAgentRecursive(
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    } else if (sealed.traceArchiveDeletionLease !== null) {
+      log.warn('Trace archive deletion lease retained after workflow termination failure', {
+        agent_id: agentId,
+      });
     }
 
     log.info('Deleted agent', { agent_id: agentId, terminate_reason: terminateReason });
+    return workflowTerminationHandled;
   } finally {
     stopArchiveHeartbeat?.();
   }
