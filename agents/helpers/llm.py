@@ -923,12 +923,18 @@ def build_verifier_context_messages(
     context: List[Dict[str, Any]],
     system_prompt: str,
     verifier_file_evidence_by_message: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    call_site: str = "verifier",
 ) -> List[Dict[str, Any]]:
     """Build verifier messages with compressed tool results and progressive cache.
 
     Strips ASSISTANT and SYSTEM messages. Compresses USER + TOOL messages into
     user-role batches, split by prior verifier responses (which become the
     assistant turns to maintain user/assistant alternation).
+
+    For ``call_site="benchmark_declared_evaluator"``, skip TOOL_RESULT budgeting.
+    Declared-judge evidence is already bounded by the single-turn evidence builder
+    (~320k). Re-applying the generic 12k tool cap head+tails the completion card
+    and drops middle ranks of large structured deliverables (cuda-kernel top100).
 
     Sequential verifier calls share a growing cached prefix:
       call N reads [sys, user_batch1, asst_v1, ..., user_batchN-1, asst_vN-1]
@@ -1023,11 +1029,20 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            tool_text, truncated = _budget_verifier_tool_result_text(
-                "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str),
-                tool_name=str(tool_name or "tool"),
-                used_chars=_tool_result_chars_used,
-            )
+            #
+            # Declared-evaluator evidence is pre-bounded (~320k) and often carries
+            # the full structured deliverable (e.g. top-100 repos). Applying the
+            # generic 12k tool cap here head+tails that card and fails the judge
+            # even when the agent completed correctly.
+            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            if str(call_site or "") == "benchmark_declared_evaluator":
+                tool_text, truncated = dumped, False
+            else:
+                tool_text, truncated = _budget_verifier_tool_result_text(
+                    dumped,
+                    tool_name=str(tool_name or "tool"),
+                    used_chars=_tool_result_chars_used,
+                )
             if truncated:
                 _tool_result_budget_hits += 1
             # Aggregate budget exhausted → empty text; skip append so later
@@ -1093,8 +1108,11 @@ def build_verifier_context_messages(
 # the file-evidence budget: spawn_agent and artifact_file tool rows often embed
 # full ranking JSON directly in `result`, bypassing file-pointer inlining.
 VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
-VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 40_000
-VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 64_000
+# Deliverable tools (attempt_completion / artifact writes) must fit a full
+# top-100 ranking JSON (~50–80k with descriptions). The prior 40k/64k caps
+# head+tailed cuda-kernel top100 completion cards during verifier_execute.
+VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 100_000
+VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 160_000
 _VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
     {
         "attempt_completion",
@@ -5533,6 +5551,7 @@ async def check_progress(
             context,
             system_prompt,
             verifier_file_evidence_by_message=verifier_file_evidence,
+            call_site=call_site,
         )
 
         # Resolve context pointers

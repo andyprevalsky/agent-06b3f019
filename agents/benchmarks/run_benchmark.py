@@ -9311,6 +9311,29 @@ def _apply_compact_benchmark_state(evidence: list[dict], compact_state: dict) ->
     return evidence
 
 
+def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list[dict]:
+    """Prefer the agent's populated response-schema output for declared judges.
+
+    Completion-card prose can be huge and previously got head+tail truncated by
+    the verifier TOOL_RESULT budget, hiding middle ranks. ``structured_output``
+    is the compact schema payload (e.g. 100 repos) and should always be visible.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    structured = agent.get("structured_output")
+    if structured is None:
+        structured = agent.get("structuredOutput")
+    if structured is None:
+        return evidence
+    row = {
+        "role": "ASSISTANT",
+        "text": json.dumps({"structured_output": structured}, default=str),
+        "metadata": {"evidence_type": "structured_output"},
+    }
+    # Put structured output first so budget-sensitive judges see it even if a
+    # later layer ever reintroduces truncation.
+    return [row, *evidence]
+
+
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge.
 
@@ -9331,19 +9354,22 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
 
     compact_state = _compact_benchmark_state_for_judge(data)
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
     compact_only: list[dict] = []
     _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
     evidence = _apply_compact_benchmark_state(compact_only, compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
-    return [{"benchmark_state": compact_state}]
+    return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {

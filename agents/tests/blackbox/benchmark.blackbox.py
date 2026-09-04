@@ -2992,6 +2992,45 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     )
 
 
+def test_declared_evaluator_evidence_includes_structured_output_first():
+    """Structured response-schema output must lead declared-judge evidence.
+
+    Regression (cuda-kernel-github-top100): completion cards alone were large enough
+    that verifier TOOL_RESULT budgeting head+tailed the repo list. Preferring the
+    compact structured_output payload keeps all 100 ranks visible to the judge.
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/r{i}",
+            "repo_url": f"https://github.com/org/r{i}",
+            "stars": 1000 - i,
+            "description": f"repo {i}",
+        }
+        for i in range(1, 101)
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {
+                "agent_id": "agent-structured",
+                "status": "COMPLETED",
+                "structured_output": {"repos": repos},
+            },
+            "messages": [],
+            "_benchmark": {"approvals_triggered": 0},
+        }
+    )
+    assert evidence, evidence
+    first = evidence[0]
+    assert first.get("metadata", {}).get("evidence_type") == "structured_output"
+    text = first.get("text") or ""
+    assert "org/r1" in text
+    assert "org/r50" in text
+    assert "org/r100" in text
+
+
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -17919,6 +17958,7 @@ async def run_all_tests():
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
+        test_declared_evaluator_evidence_includes_structured_output_first,
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     await r.record_async(

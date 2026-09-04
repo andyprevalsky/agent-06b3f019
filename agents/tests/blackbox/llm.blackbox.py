@@ -5226,6 +5226,91 @@ def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agen
     assert tool_only <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 200
 
 
+def test_build_verifier_context_messages_skips_budget_for_declared_evaluator():
+    """Declared-evaluator evidence must keep middle ranks of large deliverables.
+
+    Regression (cuda-kernel-github-top100 r27 a1): agent completed with 100 repos in
+    structured_output / completion outputs, but check_progress re-wrapped the
+    evidence as TOOL_RESULT tool_name=tool and the 12k generic cap head+tailed
+    ranks ~22–91. The declared judge then failed criterion 1 despite a valid run.
+    """
+    import json
+    from helpers.llm import (
+        VERIFIER_MAX_TOOL_RESULT_CHARS,
+        build_verifier_context_messages,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/cuda-repo-{i}",
+            "repo_url": f"https://github.com/org/cuda-repo-{i}",
+            "stars": 100000 - i,
+            "description": (
+                f"CUDA kernel library number {i} with enough text to inflate the payload"
+            ),
+        }
+        for i in range(1, 101)
+    ]
+    evidence = [
+        {
+            "role": "ASSISTANT",
+            "text": json.dumps({"structured_output": {"repos": repos}}, default=str),
+            "metadata": {"evidence_type": "structured_output"},
+        },
+        {
+            "role": "ASSISTANT",
+            "text": json.dumps(
+                {
+                    "summary": "Ranked top 100 CUDA kernel repos",
+                    "outputs": [{"key": "repos", "value": repos}],
+                },
+                default=str,
+            ),
+            "metadata": {"evidence_type": "final_completion"},
+        },
+    ]
+    blob = json.dumps(evidence, default=str)
+    assert len(blob) > VERIFIER_MAX_TOOL_RESULT_CHARS
+
+    ctx = [
+        {
+            "role": "USER",
+            "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+            "timestamp": "2026-09-04T11:41:00Z",
+        },
+        {
+            "role": "TOOL",
+            "text": blob,
+            "timestamp": "2026-09-04T11:41:01Z",
+            "metadata": {"toolName": "tool", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    truncated = build_verifier_context_messages(ctx, "system", call_site="verifier")
+    truncated_joined = "\n".join(
+        m["content"]
+        for m in truncated
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
+    assert "verifier truncated" in truncated_joined
+
+    kept = build_verifier_context_messages(
+        ctx, "system", call_site="benchmark_declared_evaluator"
+    )
+    kept_joined = "\n".join(
+        m["content"]
+        for m in kept
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
+    assert "verifier truncated" not in kept_joined
+    # Nested JSON is escaped inside TOOL_RESULT; assert on unique repo markers.
+    assert "cuda-repo-1" in kept_joined
+    assert "cuda-repo-50" in kept_joined
+    assert "cuda-repo-100" in kept_joined
+    assert kept_joined.count("cuda-repo-") >= 100
+
+
 async def test_build_verifier_context_messages_self_closes_trailing_refs():
     """Verifier context should not expand terminal message refs inside JSON/batches."""
     from helpers.context_pointers import resolve_pointers_in_messages
