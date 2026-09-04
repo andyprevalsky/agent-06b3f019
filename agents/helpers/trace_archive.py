@@ -184,6 +184,21 @@ def _artifact_transaction_path(target: Path) -> Path:
     return target.with_suffix(target.suffix + _ARTIFACT_TRANSACTION_SUFFIX)
 
 
+def _artifact_transaction_target(path: Path) -> Optional[Path]:
+    if not path.name.endswith(_ARTIFACT_TRANSACTION_SUFFIX):
+        return None
+    return path.with_name(path.name[: -len(_ARTIFACT_TRANSACTION_SUFFIX)])
+
+
+def _is_artifact_transaction_temporary(path: Path) -> bool:
+    marker = f"{_ARTIFACT_TRANSACTION_SUFFIX}."
+    _, separator, tail = path.name.rpartition(marker)
+    if not separator or not tail.endswith(".tmp"):
+        return False
+    identifiers = tail[: -len(".tmp")].split(".")
+    return 1 <= len(identifiers) <= 2 and all(identifier.isdigit() for identifier in identifiers)
+
+
 def _encode_artifact_transaction(ciphertext: bytes, metadata: dict[str, Any]) -> bytes:
     metadata_bytes = json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8")
     return _ARTIFACT_TRANSACTION_MAGIC + len(metadata_bytes).to_bytes(8, "big") + metadata_bytes + ciphertext
@@ -459,7 +474,12 @@ def list_local_artifact_paths(root_agent_id: str) -> list[str]:
         return []
     paths: list[str] = []
     for item in bundle.rglob("*"):
-        if item.is_file() and not item.name.endswith(".meta.json") and _ARTIFACT_TRANSACTION_SUFFIX not in item.name:
+        if (
+            item.is_file()
+            and not item.name.endswith(".meta.json")
+            and _artifact_transaction_target(item) is None
+            and not _is_artifact_transaction_temporary(item)
+        ):
             paths.append(item.relative_to(bundle).as_posix())
     return sorted(paths)
 
@@ -792,11 +812,10 @@ def _outbox_artifact_target(item: Path) -> Optional[Path]:
     """Map a durable outbox file to the artifact pair it can publish."""
     if item.name.endswith(".meta.json"):
         return None
-    if _ARTIFACT_TRANSACTION_SUFFIX not in item.name:
-        return item
-    if item.name.endswith(_ARTIFACT_TRANSACTION_SUFFIX):
-        return item.with_name(item.name[: -len(_ARTIFACT_TRANSACTION_SUFFIX)])
-    return None
+    transaction_target = _artifact_transaction_target(item)
+    if transaction_target is not None:
+        return transaction_target
+    return None if _is_artifact_transaction_temporary(item) else item
 
 
 def _root_outbox_has_artifacts(root_agent_id: str) -> bool:

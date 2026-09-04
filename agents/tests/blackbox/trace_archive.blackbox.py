@@ -245,10 +245,15 @@ def test_local_artifact_listing_hides_transaction_and_temporary_files():
         try:
             (bundle / "visible.json.gz.enc").write_bytes(b"ciphertext")
             (bundle / "visible.json.gz.enc.meta.json").write_text("{}")
+            (bundle / "trace.transaction.json").write_bytes(b"valid-artifact")
+            (bundle / "trace.transaction.json.meta.json").write_text("{}")
             (bundle / "hidden.json.gz.enc.transaction").write_bytes(b"transaction")
             (bundle / "hidden.json.gz.enc.transaction.123.tmp").write_bytes(b"temporary")
 
-            assert list_local_artifact_paths("agent-listing") == ["llm/visible.json.gz.enc"]
+            assert list_local_artifact_paths("agent-listing") == [
+                "llm/trace.transaction.json",
+                "llm/visible.json.gz.enc",
+            ]
         finally:
             restore()
 
@@ -927,6 +932,30 @@ def test_outbox_drain_recovers_interrupted_artifact_transactions():
                 restore()
 
 
+def test_outbox_drain_preserves_transaction_in_valid_artifact_name():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        posts = []
+        try:
+            ciphertext = b"valid-transaction-name"
+            trace_archive._write_outbox(
+                "agent-valid-name",
+                "llm/trace.transaction.json",
+                ciphertext,
+                {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+            )
+            trace_archive._post_backend_artifact = lambda **kwargs: posts.append(kwargs) or "r2://stored"
+            assert trace_archive._drain_backend_outbox(root_agent_id="agent-valid-name") == 1
+            assert len(posts) == 1
+            assert posts[0]["path"] == "llm/trace.transaction.json"
+        finally:
+            trace_archive._post_backend_artifact = original_post
+            restore()
+
+
 def test_outbox_drain_honors_expired_terminal_deadline():
     """A terminal flush cannot begin another HTTP upload after its deadline."""
     import helpers.trace_archive as trace_archive
@@ -1455,6 +1484,10 @@ async def run_all_tests():
     r.record(
         "outbox_drain_recovers_interrupted_artifact_transactions",
         test_outbox_drain_recovers_interrupted_artifact_transactions,
+    )
+    r.record(
+        "outbox_drain_preserves_transaction_in_valid_artifact_name",
+        test_outbox_drain_preserves_transaction_in_valid_artifact_name,
     )
     r.record(
         "outbox_drain_honors_expired_terminal_deadline",
