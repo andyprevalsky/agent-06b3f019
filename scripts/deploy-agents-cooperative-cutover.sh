@@ -201,8 +201,15 @@ fi
 # then lose the race with the GHA step timeout during machine retirement
 # (seen on run 33817062156: 0 open workflows the whole time, step killed at 60m).
 count_open_on_queue() {
-  local raw
-  raw="$(npx tsx scripts/count-open-workflows-on-queue.ts --queue "$1" 2>/dev/null || true)"
+  # Capture status separately: the TS helper can print a count and still exit
+  # non-zero (e.g. prisma.$disconnect failure). Masking with `|| true` would
+  # let drain/post-clear treat that unknown state as a real integer (incl. 0).
+  local raw status
+  raw="$(npx tsx scripts/count-open-workflows-on-queue.ts --queue "$1" 2>/dev/null)" && status=0 || status=$?
+  if [ "$status" -ne 0 ]; then
+    printf '?\n'
+    return 0
+  fi
   printf '%s\n' "$raw" | awk '/^[0-9]+$/{n=$0} END{if (n == "") print "?"; else print n}'
 }
 
