@@ -10,7 +10,7 @@ import { COMPENSATION, JOB_TYPE, LOCATION, SCOPE_PITCH, WORK_STYLE } from '../co
 
 export default function CompensationBlock() {
   return (
-    <section className="rounded-lg bg-slate-50 p-6 sm:p-8 space-y-3">
+    <section className="space-y-3">
       <h2 className="text-xl font-semibold text-slate-900">Location &amp; Compensation</h2>
       <p className="text-lg font-semibold text-slate-900">{COMPENSATION.totalCash}</p>
       <p className="text-base text-slate-600 leading-relaxed">

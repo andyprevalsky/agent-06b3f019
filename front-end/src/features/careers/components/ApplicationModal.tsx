@@ -141,7 +141,7 @@ export default function ApplicationModal({
       <DialogContent className="box-border left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-lg w-[calc(100vw-2rem)] max-w-md max-h-[85svh] sm:max-h-[85vh] overflow-y-auto overflow-x-hidden p-4 sm:p-6">
         <DialogHeader className="text-left min-w-0">
           <DialogTitle className="text-slate-900">
-            {status === 'submitted' ? 'Application received' : `Apply — ${roleTitle}`}
+            {status === 'submitted' ? 'Application received' : `Apply for ${roleTitle}`}
           </DialogTitle>
         </DialogHeader>
 

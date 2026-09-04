@@ -10,7 +10,7 @@ export {
   RESUME_MIME_TYPE,
   WORK_STYLE,
 } from './config';
-export { ABOUT_ROSE, HOW_WE_WORK, ROLES, SCOPE_PITCH } from './config';
+export { ABOUT_ROSE, ROLES, SCOPE_PITCH } from './config';
 export { findRole, submitApplication } from './api';
 export { useRole, useRoles } from './hooks';
 export {

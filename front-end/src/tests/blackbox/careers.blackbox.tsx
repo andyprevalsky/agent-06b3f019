@@ -9,8 +9,8 @@ import {
   CompensationBlock,
   ROLES,
   ABOUT_ROSE,
-  HOW_WE_WORK,
   COMPENSATION,
+  SCOPE_PITCH,
   LOCATION,
   findRole,
   submitApplication,
@@ -59,6 +59,30 @@ describe('careers content', () => {
   });
 });
 
+describe('careers copy style', () => {
+  it('uses no em dashes anywhere in published copy', () => {
+    const copy = [
+      ...ABOUT_ROSE,
+      SCOPE_PITCH,
+      COMPENSATION.totalCash,
+      COMPENSATION.breakdown,
+      COMPENSATION.equity,
+      ...ROLES.flatMap((role) => [
+        role.title,
+        role.summary,
+        role.discipline,
+        ...role.about,
+        ...role.sections.flatMap((section) => [
+          section.title,
+          ...(section.body ?? []),
+          ...(section.bullets ?? []),
+        ]),
+      ]),
+    ];
+    expect(copy.filter((text) => text.includes('\u2014'))).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Overview page — /careers
 // ---------------------------------------------------------------------------
@@ -79,17 +103,19 @@ describe('Careers overview page', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('4 engineers');
   });
 
-  it('renders the company thesis and how-we-work copy', () => {
+  it('renders the company thesis', () => {
     renderWithProviders(<Careers />);
     expect(screen.getByText(ABOUT_ROSE[0])).toBeInTheDocument();
-    for (const item of HOW_WE_WORK) {
-      expect(screen.getByText(item)).toBeInTheDocument();
-    }
   });
 
-  it('leads with total cash, not base', () => {
+  it('keeps compensation off the overview; it belongs on the role page', () => {
     renderWithProviders(<Careers />);
-    expect(screen.getByText(COMPENSATION.totalCash)).toBeInTheDocument();
+    expect(screen.queryByText(COMPENSATION.totalCash)).not.toBeInTheDocument();
+  });
+
+  it('has no How We Work section', () => {
+    renderWithProviders(<Careers />);
+    expect(screen.queryByRole('heading', { name: /how we work/i })).not.toBeInTheDocument();
   });
 });
 

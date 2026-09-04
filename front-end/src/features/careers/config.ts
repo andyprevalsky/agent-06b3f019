@@ -41,22 +41,13 @@ export const RESUME_MIME_TYPE = 'application/pdf';
 export const LINKEDIN_PREFIX = 'linkedin.com/in/';
 
 /**
- * "About Rose Labs" — identical on the overview page and every role page.
+ * "About Rose Labs": identical on the overview page and every role page.
  * The thesis paragraph is what makes four separate postings read as one company.
  */
 export const ABOUT_ROSE: readonly string[] = [
-  'Frontier models are not the bottleneck. A model that reasons brilliantly for twenty minutes, pointed at one task at a time, is a demo. Real-world superintelligence is that capability held together for hours, run across thousands of agents at once, reliably, at a cost that makes sense — and nobody has built it, because almost nobody is measuring it.',
+  'Frontier models are not the bottleneck. A model that reasons brilliantly for twenty minutes, pointed at one task at a time, is a demo. Real-world superintelligence is that capability held together for hours, run across thousands of agents at once, reliably, at a cost that makes sense. Nobody has built it, because almost nobody is measuring it.',
   'We think agent scale is the binding constraint, and that it is a measurable one. So we have compressed the company into a single object: a proprietary benchmark of long-horizon, high-complexity, mass-agent tasks, fed continuously by real user runs. It scores whether the task finished, whether it held together over hours, whether it held at N agents at once, what it cost, and whether it worked every time.',
-  'Everything we do is either raising that number or shortening the loop that raises it. Then we ship it to users. Rose is a personal superintelligence that does real work for real people — in the browser, over messages, on the phone, and across the tools they already use.',
-];
-
-/** "How We Work" — identical on every role page. */
-export const HOW_WE_WORK: readonly string[] = [
-  'Small, technical team. You would be one of the first four engineers.',
-  'We measure everything. A capability without a benchmark task is assumed broken.',
-  'We do not tune tasks to make scores go up. A benchmark you can game has stopped telling you anything.',
-  'Agents write, review, test, and deploy most of our code. Improving that factory is everyone’s job.',
-  'Truth over comfort — with each other and with ourselves.',
+  'Everything we do is either raising that number or shortening the loop that raises it. Then we ship it to users. Rose is a personal superintelligence that does real work for real people: in the browser, over messages, on the phone, and across the tools they already use.',
 ];
 
 /** The scope pitch that runs underneath the compensation block. */
@@ -73,20 +64,20 @@ export const ROLES: readonly Role[] = [
       'Own the loop end to end: write the long-horizon task that exposes where we break, then improve the harness and the models until it passes.',
     about: [
       'We run one loop, and this role owns it end to end.',
-      'Real user runs come in. You mine them for the tasks where our agents actually break, and promote those into hard, reproducible benchmark tasks. Then you improve the harness and the models until those tasks pass — context and memory, planning and verification, tool design, orchestration, recovery, and the decomposition models underneath. Then you prove the gain was real and go again.',
-      'We are hiring two people into this role. You will cross-review each other’s benchmark tasks — nobody merges their own — because the fastest way to ruin an eval-driven company is to let the person climbing the benchmark also decide what it says.',
+      'Real user runs come in. You mine them for the tasks where our agents actually break, and promote those into hard, reproducible benchmark tasks. Then you improve the harness and the models until those tasks pass: context and memory, planning and verification, tool design, orchestration, recovery, and the decomposition models underneath. Then you prove the gain was real and go again.',
+      'We are hiring two people into this role. You will cross-review each other’s benchmark tasks, and nobody merges their own, because the fastest way to ruin an eval-driven company is to let the person climbing the benchmark also decide what it says.',
     ],
     sections: [
       {
         title: 'What You’ll Work On',
         bullets: [
-          'Build the pipelines that turn real user trajectories into the benchmarks we care about. The suite should be fed by production, not hand-invented — the tasks that matter are the ones users are already failing to get done.',
+          'Build the pipelines that turn real user trajectories into the benchmarks we care about. The suite should be fed by production, not hand-invented. The tasks that matter are the ones users are already failing to get done.',
           'Author long-horizon evaluation tasks with deterministic environments, fixtures, and verifiers. Define what “good” means per task, build the judges that enforce it, and push complexity forward each generation so the suite stays one the current harness fails.',
-          'Make measured improvements to the agent harness — memory, context compression, planner and verifier loops, tool schemas, sub-agent orchestration, failure recovery. Every improvement lands with a before and after on tasks that were failing.',
-          'Build and optimize custom models for real-world task decomposition — the step that most determines whether a long-horizon run succeeds or wanders. Whether that is program and prompt optimization over the existing planner, a fine-tune, or a separately trained model is an open research question and part of the job.',
+          'Make measured improvements to the agent harness: memory, context compression, planner and verifier loops, tool schemas, sub-agent orchestration, failure recovery. Every improvement lands with a before and after on tasks that were failing.',
+          'Build and optimize custom models for real-world task decomposition, the step that most determines whether a long-horizon run succeeds or wanders. Whether that is program and prompt optimization over the existing planner, a fine-tune, or a separately trained model is an open research question and part of the job.',
           'Improve the continual-learning system that turns completed runs into durable capability, so each run makes the next one better without a human writing the lesson down.',
           'Refine the world simulation model that replays and predicts agent-environment interaction from archived trajectories, so evaluation does not need live services on every run. Raise prediction fidelity until simulated runs are trustworthy enough to gate decisions on.',
-          'Own trajectory stability at scale: a thousand-agent run that still converges on the goal — error propagation between agents, supervision, and the degradation modes that only appear at high agent counts. You own the trajectories; the platform engineer owns the runtime under them.',
+          'Own trajectory stability at scale: a thousand-agent run that still converges on the goal: error propagation between agents, supervision, and the degradation modes that only appear at high agent counts. You own the trajectories; the platform engineer owns the runtime under them.',
         ],
       },
       {
@@ -96,7 +87,7 @@ export const ROLES: readonly Role[] = [
           'Strong ML fundamentals. You can reason from first principles about why a harness or model change should help before you run it, and you design the ablation that tells you whether it did.',
           'Discipline about attribution. You do not ship a change you cannot measure, and you are suspicious of your own green results.',
           'Strong engineering fundamentals; Python. Comfortable with containers, fixtures, and distributed execution.',
-          'Judgment about real user data. This role works with production trajectories — redaction, consent, and access boundaries are part of the job, not a compliance afterthought.',
+          'Judgment about real user data. This role works with production trajectories, so redaction, consent, and access boundaries are part of the job, not a compliance afterthought.',
         ],
       },
       {
@@ -117,20 +108,20 @@ export const ROLES: readonly Role[] = [
     discipline: 'Infrastructure',
     openings: 1,
     summary:
-      'Run agents at mass concurrency at a cost and reliability that hold — and own the factory that sets how fast everyone else iterates.',
+      'Run agents at mass concurrency at a cost and reliability that hold, and own the factory that sets how fast everyone else iterates.',
     about: [
       'Most infrastructure roles are judged on dashboards. This one is judged on a benchmark.',
-      'Cost per completed task and reliability under mass-agent load are scored dimensions of the same suite the research team climbs — so when you cut cost per agent-hour or kill a failure mode that only appears at a thousand agents, the number moves and everyone sees it.',
+      'Cost per completed task and reliability under mass-agent load are scored dimensions of the same suite the research team climbs, so when you cut cost per agent-hour or kill a failure mode that only appears at a thousand agents, the number moves and everyone sees it.',
       'You also own the factory the other engineers work inside: the tooling and deploy pipeline that determine how many improvement cycles we get per month. That makes you the clock speed of the research, not support behind it.',
     ],
     sections: [
       {
         title: 'What You’ll Work On',
         bullets: [
-          'Scale the agent execution platform toward mass concurrent agents — durable workflows, workers, sandboxed execution, Postgres, and realtime fan-out. Kill every bottleneck whose cost grows with agent count: shared channels, connection fan-in, single-writer contention, retry storms.',
+          'Scale the agent execution platform toward mass concurrent agents: durable workflows, workers, sandboxed execution, Postgres, and realtime fan-out. Kill every bottleneck whose cost grows with agent count: shared channels, connection fan-in, single-writer contention, retry storms.',
           'Own runtime stability at scale. No cascading failures, no degradation that only shows up at high agent counts, no run that succeeds at ten agents and collapses at a thousand. You own the runtime; the harness engineers own the trajectories on top of it.',
           'Own cost per completed task and reliability as first-class, benchmark-scored metrics.',
-          'Build and sharpen the software factory — test tiers, review and deploy gates, automated benchmark selection — so changes ship safely and fast.',
+          'Build and sharpen the software factory (test tiers, review and deploy gates, automated benchmark selection) so changes ship safely and fast.',
           'Build the diagnostics everyone depends on: trace waterfalls, cost and cache attribution, failure triage.',
           'Build 0 to 1 quickly, then scale it by orders of magnitude.',
         ],
@@ -161,18 +152,18 @@ export const ROLES: readonly Role[] = [
     discipline: 'Product',
     openings: 1,
     summary:
-      'Invent what it looks like to supervise, trust, and steer thousands of agents doing hours-long work — and keep the integrations that reach the real world alive.',
+      'Invent what it looks like to supervise, trust, and steer thousands of agents doing hours-long work, and keep the integrations that reach the real world alive.',
     about: [
-      'Nobody has figured out what it looks like to work alongside agents that run for hours and number in the thousands. Not a chat box. You need to see what an agent is doing without drowning in it, trust it enough to walk away, catch it when it is wrong, and steer it back without starting over — across many agents at once.',
-      'That is this role. You own every surface a human touches, and the integrations that give agents real-world reach. Both feed back into everything else here: real user runs are what our benchmark is built from, so the quality of the interface determines the quality of the data the whole company improves on — and an integration that breaks is a failed task and a lower score.',
+      'Nobody has figured out what it looks like to work alongside agents that run for hours and number in the thousands. Not a chat box. You need to see what an agent is doing without drowning in it, trust it enough to walk away, catch it when it is wrong, and steer it back without starting over, across many agents at once.',
+      'That is this role. You own every surface a human touches, and the integrations that give agents real-world reach. Both feed back into everything else here: real user runs are what our benchmark is built from, so the quality of the interface determines the quality of the data the whole company improves on. An integration that breaks is a failed task and a lower score.',
     ],
     sections: [
       {
         title: 'What You’ll Work On',
         bullets: [
-          'Design and build the product surfaces for supervising long-running agents — following work in progress, interrupting and correcting mid-run, reviewing what happened, and deciding whether to trust it next time.',
+          'Design and build the product surfaces for supervising long-running agents: following work in progress, interrupting and correcting mid-run, reviewing what happened, and deciding whether to trust it next time.',
           'Solve the scale problem on the human side: legible oversight of many concurrent agents without turning it into a firehose.',
-          'Keep integrations stable — email, messaging, payments, browser sessions, phone. These are how agents reach the real world; when one silently breaks, the agent fails and we lose the run.',
+          'Keep integrations stable: email, messaging, payments, browser sessions, phone. These are how agents reach the real world; when one silently breaks, the agent fails and we lose the run.',
           'Own usability as a measurable property. Instrument the product, find where users stall or abandon, and fix it.',
           'Ship fast across the stack: React and TypeScript on the front end, Node and Express behind it, realtime throughout, plus the desktop app.',
           'Close the loop with research: make sure real user runs come back as usable trajectories, and that the failures users hit become benchmark tasks.',
@@ -191,7 +182,7 @@ export const ROLES: readonly Role[] = [
         title: 'Especially Exciting',
         bullets: [
           'You have built products on top of LLMs or agents, and have opinions about what actually works.',
-          'Design ability — you can go from a rough idea to a shipped interface without a spec or a mock.',
+          'Design ability. You can go from a rough idea to a shipped interface without a spec or a mock.',
           'Realtime, streaming, or collaborative interfaces.',
           'You have owned third-party integrations at scale and know how they really fail.',
         ],

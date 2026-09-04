@@ -10,11 +10,10 @@
 import { Link } from 'react-router-dom';
 import NaviFooter from '@/components/NaviFooter';
 
-import { ABOUT_ROSE, FONT_FAMILY, HOW_WE_WORK, JOB_TYPE, LOCATION, WORK_STYLE } from '../config';
+import { ABOUT_ROSE, FONT_FAMILY, JOB_TYPE, LOCATION, WORK_STYLE } from '../config';
 import { useRoles } from '../hooks';
 
 import CareersHeader from './CareersHeader';
-import CompensationBlock from './CompensationBlock';
 
 export default function Careers() {
   const roles = useRoles();
@@ -68,25 +67,6 @@ export default function Careers() {
             ))}
           </div>
         </section>
-
-        <section className="space-y-4">
-          <h2 className="text-xl font-semibold text-slate-900">How We Work</h2>
-          <ul className="space-y-2">
-            {HOW_WE_WORK.map((item) => (
-              <li
-                key={item.slice(0, 40)}
-                className="flex gap-3 text-base text-slate-600 leading-relaxed"
-              >
-                <span aria-hidden="true" className="text-slate-400 flex-shrink-0">
-                  &middot;
-                </span>
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <CompensationBlock />
       </div>
 
       <NaviFooter />
