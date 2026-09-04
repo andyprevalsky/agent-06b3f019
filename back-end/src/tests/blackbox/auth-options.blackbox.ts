@@ -540,7 +540,10 @@ test('disabled passkey is surfaced but marked disabled', async () => {
     await createPasskey({ userId, authRealm: 'amazon.com' });
     const options = await getAuthOptions(userId, 'amazon.com');
     const disabledOption = options.passkeys.find((passkey) => passkey.id === disabled.id);
-    assert(disabledOption?.disabled === true, 'expected disabled passkey to stay listed and marked');
+    assert(
+      disabledOption?.disabled === true,
+      'expected disabled passkey to stay listed and marked'
+    );
   } finally {
     await cleanup(userId);
   }
