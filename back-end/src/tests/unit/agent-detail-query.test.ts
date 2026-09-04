@@ -64,6 +64,23 @@ async function testRootAgentWithUsageAndMessages(): Promise<void> {
       ],
     },
   });
+  await prisma.toolUsage.create({
+    data: {
+      agentId,
+      userId,
+      toolName: 'notes',
+      totalCostCents: 1,
+      usageItems: { not: 'an-array' },
+    },
+  });
+  const tool = await prisma.tool.upsert({
+    where: { name: 'preview-query-web-search' },
+    update: {},
+    create: { name: 'preview-query-web-search', description: 'search the web' },
+  });
+  await prisma.agentTool.create({
+    data: { agentId, toolId: tool.id },
+  });
 
   const detail = await getAgentDetailForPreview(agentId);
   assert.ok(detail);
@@ -71,7 +88,9 @@ async function testRootAgentWithUsageAndMessages(): Promise<void> {
   assert.equal(detail.agent.parent_goal, null);
   assert.equal(detail.agent.tool_tokens_in, 11);
   assert.equal(detail.agent.tool_tokens_out, 3);
-  assert.equal(detail.agent.tool_cost_cents, 7);
+  assert.equal(detail.agent.tool_cost_cents, 8);
+  assert.equal(detail.agent.tools.length, 1);
+  assert.equal(detail.agent.tools[0].name, 'preview-query-web-search');
   assert.equal(detail.agent.verifier?.type, 'FLOAT_LLM_JUDGE');
   assert.equal(detail.agent.failure_context, null);
   assert.equal(detail.messages.length, 1);

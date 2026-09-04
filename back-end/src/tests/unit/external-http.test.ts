@@ -370,6 +370,85 @@ async function testOversizeDeclaredContentLength(): Promise<void> {
   );
 }
 
+async function testPublicIpSkipsDnsAndEmptyRedirectStops(): Promise<void> {
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return new Response('loop', {
+      status: 302,
+      headers: { location: '   ', 'content-type': 'text/plain' },
+    });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'GET',
+    url: 'https://1.1.1.1/health',
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.status, 302);
+  assert.equal(result.body, 'loop');
+}
+
+async function testTooManyRedirects(): Promise<void> {
+  globalThis.fetch = (async () =>
+    new Response(null, {
+      status: 302,
+      headers: { location: 'https://example.com/next' },
+    })) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://example.com/bounce',
+      }),
+    /exceeded/
+  );
+}
+
+async function testHeadAndPostWithoutBody(): Promise<void> {
+  globalThis.fetch = (async (_input, init) => {
+    assert.equal(init?.body, undefined);
+    return new Response('', { status: 200, headers: { 'content-type': 'text/plain' } });
+  }) as typeof fetch;
+
+  const head = await executeExternalHttpRequest({
+    method: 'HEAD',
+    url: 'https://example.com/head',
+  });
+  assert.equal(head.status, 200);
+
+  const post = await executeExternalHttpRequest({
+    method: 'POST',
+    url: 'https://example.com/nobody',
+  });
+  assert.equal(post.status, 200);
+}
+
+async function testDnsFailureAndExhaustedTransportError(): Promise<void> {
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://no-such-host-xyz.invalid/path',
+      }),
+    /DNS lookup failed/
+  );
+
+  globalThis.fetch = (async () => {
+    throw new Error('ECONNRESET');
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://example.com/down',
+      }),
+    /ECONNRESET/
+  );
+}
+
 async function main(): Promise<void> {
   await testValidation();
   await testSuccessfulJsonResponse();
@@ -385,6 +464,10 @@ async function main(): Promise<void> {
   await testStringPostBodyAndIdempotentRetry();
   await testTransportErrorThenSuccess();
   await testOversizeDeclaredContentLength();
+  await testPublicIpSkipsDnsAndEmptyRedirectStops();
+  await testTooManyRedirects();
+  await testHeadAndPostWithoutBody();
+  await testDnsFailureAndExhaustedTransportError();
   process.stdout.write('external-http unit tests passed\n');
 }
 
