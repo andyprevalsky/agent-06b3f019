@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import ipaddr from 'ipaddr.js';
 
 import { InvalidExternalHttpRequestError } from './errors';
 import type { ExternalHttpRequestBody, HttpMethod } from './types';
@@ -15,84 +16,60 @@ export function assertExternalHttpMethod(method: string): HttpMethod {
   return normalized as HttpMethod;
 }
 
-function extractMappedIPv4(addr: string): string | null {
-  const lower = addr.toLowerCase();
-  if (lower.includes('.')) {
-    const lastColon = lower.lastIndexOf(':');
-    if (lastColon === -1) return null;
-    const v4 = lower.slice(lastColon + 1);
-    return isIP(v4) === 4 ? v4 : null;
-  }
+const BENCHMARK_V4 = ipaddr.parseCIDR('198.18.0.0/15');
+const GLOBAL_V6_UNICAST = ipaddr.parseCIDR('2000::/3');
+const GLOBAL_NAT64_V6 = ipaddr.parseCIDR('64:ff9b::/96');
+const IETF_PROTOCOL_V6 = ipaddr.parseCIDR('2001::/23');
+const GLOBAL_IETF_V6_EXCEPTIONS = [
+  ipaddr.parseCIDR('2001:1::1/128'),
+  ipaddr.parseCIDR('2001:1::2/128'),
+  ipaddr.parseCIDR('2001:1::3/128'),
+  ipaddr.parseCIDR('2001:3::/32'),
+  ipaddr.parseCIDR('2001:4:112::/48'),
+  ipaddr.parseCIDR('2001:20::/28'),
+  ipaddr.parseCIDR('2001:30::/28'),
+] as const;
+const DOCUMENTATION_V6 = ipaddr.parseCIDR('3fff::/20');
 
-  const marker = lower.indexOf(':ffff:');
-  if (marker === -1) return null;
-  const rest = lower.slice(marker + ':ffff:'.length);
-  const groups = rest.split(':').filter((part) => part.length > 0);
-  if (groups.length !== 2) return null;
-  const hi = Number.parseInt(groups[0]!, 16);
-  const lo = Number.parseInt(groups[1]!, 16);
-  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
-  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+function isBlockedV4(address: ipaddr.IPv4): boolean {
+  const normalized = address.toString();
+  // These two protocol anycast addresses are the only globally reachable
+  // exceptions inside ipaddr.js's otherwise-reserved 192.0.0.0/24 range.
+  if (normalized === '192.0.0.9' || normalized === '192.0.0.10') return false;
+  if (address.match(BENCHMARK_V4)) return true;
+  return address.range() !== 'unicast';
 }
 
-function isBlockedV4(address: string): boolean {
-  const parts = address.split('.').map(Number);
-  const [a, b] = parts;
-  if (
-    parts.length !== 4 ||
-    a === undefined ||
-    b === undefined ||
-    parts.some((n) => Number.isNaN(n))
-  ) {
-    return true;
+function isBlockedV6(address: ipaddr.IPv6): boolean {
+  // IPv4-mapped literals must be classified by their effective destination.
+  if (address.isIPv4MappedAddress()) return isBlockedV4(address.toIPv4Address());
+
+  // The globally reachable NAT64 prefix is safe only when its embedded IPv4
+  // destination is itself globally reachable.
+  if (address.match(GLOBAL_NAT64_V6)) {
+    const bytes = address.toByteArray();
+    return isBlockedV4(ipaddr.fromByteArray(bytes.slice(-4)) as ipaddr.IPv4);
   }
 
-  // 0.0.0.0/8
-  if (a === 0) return true;
-  // 127.0.0.0/8 loopback
-  if (a === 127) return true;
-  // 10.0.0.0/8
-  if (a === 10) return true;
-  // 169.254.0.0/16 link-local / cloud metadata
-  if (a === 169 && b === 254) return true;
-  // 172.16.0.0/12
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  // 100.64.0.0/10 CGNAT / shared address space
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  // 192.168.0.0/16
-  if (a === 192 && b === 168) return true;
-  return false;
-}
+  // Current globally routed IPv6 unicast space. Fail closed on unallocated
+  // ranges rather than allowing a future special-use prefix by default.
+  if (!address.match(GLOBAL_V6_UNICAST)) return true;
+  if (address.match(DOCUMENTATION_V6)) return true;
 
-function isBlockedV6(address: string): boolean {
-  const lower = address.toLowerCase();
-
-  if (lower === '::' || lower === '::1') return true;
-
-  const mappedV4 = extractMappedIPv4(lower);
-  if (mappedV4 !== null) {
-    return isBlockedV4(mappedV4);
+  // 2001::/23 is non-global unless IANA assigns a narrower global exception.
+  if (address.match(IETF_PROTOCOL_V6)) {
+    return !GLOBAL_IETF_V6_EXCEPTIONS.some((range) => address.match(range));
   }
 
-  // fc00::/7 unique local
-  if (lower.startsWith('fc') || lower.startsWith('fd')) {
-    return true;
-  }
-
-  const firstHextet = lower.split(':')[0];
-  if (firstHextet && firstHextet.length === 4 && firstHextet >= 'fe80' && firstHextet <= 'febf') {
-    return true;
-  }
-
-  return false;
+  return address.range() !== 'unicast';
 }
 
 /** True when the address must not be reached by api_request (SSRF guard). */
 export function isBlockedExternalAddress(address: string): boolean {
-  const version = isIP(address);
-  if (version === 4) return isBlockedV4(address);
-  if (version === 6) return isBlockedV6(address);
-  return true;
+  if (!ipaddr.isValid(address)) return true;
+  const parsed = ipaddr.parse(address);
+  if (parsed.kind() === 'ipv4') return isBlockedV4(parsed as ipaddr.IPv4);
+  return isBlockedV6(parsed as ipaddr.IPv6);
 }
 
 function normalizeHostname(hostname: string): string {

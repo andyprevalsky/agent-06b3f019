@@ -1,5 +1,5 @@
 import { type Prisma, IntegrationType, IntegrationStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 
 import { AUTH_COOKIE_PATTERNS, FALSE_POSITIVE_COOKIES } from '../../providers/authCookies';
@@ -143,6 +143,7 @@ export async function upsertIntegration(params: {
 export async function upsertIntegrationRaw(params: {
   userId: string;
   name: string;
+  accountId?: string | null;
   type: IntegrationType;
   config?: Prisma.InputJsonValue;
   status?: IntegrationStatus;
@@ -157,28 +158,33 @@ export async function upsertIntegrationRaw(params: {
   poolingEnabled?: boolean;
   updateExtra?: Record<string, unknown>;
 }) {
-  return prisma.integration.upsert({
-    where: {
-      userId_name_accountId: {
-        userId: params.userId,
-        name: params.name,
-        accountId: '',
-      },
-    },
-    create: {
-      userId: params.userId,
-      name: params.name,
-      type: params.type,
-      config: params.config ?? {},
-      status: params.status ?? IntegrationStatus.NOT_CONNECTED,
-      ...(params.isActive !== undefined && { isActive: params.isActive }),
-      ...(params.poolingEnabled !== undefined && { poolingEnabled: params.poolingEnabled }),
-      ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
-      ...(params.lastSuccessfulSyncAt !== undefined && {
-        lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
-      }),
-    },
-    update: {
+  const accountId = params.accountId?.trim() ?? '';
+  return runTransactionWithRetry(async (transaction) => {
+    // Credential uploads can arrive concurrently from multiple machines. The
+    // per-user/provider lock makes choosing an exact row versus claiming the
+    // one legacy accountless row one serialized operation.
+    await transaction.$queryRaw`
+      WITH acquired AS MATERIALIZED (
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`${params.userId}:${params.name}`}, 682451)
+        )
+      )
+      SELECT 1::int AS locked FROM acquired
+    `;
+
+    const exact = await transaction.integration.findUnique({
+      where: { userId_name_accountId: { userId: params.userId, name: params.name, accountId } },
+    });
+    const target =
+      exact ??
+      (accountId === ''
+        ? null
+        : await transaction.integration.findUnique({
+            where: {
+              userId_name_accountId: { userId: params.userId, name: params.name, accountId: '' },
+            },
+          }));
+    const data = {
       type: params.type,
       config: params.config ?? {},
       ...(params.status !== undefined && { status: params.status }),
@@ -189,7 +195,23 @@ export async function upsertIntegrationRaw(params: {
         lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
       }),
       ...params.updateExtra,
-    },
+    };
+
+    if (target !== null) {
+      return transaction.integration.update({
+        where: { id: target.id },
+        data: { ...data, accountId },
+      });
+    }
+    return transaction.integration.create({
+      data: {
+        userId: params.userId,
+        name: params.name,
+        status: params.status ?? IntegrationStatus.NOT_CONNECTED,
+        ...data,
+        accountId,
+      },
+    });
   });
 }
 
@@ -292,23 +314,6 @@ export async function updateIntegrationStatus(
       status,
       ...extra,
     },
-  });
-}
-
-export async function persistRecoveredIntegrationAccountId(
-  userId: string,
-  name: 'claude_code' | 'gpt_code',
-  recoveredAccountId: string | null
-): Promise<void> {
-  if (recoveredAccountId === null || recoveredAccountId === '') return;
-  const conflict = await prisma.integration.findFirst({
-    where: { userId, name, accountId: recoveredAccountId },
-    select: { id: true },
-  });
-  if (conflict !== null) return;
-  await prisma.integration.updateMany({
-    where: { userId, name, accountId: '' },
-    data: { accountId: recoveredAccountId },
   });
 }
 

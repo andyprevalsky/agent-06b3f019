@@ -16,12 +16,11 @@
  * outputs and terminate a surviving server after a backend restart.
  */
 import { type ChildProcess, spawn } from 'child_process';
-import { createServer, Socket } from 'net';
+import { createServer } from 'net';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, sep } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { retryWithBackoff } from './retry';
 import { type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
 import { randomUUID } from './crypto';
 
@@ -229,32 +228,59 @@ async function allocatePort(): Promise<number> {
   });
 }
 
-async function waitForLocalPort(port: number, timeoutMs: number): Promise<boolean> {
-  const pollMs = 200;
-  const maxRetries = Math.max(1, Math.ceil(timeoutMs / pollMs));
-  const connected = await retryWithBackoff(
-    () =>
-      new Promise<boolean>((resolveReady) => {
-        const sock = new Socket();
-        const onDone = (ok: boolean) => {
-          sock.removeAllListeners();
-          sock.destroy();
-          resolveReady(ok);
-        };
-        sock.setTimeout(500);
-        sock.once('connect', () => onDone(true));
-        sock.once('timeout', () => onDone(false));
-        sock.once('error', () => onDone(false));
-        sock.connect(port, '127.0.0.1');
-      }),
-    {
-      maxRetries,
-      fixedDelays: Array.from({ length: maxRetries }, () => pollMs),
-      shouldRetryResult: (ready) => !ready,
-      component: 'ClaudeCodeLocalPort',
-    }
-  );
-  return connected;
+async function waitForChildReadiness(
+  child: ChildProcess,
+  port: number,
+  readinessToken: string,
+  timeoutMs: number
+): Promise<boolean> {
+  return await new Promise((resolveReady) => {
+    let settled = false;
+    let stdout = '';
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+      child.off('error', onFailure);
+      child.off('exit', onFailure);
+      resolveReady(ready);
+    };
+    const onFailure = () => finish(false);
+    const onData = (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      const lines = stdout.split('\n');
+      stdout = lines.pop() ?? '';
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (
+            event.message === 'Server listening' &&
+            event.port === port &&
+            event.readinessToken === readinessToken
+          ) {
+            finish(true);
+            return;
+          }
+        } catch {
+          // Only the authenticated JSON readiness record can satisfy startup.
+        }
+      }
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.stdout?.on('data', onData);
+    child.once('error', onFailure);
+    child.once('exit', onFailure);
+  });
+}
+
+export function resolveLocalAttachmentPath(workDir: string, filename: string): string {
+  const attachmentDir = resolve(workDir, 'attachments');
+  const target = resolve(attachmentDir, filename);
+  if (target === attachmentDir || !target.startsWith(`${attachmentDir}${sep}`)) {
+    throw new Error(`Attachment filename escapes the session directory: ${filename}`);
+  }
+  return target;
 }
 
 async function extractLocalFiles(
@@ -350,7 +376,7 @@ export async function createLocalClaudeCodeSession(params: {
     for (const fp of params.attachments) {
       try {
         const content = await downloadFromStorage(fp.storage_path);
-        const remotePath = join(workDir, 'attachments', fp.original_filename);
+        const remotePath = resolveLocalAttachmentPath(workDir, fp.original_filename);
         writeFileSync(remotePath, content);
         uploadedFiles.push(remotePath);
       } catch (err) {
@@ -362,6 +388,7 @@ export async function createLocalClaudeCodeSession(params: {
   }
 
   const port = await allocatePort();
+  const readinessToken = randomUUID();
   const wsServerPath = findWsServerPath();
   const pathEnv = ['/home/ubuntu/.local/bin', process.env.PATH || ''].filter(Boolean).join(':');
 
@@ -371,6 +398,7 @@ export async function createLocalClaudeCodeSession(params: {
     PATH: pathEnv,
     HOME: workDir,
     CLAUDE_CONFIG_DIR: join(workDir, '.claude'),
+    ROSE_LOCAL_WS_READINESS_TOKEN: readinessToken,
   });
 
   log.info(
@@ -392,13 +420,12 @@ export async function createLocalClaudeCodeSession(params: {
   });
   child.on('exit', (code, signal) => {
     log.info('Local Claude Code ws-server exited', { sandboxId, code, signal });
-    localSessions.delete(taskId);
   });
 
-  const ready = await waitForLocalPort(port, 20_000);
+  const ready = await waitForChildReadiness(child, port, readinessToken, 20_000);
   if (!ready) {
     child.kill('SIGKILL');
-    throw new Error(`Local Claude Code ws-server failed to listen on port ${port}`);
+    throw new Error(`Local Claude Code ws-server did not prove readiness on port ${port}`);
   }
 
   const wsUrl = `ws://127.0.0.1:${port}`;
@@ -439,7 +466,29 @@ export async function createLocalClaudeCodeSession(params: {
     throw persistErr;
   }
 
-  writeOwnership(ownership);
+  try {
+    writeOwnership(ownership);
+  } catch (ownershipError) {
+    await killOwnedProcess({ process: child, pid: ownership.pid });
+    try {
+      await prisma.claudeCodeSession.update({
+        where: { id: taskId },
+        data: { status: 'CLOSED', closedAt: new Date() },
+      });
+    } catch (closeError) {
+      try {
+        await prisma.claudeCodeSession.delete({ where: { id: taskId } });
+      } catch (deleteError) {
+        throw new AggregateError(
+          [ownershipError, closeError, deleteError],
+          `Failed to persist or roll back local Claude Code session ${taskId}`
+        );
+      }
+    }
+    clearOwnership(workDir);
+    rmSync(workDir, { recursive: true, force: true });
+    throw ownershipError;
+  }
   localSessions.set(taskId, { ...ownership, process: child });
   log.info(`Local Claude Code session ready: ${taskId} ws=${wsUrl}`);
 
@@ -462,8 +511,6 @@ export async function closeLocalClaudeCodeSession(
       process: live?.process ?? null,
       pid: ownership.pid,
     });
-    clearOwnership(ownership.workDir);
-    localSessions.delete(taskId);
   }
 
   await prisma.claudeCodeSession.update({
@@ -473,6 +520,11 @@ export async function closeLocalClaudeCodeSession(
       closedAt: new Date(),
     },
   });
+
+  if (ownership) {
+    clearOwnership(ownership.workDir);
+    localSessions.delete(taskId);
+  }
 
   return { outputFiles };
 }

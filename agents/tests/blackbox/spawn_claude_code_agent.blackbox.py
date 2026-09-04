@@ -1370,6 +1370,24 @@ async def test_run_verifier_disabled_by_env_flag():
             assert struct_ok is None
             assert itok_ok == 0 and otok_ok == 0
 
+            # Leftover artifacts from a failed process are evidence, not a
+            # successful session.
+            score_failed, _, _, _, _ = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["process failed after writing"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=1,
+                attempt_completion=False,
+                code_provider=provider,
+                output_files=[{"path": "/home/user/output/partial.json", "content": "{}"}],
+            )
+            assert score_failed == 0.5, provider
+
     assert called["check_progress"] == 0
 
 

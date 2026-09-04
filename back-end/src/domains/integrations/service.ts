@@ -528,10 +528,14 @@ export function resolveSyncedPoolingEnabled(params: {
   return params.existing?.poolingEnabled ?? false;
 }
 
-async function resolvePoolingForCredentialSync(userId: string, name: string): Promise<boolean> {
+async function resolvePoolingForCredentialSync(
+  userId: string,
+  name: string,
+  accountId?: string | null
+): Promise<boolean> {
   const [accountDefault, existing] = await Promise.all([
     repo.findUserPoolTokensByDefault(userId),
-    repo.findIntegrationPoolingState(userId, name),
+    repo.findIntegrationPoolingState(userId, name, accountId),
   ]);
   return resolveSyncedPoolingEnabled({ accountDefault, existing });
 }
@@ -542,11 +546,15 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
     log.error('Rejecting undecryptable Claude Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'claude_code');
   const recoveredAccountId = await resolveAccountIdForCredentialRecovery(
     userId,
     'claude_code',
     encryptedCredentials
+  );
+  const poolingEnabled = await resolvePoolingForCredentialSync(
+    userId,
+    'claude_code',
+    recoveredAccountId
   );
   log.info('Storing Claude Code credentials', {
     userId,
@@ -556,6 +564,7 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
   await repo.upsertIntegrationRaw({
     userId,
     name: 'claude_code',
+    accountId: recoveredAccountId,
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
@@ -565,7 +574,6 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  await repo.persistRecoveredIntegrationAccountId(userId, 'claude_code', recoveredAccountId);
   await clearConnectionNeedsReconnectFromIntegrationRecovery({
     userId,
     integrationName: 'claude_code',
@@ -580,11 +588,15 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     log.error('Rejecting undecryptable GPT Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'gpt_code');
   const recoveredAccountId = await resolveAccountIdForCredentialRecovery(
     userId,
     'gpt_code',
     encryptedCredentials
+  );
+  const poolingEnabled = await resolvePoolingForCredentialSync(
+    userId,
+    'gpt_code',
+    recoveredAccountId
   );
   log.info('Storing GPT Code credentials', {
     userId,
@@ -594,6 +606,7 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
   await repo.upsertIntegrationRaw({
     userId,
     name: 'gpt_code',
+    accountId: recoveredAccountId,
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
@@ -603,7 +616,6 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  await repo.persistRecoveredIntegrationAccountId(userId, 'gpt_code', recoveredAccountId);
   await clearConnectionNeedsReconnectFromIntegrationRecovery({
     userId,
     integrationName: 'gpt_code',

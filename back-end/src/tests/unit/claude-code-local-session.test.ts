@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -10,6 +10,7 @@ import {
   createLocalClaudeCodeSessionIfBillingBlocked,
   isE2bTeamBillingBlockError,
   isLocalClaudeCodeSandboxId,
+  resolveLocalAttachmentPath,
   shouldAllowLocalClaudeCodeFallback,
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
@@ -101,7 +102,11 @@ import { createServer } from 'node:net';
 const port = Number(process.env.PORT);
 const server = createServer();
 server.listen(port, '127.0.0.1', () => {
-  process.stdout.write('listening ' + port + '\\n');
+  process.stdout.write(JSON.stringify({
+    message: 'Server listening',
+    port,
+    readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN,
+  }) + '\\n');
 });
 `
 );
@@ -204,6 +209,34 @@ test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked'
   }
 });
 
+test('close preserves ownership metadata until the database records CLOSED', async () => {
+  const taskId = `local-session-close-retry-${Date.now()}`;
+  await createLocalClaudeCodeSession({
+    taskId,
+    agentId: 'agent-close-retry',
+    goal: 'close ordering',
+    envs: {},
+    claudeTokenSource: null,
+    claudeTokenIntegrationId: null,
+  });
+  const workingUpdate = prisma.claudeCodeSession.update;
+  try {
+    prisma.claudeCodeSession.update = (async () => {
+      throw new Error('database close unavailable');
+    }) as typeof prisma.claudeCodeSession.update;
+    await assert.rejects(() => closeLocalClaudeCodeSession(taskId), /database close unavailable/);
+    assert.equal(
+      existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')),
+      true,
+      'ownership must survive a failed CLOSED update so cleanup can retry'
+    );
+  } finally {
+    prisma.claudeCodeSession.update = workingUpdate;
+  }
+  await closeLocalClaudeCodeSession(taskId);
+  assert.equal(existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')), false);
+});
+
 test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async () => {
   const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
   const prevFly = process.env.FLY_APP_NAME;
@@ -238,6 +271,16 @@ test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async
     if (prevFly === undefined) delete process.env.FLY_APP_NAME;
     else process.env.FLY_APP_NAME = prevFly;
   }
+});
+
+test('local attachment paths cannot escape the session attachment directory', () => {
+  const workDir = join('/tmp', 'claude-code-local', 'path-boundary');
+  assert.equal(
+    resolveLocalAttachmentPath(workDir, 'evidence.txt'),
+    join(workDir, 'attachments', 'evidence.txt')
+  );
+  assert.throws(() => resolveLocalAttachmentPath(workDir, '../session.json'), /escapes/);
+  assert.throws(() => resolveLocalAttachmentPath(workDir, '/tmp/outside.txt'), /escapes/);
 });
 
 test('closeLocalClaudeCodeSession extracts output files when userId is provided', async () => {
@@ -292,7 +335,7 @@ test('createLocalClaudeCodeSession throws when the ws-server never listens', asy
           claudeTokenSource: null,
           claudeTokenIntegrationId: null,
         }),
-      /failed to listen on port/i
+      /did not prove readiness on port/i
     );
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;

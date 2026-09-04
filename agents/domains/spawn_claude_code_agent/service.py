@@ -1328,10 +1328,11 @@ async def _run_verifier(
 
     if code_agent_verifier_disabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
-        # extracted /home/user/output artifacts — otherwise a failed session
-        # reports success=True to the parent (score >= 1.0).
+        # both extracted output artifacts and a process/completion success
+        # signal. A crashed process can leave stale partial files behind.
         has_artifacts = bool(extracted_output_files)
-        score = 1.0 if has_artifacts else 0.5
+        has_success_signal = attempt_completion or exit_code == 0
+        score = 1.0 if has_artifacts and has_success_signal else 0.5
         v_reasoning = (
             "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
@@ -1345,6 +1346,7 @@ async def _run_verifier(
             code_provider=code_provider,
             exit_code=exit_code,
             has_artifacts=has_artifacts,
+            has_success_signal=has_success_signal,
             has_structured_from_files=bool(output_file_structured),
             score=score,
         )
