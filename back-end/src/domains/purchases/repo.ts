@@ -1,5 +1,5 @@
 import { Prisma, PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { lockPurchaseWalletTransition } from '../../providers/purchase-wallet-funding-repo';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 
@@ -173,7 +173,7 @@ export async function updatePurchaseStatus(
  * reclaim are predicates of the same database statement.
  */
 export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
-  return prisma.$transaction(async (transaction) => {
+  return runTransactionWithRetry(async (transaction) => {
     await lockPurchaseWalletTransition(transaction, id);
     return transaction.purchaseSpend.updateMany({
       where: {

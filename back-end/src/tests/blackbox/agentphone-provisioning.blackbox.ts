@@ -39,7 +39,7 @@ async function main(): Promise<void> {
       agentCreates += 1;
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       providerAgent = { id: 'agt-concurrent', description: body.description, numbers: [] };
-      return Response.json(providerAgent);
+      throw new DOMException('provider response was lost', 'AbortError');
     }
     if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
       numberCreates += 1;
@@ -51,20 +51,26 @@ async function main(): Promise<void> {
   }) as typeof fetch;
 
   const userId = `agentphone-concurrent-${randomUUID()}`;
-  const [first, second] = await Promise.all([
-    createAgentPhoneNumber({ userId }),
-    createAgentPhoneNumber({ userId }),
-  ]);
-  assert.equal(agentCreates, 1, 'serialized callers must create one provider agent');
-  assert.equal(numberCreates, 1, 'serialized callers must create one provider number');
-  assert.equal(first?.agentId, second?.agentId, 'both callers must reuse the marker agent');
-  assert.equal(first?.numberId, second?.numberId, 'both callers must reuse the provider number');
-  assert.equal(pageSignals.length, 4, 'both scans must continue past a full page without total');
-  assert.equal(
-    new Set(pageSignals).size,
-    pageSignals.length,
-    'every reconciliation page must receive a fresh timeout signal'
-  );
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+  await prisma.agentIdentity.create({ data: { userId, email: `${userId}@example.test` } });
+  try {
+    const [first, second] = await Promise.all([
+      createAgentPhoneNumber({ userId }),
+      createAgentPhoneNumber({ userId }),
+    ]);
+    assert.equal(agentCreates, 1, 'serialized callers must create one provider agent');
+    assert.equal(numberCreates, 1, 'serialized callers must create one provider number');
+    assert.equal(first?.agentId, second?.agentId, 'both callers must reuse the persisted agent');
+    assert.equal(first?.numberId, second?.numberId, 'both callers must reuse the persisted number');
+    assert.equal(pageSignals.length, 2, 'uncertain create must scan past a full page');
+    assert.equal(
+      new Set(pageSignals).size,
+      pageSignals.length,
+      'every reconciliation page must receive a fresh timeout signal'
+    );
+  } finally {
+    await prisma.user.deleteMany({ where: { userId } });
+  }
 }
 
 main()

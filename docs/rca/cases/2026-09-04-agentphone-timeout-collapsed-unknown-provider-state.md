@@ -11,6 +11,7 @@ symptoms:
   - AgentPhone POST times out after the provider may have created an agent or number
   - auth options silently returns email-only identity after an ambiguous provider write
   - AgentPhone provider resource can exist without persisted provider IDs
+  - live browser-provider parity fails after scanning 10,000 unrelated provider agents
 tags:
   - agentphone
   - provisioning
@@ -59,10 +60,17 @@ number creation's entire budget.
 Every provider request, including every reconciliation page, now has its own
 bounded signal. Agent creation carries a deterministic SHA-256 provisioning
 marker in its description. Rose acquires a database advisory lock keyed by user
-across backend replicas and scans the documented paginated agents endpoint
-before creating anything, so concurrent requests reuse one marker resource.
-When `total` is absent, full pages continue until an empty or short page; an
-exhausted 10,000-agent bound fails closed rather than claiming a complete scan.
+across backend replicas, rechecks the user's persisted provider identity under
+that lock, and writes the provider agent/number IDs before releasing it. A
+waiting replica therefore reuses the exact persisted resource.
+
+The first implementation scanned the entire provider account before every new
+create. The live blackbox exposed that this is not a viable absence proof once
+the account exceeds 10,000 agents. Ordinary first-time provisioning now creates
+directly under the lock; paginated marker reconciliation is reserved for an
+ambiguous create outcome. When `total` is absent, full pages continue until an
+empty or short page, and an exhausted bound still fails closed instead of
+claiming a complete scan.
 
 If number creation is ambiguous, Rose reads the known agent. It recovers an
 attached active number, or deletes the newly created agent after the provider

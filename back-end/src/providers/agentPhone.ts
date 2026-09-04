@@ -4,7 +4,7 @@ import {
   isLocalBenchmarkAgentPhoneMockEnabled,
 } from './smsTransportMock';
 import { createHash } from './crypto';
-import { prisma } from './database';
+import { runTransactionWithRetry } from './database';
 
 const log = createLogger('AgentPhone');
 
@@ -282,41 +282,29 @@ async function provisionAgentPhoneNumber(params: {
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
   const marker = markerForUser(params.userId);
-  let agent: AgentPhoneAgent | null;
+  let agent: AgentPhoneAgent;
   try {
-    agent = await findAgentByMarker(marker);
+    agent = await createAgent(displayName, marker);
   } catch (error) {
-    throw new AgentPhoneProvisioningError(
-      `AgentPhone provisioning state is uncertain; reconciliation failed before create: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      false
-    );
-  }
-  if (agent === null) {
+    if (isConfirmedAgentCreateRejection(error)) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
+        true
+      );
+    }
     try {
-      agent = await createAgent(displayName, marker);
-    } catch (error) {
-      if (isConfirmedAgentCreateRejection(error)) {
-        throw new AgentPhoneProvisioningError(
-          `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
-          true
-        );
+      const recovered = await findAgentByMarker(marker);
+      if (recovered === null) {
+        throw new Error('no exact provisioning marker was visible after a complete scan');
       }
-      try {
-        const recovered = await findAgentByMarker(marker);
-        if (recovered === null) {
-          throw new Error('no exact provisioning marker was visible after a complete scan');
-        }
-        agent = recovered;
-      } catch (reconcileError) {
-        throw new AgentPhoneProvisioningError(
-          `AgentPhone agent creation is uncertain; reconciliation failed: ${
-            reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
-          }`,
-          false
-        );
-      }
+      agent = recovered;
+    } catch (reconcileError) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone agent creation is uncertain; reconciliation failed: ${
+          reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+        }`,
+        false
+      );
     }
   }
 
@@ -390,13 +378,47 @@ export async function createAgentPhoneNumber(params: {
   }
 
   // Provider creation has no idempotency key. Serialize by user across backend
-  // replicas, then reconcile the deterministic marker before any create.
-  return prisma.$transaction(
+  // replicas and persist the provider identity before releasing the lock. A
+  // waiting replica therefore reuses the exact resource instead of creating a
+  // second one. Marker pagination is reserved for an uncertain create outcome;
+  // scanning a large provider account on every ordinary signup is neither a
+  // scalable nor a reliable absence proof.
+  return runTransactionWithRetry(
     async (transaction) => {
       await transaction.$executeRaw`
         SELECT pg_advisory_xact_lock(hashtext(${`agentphone-provision:${params.userId}`}))
       `;
-      return provisionAgentPhoneNumber(params);
+      const existing = await transaction.agentIdentity.findUniqueOrThrow({
+        where: { userId: params.userId },
+        select: {
+          phone: true,
+          phoneProviderAgentId: true,
+          phoneProviderNumberId: true,
+        },
+      });
+      if (
+        existing.phone !== null &&
+        existing.phoneProviderAgentId !== null &&
+        existing.phoneProviderNumberId !== null
+      ) {
+        return {
+          agentId: existing.phoneProviderAgentId,
+          numberId: existing.phoneProviderNumberId,
+          phoneNumber: existing.phone,
+        };
+      }
+
+      const provisioned = await provisionAgentPhoneNumber(params);
+      await transaction.agentIdentity.update({
+        where: { userId: params.userId },
+        data: {
+          phone: provisioned.phoneNumber,
+          phoneProvider: 'agentphone',
+          phoneProviderAgentId: provisioned.agentId,
+          phoneProviderNumberId: provisioned.numberId,
+        },
+      });
+      return provisioned;
     },
     { maxWait: 30_000, timeout: 120_000 }
   );

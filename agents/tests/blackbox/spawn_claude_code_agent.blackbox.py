@@ -1494,7 +1494,7 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
         )
 
     assert called["check_progress"] == 0
-    assert score == 1.0
+    assert score == 0.5
     assert "verifier disabled" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning

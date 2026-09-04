@@ -1,5 +1,5 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 
 export async function lockPurchaseWalletTransition(
   transaction: Prisma.TransactionClient,
@@ -210,7 +210,7 @@ export async function claimWalletFundingReclaim(
   purchaseId: string,
   data: { reclaimIdempotencyKey: string; reclaimLeaseToken: string }
 ) {
-  return prisma.$transaction(async (transaction) => {
+  return runTransactionWithRetry(async (transaction) => {
     await lockPurchaseWalletTransition(transaction, purchaseId);
     return transaction.purchaseWalletFunding.updateMany({
       where: {
