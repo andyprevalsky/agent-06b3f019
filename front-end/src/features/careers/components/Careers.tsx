@@ -30,7 +30,8 @@ export default function Careers() {
         <header className="space-y-4">
           <p className="text-sm uppercase tracking-wide text-slate-500">Careers</p>
           <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight leading-tight">
-            Agent scale is the bottleneck. We&rsquo;re hiring {totalOpenings} engineers to break it.
+            Agent scale is the bottleneck to superintelligence. We&rsquo;re hiring {totalOpenings}{' '}
+            engineers to break it.
           </h1>
           <p className="text-base sm:text-lg text-slate-600 leading-relaxed">
             {LOCATION} · {WORK_STYLE} · {JOB_TYPE}
