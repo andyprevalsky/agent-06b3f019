@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     SDK_IDLE_TIMEOUT_S,
+    SDK_POST_RESULT_STRETCH_TOOL_NAMES,
     SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
     SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
@@ -733,23 +734,32 @@ async def _run_agentic_loop(  # noqa: C901
         tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         if event_type == "tool_use" and isinstance(tool_name, str):
             in_flight_tool_count += 1
-            if tool_name in SDK_WAIT_TOOL_NAMES:
+            if tool_name in SDK_WAIT_TOOL_NAMES or tool_name in SDK_POST_RESULT_STRETCH_TOOL_NAMES:
+                # Wait tools AND Bash/Task/TaskOutput: arm post-result stretch.
+                # Bash often returns tool_result while background work continues
+                # with no further WS events; without arming, tool_result snaps
+                # idle back to 180s and kills the session (cuda k=3 r24).
                 wait_tool_armed = True
                 if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    reason = (
+                        "wait tool"
+                        if tool_name in SDK_WAIT_TOOL_NAMES
+                        else "post-result stretch tool"
+                    )
                     logger.info(
-                        "[ClaudeCode] Extending SDK idle timeout for wait tool",
+                        f"[ClaudeCode] Extending SDK idle timeout for {reason}",
                         agent_id=agent_id,
                         task_id=task_id,
                         tool_name=tool_name,
                         idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
                     )
             else:
-                # Non-wait tool (e.g. long Bash) — stretch while in-flight so
+                # Non-wait tool (e.g. Write) — stretch while in-flight so
                 # silence during execution is not mistaken for a hung CLI.
-                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup often
-                # precede Bash, and the post-wait stretch must survive those
-                # follow-on tools (otherwise tool_result restores the short
-                # 180s window and kills the wait).
+                # Do NOT clear wait_tool_armed: Monitor/ScheduleWakeup/Bash often
+                # precede follow-on tools, and the post-result stretch must
+                # survive those (otherwise tool_result restores the short
+                # 180s window and kills the wait/background work).
                 if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
                     logger.info(
                         "[ClaudeCode] Extending SDK idle timeout for in-flight tool",

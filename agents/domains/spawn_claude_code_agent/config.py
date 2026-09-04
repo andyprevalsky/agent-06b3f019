@@ -43,6 +43,13 @@ SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
 # wait tool has armed the post-wait stretch.
 SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools / in-flight
 SDK_WAIT_TOOL_NAMES: Final[frozenset[str]] = frozenset({"Monitor", "ScheduleWakeup"})
+# Bash (and Task/TaskOutput for backgrounded work) often emit tool_result while
+# work continues off-WebSocket. Treat them like wait tools for idle-arming so
+# tool_result does not snap idle back to 180s and kill productive sessions
+# (cuda k=3 r24 a2 CC: Bash stretch → tool_result → 180s idle kill, 0 artifacts).
+SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {"Bash", "Task", "TaskOutput"}
+)
 
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
