@@ -17957,8 +17957,11 @@ async def run_all_tests():
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
     r.record(
-        "declared_evaluator_evidence_compacts_mass_agent_tree",
+        "declared_evaluator_evidence_includes_structured_output_first",
         test_declared_evaluator_evidence_includes_structured_output_first,
+    )
+    r.record(
+        "declared_evaluator_evidence_compacts_mass_agent_tree",
         test_declared_evaluator_evidence_compacts_mass_agent_tree,
     )
     await r.record_async(

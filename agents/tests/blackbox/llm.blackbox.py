@@ -5096,19 +5096,26 @@ async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
 
 
 async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
-    """Verifier file evidence keeps deliverables; demotes huge intermediate dumps.
+    """Verifier file evidence keeps deliverables; caps huge intermediate dumps.
 
-    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB–300KB)
+    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB-300KB)
     were fully inlined into verifier_execute, Rose hit the attempt deadline
     mid-JSON, soft-failed score=0.5, and the finished agent looped on CC spawns.
+
+    Current policy: non-deliverables are truncated to the small per-file cap
+    (still may remain inlined), while deliverables keep the large cap and the
+    total budget remains hard. Demotion-to-metadata only kicks in when the
+    post-cap sum still exceeds VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS.
     """
     from helpers.llm import (
+        VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
         VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
         _resolve_verifier_file_evidence,
     )
 
     intermediate = "x" * 80_000
-    # ~30k deliverable so truncated intermediate (40k) cannot also fit in 48k budget.
+    # ~30k deliverable: fits the deliverable cap and leaves room under the total
+    # budget after the intermediate is reduced to the small non-deliverable cap.
     deliverable = '{"repos":[' + ",".join(
         f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
         for i in range(350)
@@ -5160,8 +5167,15 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     final = evidence["msg-deliverable"][0]
     assert final["content_inlined"] is True
     assert "repo_000" in final["result"]
-    assert inter["content_inlined"] is False, "huge intermediate dump must be demoted to metadata"
-    assert "Omitted from verifier inline" in inter["result"]
+    # Huge intermediate must not consume the deliverable budget: either demoted
+    # to metadata, or truncated to the small non-deliverable inline cap.
+    if inter["content_inlined"]:
+        assert "verifier truncated" in inter["result"] or len(inter["result"]) <= (
+            VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS + 512
+        )
+        assert inter["result"].count("x") <= VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS
+    else:
+        assert "Omitted from verifier inline" in inter["result"]
     total_inlined = sum(
         len(p["result"]) for payloads in evidence.values() for p in payloads if p.get("content_inlined")
     )
