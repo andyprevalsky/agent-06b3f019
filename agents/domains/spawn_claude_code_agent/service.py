@@ -1335,6 +1335,66 @@ def _build_code_event_context(
     return json.dumps(evidence, ensure_ascii=False, indent=2)
 
 
+async def _persist_code_agent_judge_evidence(
+    *,
+    agent_id: str,
+    task_id: str,
+    code_provider: str,
+    code_events: list[Dict[str, Any]] | None,
+    output_files: list[Dict[str, Any]] | None,
+    action_summary: list[str],
+) -> None:
+    """Persist non-orchestration code-agent evidence for harness judges.
+
+    Orchestration chips use ``toolName=spawn_claude_code_agent`` and therefore
+    contribute 0 leaf steps to ``_agent_class_step_counts``. When the LLM
+    verifier is skipped, nothing else records coding-agent work, so declared
+    judges see every code agent at step_count=0 and fail "coding-agent fetch"
+    criteria. These TOOL messages use distinct non-orchestration tool names +
+    ``agentType=code`` + ``task_id``/``subAgentId`` so they count as grounded
+    code-agent steps and remain readable in the trajectory.
+    """
+    events = code_events or []
+    files = output_files or []
+    summary = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
+    if not events and not files and not summary:
+        return
+
+    event_context = _build_code_event_context(
+        code_events=events,
+        output_files=files,
+        action_summary=summary,
+    )
+    # Prefer explicit event/action cardinality so judges see non-zero steps even
+    # when only a single evidence chip is present.
+    steps_taken = max(len(events), len(summary), 1 if files else 0, 1)
+
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title="🧾 Code-agent SDK events",
+        task_id=task_id,
+        message=f"Code-agent SDK event JSON:\n\n{event_context}",
+        status=MessageStatus.FINISHED,
+        action_type="system",
+        code_provider=code_provider,
+        tool_name="code_agent_sdk_events",
+        agent_type="code",
+        steps_taken=steps_taken,
+    )
+    await save_claude_code_message(
+        agent_id=agent_id,
+        title="🧾 Code-agent execution summary",
+        task_id=task_id,
+        message="Execution Summary:\n\n" + "\n".join(summary[-20:]),
+        status=MessageStatus.FINISHED,
+        action_type="system",
+        code_provider=code_provider,
+        tool_name="claude_code_history",
+        agent_type="code",
+        steps_taken=steps_taken,
+    )
+
+
 async def _run_verifier(
     *,
     agent_id: str,
@@ -1400,6 +1460,16 @@ async def _run_verifier(
             has_artifacts=has_artifacts,
             has_structured_from_files=bool(output_file_structured),
             score=score,
+        )
+        # Persist SDK/history evidence so harness step counts + declared judges
+        # still see grounded coding-agent work when the LLM verifier is off.
+        await _persist_code_agent_judge_evidence(
+            agent_id=agent_id,
+            task_id=task_id,
+            code_provider=code_provider,
+            code_events=code_events,
+            output_files=extracted_output_files,
+            action_summary=action_summary,
         )
         return score, v_reasoning, output_file_structured, input_tokens, output_tokens
 

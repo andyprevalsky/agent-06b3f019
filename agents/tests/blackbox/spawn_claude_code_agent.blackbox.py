@@ -1312,7 +1312,11 @@ async def test_run_verifier_happy_path():
 
 
 async def test_run_verifier_disabled_by_env_flag():
-    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex."""
+    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex.
+
+    Also persists non-orchestration SDK/history evidence chips so harness
+    `_agent_class_step_counts` records grounded code-agent steps for judges.
+    """
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
@@ -1344,6 +1348,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 exit_code=0,
                 code_provider=provider,
                 output_files=[],
+                code_events=[{"type": "tool_use", "name": "Bash"}],
             )
             assert score == 0.5, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
@@ -1358,12 +1363,16 @@ async def test_run_verifier_disabled_by_env_flag():
                 goal="g",
                 model="rose-labs/rose-1-lite",
                 terminal=terminal,
-                action_summary=["wrote output"],
+                action_summary=["wrote output", "fetched github repos"],
                 output_schema={"fields": []},
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
                 output_files=[{"path": "/home/user/output/result.json", "content": "{}"}],
+                code_events=[
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "curl api.github.com"}},
+                    {"type": "tool_result", "content": "items"},
+                ],
             )
             assert score_ok == 1.0, provider
             assert "verifier disabled" in reasoning_ok.lower(), reasoning_ok
@@ -1371,6 +1380,25 @@ async def test_run_verifier_disabled_by_env_flag():
             assert itok_ok == 0 and otok_ok == 0
 
     assert called["check_progress"] == 0
+
+    evidence_metas = []
+    for call in get_captured_requests():
+        if call.get("method") != "POST" or "/api/agents/" not in (call.get("url") or ""):
+            continue
+        body = json.loads(call["requestBody"])
+        meta = body.get("metadata") or {}
+        if meta.get("toolName") in {"code_agent_sdk_events", "claude_code_history"}:
+            evidence_metas.append(meta)
+    tool_names = {m["toolName"] for m in evidence_metas}
+    assert "code_agent_sdk_events" in tool_names, evidence_metas
+    assert "claude_code_history" in tool_names, evidence_metas
+    assert all(m.get("agentType") == "code" for m in evidence_metas), evidence_metas
+    assert all(m.get("task_id") == "t" for m in evidence_metas), evidence_metas
+    assert all(m.get("subAgentId") == "t" for m in evidence_metas), evidence_metas
+    assert all(int(m.get("steps_taken") or 0) > 0 for m in evidence_metas), evidence_metas
+    # 2 providers × 2 verifier calls × 2 evidence chips = 8
+    assert len(evidence_metas) == 8, len(evidence_metas)
+
 
 
 async def test_run_verifier_exception_fallback():
