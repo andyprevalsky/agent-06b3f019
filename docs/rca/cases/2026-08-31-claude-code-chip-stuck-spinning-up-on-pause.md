@@ -2,7 +2,7 @@
 id: 2026-08-31-claude-code-chip-stuck-spinning-up-on-pause
 date: 2026-08-31
 title: Claude Code chip stays on Spinning up after pause cancel
-surface: agents+front-end
+surface: cross
 component: spawn-claude-code-agent / ClaudeCodeChip
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
@@ -17,7 +17,7 @@ tags:
   - chip
   - pause
   - cancel
-  - task_complete
+  - task-complete
   - spinning-up
 sources:
   - agent 182cf2ab-cb85-4437-9c4b-35d3b5afc2a4
@@ -68,3 +68,10 @@ did not.
 
 User confirmed the hypothesis: Spinning up is the code chip; it flips off
 `task_complete` / live WS, not PAUSED; cancel never landed as chip completion.
+
+## Reusable lesson
+
+A UI chip that derives terminality from one action_type on a scoped message is
+only as terminal as its narrowest producer: every cancel/abort path must emit
+that same terminal action with the same scoping key, and the reader must treat
+terminality as sticky so a late heartbeat cannot reopen it.

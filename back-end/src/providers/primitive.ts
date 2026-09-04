@@ -12,6 +12,13 @@ export interface PrimitiveInbox {
   clientId: string;
 }
 
+export interface PrimitiveAttachment {
+  filename: string;
+  contentType: string;
+  /** Raw attachment bytes; base64-encoded at the transport boundary. */
+  content: Buffer;
+}
+
 export interface PrimitiveEmail {
   from: string;
   fromName: string | null;
@@ -269,4 +276,87 @@ export async function fetchPrimitiveMessagesSince(params: {
     .filter((email) => email.date.getTime() >= params.since.getTime())
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .slice(0, params.limit);
+}
+
+/**
+ * Combined raw attachment bytes Primitive accepts on a single /send-mail call.
+ * Mirrors the documented 30 MiB relay ceiling.
+ */
+export const PRIMITIVE_MAX_ATTACHMENT_BYTES = 31457280;
+
+/**
+ * Send one outbound email through Primitive's relay.
+ *
+ * `to` is a single recipient by API contract — callers fan out themselves so a
+ * per-recipient rejection stays isolated instead of failing the whole send.
+ * Resolves true when the relay accepted the message, false otherwise; the
+ * caller decides whether a partial failure is fatal.
+ */
+export async function sendPrimitiveEmail(params: {
+  from: string;
+  to: string;
+  subject: string;
+  bodyText: string;
+  bodyHtml?: string;
+  attachments?: PrimitiveAttachment[];
+}): Promise<boolean> {
+  if (!isPrimitiveConfigured()) {
+    log.warn('PRIMITIVE_API_KEY missing; outbound send skipped', { to: params.to });
+    return false;
+  }
+
+  const attachments = params.attachments ?? [];
+  const totalBytes = attachments.reduce((sum, item) => sum + item.content.byteLength, 0);
+  if (totalBytes > PRIMITIVE_MAX_ATTACHMENT_BYTES) {
+    log.error('Primitive send rejected locally: attachments exceed relay ceiling', {
+      to: params.to,
+      totalBytes,
+    });
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${baseUrl()}/send-mail`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: params.from,
+        to: params.to,
+        subject: params.subject,
+        body_text: params.bodyText,
+        ...(params.bodyHtml === undefined ? {} : { body_html: params.bodyHtml }),
+        ...(attachments.length === 0
+          ? {}
+          : {
+              attachments: attachments.map((item) => ({
+                filename: item.filename,
+                content_type: item.contentType,
+                content_base64: item.content.toString('base64'),
+              })),
+            }),
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      log.error('Primitive send failed', {
+        to: params.to,
+        status: response.status,
+        detail: detail.slice(0, 200),
+      });
+      return false;
+    }
+
+    log.info('Primitive send accepted', { to: params.to, subject: params.subject.slice(0, 200) });
+    return true;
+  } catch (error: unknown) {
+    log.error('Primitive send threw', {
+      to: params.to,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }

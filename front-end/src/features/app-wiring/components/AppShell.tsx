@@ -12,6 +12,8 @@
  *   +--> "/terminal" --> <Index />
  *   +--> "/research" --> <ResearchBlog />
  *   +--> "/research/:slug" --> <ResearchBlogPost />
+ *   +--> "/careers" --> <Careers />
+ *   +--> "/careers/:slug" --> <CareersRole />
  *   +--> "/download" --> <Download />
  *   +--> "/waitlist" --> main Terminal + automatic phone login
  *   +--> "/open-agent" --> <OpenAgentRedirect /> (durable ?agent-id deep link)

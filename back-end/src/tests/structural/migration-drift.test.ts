@@ -43,6 +43,43 @@ type TableState = Map<string, Set<string>>;
 const SCHEMA_PREFIX = '(?:"?public"?\\.)?';
 const NON_COLUMN_KEYWORDS = /^(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|EXCLUDE)\b/i;
 
+/**
+ * Split a CREATE TABLE body into its top-level definitions.
+ *
+ * Splitting on newlines instead treats the continuation lines of a multi-line
+ * definition as separate entries, so a wrapped foreign key like
+ *
+ *   CONSTRAINT "x_fkey"
+ *     FOREIGN KEY ("a") REFERENCES "B"("id")
+ *     ON DELETE CASCADE ON UPDATE CASCADE
+ *
+ * yields a line starting with `ON`, which then parses as a column named "ON"
+ * and reports permanent phantom drift for a perfectly valid migration.
+ * Commas at paren depth 0 are the real separators; quoted identifiers may
+ * contain either character, so track quoting too.
+ */
+function splitTableBody(body: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quoted = false;
+  let current = '';
+  for (const char of body) {
+    if (char === '"') quoted = !quoted;
+    if (!quoted) {
+      if (char === '(') depth += 1;
+      else if (char === ')') depth -= 1;
+      else if (char === ',' && depth === 0) {
+        parts.push(current);
+        current = '';
+        continue;
+      }
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts;
+}
+
 function parseCreateTable(sql: string, state: TableState): void {
   const re = new RegExp(
     `CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${SCHEMA_PREFIX}"([^"]+)"\\s*\\(([\\s\\S]+?)\\n\\)\\s*;`,
@@ -53,8 +90,8 @@ function parseCreateTable(sql: string, state: TableState): void {
     const table = m[1];
     const body = m[2];
     const columns = new Set<string>();
-    for (const line of body.split('\n')) {
-      const trimmed = line.trim().replace(/,$/, '');
+    for (const part of splitTableBody(body)) {
+      const trimmed = part.trim().replace(/\s+/g, ' ');
       if (!trimmed || NON_COLUMN_KEYWORDS.test(trimmed)) continue;
       // Column def starts with a quoted OR bare identifier followed by a type.
       const colMatch = trimmed.match(/^(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+\S/);
