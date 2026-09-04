@@ -28,6 +28,41 @@ SILENCE_TIMEOUT_S: Final[float] = 1.0
 # progress chips). Progress chips do not refresh last_output_time.
 SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
 
+# Claude Code's Monitor / ScheduleWakeup tools legitimately go quiet on the
+# WebSocket while background work continues (cuda k=3 r21 agent ce189356:
+# Monitor + ScheduleWakeup then 180s silence → idle kill, 0 artifacts, score
+# 0.5). Keep the short default for ordinary hangs, but stretch the idle window
+# after those wait tools so productive sessions are not aborted mid-wait.
+# Still well below MAX_RUNTIME_S so a truly stuck Monitor cannot burn the full
+# budget.
+#
+# The same stretched window applies while ANY tool is in-flight (tool_use with
+# no matching tool_result yet). Long Bash / Write / network calls emit no WS
+# events until they finish — cuda k=3 r22 CC#4 was idle-killed mid-Bash at
+# 180s despite active work. tool_result restores the short window unless a
+# wait tool has armed the post-wait stretch.
+SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools / in-flight
+SDK_WAIT_TOOL_NAMES: Final[frozenset[str]] = frozenset({"Monitor", "ScheduleWakeup"})
+# Bash (and Task/TaskOutput for backgrounded work) often emit tool_result while
+# work continues off-WebSocket. Treat them like wait tools for idle-arming so
+# tool_result does not snap idle back to 180s and kill productive sessions
+# (cuda k=3 r24 a2 CC: Bash stretch → tool_result → 180s idle kill, 0 artifacts).
+SDK_POST_RESULT_STRETCH_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {"Bash", "Task", "TaskOutput"}
+)
+
+# After the SDK emits type=result (CLI declared completion), do not let
+# Bash/Task/ScheduleWakeup re-arm the 900s stretch. Healthy sessions exit
+# within ~1s of result (cuda k=3 r31 a1); zombie sessions that keep tooling
+# after result (r31 a2: result → ScheduleWakeup/Bash → Max runtime, 0
+# artifacts) must fall back to the short idle window so the parent can retry
+# inside the bench budget instead of burning 2×1800s.
+#
+# Absolute backstop if stdout keeps refreshing last_output_time after result
+# (prevents idle from ever firing): end the monitor this many seconds after
+# the *first* SDK result regardless of stretch/idle.
+SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent
