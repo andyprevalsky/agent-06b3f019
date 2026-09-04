@@ -9349,27 +9349,109 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         SINGLE_TURN_TEXT_CAP,
         _append_completion_card,
         build_single_turn_evidence,
+        single_turn_evidence_char_count,
         single_turn_evidence_exceeds_budget,
     )
+
+    # #region agent log
+    def _dbg_evidence(hypothesis_id: str, message: str, evidence_rows: list, path: str) -> None:
+        try:
+            tool_names: dict[str, int] = {}
+            evid_types: dict[str, int] = {}
+            for row in evidence_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                if "benchmark_state" in row:
+                    tool_names["benchmark_state"] = tool_names.get("benchmark_state", 0) + 1
+                    bs = row.get("benchmark_state") if isinstance(row.get("benchmark_state"), dict) else {}
+                    sessions = bs.get("claude_code_sessions") if isinstance(bs, dict) else None
+                    continue
+                meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                name = str(meta.get("toolName") or meta.get("evidence_type") or row.get("role") or "?")
+                tool_names[name] = tool_names.get(name, 0) + 1
+                if meta.get("evidence_type"):
+                    evid_types[str(meta["evidence_type"])] = evid_types.get(str(meta["evidence_type"]), 0) + 1
+            grounding = sum(
+                tool_names.get(k, 0)
+                for k in (
+                    "spawn_claude_code_agent",
+                    "code_agent_sdk_events",
+                    "claude_code_history",
+                    "web_search",
+                    "web_fetch",
+                    "spawn_agent",
+                )
+            )
+            payload = {
+                "hypothesisId": hypothesis_id,
+                "location": "run_benchmark.py:_declared_evaluator_evidence",
+                "message": message,
+                "data": {
+                    "path": path,
+                    "row_count": len(evidence_rows or []),
+                    "char_count": single_turn_evidence_char_count(evidence_rows or []),
+                    "over_budget": single_turn_evidence_exceeds_budget(evidence_rows or []),
+                    "tool_names": tool_names,
+                    "evidence_types": evid_types,
+                    "grounding_tool_rows": grounding,
+                    "has_claude_code_sessions": bool(
+                        (data.get("_benchmark") or {}).get("claude_code_sessions")
+                    ),
+                    "input_message_count": len(data.get("messages") or []),
+                },
+                "timestamp": int(time.time() * 1000),
+            }
+            with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _df:
+                _df.write(json.dumps(payload, default=str) + "\n")
+        except Exception:
+            pass
+    # #endregion
 
     compact_state = _compact_benchmark_state_for_judge(data)
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
+    # #region agent log
+    _dbg_evidence("A", "after_full_tree_evidence", evidence, "full")
+    # #endregion
     if not single_turn_evidence_exceeds_budget(evidence):
+        # #region agent log
+        _dbg_evidence("A", "return_full_under_budget", evidence, "full")
+        # #endregion
         return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
+    # #region agent log
+    _dbg_evidence("B", "after_slim_no_tree_evidence", evidence, "slim")
+    # #endregion
     if not single_turn_evidence_exceeds_budget(evidence):
+        # #region agent log
+        _dbg_evidence("B", "return_slim_under_budget", evidence, "slim")
+        # #endregion
         return evidence
     compact_only: list[dict] = []
     _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
     evidence = _apply_compact_benchmark_state(compact_only, compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
+    # #region agent log
+    _dbg_evidence("C", "after_compact_only_drop_tools", evidence, "compact_only")
+    # #endregion
     if not single_turn_evidence_exceeds_budget(evidence):
+        # #region agent log
+        _dbg_evidence(
+            "C",
+            "return_compact_only_no_grounding",
+            evidence,
+            "compact_only",
+        )
+        # #endregion
         return evidence
-    return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
+    evidence = _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
+    # #region agent log
+    _dbg_evidence("C", "return_state_only", evidence, "state_only")
+    # #endregion
+    return evidence
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -11470,13 +11552,46 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
-    if any(
+    _needs_cc_hydrate = any(
         check.get("type") == "claude_code_session_output"
         for evaluator in task.evaluators
         if evaluator.get("method") == "static_check"
         for check in evaluator.get("checks", [])
-    ):
+    )
+    if _needs_cc_hydrate:
         await _hydrate_claude_code_sessions(data)
+    # #region agent log
+    try:
+        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _df:
+            _df.write(
+                json.dumps(
+                    {
+                        "hypothesisId": "D",
+                        "location": "run_benchmark.py:_run_declared_evaluators",
+                        "message": "claude_code_session_hydrate_gate",
+                        "data": {
+                            "needs_cc_hydrate": _needs_cc_hydrate,
+                            "has_sessions": bool(
+                                (data.get("_benchmark") or {}).get("claude_code_sessions")
+                            ),
+                            "evaluator_methods": [
+                                e.get("method") for e in task.evaluators
+                            ],
+                            "static_check_types": [
+                                c.get("type")
+                                for e in task.evaluators
+                                if e.get("method") == "static_check"
+                                for c in e.get("checks", [])
+                            ],
+                        },
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
 
     needs_tree_evidence = any(
         evaluator.get("method") in {"single_turn_llm_judge", "agentic_llm_judge", "polar"}
@@ -11503,6 +11618,35 @@ async def _run_declared_evaluators(
                 )
 
                 evidence = _declared_evaluator_evidence(data)
+                # #region agent log
+                try:
+                    with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as _df:
+                        _df.write(
+                            json.dumps(
+                                {
+                                    "hypothesisId": "E",
+                                    "location": "run_benchmark.py:_run_declared_evaluators",
+                                    "message": "single_turn_vs_agentic_fallback",
+                                    "data": {
+                                        "evaluator_id": evaluator_id,
+                                        "evidence_over_budget": single_turn_evidence_exceeds_budget(
+                                            evidence
+                                        ),
+                                        "evidence_chars": len(
+                                            json.dumps(evidence, default=str)
+                                        ),
+                                        "will_use_agentic": single_turn_evidence_exceeds_budget(
+                                            evidence
+                                        ),
+                                    },
+                                    "timestamp": int(time.time() * 1000),
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+                # #endregion
                 if single_turn_evidence_exceeds_budget(evidence):
                     judged = await _call_declared_agentic_llm_judge(task, evaluator, data)
                     evidence_mode = "agentic_llm_judge"

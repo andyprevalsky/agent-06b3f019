@@ -3031,6 +3031,128 @@ def test_declared_evaluator_evidence_includes_structured_output_first():
     assert "org/r100" in text
 
 
+def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
+    """Fat Claude Code transcripts must not collapse judge evidence to completion-only.
+
+    Regression (cuda-kernel-github-top100-code-agent k=3 r24 agent b977534d):
+    root had 100+ messages including multi-100KB spawn_claude_code_agent /
+    code_agent_sdk_events / claude_code_history rows. build_single_turn_evidence
+    serialized to ~392k (>320k cap), so _declared_evaluator_evidence fell through
+    to compact_only (structured_output + final_completion + metadata) and the
+    declared judge correctly scored 0 for missing coding-agent grounding.
+
+    Expected: within SINGLE_TURN_CHAR_BUDGET, still retain at least one capped
+    code-agent grounding row (sdk events / history / spawn_claude_code_agent).
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_CHAR_BUDGET,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"ggml-org/repo-{i}",
+            "repo_url": f"https://github.com/ggml-org/repo-{i}",
+            "stars": 100000 - i,
+            "description": f"CUDA kernel library {i}",
+        }
+        for i in range(1, 101)
+    ]
+    # ~40 messages × ~12k capped bodies → >320k when naively kept, forcing the
+    # compact_only cascade on current code.
+    fat_cc = (
+        "GitHub API search results for CUDA kernels:\n"
+        + "\n".join(
+            f"{i}. ggml-org/repo-{i} stars={100000-i} "
+            f"https://github.com/ggml-org/repo-{i} desc=CUDA kernel library {i} "
+            + ("x" * 200)
+            for i in range(1, 80)
+        )
+    )
+    assert len(fat_cc) > 12_000
+    messages = []
+    for index in range(35):
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": fat_cc,
+                "message": fat_cc,
+                "metadata": {
+                    "toolName": "spawn_claude_code_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": f"cc-{index}",
+                    "title": f"Claude Code session {index}",
+                },
+            }
+        )
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": fat_cc,
+                "message": fat_cc,
+                "metadata": {
+                    "toolName": "code_agent_sdk_events",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": f"sdk-{index}",
+                    "agentType": "code",
+                },
+            }
+        )
+    messages.append(
+        {
+            "role": "TOOL",
+            "text": "done",
+            "message": "done",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "completionSummary": {
+                    "summary": "Ranked top 100 CUDA kernel repos via Claude Code GitHub fetch",
+                    "outputs": [{"key": "repos", "value": repos}],
+                },
+            },
+        }
+    )
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {
+                "agent_id": "b977534d-repro",
+                "status": "COMPLETED",
+                "structured_output": {"repos": repos},
+            },
+            "messages": messages,
+            "_benchmark": {
+                "api_base_url": "http://localhost:3901",
+                "agent_class_step_counts": {
+                    "code": {"cc-0": 12},
+                    "explore": {},
+                },
+            },
+        }
+    )
+    dumped = json.dumps(evidence, default=str)
+    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
+    assert not single_turn_evidence_exceeds_budget(evidence)
+    tool_names = {
+        (row.get("metadata") or {}).get("toolName")
+        for row in evidence
+        if isinstance(row, dict) and isinstance(row.get("metadata"), dict)
+    }
+    grounding = tool_names & {
+        "spawn_claude_code_agent",
+        "code_agent_sdk_events",
+        "claude_code_history",
+    }
+    assert grounding, (
+        "compact_only dropped all code-agent grounding rows; "
+        f"tool_names={tool_names} evidence_types="
+        f"{[(row.get('metadata') or {}).get('evidence_type') for row in evidence if isinstance(row, dict)]}"
+    )
+    assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
+
+
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -17959,6 +18081,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_includes_structured_output_first",
         test_declared_evaluator_evidence_includes_structured_output_first,
+    )
+    r.record(
+        "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
+        test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",
