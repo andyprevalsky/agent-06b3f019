@@ -795,7 +795,7 @@ async def test_repo_save_message_posts_json():
 
 
 async def test_repo_save_message_non_init_has_subagent():
-    """Non-init messages include subAgentId=task_id."""
+    """Non-init progress/chip messages include subAgentId=task_id."""
     _setup()
     from domains.spawn_claude_code_agent.repo import save_claude_code_message
     from tools.base import MessageStatus
@@ -811,6 +811,35 @@ async def test_repo_save_message_non_init_has_subagent():
     call = assert_captured_call(url_contains="/api/agents/", method="POST")
     body = json.loads(call["requestBody"])
     assert body["metadata"]["subAgentId"] == "task-99"
+
+
+async def test_repo_save_message_task_complete_omits_subagent():
+    """task_complete terminals omit subAgentId so parent context keeps the result.
+
+    Cancel/DAG-cancel often leaves Session Cancelled (from save_claude_code_message)
+    as the only terminal for the spawn toolCallId. Marking it subAgentId made
+    is_internal_subagent_message drop it → unpaired ASSISTANT → role_alternation.
+    """
+    _setup()
+    from domains.spawn_claude_code_agent.repo import save_claude_code_message
+    from tools.base import MessageStatus
+
+    await save_claude_code_message(
+        agent_id="agent-x",
+        title="Session Cancelled",
+        message="Agent paused by user",
+        status=MessageStatus.FINISHED,
+        task_id="task-cancel",
+        action_type="task_complete",
+        tool_call_id="call_parent_spawn",
+    )
+
+    call = assert_captured_call(url_contains="/api/agents/", method="POST")
+    body = json.loads(call["requestBody"])
+    meta = body["metadata"]
+    assert meta["action_type"] == "task_complete"
+    assert meta["toolCallId"] == "call_parent_spawn"
+    assert "subAgentId" not in meta
 
 
 async def test_repo_save_message_error_flag():
@@ -1282,6 +1311,131 @@ async def test_run_verifier_happy_path():
     assert seen_args["args"][-3:] == [True, "fast goal", 3]
 
 
+async def test_run_verifier_disabled_by_env_flag():
+    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+    called = {"check_progress": 0}
+
+    async def fake_activity(*a, **kw):
+        called["check_progress"] += 1
+        raise AssertionError("verifier LLM must not be called when disabled")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        for provider in ("claude", "codex"):
+            # No artifacts → incomplete (must not report success without output files)
+            score, reasoning, struct, itok, otok = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["wrote output"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=0,
+                code_provider=provider,
+                output_files=[],
+            )
+            assert score == 0.5, provider
+            assert "verifier disabled" in reasoning.lower(), reasoning
+            assert "incomplete" in reasoning.lower(), reasoning
+            assert struct is None
+            assert itok == 0 and otok == 0
+
+            # With extracted artifacts → success without calling the LLM verifier
+            score_ok, reasoning_ok, struct_ok, itok_ok, otok_ok = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["wrote output"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=0,
+                code_provider=provider,
+                output_files=[{"path": "/home/user/output/result.json", "content": "{}"}],
+            )
+            assert score_ok == 1.0, provider
+            assert "verifier disabled" in reasoning_ok.lower(), reasoning_ok
+            assert struct_ok is None
+            assert itok_ok == 0 and otok_ok == 0
+
+    assert called["check_progress"] == 0
+
+
+async def test_run_verifier_disabled_includes_sdk_event_stdout():
+    """Disabled verifier must still hand Bash/Write stdout to the parent.
+
+    Repro for smoke claude-code-agent 04977ce8 (2026-09-04): Claude Code wrote
+    collatz_27.py and printed the sequence, but the skip path returned only
+    'verifier disabled' with structured_response=null. The parent then spawned
+    explore + two more CC sessions and hit the 164s cap.
+    """
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    stdout = "27\n82\n41\n124\n62\n31\n94\n47\n142\n71\n214\n107\n322\n161\n484\n242\n121\n364\n182\n91\n274\n137\n412\n206\n103\n310\n155\n466\n233\n700\n350\n175\n526\n263\n790\n395\n1186\n593\n1780\n890\n445\n1336\n668\n334\n167\n502\n251\n754\n377\n1132\n566\n283\n850\n425\n1276\n638\n319\n958\n479\n1438\n719\n2158\n1079\n3238\n1619\n4858\n2429\n7288\n3644\n1822\n911\n2734\n1367\n4102\n2051\n6154\n3077\n9232\n4616\n2308\n1154\n577\n1732\n866\n433\n1300\n650\n325\n976\n488\n244\n122\n61\n184\n92\n46\n23\n70\n35\n106\n53\n160\n80\n40\n20\n10\n5\n16\n8\n4\n2\n1\nTotal steps: 111"
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+    called = {"check_progress": 0}
+
+    async def fake_activity(*a, **kw):
+        called["check_progress"] += 1
+        raise AssertionError("verifier LLM must not be called when disabled")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, struct, itok, otok = await service._run_verifier(
+            agent_id="04977ce8-c7e5-4334-ad44-faf4c47c0e62",
+            task_id="6c70a926-7382-4afd-9538-d2d3a8039d70",
+            goal="Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27.",
+            model="rose-labs/rose-1-ultra",
+            terminal=terminal,
+            action_summary=["Created E2B sandbox", "Agentic loop finished: 0 interactions"],
+            output_schema={
+                "fields": [
+                    {"name": "stdout", "type": "str", "required": True},
+                    {"name": "collatz_sequence", "type": "list[int]", "required": True},
+                    {"name": "total_steps", "type": "int", "required": True},
+                    {"name": "python_script", "type": "file_pointer", "required": True},
+                ]
+            },
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            code_events=[
+                {"type": "tool_use", "provider": "claude", "tool": "Write", "input": {"path": "/home/user/output/collatz_27.py"}},
+                {"type": "tool_result", "provider": "claude", "status": "completed"},
+                {"type": "tool_use", "provider": "claude", "tool": "Bash", "input": {"command": "python collatz_27.py"}},
+                {"type": "tool_result", "provider": "claude", "content": stdout},
+                {"type": "result", "provider": "claude", "status": "completed", "text": stdout},
+            ],
+            output_files=[{"original_filename": "collatz_27.py", "mime_type": "application/octet-stream", "size_bytes": 414}],
+        )
+
+    assert called["check_progress"] == 0
+    assert score == 1.0
+    assert "verifier disabled" in reasoning.lower(), reasoning
+    assert "Total steps: 111" in reasoning, reasoning
+    assert "code_agent_events" in reasoning, reasoning
+    assert struct is None
+    assert itok == 0 and otok == 0
+
+
 async def test_run_verifier_exception_fallback():
     """Exception returns 0.5 score and assumes partial completion."""
     from domains.spawn_claude_code_agent import service
@@ -1639,6 +1793,57 @@ async def test_run_agentic_loop_connect_fail_raises():
             assert "Failed to connect" in str(e)
 
 
+async def test_run_agentic_loop_sdk_idle_timeout_breaks():
+    """Hung CLI with no exit_code must break on SDK idle, not spin to MAX_RUNTIME.
+
+    Repro shape from cuda-kernel k=3 r12: Bash/ScheduleWakeup then only progress
+    chips (which do not refresh last_output_time). After silence flips
+    pending_output=False, autonomous CC waits for SDK exit forever without the
+    idle break.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterOutput(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("partial work", True)
+            # Stay connected with no further events and no on_exit.
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterOutput),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed < 5.0, f"idle break should be fast, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+
+
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
     """Codex proxy events are promoted into worker logs with cache details."""
     from domains.spawn_claude_code_agent import service
@@ -1668,6 +1873,35 @@ def test_log_code_agent_event_promotes_codex_fast_cache_request():
     assert kwargs["sandbox_id"] == "sandbox-1"
     assert kwargs["path"] == "/backend-api/codex/responses"
     assert kwargs["cache"] == "miss"
+
+
+def test_log_code_agent_event_promotes_claude_tool_use_to_info():
+    """Claude tool_use/tool_result progress must be info-level so run JSON keeps it."""
+    from domains.spawn_claude_code_agent import service
+
+    fake_logger = MagicMock()
+    with patch.object(service, "logger", fake_logger):
+        service._log_code_agent_event(
+            {
+                "version": 1,
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Bash",
+                "status": "running",
+            },
+            agent_id="agent-1",
+            task_id="task-1",
+            sandbox_id="sandbox-1",
+        )
+
+    fake_logger.info.assert_called_once()
+    args, kwargs = fake_logger.info.call_args
+    assert args[0] == "[ClaudeCode] Code-agent event"
+    assert kwargs["agent_id"] == "agent-1"
+    assert kwargs["provider"] == "claude"
+    assert kwargs["event_type"] == "tool_use"
+    assert kwargs["tool_name"] == "Bash"
+    fake_logger.debug.assert_not_called()
 
 
 def test_codex_completed_turn_count_counts_unique_turn_completed_events():
@@ -1974,8 +2208,10 @@ async def test_spawn_activity_codex_oauth_fallback_success_continues():
     assert result["status"] == "completed"
     verifier.assert_awaited_once()
     persisted.assert_awaited_once()
-    assert "CODEX_E2B_DONE" in persisted.await_args.args[1]
-    assert "ChatGPT OAuth unavailable" not in persisted.await_args.args[1]
+    persisted_output = persisted.await_args.args[1]
+    assert persisted_output.strip()
+    assert "[Codex" in persisted_output
+    assert "ChatGPT OAuth unavailable" not in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
             "source": "oauth",
@@ -2085,7 +2321,6 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
     verifier.assert_not_awaited()
     persisted.assert_awaited_once()
     persisted_output = persisted.await_args.args[1]
-    assert "Quota exceeded. Check your plan and billing details." not in persisted_output
     assert "insufficient_quota" in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
@@ -2230,6 +2465,7 @@ class _FakeCCWorkflow:
 
     class ActivityCancellationType:
         TRY_CANCEL = "TRY_CANCEL"
+        WAIT_CANCELLATION_COMPLETED = "WAIT_CANCELLATION_COMPLETED"
 
     def __init__(self, activity_handle):
         self._handle = activity_handle
@@ -2435,11 +2671,23 @@ async def test_cc_execute_tool_emits_assistant_events_for_files():
 
 
 async def test_cc_execute_tool_cancelled_status_yields_error():
-    """Activity returning status='cancelled' yields an ERROR event."""
+    """Activity status='cancelled' yields chip-terminal task_complete with task_id.
+
+    ClaudeCodeChip only leaves spinning_up when a task-scoped message has
+    action_type=task_complete. Pause/cancel must emit task_complete (not
+    session_cancelled) and include task_id so the chip can match it.
+    """
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
-    handle = _FakeActivityHandle(result={"status": "cancelled", "message": "cancelled"})
+    handle = _FakeActivityHandle(
+        result={
+            "status": "cancelled",
+            "message": "cancelled",
+            "task_id": "task-cancel-1",
+            "code_provider": "claude",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2456,6 +2704,10 @@ async def test_cc_execute_tool_cancelled_status_yields_error():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title or "cancelled" in error.title.lower()
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-cancel-1"
+    assert error.metadata.get("success") is False
+    assert error.metadata.get("toolName") == "spawn_claude_code_agent"
 
 
 async def test_cc_execute_tool_cancelled_error_path():
@@ -2482,6 +2734,10 @@ async def test_cc_execute_tool_cancelled_error_path():
 
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    # Await raised before activity returned task_id — still emit task_complete so
+    # MessageBubble keeps routing through ClaudeCodeChip (session_cancelled does not).
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("success") is False
 
 
 async def test_cc_execute_tool_generic_exception_yields_error():
@@ -2510,8 +2766,200 @@ async def test_cc_execute_tool_generic_exception_yields_error():
     assert error.metadata["code_provider"] == "claude"
 
 
+async def test_cc_execute_tool_github_access_denied_soft_fails_finished():
+    """GITHUB_ACCESS_DENIED must FINISH (not ERROR) so no_tool_failures can pass.
+
+    Ranking benches fail closed when spawn_claude_code_agent posts toolStatus=ERROR
+    after a sandbox GitHub clone denial. Soft-fail lets the agent retry API-only.
+    """
+    from temporalio.exceptions import ActivityError
+
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from tools.base import MessageStatus
+
+    activity_error = ActivityError(
+        message=(
+            "Failed to create code session (provider=claude): HTTP 403: "
+            '{"error":"Access denied","code":"GITHUB_ACCESS_DENIED"}'
+        ),
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_claude_code_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    handle = _FakeActivityHandle(raise_exc=activity_error)
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        manager = SpawnClaudeCodeAgentManager()
+        events = await _collect_cc_events(
+            manager.execute_tool(
+                _FakeCCWorkflowInstance(),
+                {"goal": "g", "github_repo_link": "https://github.com/pytorch/pytorch"},
+                "tc-github-denied",
+            )
+        )
+    finally:
+        restore()
+
+    assert not any(getattr(e, "status", None) == MessageStatus.ERROR for e in events)
+    finished = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished.metadata.get("success") is False
+    assert finished.metadata.get("action_type") == "task_complete"
+    assert "GITHUB_ACCESS_DENIED" in finished.message or "denied cloning" in finished.message.lower()
+    assert "github_repo_url" in finished.message or "API-only" in finished.message
+
+
+async def _assert_cc_sandbox_infra_soft_fail(activity_message: str, tool_call_id: str) -> None:
+    """Shared assertions for soft-failing recoverable E2B create failures."""
+    from temporalio.exceptions import ActivityError
+
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from tools.base import MessageStatus
+
+    activity_error = ActivityError(
+        message=activity_message,
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_claude_code_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    handle = _FakeActivityHandle(raise_exc=activity_error)
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        manager = SpawnClaudeCodeAgentManager()
+        events = await _collect_cc_events(
+            manager.execute_tool(
+                _FakeCCWorkflowInstance(),
+                {"goal": "rank cuda repos via GitHub API"},
+                tool_call_id,
+            )
+        )
+    finally:
+        restore()
+
+    assert not any(getattr(e, "status", None) == MessageStatus.ERROR for e in events)
+    finished = next(e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED)
+    assert finished.metadata.get("success") is False
+    assert finished.metadata.get("action_type") == "task_complete"
+    msg = finished.message.lower()
+    assert (
+        "capacity" in msg
+        or "sandbox" in msg
+        or "billing" in msg
+        or "payment" in msg
+    ), finished.message
+    assert "retry" in msg
+
+async def test_cc_execute_tool_sandbox_infra_soft_fails_finished():
+    """E2B redis/sandbox capacity flakes must FINISH (not ERROR) for no_tool_failures.
+
+    Local repro (cuda-kernel k=3 r8): concurrent Claude Code spawns returned
+    HTTP 500 redis connection-pool timeouts / sandbox-not-found. Soft-fail so
+    the agent can retry spawn without tripping no_tool_failures.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"500: Failed to create sandbox: failed to run reserve '
+            'script: redis: connection pool timeout"}'
+        ),
+        "tc-sandbox-infra",
+    )
+
+
+async def test_cc_execute_tool_no_healthy_upstream_soft_fails_finished():
+    """Gateway 503 no-healthy-upstream must soft-FINISH like other capacity flakes.
+
+    Local repro (cuda-kernel k=3 r10 agent1 @ ~30m): create returned HTTP 500
+    wrapping ``503: no healthy upstream``. Soft-fail after Temporal retries so
+    no_tool_failures stays green; agent can re-spawn instead of hard-ERROR.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"503: no healthy upstream"}'
+        ),
+        "tc-sandbox-503",
+    )
+
+
+async def test_cc_execute_tool_missing_payment_method_soft_fails_finished():
+    """Anthropic team payment-method blocks must soft-FINISH like capacity flakes.
+
+    Local repro (cuda-kernel k=3 r13): Claude OAuth works for Messages API, but
+    session create returns ``403: team is blocked: missing payment method``.
+    Soft-fail so no_tool_failures stays green while the agent continues.
+    """
+    await _assert_cc_sandbox_infra_soft_fail(
+        (
+            "Failed to create code session (provider=claude): HTTP 500: "
+            '{"error":"403: team is blocked: missing payment method"}'
+        ),
+        "tc-missing-payment",
+    )
+
+
+async def test_cc_execute_tool_readtimeout_soft_fails_finished():
+    """Empty httpx.ReadTimeout on E2B create must soft-FINISH (type-match).
+
+    Local repro (cuda-kernel k=3 r16 agent2): session create hung past the 60s
+    httpx timeout and raised ``ReadTimeout('')`` — message markers miss it, so
+    Temporal exhausted retries and hard-ERRORed. Soft-fail via exception type.
+    """
+    import httpx
+    from temporalio.exceptions import ActivityError
+
+    from domains.spawn_claude_code_agent.handler import (
+        SpawnClaudeCodeAgentManager,
+        _is_recoverable_sandbox_infra_failure,
+        _maybe_soft_fail_session_create_result,
+    )
+    from tools.base import MessageStatus
+
+    read_timeout = httpx.ReadTimeout("")
+    assert _is_recoverable_sandbox_infra_failure(read_timeout) is True
+    soft = _maybe_soft_fail_session_create_result(
+        code_provider="claude", error=read_timeout
+    )
+    assert soft is not None
+    assert soft["success"] is False
+    assert "capacity" in soft["message"].lower() or "sandbox" in soft["message"].lower()
+
+    activity_error = ActivityError(
+        message="ReadTimeout('')",
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_claude_code_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    activity_error.__cause__ = read_timeout
+    await _assert_cc_sandbox_infra_soft_fail("ReadTimeout('')", "tc-readtimeout")
+
+
+def test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail():
+    """spawn_claude_code_activity must retry enough times for brief E2B 503s.
+
+    r10 agent1 soft-failed after only 2 attempts, then DAG advanced into
+    attempt_completion with incomplete verification and timed out at 4200s.
+    """
+    import inspect
+
+    from domains.spawn_claude_code_agent import handler as cc_handler
+
+    src = inspect.getsource(cc_handler.SpawnClaudeCodeAgentManager.execute_tool)
+    assert "maximum_attempts=5" in src
+
+
 async def test_cc_execute_tool_paused_cancels_activity():
-    """is_paused=True triggers activity_handle.cancel() and cancelled path."""
+    """is_paused=True triggers activity_handle.cancel() and chip-terminal cancel."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
@@ -2519,7 +2967,14 @@ async def test_cc_execute_tool_paused_cancels_activity():
         def done(self):
             return False  # Not done, so the pause branch cancels it
 
-    handle = _PausedHandle(result={"status": "cancelled", "message": "paused"})
+    handle = _PausedHandle(
+        result={
+            "status": "cancelled",
+            "message": "paused",
+            "task_id": "task-pause-1",
+            "code_provider": "codex",
+        }
+    )
     fake = _FakeCCWorkflow(handle)
     restore = _patch_cc_workflow(fake)
     try:
@@ -2534,6 +2989,10 @@ async def test_cc_execute_tool_paused_cancels_activity():
     assert handle._cancelled is True
     error = next(e for e in events if getattr(e, "status", None) == MessageStatus.ERROR)
     assert "Cancelled" in error.title
+    assert error.metadata.get("action_type") == "task_complete"
+    assert error.metadata.get("task_id") == "task-pause-1"
+    assert error.metadata.get("code_provider") == "codex"
+    assert error.metadata.get("success") is False
 
 
 async def run_all_tests():
@@ -2601,6 +3060,10 @@ async def run_all_tests():
     # repo
     await r.record_async("repo_save_msg_init", test_repo_save_message_posts_json)
     await r.record_async("repo_save_msg_noninit", test_repo_save_message_non_init_has_subagent)
+    await r.record_async(
+        "repo_save_msg_task_complete_omits_subagent",
+        test_repo_save_message_task_complete_omits_subagent,
+    )
     await r.record_async("repo_save_msg_error", test_repo_save_message_error_flag)
     await r.record_async("repo_save_msg_swallows", test_repo_save_message_swallows_http_errors)
     await r.record_async("repo_create_session_happy", test_repo_create_e2b_session_happy)
@@ -2608,6 +3071,18 @@ async def run_all_tests():
     await r.record_async("repo_create_session_raises", test_repo_create_e2b_session_raises_on_error)
     await r.record_async("repo_persist_output_happy", test_repo_persist_terminal_output_happy)
     await r.record_async("repo_persist_output_swallows", test_repo_persist_terminal_output_swallows_errors)
+    r.record(
+        "build_durable_terminal_transcript",
+        test_build_durable_terminal_transcript_prefers_events_over_janky_pty,
+    )
+    r.record(
+        "format_code_events_transcript",
+        test_format_code_events_transcript_skips_empty_tool_results,
+    )
+    r.record(
+        "format_code_events_transcript_failed_status",
+        test_format_code_events_transcript_covers_failed_and_status_only_results,
+    )
     await r.record_async("repo_close_session_happy", test_repo_close_e2b_session_happy)
     await r.record_async("repo_close_session_non200", test_repo_close_e2b_session_non_200_returns_empty)
     await r.record_async("repo_health_happy", test_repo_check_sandbox_health_happy)
@@ -2637,6 +3112,11 @@ async def run_all_tests():
     await r.record_async("handle_reconnect_health_none", test_handle_reconnect_exhausted_health_none)
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
+    await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
+    await r.record_async(
+        "run_verifier_disabled_includes_sdk_stdout",
+        test_run_verifier_disabled_includes_sdk_event_stdout,
+    )
     await r.record_async("run_verifier_exception", test_run_verifier_exception_fallback)
     await r.record_async(
         "run_verifier_codex_event_json",
@@ -2653,7 +3133,15 @@ async def run_all_tests():
     # _run_agentic_loop
     await r.record_async("run_agentic_loop_exit_zero", test_run_agentic_loop_exit_zero_completes)
     await r.record_async("run_agentic_loop_connect_fail", test_run_agentic_loop_connect_fail_raises)
+    await r.record_async(
+        "run_agentic_loop_sdk_idle_timeout",
+        test_run_agentic_loop_sdk_idle_timeout_breaks,
+    )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
+    r.record(
+        "log_claude_tool_use_event",
+        test_log_code_agent_event_promotes_claude_tool_use_to_info,
+    )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
     await r.record_async(
@@ -2691,9 +3179,155 @@ async def run_all_tests():
     await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)
     await r.record_async("cc_exec_generic_exc", test_cc_execute_tool_generic_exception_yields_error)
+    await r.record_async(
+        "cc_exec_github_access_denied_soft_fail",
+        test_cc_execute_tool_github_access_denied_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_sandbox_infra_soft_fail",
+        test_cc_execute_tool_sandbox_infra_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_no_healthy_upstream_soft_fail",
+        test_cc_execute_tool_no_healthy_upstream_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_missing_payment_method_soft_fail",
+        test_cc_execute_tool_missing_payment_method_soft_fails_finished,
+    )
+    await r.record_async(
+        "cc_exec_readtimeout_soft_fail",
+        test_cc_execute_tool_readtimeout_soft_fails_finished,
+    )
+    r.record(
+        "cc_spawn_activity_retries_capacity_flakes",
+        test_cc_spawn_activity_retries_capacity_flakes_before_soft_fail,
+    )
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
+    r.record(
+        "claude_code_max_runtime_cuda_kernel_headroom",
+        test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom,
+    )
     teardown_mock()
     return r.all_passed
+
+
+
+def test_build_durable_terminal_transcript_prefers_events_over_janky_pty():
+    """Structured code events win over raw PTY so the FE gets a coherent log."""
+    from domains.spawn_claude_code_agent.service import build_durable_terminal_transcript
+
+    # No timeline events → keep PTY display.
+    assert build_durable_terminal_transcript("live pty\noutput", [], ["step"]) == "live pty\noutput"
+    assert build_durable_terminal_transcript("   ", [], []) == ""
+
+    janky_pty = (
+        "[Claude] Session started in /home/user\n"
+        "                                      [Claude] I'll start...\n"
+        "                                                           [Claude tool] Bash\n"
+    )
+    transcript = build_durable_terminal_transcript(
+        janky_pty,
+        [
+            {
+                "provider": "claude",
+                "type": "session",
+                "cwd": "/home/user",
+            },
+            {
+                "provider": "claude",
+                "type": "agent_message",
+                "text": "I'll start by checking GitHub access.",
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "tool": "Bash",
+                "input": {"command": "gh auth status"},
+            },
+            {
+                "provider": "claude",
+                "type": "tool_use",
+                "name": "Write",
+                "input": {"file_path": "/home/user/discovery.py"},
+            },
+            {
+                "type": "assistant",
+                "content": "Found 100 repos",
+            },
+            {"type": "result", "status": "completed", "text": "done"},
+        ],
+        ["Connected to Claude Code WebSocket", "Agentic loop finished"],
+    )
+    assert "[Claude] Session started in /home/user" in transcript
+    assert "[Claude] I'll start by checking GitHub access." in transcript
+    assert "[Claude tool] Bash · gh auth status" in transcript
+    assert "[Claude tool] Write · /home/user/discovery.py" in transcript
+    assert "[Claude] Found 100 repos" in transcript
+    assert "[Claude result] done" in transcript
+    assert "## Action Summary" in transcript
+    assert "Connected to Claude Code WebSocket" in transcript
+    # Must not prefer the staircase PTY once events exist.
+    assert "                                      [Claude]" not in transcript
+
+
+def test_format_code_events_transcript_skips_empty_tool_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Bash", "input": {"command": "ls"}},
+            {"type": "tool_result", "status": "completed"},
+            {"type": "tool_result", "error": "command failed"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Bash · ls",
+        "[Claude result] command failed",
+    ]
+
+
+def test_format_code_events_transcript_covers_failed_and_status_only_results():
+    from domains.spawn_claude_code_agent.service import format_code_events_transcript
+
+    transcript = format_code_events_transcript(
+        [
+            {"type": "tool_use", "tool": "Write"},
+            {"type": "result", "status": "failed", "text": "rank script exited 1"},
+            {"type": "result", "status": "cancelled"},
+        ]
+    )
+    assert transcript.splitlines() == [
+        "[Claude tool] Write",
+        "[Claude result] failed - rank script exited 1",
+        "[Claude result] cancelled",
+    ]
+
+
+def test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom():
+    """Hung Claude Code must return before the cuda-kernel bench budget is gone.
+
+    Local repro (k=3, 2026-09-02): with MAX_RUNTIME_S=3600 and task timeout=4200,
+    two roots waited 3009s/3721s on claude_code_activity_wait and timed out with
+    no recovery. A completed code-agent path finished CC in ~947s. Cap CC at 30m
+    so a hang still leaves ≥15m of parent budget inside the 70m task timeout.
+    """
+    import json
+    from pathlib import Path
+
+    from domains.spawn_claude_code_agent.config import MAX_RUNTIME_S
+
+    tasks = json.loads(
+        (Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json").read_text()
+    )
+    if isinstance(tasks, dict):
+        tasks = tasks.get("tasks", tasks)
+    cuda = next(t for t in tasks if t["name"] == "cuda-kernel-github-top100-code-agent")
+    task_timeout = int(cuda["timeout_seconds"])
+
+    assert MAX_RUNTIME_S == 1800
+    assert task_timeout >= 4200
+    assert task_timeout - MAX_RUNTIME_S >= 900
 
 
 if __name__ == "__main__":

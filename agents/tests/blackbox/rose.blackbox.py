@@ -471,6 +471,55 @@ def test_transform_messages_for_anthropic_bundles_consecutive_tool_results():
     assert len(user_with_results[0]["content"]) == 2
 
 
+def test_build_anthropic_body_does_not_mutate_caller_messages():
+    """RoseClient reuses one `messages` list across claudeAuth -> waterfall.
+
+    The Anthropic transform merges consecutive user turns and the cache
+    breakpoint rewrites the last message; both must operate on copies, or the
+    OpenRouter fallback after a claudeAuth failure sends merged/duplicated
+    content carrying Anthropic-only cache_control keys.
+    """
+    import copy
+
+    from providers.rose.claude_auth import build_anthropic_body
+    from providers.rose.pools import get_pool
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    messages = [
+        {"role": "system", "content": "static system prompt"},
+        {"role": "user", "content": "GOAL: g\n\nPlan this goal into tasks."},
+        {"role": "user", "content": "# Reference Plans\n\nblock"},
+        {"role": "user", "content": "[TOOL]: earlier output"},
+    ]
+    snapshot = copy.deepcopy(messages)
+
+    first = transform_messages_for_anthropic(messages)
+    assert messages == snapshot, "transform_messages_for_anthropic mutated its input"
+    second = transform_messages_for_anthropic(messages)
+    assert first == second, "transform must be idempotent on unchanged input"
+    assert len(first[2]) == 1 and len(first[2][0]["content"]) == 3, "consecutive user turns merge into one message"
+
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=64,
+    )
+    assert messages == snapshot, "build_anthropic_body mutated its input"
+    assert body["messages"][0]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+    body_again = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=64,
+    )
+    assert body_again["messages"] == body["messages"], "rebuilding from the same input must give the same body"
+
+
 def test_transform_messages_for_anthropic_raises_on_missing_id():
     raised = False
     try:
@@ -3996,6 +4045,67 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert meta.data.get("gpt_token_error") == "rate_limit"
 
 
+async def test_client_codex_404_falls_through_to_waterfall():
+    """Codex Cloudflare/edge 404 (empty body — same for garbage tokens) must NOT
+    fail the whole complete() call. It must raise RoseServerError (in
+    _FALL_THROUGH_ERRORS) so RoseClient walks openai-api-key / OpenRouter
+    waterfall. Regression: bare RoseError on 404 aborted spawn-subagents smoke
+    3× with `RoseError: Codex 404:` and never reached waterfall.
+    """
+    import os
+
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "waterfall after codex 404"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}},
+            ]
+        )
+    )
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+
+    def handler(req):
+        url = str(req.url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            seen["codex"] += 1
+            # Match the live edge failure: HTTP 404, empty body, cf-ray present.
+            return httpx.Response(404, text="", headers={"cf-ray": "test-codex-404"})
+        if url == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(500, text="openai key must not be required for this regression")
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.pop("GPT_API_KEY", None)
+    prev_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=gpt_auth_from_token("blocked-codex-token", "acct_404"),
+                call_site="test-codex-404-waterfall",
+            )
+        )
+    finally:
+        if prev_gpt is not None:
+            os.environ["GPT_API_KEY"] = prev_gpt
+        if prev_anthropic is not None:
+            os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+
+    assert seen["codex"] >= 1, "Codex route must be attempted"
+    assert seen["openrouter"] == 1, "OpenRouter waterfall must serve after Codex 404"
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert content == "waterfall after codex 404"
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None
+    assert meta.data.get("gpt_token_error") == "server_error"
+    assert classify_gpt_token_error(RoseServerError("Codex 404: ", status=404)) == "server_error"
+
+
 async def test_client_api_key_tier_402_falls_through_to_waterfall():
     """End-to-end: no compute token → funded api-key tier hit → 402 → backs off
     and falls through to the OpenRouter waterfall (which serves the response)."""
@@ -6105,6 +6215,7 @@ async def run_all_tests():
     r = BlackboxResult()
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
+    r.record("build_anthropic_body_no_input_mutation", test_build_anthropic_body_does_not_mutate_caller_messages)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
     r.record("oss_pool_is_open_weights_only", test_oss_pool_is_open_weights_only)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)
@@ -6350,6 +6461,10 @@ async def run_all_tests():
     await r.record_async(
         "gpt_token_usage_limit_to_openai_apikey",
         test_client_gpt_token_usage_limit_falls_back_to_openai_api_key,
+    )
+    await r.record_async(
+        "codex_404_falls_through_to_waterfall",
+        test_client_codex_404_falls_through_to_waterfall,
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall

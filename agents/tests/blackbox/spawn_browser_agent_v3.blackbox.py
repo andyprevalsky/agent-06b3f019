@@ -301,6 +301,82 @@ def test_transient_session_init_failure_classification():
 # don't exist (ImportError) and the guarantees below don't hold.
 # ============================================================================
 
+# ============================================================================
+# RCA repro — read_browser_state must not burn the action step budget
+# ----------------------------------------------------------------------------
+# Bug (before): d5b79a331 replaced free per-turn DOM injection with an explicit
+# `read_browser_state` tool but still incremented MAX_ITERATIONS for every call.
+# Smoke agent b4b36b53 (browser-biometrics-webdecoy) spent 16/60 steps on
+# read_browser_state, hit max steps on the Submit click, and never read the
+# visible FCaptcha score before the 420s harness pause.
+#
+# Fix (after): adjust_iteration_after_action refunds the step for
+# read_browser_state (capped consecutive so a stuck model still terminates).
+# ============================================================================
+
+
+def test_read_browser_state_does_not_consume_step_budget():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = 5, 0
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 4
+    assert consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="Read_Browser_State",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3
+    assert consecutive == 2
+
+
+def test_read_browser_state_budget_refund_caps_consecutive_observations():
+    from domains.spawn_browser_agent_v3.config import (
+        MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS,
+        adjust_iteration_after_action,
+    )
+
+    iteration, consecutive = 20, 0
+    for _ in range(MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS):
+        iteration, consecutive = adjust_iteration_after_action(
+            iteration=iteration,
+            action_name="read_browser_state",
+            consecutive_budget_free=consecutive,
+        )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    # Next observation consumes budget so the loop cannot spin forever.
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="read_browser_state",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
+    assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS + 1
+
+
+def test_click_resets_budget_free_observation_streak():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=3,
+        action_name="read_browser_state",
+        consecutive_budget_free=0,
+    )
+    assert iteration == 2 and consecutive == 1
+    iteration, consecutive = adjust_iteration_after_action(
+        iteration=iteration + 1,  # loop already incremented for the click turn
+        action_name="click",
+        consecutive_budget_free=consecutive,
+    )
+    assert iteration == 3 and consecutive == 0
+
+
 def test_visible_result_completion_rewrites_post_submit_wait():
     """c3762be3 already stated score 0.07 + bot verdict, then waited 6–10s.
 
@@ -6259,6 +6335,124 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
     browser_stream.finish_tools.assert_awaited_once_with(status="ERROR")
     assert browser_turn_messages[-1]["role"] == "tool"
     assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
+
+
+def test_post_verifier_rejection_browser_state_fetch_is_bounded():
+    """After a durable verifier rejection, refreshing browser state must stay soft-bounded.
+
+    polar-odysseys-440ed7f388a2 TREE STALL: challenge freeze left CDP hung, so
+    the post-reject `get_browser_state` burned the full 300s BrowserStateRequest
+    timeout with no further durable messages while Temporal keepalive heartbeats
+    kept the activity alive. Tree-stall correctly paused at ~510s of silence.
+    The rejection message was already persisted — this refresh is optional and
+    must go through `_get_browser_state_soft` (≈10s × 2), never a bare CDP await
+    inside the verifier try/except.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from domains.spawn_browser_agent_v3 import config, handler
+
+    assert config.BROWSER_STATE_SOFT_TIMEOUT_SECONDS == 10.0
+    assert config.BROWSER_STATE_SOFT_ATTEMPTS == 2
+
+    source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
+    tree = ast.parse(source)
+    reject_title_nodes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.JoinedStr)
+        and any(
+            isinstance(part, ast.Constant) and "Verifier rejected" in str(part.value)
+            for part in node.values
+        )
+    ]
+    assert reject_title_nodes, "expected Verifier rejected title in attempt_completion path"
+    reject_lineno = min(node.lineno for node in reject_title_nodes)
+
+    soft_calls = []
+    bare_gets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Await) or node.lineno < reject_lineno:
+            continue
+        if node.lineno >= reject_lineno + 80:
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if isinstance(func, ast.Name) and func.id == "_get_browser_state_soft":
+            soft_calls.append(node.lineno)
+            continue
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "get_browser_state"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "dom_service"
+        ):
+            bare_gets.append(node.lineno)
+
+    assert soft_calls, (
+        "post-verifier-rejection path must await _get_browser_state_soft; "
+        "found none after Verifier rejected"
+    )
+    assert not bare_gets, (
+        "post-verifier-rejection path must not bare-await get_browser_state; "
+        f"found unbounded await at line(s) {bare_gets}"
+    )
+
+
+async def test_get_browser_state_soft_retries_then_returns_none_on_hang():
+    """Soft fetch times out per attempt, retries once, then returns None."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def hang(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        await asyncio.Event().wait()
+
+    started = asyncio.get_event_loop().time()
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=hang),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    elapsed = asyncio.get_event_loop().time() - started
+    assert out is None
+    assert calls["n"] == 2
+    assert 0.08 <= elapsed < 0.5, elapsed
+
+
+async def test_get_browser_state_soft_retries_after_timeout_then_succeeds():
+    """A single soft timeout is retried and can still return state."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from domains.spawn_browser_agent_v3.handler import _get_browser_state_soft
+
+    calls = {"n": 0}
+
+    async def flaky(*, include_screenshot: bool = False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(1)
+        return {"url": "https://example.com", "screenshot": None}
+
+    out = await _get_browser_state_soft(
+        SimpleNamespace(get_browser_state=flaky),
+        include_screenshot=False,
+        timeout_seconds=0.05,
+        attempts=2,
+    )
+    assert out == {"url": "https://example.com", "screenshot": None}
+    assert calls["n"] == 2
+
 
 async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
     """Helper still supports restore_cookies=False for non-recovery callers."""
@@ -18800,6 +18994,18 @@ async def run_all_tests():
         test_browser_fast_mode_timeout_is_demo_only,
     )
     r.record(
+        "read_browser_state_does_not_consume_step_budget",
+        test_read_browser_state_does_not_consume_step_budget,
+    )
+    r.record(
+        "read_browser_state_budget_refund_caps_consecutive_observations",
+        test_read_browser_state_budget_refund_caps_consecutive_observations,
+    )
+    r.record(
+        "click_resets_budget_free_observation_streak",
+        test_click_resets_budget_free_observation_streak,
+    )
+    r.record(
         "visible_result_completion_rewrites_post_submit_wait",
         test_visible_result_completion_rewrites_post_submit_wait,
     )
@@ -19198,6 +19404,18 @@ async def run_all_tests():
     await r.record_async(
         "rotation_storage_timeout_finishes_error",
         test_recovery_storage_timeout_finishes_error_and_returns_control_to_model_loop,
+    )
+    r.record(
+        "post_verifier_rejection_browser_state_fetch_bounded",
+        test_post_verifier_rejection_browser_state_fetch_is_bounded,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_none",
+        test_get_browser_state_soft_retries_then_returns_none_on_hang,
+    )
+    await r.record_async(
+        "get_browser_state_soft_retries_then_succeeds",
+        test_get_browser_state_soft_retries_after_timeout_then_succeeds,
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
@@ -19635,6 +19853,10 @@ async def run_all_tests():
         test_alchemy_evaluate_js_completes_on_healthy_canvas,
     )
     await r.record_async(
+        "evaluate_awaits_promises",
+        test_evaluate_awaits_promises,
+    )
+    await r.record_async(
         "renderer_block_matches_evaluate_timeout_recovery_signature",
         test_renderer_block_matches_evaluate_timeout_recovery_signature,
     )
@@ -19720,6 +19942,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_download_persister_ignores_network_fetch",
         test_browser_download_persister_ignores_network_fetch_heuristics,
+    )
+    await r.record_async(
+        "browser_download_persister_rebinds_listeners",
+        test_browser_download_persister_rebinds_listeners_on_new_cdp_client,
+    )
+    await r.record_async(
+        "chrome_download_trusts_inline_disposition_png",
+        test_chrome_download_trusts_inline_disposition_png,
+    )
+    await r.record_async(
+        "materialize_prefers_provider_file_path",
+        test_materialize_prefers_provider_file_path_before_page_fetch,
     )
     r.record(
         "dom_service_defaults_downloads_path_from_env",
@@ -19930,6 +20164,10 @@ async def run_all_tests():
         "execute_goto_err_aborted_persists_download",
         test_execute_goto_err_aborted_persists_attachment_download,
     )
+    await r.record_async(
+        "goto_err_aborted_persists_download_to_session",
+        test_goto_err_aborted_persists_download_to_session,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     r.record("api_surface_guard", test_url_looks_like_api_surface_guard)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
@@ -20004,6 +20242,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_active_tab_url",
         test_browser_agent_recording_captures_visible_active_tab_url,
+    )
+    await r.record_async(
+        "browser_agent_recording_mark_survives_wiped_frames_dir",
+        test_browser_agent_recording_mark_survives_wiped_frames_dir,
     )
     await r.record_async(
         "browser_agent_recording_disabled_env",
@@ -20096,6 +20338,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_cleanup_scheduler_nonblocking",
         test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
+    )
+    await r.record_async(
+        "browser_cleanup_emits_task_complete_terminal",
+        test_browser_cleanup_emits_task_complete_terminal_for_fe_chip,
+    )
+    await r.record_async(
+        "browser_cleanup_skips_task_complete_when_paused",
+        test_browser_cleanup_skips_task_complete_when_paused_for_resume,
+    )
+    r.record(
+        "browser_activity_finally_skips_terminal_on_pause",
+        test_browser_activity_finally_skips_terminal_on_pause_for_resume,
     )
     await r.record_async(
         "drain_background_browser_cleanups",

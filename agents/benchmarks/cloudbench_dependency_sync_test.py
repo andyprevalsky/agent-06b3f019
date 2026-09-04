@@ -7196,66 +7196,71 @@ printf '%s' "$tok"
     assert result.stdout == "good-token", result.stdout + result.stderr
 
 
-def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
-    """Owning-boundary repro against a deterministic auth-required Git server.
-
-    The Rose repository can change visibility independently of this contract, so
-    using GitHub itself made an unauthenticated fetch turn green when it became
-    public. The loopback fixture preserves the real Git HTTP-header boundary.
-    """
-    resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
-    resolved = subprocess.run(
+def test_refresh_deps_controller_auth_header_fetches_private_repo(tmp_path: Path) -> None:
+    """Owning-boundary repro: empty AUTH_HDR fails private fetch; controller
+    header succeeds. Mirrors the warm-box failure mode without Fly."""
+    seed_repo = tmp_path / "seed"
+    private_repo = tmp_path / "private.git"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(seed_repo)], check=True)
+    (seed_repo / "README").write_text("private fixture\n")
+    subprocess.run(["git", "-C", str(seed_repo), "add", "README"], check=True)
+    subprocess.run(
         [
-            "bash",
+            "git",
+            "-C",
+            str(seed_repo),
             "-c",
-            f"source {shlex.quote(str(resolver))}; "
-            f"cloudbench_resolve_github_token {shlex.quote(str(ROOT))}",
+            "user.name=Cloudbench Test",
+            "-c",
+            "user.email=cloudbench@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
         ],
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
+        check=True,
     )
-    assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
-    token = resolved.stdout.strip()
-    assert token, "canonical controller GitHub token resolver returned an empty token"
-    auth_value = "Basic " + base64.b64encode(
-        f"x-access-token:{token}".encode()
-    ).decode()
-    auth = f"Authorization: {auth_value}"
-    commit_sha = "1" * 40
-    observed_auth: list[str | None] = []
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed_repo), str(private_repo)], check=True)
+    subprocess.run(["git", "--git-dir", str(private_repo), "update-server-info"], check=True)
 
-    def pkt_line(payload: bytes) -> bytes:
-        return f"{len(payload) + 4:04x}".encode() + payload
-
-    advertisement = (
-        pkt_line(b"# service=git-upload-pack\n")
-        + b"0000"
-        + pkt_line(
-            f"{commit_sha} HEAD\0symref=HEAD:refs/heads/main agent=fixture/1.0\n".encode()
-        )
-        + pkt_line(f"{commit_sha} refs/heads/main\n".encode())
-        + b"0000"
-    )
+    token = "test-controller-token"
+    auth = "Authorization: Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    observed_auth: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
+        def _send(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self) -> None:
-            received_auth = self.headers.get("Authorization")
-            observed_auth.append(received_auth)
-            if received_auth != auth_value:
+            request_auth = self.headers.get("Authorization", "")
+            observed_auth.append(request_auth)
+            if self.path == "/repos/Rose-Ai-Labs/rose":
+                if request_auth == f"Bearer {token}":
+                    self._send(200, b'{"private":true}', "application/json")
+                else:
+                    self._send(401, b'{"message":"Bad credentials"}', "application/json")
+                return
+            if request_auth != auth.removeprefix("Authorization: "):
                 self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="cloudbench-test"')
+                self.send_header("WWW-Authenticate", 'Basic realm="private-git"')
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            self.send_response(200)
-            self.send_header(
-                "Content-Type", "application/x-git-upload-pack-advertisement"
-            )
-            self.send_header("Content-Length", str(len(advertisement)))
-            self.end_headers()
-            self.wfile.write(advertisement)
+            relative = self.path.partition("?")[0].lstrip("/")
+            target = (tmp_path / relative).resolve()
+            try:
+                target.relative_to(tmp_path.resolve())
+            except ValueError:
+                self._send(403, b"")
+                return
+            if not target.is_file():
+                self._send(404, b"")
+                return
+            self._send(200, target.read_bytes())
 
         def log_message(self, *_args) -> None:
             return
@@ -7263,17 +7268,41 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/rose.git"
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    resolver = ROOT / "scripts/lib/cloudbench-github-token.sh"
     env = {
         **os.environ,
+        "CLOUDBENCH_GITHUB_REPO_API": f"{base_url}/repos/Rose-Ai-Labs/rose",
+        "CLOUDBENCH_GITHUB_TOKEN": token,
+        "CLOUDBENCH_GITHUB_TOKEN_B64": "",
+        "GITHUB_DISPATCH_TOKEN": "",
+        "GITHUB_TOKEN": "",
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
-        "HOME": "/tmp/cloudbench-refresh-deps-auth-repro",
+        "HOME": str(tmp_path / "client-home"),
     }
     Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     base = ["git", "-c", "credential.helper="]
     try:
+        resolved = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {shlex.quote(str(resolver))}; "
+                f"cloudbench_resolve_github_token {shlex.quote(str(ROOT))}",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+            timeout=30,
+        )
+        assert resolved.returncode == 0, "canonical controller GitHub token resolver failed"
+        assert resolved.stdout.strip() == token, "canonical controller GitHub token resolver returned the wrong token"
+
+        url = f"{base_url}/private.git"
+        observed_auth.clear()
         bug = subprocess.run(
             base + ["-c", "http.extraheader=", "ls-remote", url, "HEAD"],
             text=True,
@@ -7283,6 +7312,10 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
             timeout=30,
             check=False,
         )
+        assert bug.returncode != 0
+        assert observed_auth and auth.removeprefix("Authorization: ") not in observed_auth
+
+        observed_auth.clear()
         fixed = subprocess.run(
             base + ["-c", f"http.extraheader={auth}", "ls-remote", url, "HEAD"],
             text=True,
@@ -7292,21 +7325,13 @@ def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
             timeout=30,
             check=False,
         )
+        assert fixed.returncode == 0, fixed.stderr
+        assert auth.removeprefix("Authorization: ") in observed_auth
+        assert re.match(r"^[0-9a-f]{40}\s+HEAD$", fixed.stdout.strip().splitlines()[0])
     finally:
         server.shutdown()
         server.server_close()
         server_thread.join(timeout=5)
-
-    assert bug.returncode != 0
-    assert re.search(
-        r"authentication failed|could not read username",
-        bug.stderr or "",
-        re.IGNORECASE,
-    )
-    assert fixed.returncode == 0, fixed.stderr
-    assert fixed.stdout.strip().splitlines()[0] == f"{commit_sha}\tHEAD"
-    assert observed_auth[0] is None
-    assert auth_value in observed_auth
 
 
 

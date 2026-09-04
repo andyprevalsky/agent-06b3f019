@@ -95,6 +95,23 @@ def upload_run_json(run_json: Path) -> str:
     return str(bundle.get("run_id") or "")
 
 
+def dual_write_claude_code_sessions(run_json: Path, agent_id: str) -> None:
+    """Mirror Claude Code transcripts into prod so durable FE terminals render."""
+    script = REPO_ROOT / "scripts" / "dual_write_claude_code_sessions.py"
+    if not script.is_file():
+        print(f"⚠ skip session dual-write — missing {script}")
+        return
+    cmd = [
+        sys.executable,
+        str(script),
+        "--run-json",
+        str(run_json),
+        "--agent-id",
+        agent_id,
+    ]
+    print(f"Dual-writing Claude Code sessions for {agent_id}…")
+    subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
+
 def _message_metadata(message: dict) -> dict:
     meta = message.get("metadata")
     if isinstance(meta, dict):
@@ -335,7 +352,9 @@ def main() -> int:
     agent_id = _normalize_agent_id(args.agent_id)
     run_id = ""
     if args.run_json and not args.skip_hub_upload:
-        run_id = upload_run_json(args.run_json.resolve())
+        run_path = args.run_json.resolve()
+        run_id = upload_run_json(run_path)
+        dual_write_claude_code_sessions(run_path, agent_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
     dump_html = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:

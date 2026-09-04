@@ -8,8 +8,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 
@@ -17,6 +18,14 @@ config();
 
 import { prisma } from '../../providers/database';
 import { deleteAgentRecursive } from '../../providers/agentKill';
+import { listArchivedObjectsStrict } from '../../providers/traceArchive';
+import { inspectFinalizedManifest } from '../../providers/traceArchiveManifest';
+import {
+  enqueueTraceArchiveFinalization,
+  releaseTraceArchiveDeletion,
+  runTraceArchiveFinalizationRetries,
+  type TraceArchiveDeletionLease,
+} from '../../providers/traceArchiveFinalizationRetry';
 
 let passed = 0;
 const failures: string[] = [];
@@ -57,6 +66,18 @@ async function main(): Promise<void> {
     assert.match(kill, /agentAttentionRequest\.deleteMany/);
     assert.match(kill, /deletedAt:\s*new Date\(\)/);
     assert.match(kill, /cleanupAgentSessions/);
+    assert.match(kill, /enqueueTraceArchiveFinalization\(tx, agentId\)/);
+    assert.match(kill, /runTraceArchiveFinalizationRetries/);
+    assert.match(kill, /workflowTerminationHandled = false/);
+    assert.match(
+      kill,
+      /sealed\.traceArchiveDeletionLease !== null && workflowTerminationHandled/,
+      'unexpected workflow termination failures must retain the R2 finalization lease'
+    );
+    assert.match(
+      readSrc('src', 'serverCron.ts'),
+      /scheduleTraceArchiveFinalizationRetries\(isProduction\)/
+    );
     // Soft-delete under workflow-generation lock before recursing children so a
     // concurrent child create cannot commit after the descendant snapshot.
     assert.match(kill, /lockAgentWorkflowGeneration/);
@@ -95,10 +116,41 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('Temporal cleanup trigger fences R2 finalization and deadline preflight is neutral', () => {
+    const cleanupMigration = readSrc(
+      'prisma',
+      'migrations',
+      '20260724002500_temporal_cleanup_utc_grace',
+      'migration.sql'
+    );
+    assert.match(
+      cleanupMigration,
+      /NEW\."deletedAt" IS NOT NULL AND OLD\."deletedAt" IS NULL/,
+      'soft-delete must atomically enqueue Temporal cleanup'
+    );
+    assert.match(cleanupMigration, /INSERT INTO "TemporalWorkflowCleanup"/);
+    assert.match(cleanupMigration, /SET "temporalCleanupPending" = true/);
+
+    const retry = readSrc('src', 'providers', 'traceArchiveFinalizationRetry.ts');
+    assert.match(retry, /if \(agent\.temporalCleanupPending\)/);
+    assert.match(
+      retry,
+      /assertBeforeDeadline\(options\.deadlineAtMs\);\s*} catch \(error\) {\s*await unclaim\(obligation\);\s*throw error;\s*}\s*try {\s*await assertDeletedTreeIsTerminal/,
+      'a deadline reached before R2 work must release the claim without retry backoff'
+    );
+  });
+
   await test('deleteAgentRecursive removes attention for parent + child', async () => {
     const userId = `archive-attn-${randomUUID()}`;
     const parentId = randomUUID();
     const childId = randomUUID();
+    const archiveDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-archive-'));
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
 
     await prisma.user.create({
       data: { userId, phone: `+1555${String(Date.now()).slice(-7)}` },
@@ -160,12 +212,248 @@ async function main(): Promise<void> {
       });
       assert.equal(archived.length, 2);
       assert.ok(archived.every((row) => row.deletedAt !== null));
+
+      const rootObjects = await listArchivedObjectsStrict(parentId);
+      const rootPaths = new Set(rootObjects.map((object) => object.path));
+      assert.ok(rootPaths.has('db/end.fixture.json.gz.enc'));
+      assert.ok(rootPaths.has('manifest.json.gz.enc'));
+      assert.ok(rootPaths.has('manifest.public.json'));
+      assert.equal((await inspectFinalizedManifest(parentId)).status, 'current');
+      assert.deepEqual(await listArchivedObjectsStrict(childId), []);
     } finally {
       await prisma.agentAttentionRequest.deleteMany({
         where: { agentId: { in: [parentId, childId] } },
       });
       await prisma.agent.deleteMany({ where: { id: { in: [parentId, childId] } } });
       await prisma.user.deleteMany({ where: { userId } });
+      rmSync(archiveDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('failed root finalization stays durable and repeated delete respects backoff', async () => {
+    const userId = `archive-retry-${randomUUID()}`;
+    const rootId = randomUUID();
+    const testDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-retry-'));
+    const invalidArchiveRoot = join(testDir, 'not-a-directory');
+    const recoveredArchiveRoot = join(testDir, 'recovered');
+    writeFileSync(invalidArchiveRoot, 'block mkdir');
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = invalidArchiveRoot;
+
+    await prisma.user.create({
+      data: { userId, phone: `+1554${String(Date.now()).slice(-7)}` },
+    });
+    await prisma.agent.create({
+      data: {
+        id: rootId,
+        userId,
+        goal: 'root archive retry',
+        status: 'ACTIVE',
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+
+    try {
+      await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+
+      const retained = await prisma.traceArchiveFinalization.findUnique({
+        where: { rootAgentId: rootId },
+      });
+      assert.ok(retained, 'failed R2 finalization must retain an outbox row');
+      assert.equal(retained.attemptCount, 1);
+      assert.ok(retained.lastError);
+      assert.ok(
+        (await prisma.agent.findUniqueOrThrow({ where: { id: rootId } })).deletedAt,
+        'the retry obligation must survive after the root is already soft-deleted'
+      );
+
+      process.env.TRACE_ARCHIVE_LOCAL_DIR = recoveredArchiveRoot;
+      await deleteAgentRecursive(rootId, { terminateReason: 'unit-test retry' });
+
+      const stillRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
+        where: { rootAgentId: rootId },
+      });
+      assert.equal(stillRetained.attemptCount, 1);
+      assert.equal(stillRetained.notBefore.getTime(), retained.notBefore.getTime());
+      assert.equal(stillRetained.lastError, retained.lastError);
+      assert.deepEqual(
+        await listArchivedObjectsStrict(rootId),
+        [],
+        'an idempotent repeated delete must not bypass retry backoff'
+      );
+
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 1, finalized: 1 }
+      );
+
+      assert.equal(
+        await prisma.traceArchiveFinalization.findUnique({ where: { rootAgentId: rootId } }),
+        null,
+        'successful retry must clear the durable obligation'
+      );
+      const paths = new Set((await listArchivedObjectsStrict(rootId)).map((object) => object.path));
+      assert.ok(paths.has('db/end.fixture.json.gz.enc'));
+      assert.ok(paths.has('manifest.json.gz.enc'));
+      assert.ok(paths.has('manifest.public.json'));
+      assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: rootId } });
+      await prisma.user.deleteMany({ where: { userId } });
+      rmSync(testDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
+    }
+  });
+
+  await test('finalization waits for deletion ownership and terminal descendants', async () => {
+    const userId = `archive-ordering-${randomUUID()}`;
+    const rootId = randomUUID();
+    const childId = randomUUID();
+    const archiveDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-ordering-'));
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
+
+    await prisma.user.create({
+      data: { userId, phone: `+1553${String(Date.now()).slice(-7)}` },
+    });
+    await prisma.agent.create({
+      data: {
+        id: rootId,
+        userId,
+        goal: 'root archive ordering',
+        status: 'ACTIVE',
+        deletedAt: new Date(),
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+    await prisma.agent.create({
+      data: {
+        id: childId,
+        userId,
+        parentAgentId: rootId,
+        goal: 'child archive ordering',
+        status: 'ACTIVE',
+        deletedAt: new Date(),
+        temporalCleanupPending: true,
+        busId: rootId,
+        verifier: { create: {} },
+      },
+    });
+
+    try {
+      let deletionLease: TraceArchiveDeletionLease | null = null;
+      await prisma.$transaction(async (tx) => {
+        deletionLease = await enqueueTraceArchiveFinalization(tx, rootId);
+      });
+      assert.ok(deletionLease);
+
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 0, finalized: 0 },
+        'an active recursive deletion lease must not be claimable'
+      );
+
+      await releaseTraceArchiveDeletion(deletionLease);
+      await assert.rejects(
+        runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        AggregateError,
+        'a descendant Temporal cleanup obligation must block the end fixture'
+      );
+      assert.equal(
+        (
+          await prisma.traceArchiveFinalization.findUniqueOrThrow({
+            where: { rootAgentId: rootId },
+          })
+        ).attemptCount,
+        1
+      );
+      const beforeSecondFailure = Date.now();
+      await assert.rejects(
+        runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        AggregateError
+      );
+      const twiceRetained = await prisma.traceArchiveFinalization.findUniqueOrThrow({
+        where: { rootAgentId: rootId },
+      });
+      assert.equal(twiceRetained.attemptCount, 2);
+      assert.ok(
+        twiceRetained.notBefore.getTime() >= beforeSecondFailure + 110_000,
+        'the second failure must back off for approximately two minutes'
+      );
+      assert.ok(
+        twiceRetained.notBefore.getTime() <= Date.now() + 125_000,
+        'the second failure backoff must remain bounded'
+      );
+
+      await prisma.agent.update({
+        where: { id: childId },
+        data: { temporalCleanupPending: false },
+      });
+      assert.deepEqual(
+        await runTraceArchiveFinalizationRetries({
+          rootAgentIds: [rootId],
+          batchSize: 1,
+          maxConcurrency: 1,
+          ignoreGrace: true,
+        }),
+        { discovered: 1, finalized: 1 }
+      );
+      assert.equal(
+        await prisma.traceArchiveFinalization.findUnique({ where: { rootAgentId: rootId } }),
+        null
+      );
+      assert.equal((await inspectFinalizedManifest(rootId)).status, 'current');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: { in: [childId, rootId] } } });
+      await prisma.user.deleteMany({ where: { userId } });
+      rmSync(archiveDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
     }
   });
 

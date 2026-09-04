@@ -5,19 +5,25 @@ import {
   archiveJson,
   archiveEnabled,
   listArchivedObjects,
+  listArchivedObjectsStrict,
   safeArchivePath,
   storeEncryptedArtifact,
-  storePlainArtifact,
   validateEncryptedArtifactEnvelope,
 } from './traceArchive';
+import {
+  type ManifestArtifact,
+  encryptedManifestIndex,
+  excludeControlArtifacts,
+  finalizationFenceExists,
+  publicManifest,
+  reconcileFinalizedManifest,
+  uniqueArtifacts,
+  withArchiveManifestLock,
+  writeFinalizationMarker,
+  writePublicManifest,
+} from './traceArchiveManifest';
 
 const log = createLogger('Archive');
-const rawPublicManifest = process.env.TRACE_ARCHIVE_PUBLIC_MANIFEST;
-const TRACE_ARCHIVE_PUBLIC_MANIFEST =
-  (rawPublicManifest !== undefined && rawPublicManifest !== ''
-    ? rawPublicManifest
-    : 'true'
-  ).toLowerCase() !== 'false';
 const rawBaseImageHash = process.env.TRACE_ARCHIVE_BASE_IMAGE_HASH;
 const TRACE_ARCHIVE_BASE_IMAGE_HASH =
   rawBaseImageHash !== undefined && rawBaseImageHash !== '' ? rawBaseImageHash : null;
@@ -59,18 +65,6 @@ export interface ArchiveArtifactRef {
   metadata?: EncryptedArtifactMetadata;
 }
 
-type ManifestArtifact = {
-  ref: string;
-  path?: string | null;
-  metadata?: Record<string, unknown> | unknown;
-};
-type ManifestArtifactRef = {
-  ref: string;
-  path: string | null;
-  content_type: unknown;
-  plaintext_bytes: unknown;
-  ciphertext_bytes: unknown;
-};
 type FinalizeAgentResult = {
   manifest: ArchiveArtifactRef | null;
   publicManifestRef: string | null;
@@ -78,74 +72,9 @@ type FinalizeAgentResult = {
 
 const finalizeInFlight = new Map<string, Promise<FinalizeAgentResult>>();
 
-function artifactPath(artifact: ManifestArtifact): string | null {
-  const value = metadataField(artifact, 'path') ?? artifact.path ?? null;
-  return typeof value === 'string' ? value : null;
-}
-
-function manifestArtifactRef(artifact: ManifestArtifact): ManifestArtifactRef {
-  return {
-    ref: artifact.ref,
-    path: artifactPath(artifact),
-    content_type: metadataField(artifact, 'content_type') ?? null,
-    plaintext_bytes: metadataField(artifact, 'plaintext_bytes') ?? null,
-    ciphertext_bytes: metadataField(artifact, 'ciphertext_bytes') ?? null,
-  };
-}
-
 function normalizedWorldModelMode(mode: string | undefined): string {
   const value = (mode ?? 'real').trim().toLowerCase();
   return value === '' ? 'real' : value;
-}
-
-function publicManifest(
-  rootAgentId: string,
-  artifacts: ManifestArtifact[],
-  benchmarkTaskName?: string
-): Record<string, unknown> {
-  const refs = artifacts.map(manifestArtifactRef);
-  return {
-    schema_version: 1,
-    root_agent_id: rootAgentId,
-    benchmark_task_name: benchmarkTaskName ?? null,
-    generated_at: new Date().toISOString(),
-    artifact_count: refs.length,
-    fixture_count: refs.filter((artifact) => artifact.path?.startsWith('db/') === true).length,
-    provider_count: refs.filter((artifact) => artifact.path?.startsWith('provider/') === true)
-      .length,
-    media_count: refs.filter((artifact) => artifact.path?.startsWith('media/') === true).length,
-    llm_trace_count: refs.filter((artifact) => artifact.path?.startsWith('llm') === true).length,
-    artifacts: refs,
-  };
-}
-
-function metadataField(artifact: ManifestArtifact, key: string): unknown {
-  const metadata = artifact.metadata;
-  if (metadata === null || typeof metadata !== 'object') return undefined;
-  return (metadata as Record<string, unknown>)[key];
-}
-
-function uniqueArtifacts(artifacts: ManifestArtifact[]): ManifestArtifact[] {
-  const seen = new Set<string>();
-  const unique: ManifestArtifact[] = [];
-  for (const artifact of artifacts) {
-    if (seen.has(artifact.ref)) continue;
-    seen.add(artifact.ref);
-    unique.push(artifact);
-  }
-  return unique;
-}
-
-// The manifest itself is now written at agent start, so listArchivedObjects()
-// returns the manifest control files on every subsequent write. Exclude them so
-// a bundle's manifest never indexes itself (which would inflate artifact counts
-// and self-reference the manifest).
-const CONTROL_ARTIFACT_PATHS = new Set(['manifest.json.gz.enc', 'manifest.public.json']);
-function excludeControlArtifacts(artifacts: ManifestArtifact[]): ManifestArtifact[] {
-  return artifacts.filter((artifact) => {
-    const path = artifactPath(artifact);
-    return path === null || !CONTROL_ARTIFACT_PATHS.has(path);
-  });
 }
 
 function encryptedRunMetadata(fixture: {
@@ -168,21 +97,6 @@ function encryptedRunMetadata(fixture: {
     base_image: fixture.base_image,
     base_image_hash: TRACE_ARCHIVE_BASE_IMAGE_HASH,
     end_fixture_captured_at: fixture.captured_at,
-  };
-}
-
-function encryptedManifestIndex(artifacts: ManifestArtifact[]): Record<string, unknown> {
-  const refs = artifacts.map(manifestArtifactRef);
-  return {
-    artifact_refs: refs,
-    fixture_refs: refs.filter((artifact) => artifact.path?.startsWith('db/') === true),
-    provider_refs: refs.filter((artifact) => artifact.path?.startsWith('provider/') === true),
-    media_refs: refs.filter((artifact) => artifact.path?.startsWith('media/') === true),
-    llm_trace_refs: refs.filter(
-      (artifact) =>
-        artifact.path?.startsWith('llm/') === true ||
-        artifact.path?.startsWith('llm-updates/') === true
-    ),
   };
 }
 
@@ -272,6 +186,19 @@ export async function storeWorkerArtifact(
   if (ref === null) {
     throw new Error('Trace archive is disabled or unavailable');
   }
+  const finalizationStarted = await finalizationFenceExists(input.rootAgentId);
+  if (finalizationStarted) {
+    const reconciled = await reconcileFinalizedManifest(input.rootAgentId, {
+      markerExists: true,
+    });
+    if (reconciled.status === 'updated') {
+      log.info('Trace archive manifest reconciled after late worker artifact', {
+        root_agent_id: input.rootAgentId,
+        object_path: objectPath,
+        artifact_count: reconciled.actualArtifactCount,
+      });
+    }
+  }
   return { ref };
 }
 
@@ -311,26 +238,6 @@ export async function archiveAgentStartFixture(
     });
   }
   return { fixture: result };
-}
-
-/** Best-effort public manifest mirror; shared by the start and finalize writes. */
-async function writePublicManifest(
-  rootAgentId: string,
-  refs: ManifestArtifact[],
-  benchmarkTaskName?: string
-): Promise<string | null> {
-  if (!TRACE_ARCHIVE_PUBLIC_MANIFEST) return null;
-  const publicValue = publicManifest(rootAgentId, refs, benchmarkTaskName);
-  const publicManifestRef = await storePlainArtifact({
-    rootAgentId,
-    objectPath: 'manifest.public.json',
-    body: Buffer.from(JSON.stringify(publicValue, null, 2)),
-    contentType: 'application/json',
-  });
-  if (archiveEnabled() && publicManifestRef === null) {
-    throw new Error(`Failed to archive required public manifest for ${rootAgentId}`);
-  }
-  return publicManifestRef;
 }
 
 /** Non-eligible placeholder mode for a bundle whose true mode isn't known yet. */
@@ -515,50 +422,58 @@ export async function finalizeAgent(input: AgentFinalizeRequest): Promise<Finali
 async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeAgentResult> {
   const endFixture = await collectFixture(input.rootAgentId, 'end');
   assertArchiveFinalizable(input, endFixture);
-  const fixtureRef = await archiveJson({
-    rootAgentId: input.rootAgentId,
-    objectPath: 'db/end.fixture.json.gz.enc',
-    value: endFixture,
-  });
-  if (archiveEnabled() && fixtureRef === null) {
-    throw new Error(`Failed to archive required end fixture for ${input.rootAgentId}`);
-  }
-  const listedRefs = await listArchivedObjects(input.rootAgentId);
-  const refs = uniqueArtifacts(
-    excludeControlArtifacts(fixtureRef === null ? listedRefs : [...listedRefs, fixtureRef])
-  );
-  const manifestValue = buildManifestValue({
-    rootAgentId: input.rootAgentId,
-    refs,
-    worldModelMode: input.worldModelMode,
-    benchmarkTaskName: input.benchmarkTaskName,
-    benchmarkResult: benchmarkResultFromInput(input),
-    run: encryptedRunMetadata(endFixture),
-    correlations: {
+  // Publish the durable fence before taking the object snapshot. A worker PUT
+  // that finishes before this marker is strongly visible will be included by
+  // the following R2 list; one that finishes afterward observes the marker and
+  // enters the same per-root lock to reconcile the manifests before HTTP 200.
+  await writeFinalizationMarker(input.rootAgentId);
+  return withArchiveManifestLock(input.rootAgentId, async () => {
+    const fixtureRef = await archiveJson({
+      rootAgentId: input.rootAgentId,
+      objectPath: 'db/end.fixture.json.gz.enc',
+      value: endFixture,
+    });
+    if (archiveEnabled() && fixtureRef === null) {
+      throw new Error(`Failed to archive required end fixture for ${input.rootAgentId}`);
+    }
+    const listedRefs = await listArchivedObjectsStrict(input.rootAgentId);
+    const refs = uniqueArtifacts(
+      excludeControlArtifacts(fixtureRef === null ? listedRefs : [...listedRefs, fixtureRef])
+    );
+    const manifestValue = buildManifestValue({
+      rootAgentId: input.rootAgentId,
+      refs,
+      worldModelMode: input.worldModelMode,
+      benchmarkTaskName: input.benchmarkTaskName,
+      benchmarkResult: benchmarkResultFromInput(input),
+      run: encryptedRunMetadata(endFixture),
+      correlations: {
+        root_agent_id: input.rootAgentId,
+        user_id: endFixture.user_id,
+        agent_ids: endFixture.agent_ids,
+      },
+      finalized: true,
+      force: input.force === true,
+    });
+    const manifest = await archiveJson({
+      rootAgentId: input.rootAgentId,
+      objectPath: 'manifest.json.gz.enc',
+      value: manifestValue,
+    });
+    if (archiveEnabled() && manifest === null) {
+      throw new Error(`Failed to archive required manifest for ${input.rootAgentId}`);
+    }
+    const publicManifestRef = await writePublicManifest(
+      input.rootAgentId,
+      refs,
+      input.benchmarkTaskName
+    );
+    log.info('Trace archive finalized', {
       root_agent_id: input.rootAgentId,
-      user_id: endFixture.user_id,
-      agent_ids: endFixture.agent_ids,
-    },
-    finalized: true,
-    force: input.force === true,
+      manifest_ref: manifest?.ref ?? null,
+      fixture_ref: fixtureRef?.ref ?? null,
+      artifact_count: refs.length,
+    });
+    return { manifest, publicManifestRef };
   });
-  const manifest = await archiveJson({
-    rootAgentId: input.rootAgentId,
-    objectPath: 'manifest.json.gz.enc',
-    value: manifestValue,
-  });
-  if (archiveEnabled() && manifest === null) {
-    throw new Error(`Failed to archive required manifest for ${input.rootAgentId}`);
-  }
-  const publicManifestRef = await writePublicManifest(
-    input.rootAgentId,
-    refs,
-    input.benchmarkTaskName
-  );
-  log.info('Trace archive finalized', {
-    root_agent_id: input.rootAgentId,
-    manifest_ref: manifest?.ref ?? null,
-    fixture_ref: fixtureRef?.ref ?? null,
-  });
-  return { manifest, publicManifestRef };
 }

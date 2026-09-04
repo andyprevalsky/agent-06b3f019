@@ -86,8 +86,17 @@ def normalize_status(entry: dict[str, object]) -> ReviewStatus:
             str(entry.get(key) or "")
             for key in ("description", "title", "output", "summary")
         ).lower()
+        # GraphQL rollup often reports SUCCESS for non-reviews. Treat quota /
+        # skip outcomes as unsuccessful so /deploy cannot false-green on them.
         if "review skipped" in description:
             return ReviewStatus("REVIEW_SKIPPED", True, False, kind, entry)
+        if (
+            "rate limited" in description
+            or "review limit reached" in description
+            or "usage spending cap" in description
+            or "spending cap" in description
+        ):
+            return ReviewStatus("REVIEW_RATE_LIMITED", True, False, kind, entry)
         return ReviewStatus(normalized, True, True, kind, entry)
     if normalized in FAILURE_STATES:
         return ReviewStatus(normalized, True, False, kind, entry)

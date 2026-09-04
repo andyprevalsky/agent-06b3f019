@@ -4,7 +4,7 @@
  *  - `card-provider/agentcard-org-mcp.ts` — validation, KYC gate, text-parsed details.
  *  - `card-provider/agentcard-user-mcp.ts` — validation, full-record mint, text details,
  *    isError + thrown-error mapping.
- *  - `agentcard/org-runtime.ts` — token acquisition (direct + client-credentials) and auth retry.
+ *  - `agentcard/org-runtime.ts` — Bearer `acs_` secret (no JWT) plus auth retry.
  *  - `wallet-funding.ts` — fund/confirm-collection/reclaim edge cases.
  *
  * Every collaborator is injected (tool callers + fetch), so no MCP or network call is made.
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
     );
   });
 
-  // ── org-runtime token acquisition ──
+  // ── org-runtime Bearer secret (no JWT exchange) ──
   await test('org runtime uses a direct access token when no client credentials exist', async () => {
     const prev = {
       token: process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN,
@@ -236,7 +236,7 @@ async function main(): Promise<void> {
     }
   });
 
-  await test('org runtime exchanges client credentials and retries once on auth error', async () => {
+  await test('org runtime sends the client secret as Bearer and retries once on auth error', async () => {
     const prev = {
       id: process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID,
       secret: process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET,
@@ -248,8 +248,10 @@ async function main(): Promise<void> {
     try {
       let tokenFetches = 0;
       let toolCalls = 0;
+      let seenToken = '';
       const runtime = new AgentCardOrgRuntime(
-        async () => {
+        async (accessToken) => {
+          seenToken = accessToken;
           toolCalls += 1;
           if (toolCalls === 1) throw new Error('401 unauthorized');
           return { ok: true };
@@ -266,8 +268,9 @@ async function main(): Promise<void> {
       );
       const result = await runtime.callTool('get_company_wallet', {});
       assert.deepEqual(result, { ok: true });
-      assert.equal(toolCalls, 2, 'the tool call retries after refreshing the token');
-      assert.equal(tokenFetches, 2, 'a fresh token is fetched for the retry');
+      assert.equal(seenToken, 'client-secret');
+      assert.equal(toolCalls, 2, 'the tool call retries after an MCP auth error');
+      assert.equal(tokenFetches, 0, 'organization MCP must not exchange a JWT for the org secret');
     } finally {
       if (prev.id === undefined) delete process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID;
       else process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = prev.id;
@@ -277,7 +280,7 @@ async function main(): Promise<void> {
     }
   });
 
-  await test('org runtime throws when the token endpoint fails', async () => {
+  await test('org runtime throws when the organization MCP tools/call is unauthorized', async () => {
     const prev = {
       id: process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID,
       secret: process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET,
@@ -287,10 +290,10 @@ async function main(): Promise<void> {
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'client-secret';
     delete process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN;
     try {
-      const runtime = new AgentCardOrgRuntime(async () => ({ ok: true }), (async () => ({
+      const runtime = new AgentCardOrgRuntime(undefined, (async () => ({
         ok: false,
         status: 401,
-        text: async () => JSON.stringify({ error: 'invalid_client' }),
+        text: async () => JSON.stringify({ error: 'Invalid or expired organization token' }),
       })) as unknown as typeof fetch);
       await assert.rejects(
         () => runtime.callTool('get_company_wallet', {}),

@@ -10,6 +10,9 @@ plus the agreed P1 contract change for 400):
     HTTP 429                -> RoseRateLimitError (rotates pooled token)
     HTTP 400                -> RoseInvalidRequest (does NOT rotate; falls through)
     HTTP 5xx                -> RoseServerError    (retried in-place, then falls through)
+    HTTP 404 / other        -> RoseServerError    (infra/edge unavailable; falls through —
+                                                   never bare RoseError, which is NOT in
+                                                   RoseClient._FALL_THROUGH_ERRORS)
     Stream stall / TTFT TO  -> RoseStallError     (does NOT rotate; falls through)
     Provider refusal        -> RoseRefusalError   (strict safety refusal; falls through)
     All pool models failed  -> RoseAllFailed      (terminal; carries per-step errors)
@@ -47,7 +50,12 @@ class RoseInvalidRequest(RoseError):
 
 
 class RoseServerError(RoseError):
-    """5xx from a provider — retried in-place with exponential backoff."""
+    """Provider unavailable (5xx after retries, or infra/edge 404).
+
+    5xx is retried in-place then falls through. Unexpected statuses such as a
+    Cloudflare/edge 404 on Codex are raised immediately as this type so
+    RoseClient falls through to openai-api-key / waterfall before first content.
+    """
 
 
 class RosePaymentRequiredError(RoseError):

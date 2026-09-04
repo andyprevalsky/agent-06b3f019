@@ -38,6 +38,25 @@ class TerminalFilter:
         self.screen = pyte.Screen(cols, rows)
         self.stream = pyte.Stream(self.screen)
         self._raw_chunks: list[str] = []
+        # Tracks whether the previous feed ended with CR so a chunk-boundary
+        # `\r` + `\n` split is not turned into `\r\r\n`.
+        self._last_was_cr = False
+
+    @staticmethod
+    def _normalize_convert_eol(data: str, last_was_cr: bool) -> tuple[str, bool]:
+        """Match xterm.js ``convertEol: true``: bare LF also returns the cursor.
+
+        Claude Code / many PTY streams emit LF without CR. pyte (unlike our FE
+        xterm with convertEol) treats bare LF as "move down, keep column", which
+        produces the staircase wraps persisted into ``ClaudeCodeSession.output``.
+        """
+        out: list[str] = []
+        for ch in data:
+            if ch == "\n" and not last_was_cr:
+                out.append("\r")
+            out.append(ch)
+            last_was_cr = ch == "\r"
+        return "".join(out), last_was_cr
 
     def feed(self, data: str) -> None:
         """
@@ -47,7 +66,8 @@ class TerminalFilter:
             data: Raw terminal output including ANSI codes
         """
         self._raw_chunks.append(data)
-        self.stream.feed(data)
+        normalized, self._last_was_cr = self._normalize_convert_eol(data, self._last_was_cr)
+        self.stream.feed(normalized)
 
     def get_display(self) -> str:
         """
@@ -85,6 +105,7 @@ class TerminalFilter:
         """Reset the terminal state (e.g., on reconnection with new buffer)."""
         self.screen.reset()
         self._raw_chunks.clear()
+        self._last_was_cr = False
 
     def get_cursor_position(self) -> tuple[int, int]:
         """

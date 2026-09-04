@@ -49,6 +49,7 @@ import feedbackRouter from './domains/feedback/routes';
 import adminHealthRouter from './domains/admin-health/routes';
 import imessageRouter from './domains/imessage/routes';
 import dataRouter from './domains/data/routes';
+import externalHttpRouter from './domains/external-http/routes';
 import benchmarksRouter from './domains/benchmarks/routes';
 import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
@@ -530,6 +531,7 @@ app.use('/api/feedback', feedbackRouter);
 app.use('/api/download-telemetry', downloadTelemetryRouter);
 app.use('/api/admin-health', adminHealthRouter);
 app.use('/api/data', dataRouter);
+app.use('/api/external-http', externalHttpRouter);
 app.use('/api/purchases', purchasesRouter);
 // AgentCard "for companies": org-managed cardholder onboarding plus the optional
 // per-user MCP tool surface. Browser callbacks are public; status/tools require auth.

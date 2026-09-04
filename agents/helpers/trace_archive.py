@@ -19,7 +19,7 @@ import os
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
@@ -72,7 +72,11 @@ def _local_root() -> Path:
     configured = os.environ.get("TRACE_ARCHIVE_LOCAL_ROOT", "").strip()
     if configured:
         return Path(configured).expanduser()
-    if _is_production() and not os.environ.get("CONDUCTOR_WORKSPACE_NAME") and _uses_default_repo_local_root(_LOCAL_ROOT):
+    if (
+        _is_production()
+        and not os.environ.get("CONDUCTOR_WORKSPACE_NAME")
+        and _uses_default_repo_local_root(_LOCAL_ROOT)
+    ):
         return _PROD_FALLBACK_LOCAL_ROOT
     return _LOCAL_ROOT
 
@@ -178,6 +182,21 @@ def _artifact_lock(target: Path) -> Iterator[None]:
 
 def _artifact_transaction_path(target: Path) -> Path:
     return target.with_suffix(target.suffix + _ARTIFACT_TRANSACTION_SUFFIX)
+
+
+def _artifact_transaction_target(path: Path) -> Optional[Path]:
+    if not path.name.endswith(_ARTIFACT_TRANSACTION_SUFFIX):
+        return None
+    return path.with_name(path.name[: -len(_ARTIFACT_TRANSACTION_SUFFIX)])
+
+
+def _is_artifact_transaction_temporary(path: Path) -> bool:
+    marker = f"{_ARTIFACT_TRANSACTION_SUFFIX}."
+    _, separator, tail = path.name.rpartition(marker)
+    if not separator or not tail.endswith(".tmp"):
+        return False
+    identifiers = tail[: -len(".tmp")].split(".")
+    return 1 <= len(identifiers) <= 2 and all(identifier.isdigit() for identifier in identifiers)
 
 
 def _encode_artifact_transaction(ciphertext: bytes, metadata: dict[str, Any]) -> bytes:
@@ -385,6 +404,26 @@ def _is_missing_r2_object_error(exc: Exception) -> bool:
     return exc.__class__.__name__ in {"NoSuchKey", "ClientError"} and "NoSuchKey" in str(exc)
 
 
+def use_r2_archive() -> bool:
+    """True when archive reads/writes target R2 (prod, or TRACE_ARCHIVE_BACKEND=r2)."""
+    return _use_r2_archive()
+
+
+def local_archive_root() -> Path:
+    """Local mirror root for archive bundles (``.context/trace-archive`` by default)."""
+    return _local_root()
+
+
+def r2_client() -> Any:
+    """Shared boto3 S3 client for the trace-archive R2 bucket."""
+    return _r2_client()
+
+
+def r2_bucket() -> str:
+    """Name of the trace-archive R2 bucket."""
+    return _r2_bucket()
+
+
 def read_local_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, dict[str, Any]]]:
     """Read a locally archived encrypted artifact and its metadata."""
     safe_root = _safe_segment(root_agent_id)
@@ -438,7 +477,8 @@ def list_local_artifact_paths(root_agent_id: str) -> list[str]:
         if (
             item.is_file()
             and not item.name.endswith(".meta.json")
-            and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
+            and _artifact_transaction_target(item) is None
+            and not _is_artifact_transaction_temporary(item)
         ):
             paths.append(item.relative_to(bundle).as_posix())
     return sorted(paths)
@@ -564,6 +604,7 @@ def _post_backend_artifact(
     path: str,
     ciphertext: bytes,
     metadata: dict[str, Any],
+    timeout_s: Optional[float] = None,
 ) -> Optional[str]:
     url = _backend_archive_url()
     api_key = _backend_api_key()
@@ -571,6 +612,9 @@ def _post_backend_artifact(
         logger.warning("trace_archive.backend_missing_config", root_agent_id=root_agent_id, path=path)
         return None
     try:
+        request_options: dict[str, Any] = {}
+        if timeout_s is not None:
+            request_options["timeout"] = max(0.001, min(30.0, timeout_s))
         resp = _backend_http_client().post(
             url,
             headers={"X-API-Key": api_key, "Content-Type": "application/json"},
@@ -580,6 +624,7 @@ def _post_backend_artifact(
                 "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"),
                 "metadata": metadata,
             },
+            **request_options,
         )
         if resp.status_code == 200:
             return str((resp.json() or {}).get("ref") or f"trace-archive/{root_agent_id}/{path}")
@@ -590,36 +635,67 @@ def _post_backend_artifact(
         return None
 
 
-def _drain_backend_outbox(limit: int = 8) -> None:
+def _drain_backend_outbox(
+    limit: int = 8,
+    root_agent_id: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> int:
+    if deadline is not None and time.monotonic() >= deadline:
+        return 0
     root = _outbox_root()
-    if not root.exists():
-        return
+    try:
+        if not root.exists():
+            return 0
+        safe_root = _safe_segment(root_agent_id) if root_agent_id else None
+        bundles = sorted(
+            item for item in root.iterdir() if item.is_dir() and (safe_root is None or item.name == safe_root)
+        )
+    except OSError as exc:
+        logger.warning("trace_archive.outbox_scan_error", root_agent_id=root_agent_id, error=str(exc)[:200])
+        return 0
     drained = 0
-    for bundle in sorted(item for item in root.iterdir() if item.is_dir()):
-        if drained >= limit:
-            return
-        for item in sorted(bundle.rglob("*")):
-            if drained >= limit:
-                return
-            if not item.is_file() or item.name.endswith(".meta.json"):
+    for bundle in bundles:
+        if drained >= limit or (deadline is not None and time.monotonic() >= deadline):
+            return drained
+        try:
+            items = sorted(bundle.rglob("*"))
+        except OSError as exc:
+            logger.warning(
+                "trace_archive.outbox_scan_error",
+                root_agent_id=bundle.name,
+                error=str(exc)[:200],
+            )
+            return drained
+        for item in items:
+            if drained >= limit or (deadline is not None and time.monotonic() >= deadline):
+                return drained
+            if not item.is_file():
                 continue
-            meta_path = item.with_suffix(item.suffix + ".meta.json")
-            if not meta_path.exists():
+            target = _outbox_artifact_target(item)
+            if target is None:
                 continue
             root_agent_id = bundle.name
-            path = item.relative_to(bundle).as_posix()
+            path = target.relative_to(bundle).as_posix()
             try:
-                with _artifact_lock(item):
-                    pair = _read_artifact_pair_unlocked(item)
+                with _artifact_lock(target):
+                    _recover_artifact_transaction_unlocked(target)
+                    meta_path = target.with_suffix(target.suffix + ".meta.json")
+                    if not meta_path.exists():
+                        continue
+                    pair = _read_artifact_pair_unlocked(target)
                 if pair is None:
                     continue
                 ciphertext, metadata = pair
                 expected_ciphertext_sha256 = str(metadata["ciphertext_sha256"])
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return drained
                 ref = _post_backend_artifact(
                     root_agent_id=root_agent_id,
                     path=path,
                     ciphertext=ciphertext,
                     metadata=metadata,
+                    timeout_s=remaining,
                 )
                 if ref:
                     if _delete_outbox(
@@ -635,7 +711,8 @@ def _drain_backend_outbox(limit: int = 8) -> None:
                     path=path,
                     error=str(exc)[:200],
                 )
-                return
+                return drained
+    return drained
 
 
 def store_encrypted_artifact(
@@ -681,6 +758,8 @@ _ARCHIVE_EXECUTOR = ThreadPoolExecutor(
 )
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(int(os.environ.get("TRACE_ARCHIVE_MAX_IN_FLIGHT", "64") or "64"))
 _ARCHIVE_DROPPED_JOBS = 0
+_ARCHIVE_PENDING_LOCK = threading.Lock()
+_ARCHIVE_PENDING_BY_ROOT: dict[str, set[Future[None]]] = {}
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -706,6 +785,74 @@ def _expected_ref(safe_root: str, safe_path: str) -> str:
     if _is_production() or backend == "r2":
         return f"trace-archive/{safe_root}/{safe_path}"
     return str(_local_root() / safe_root / safe_path)
+
+
+def _track_archive_future(root_agent_id: str, future: Future[None]) -> None:
+    with _ARCHIVE_PENDING_LOCK:
+        _ARCHIVE_PENDING_BY_ROOT.setdefault(root_agent_id, set()).add(future)
+
+    def _remove(completed: Future[None]) -> None:
+        with _ARCHIVE_PENDING_LOCK:
+            pending = _ARCHIVE_PENDING_BY_ROOT.get(root_agent_id)
+            if pending is None:
+                return
+            pending.discard(completed)
+            if not pending:
+                _ARCHIVE_PENDING_BY_ROOT.pop(root_agent_id, None)
+
+    future.add_done_callback(_remove)
+
+
+def _pending_archive_futures(root_agent_id: str) -> set[Future[None]]:
+    with _ARCHIVE_PENDING_LOCK:
+        return set(_ARCHIVE_PENDING_BY_ROOT.get(_safe_segment(root_agent_id), set()))
+
+
+def _outbox_artifact_target(item: Path) -> Optional[Path]:
+    """Map a durable outbox file to the artifact pair it can publish."""
+    if item.name.endswith(".meta.json"):
+        return None
+    transaction_target = _artifact_transaction_target(item)
+    if transaction_target is not None:
+        return transaction_target
+    return None if _is_artifact_transaction_temporary(item) else item
+
+
+def _root_outbox_has_artifacts(root_agent_id: str) -> bool:
+    bundle = _outbox_root() / _safe_segment(root_agent_id)
+    if not bundle.exists():
+        return False
+    return any(item.is_file() and _outbox_artifact_target(item) is not None for item in bundle.rglob("*"))
+
+
+def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
+    """Wait for locally accepted writes, then retry this run's durable outbox.
+
+    The wait is run from a worker thread by terminal lifecycle activities, never
+    on the event loop. It is a first-line ordering barrier only: another worker
+    process can still own writes for the same root, so the backend manifest
+    reconciliation fence remains authoritative.
+    """
+    safe_root = _safe_segment(root_agent_id)
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        pending = _pending_archive_futures(safe_root)
+        if not pending:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        _, unfinished = wait(pending, timeout=remaining)
+        if unfinished:
+            return False
+
+    if _use_r2_archive():
+        while _root_outbox_has_artifacts(safe_root):
+            if time.monotonic() >= deadline:
+                return False
+            if _drain_backend_outbox(limit=64, root_agent_id=safe_root, deadline=deadline) == 0:
+                return False
+    return True
 
 
 def _archive_bytes_now(
@@ -780,12 +927,15 @@ def _submit_archive_job(
             if result is not None and drain_backend_outbox_after_success:
                 _drain_backend_outbox()
         except Exception as exc:
-            logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
+            logger.warning(
+                "trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200]
+            )
         finally:
             _ARCHIVE_SLOTS.release()
 
     try:
-        _ARCHIVE_EXECUTOR.submit(_job)
+        future = _ARCHIVE_EXECUTOR.submit(_job)
+        _track_archive_future(safe_root, future)
     except Exception:
         _ARCHIVE_SLOTS.release()
         raise
@@ -861,7 +1011,9 @@ def archive_json_deferred(
 
     if not in_loop or not _async_writes_enabled():
         body = _body()
-        return archive_bytes(root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True)
+        return archive_bytes(
+            root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=True
+        )
     return _submit_archive_job(
         root_agent_id=root_agent_id,
         path=path,

@@ -1,6 +1,10 @@
 """Spawn-agent domain configuration: constants, defaults, limits."""
 
+from __future__ import annotations
+
+import os
 from datetime import timedelta
+from typing import Final
 
 # ── Explore agent ──
 EXPLORE_ACTIVITY_TIMEOUT = timedelta(seconds=600)  # 10 min max (medium default)
@@ -127,3 +131,49 @@ def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) 
 
 # ── Explore message save ──
 SAVE_MESSAGE_TIMEOUT = 5.0
+
+
+# =============================================================================
+# Temporary GPA kill-switch
+# =============================================================================
+# Drop general_purpose / for_each spawn routes so coding-agent GitHub ranking
+# benches cannot burn budget (or trip forbidden_tools) on recursive GP fan-out.
+# Prefer spawn_agent(type=code). Values: 1 / true / yes / on
+ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV: Final[str] = "ROSE_DISABLE_GENERAL_PURPOSE_AGENT"
+
+_DISABLED_TYPES: Final[frozenset[str]] = frozenset({"general_purpose", "for_each"})
+_DISABLED_PLANNER_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "spawn_general_purpose_agent",
+        "spawn_general_purpose_agent_for_each",
+    }
+)
+
+
+def general_purpose_agent_disabled() -> bool:
+    """Return True when general_purpose / for_each spawn routes must be blocked."""
+    raw = os.getenv(ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def is_disabled_general_purpose_type(agent_type: str | None) -> bool:
+    """True when ``agent_type`` is blocked by ROSE_DISABLE_GENERAL_PURPOSE_AGENT."""
+    return general_purpose_agent_disabled() and str(agent_type or "").strip() in _DISABLED_TYPES
+
+
+def is_disabled_general_purpose_planner_tool(tool_name: str | None) -> bool:
+    """True when a planner alias tool is blocked by the GPA kill-switch."""
+    return general_purpose_agent_disabled() and str(tool_name or "").strip() in _DISABLED_PLANNER_TOOLS
+
+
+def disabled_general_purpose_rejection_message(
+    *, agent_type: str | None = None, tool_name: str | None = None
+) -> str:
+    """User-facing rejection for a blocked general_purpose / for_each spawn."""
+    label = agent_type or tool_name or "general_purpose"
+    return (
+        f"spawn_agent type/tool '{label}' is disabled for this run "
+        f"({ROSE_DISABLE_GENERAL_PURPOSE_AGENT_ENV}=1). "
+        "Use spawn_agent(type='code') / Claude Code for GitHub discovery and ranking, "
+        "or type='explore' for read-only research."
+    )

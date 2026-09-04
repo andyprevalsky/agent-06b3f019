@@ -23,7 +23,17 @@ function log(level, message, data = {}) {
   }
 }
 
-const PORT = 3000;
+// E2B template defaults to 3000; local fallback overrides via PORT.
+const rawPort = process.env.PORT || "3000";
+if (!/^\d+$/.test(rawPort)) {
+  log("error", "Invalid PORT — require a complete decimal value", { port: rawPort });
+  process.exit(1);
+}
+const PORT = Number.parseInt(rawPort, 10);
+if (PORT < 0 || PORT > 65535) {
+  log("error", "PORT out of range (0–65535)", { port: PORT });
+  process.exit(1);
+}
 const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
@@ -190,9 +200,11 @@ process.on("SIGTERM", () => shutdown(0));
 log("info", "Configuring Claude Code");
 
 const home = homedir();
+const attachmentsDir = join(home, "attachments");
+const outputDir = join(home, "output");
 mkdirSync(join(home, ".claude"), { recursive: true });
-mkdirSync("/home/user/attachments", { recursive: true });
-mkdirSync("/home/user/output", { recursive: true });
+mkdirSync(attachmentsDir, { recursive: true });
+mkdirSync(outputDir, { recursive: true });
 
 const config = {
   theme: "dark",
@@ -224,7 +236,7 @@ if (CLAUDE_CODE_CREDENTIALS) {
 // Trust configuration: write in BOTH legacy and modern formats so any
 // Claude Code version recognises the workspace as trusted.
 const projects = {
-  "/home/user": { allowedTools: ["*"], hasTrustDialogAccepted: true },
+  [home]: { allowedTools: ["*"], hasTrustDialogAccepted: true },
   "/": { allowedTools: ["*"], hasTrustDialogAccepted: true },
 };
 
@@ -235,7 +247,7 @@ writeFileSync(join(home, ".claude", "projects.json"), JSON.stringify(projects));
 // in ~/.claude/settings.json under an allowedDirectories array.
 const settingsPath = join(home, ".claude", "settings.json");
 const settings = {
-  allowedDirectories: ["/home/user", "/"],
+  allowedDirectories: [home, "/"],
   ...(CLAUDE_CODE_FAST_MODE ? { fastMode: true } : {}),
 };
 writeFileSync(settingsPath, JSON.stringify(settings));
@@ -243,8 +255,8 @@ writeFileSync(settingsPath, JSON.stringify(settings));
 log("info", "Configuration written");
 
 // Clone GitHub repo if specified
-let workDir = "/home/user";
-const REPO_WORKDIR = "/home/user/workspace";
+let workDir = home;
+const REPO_WORKDIR = join(home, "workspace");
 
 if (GITHUB_REPO_URL) {
   console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
@@ -318,8 +330,34 @@ function textFromContent(content) {
 function pathsFromToolInput(input) {
   if (!input || typeof input !== "object") return [];
   return [input.file_path, input.path, input.notebook_path].filter(
-    (value) => typeof value === "string" && value.startsWith("/home/user/"),
+    (value) =>
+      typeof value === "string" &&
+      (value.startsWith(`${home}/`) || value.startsWith("/home/user/")),
   );
+}
+
+function detailFromToolInput(input, paths) {
+  if (input && typeof input === "object") {
+    for (const key of [
+      "command",
+      "file_path",
+      "path",
+      "notebook_path",
+      "pattern",
+      "query",
+      "url",
+      "description",
+    ]) {
+      const value = input[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim().replace(/\s+/g, " ").slice(0, 240);
+      }
+    }
+  }
+  if (Array.isArray(paths) && paths.length) {
+    return paths.slice(0, 4).join(", ");
+  }
+  return "";
 }
 
 function emitClaudeMessage(message) {
@@ -360,9 +398,10 @@ function emitClaudeMessage(message) {
           input: part.input || {},
           paths,
         });
+        const detail = detailFromToolInput(part.input || {}, paths);
         appendOutput(
           "stdout",
-          `[Claude tool] ${part.name}${paths.length ? ` ${paths.join(", ")}` : ""}\n`,
+          `[Claude tool] ${part.name}${detail ? ` · ${detail}` : ""}\n`,
         );
       }
     }

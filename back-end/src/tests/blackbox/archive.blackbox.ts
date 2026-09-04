@@ -19,6 +19,7 @@ import {
   listArchivedObjects,
   readArchivedArtifact,
 } from '../../providers/traceArchive';
+import { assertLateArchiveManifestConvergence } from './archive-late-manifest.helper';
 
 config();
 
@@ -445,10 +446,20 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     // finalize. It must never index its own control files.
     assert(
       !manifest.sensitive.artifact_refs.some(
-        (ref) => ref.path === 'manifest.json.gz.enc' || ref.path === 'manifest.public.json'
+        (ref) =>
+          ref.path === 'manifest.json.gz.enc' ||
+          ref.path === 'manifest.public.json' ||
+          ref.path === 'manifest.finalization-fence.json'
       ),
       'finalize manifest must not index the manifest control files'
     );
+
+    // A late successful POST must not return until both manifests converge.
+    await assertLateArchiveManifestConvergence({
+      baseUrl: BASE_URL,
+      headers,
+      rootAgentId: seed.rootAgentId,
+    });
   } finally {
     await cleanup(seed);
   }

@@ -1,5 +1,6 @@
 """Finished tool for marking agent task completion."""
 
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -23,6 +24,7 @@ async def mark_finished(
     summary: str = "",
     structured_response: Optional[Dict] = None,
     iteration_offset: Optional[int] = None,
+    root_agent_id: Optional[str] = None,
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -39,6 +41,7 @@ async def mark_finished(
         tokens_out: Output tokens (completion)
         summary: Summary of work completed (for sub-agents to return to parent)
         structured_response: Extracted structured output from the agent (if schema was defined)
+        root_agent_id: Root run ID used by the shared trace archive bundle
 
     Returns:
         Dict with completion details including summary
@@ -48,6 +51,30 @@ async def mark_finished(
 
         # Extract goal from first USER message
         goal = extract_goal_from_context(steps_taken)
+
+        # Settle archive jobs accepted by this worker process before the status
+        # transition asks the backend to snapshot the run. This cannot see jobs
+        # owned by another replica, so the backend's durable finalization fence
+        # remains the source of truth and reconciles any cross-process late PUT.
+        from helpers.trace_archive import flush_archive_writes
+
+        archive_root_agent_id = root_agent_id or agent_id
+        try:
+            archive_settled = await asyncio.to_thread(flush_archive_writes, archive_root_agent_id, 15.0)
+        except Exception as exc:
+            logger.warning(
+                "trace_archive.pre_terminal_flush_error",
+                agent_id=agent_id,
+                root_agent_id=archive_root_agent_id,
+                error=str(exc)[:200],
+            )
+        else:
+            if not archive_settled:
+                logger.warning(
+                    "trace_archive.pre_terminal_flush_incomplete",
+                    agent_id=agent_id,
+                    root_agent_id=archive_root_agent_id,
+                )
 
         # Use the single update_agent_status helper (no activity wrapper - call directly)
         from helpers.update_status import _update_agent_status_impl

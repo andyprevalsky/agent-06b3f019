@@ -17,6 +17,7 @@ from helpers.workflow_generation import (
 )
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
+from temporalio.exceptions import ApplicationError
 
 logger = structlog.get_logger()
 
@@ -74,7 +75,14 @@ async def save_claude_code_message(
     if completed_turns is not None:
         metadata["completed_turns"] = max(0, int(completed_turns))
 
-    if not is_init_message:
+    # Intermediate chip rows (progress, task_started, system) are child-scoped
+    # UI and must stay out of the parent LLM context via subAgentId.
+    # Parent-facing task_complete terminals reuse the spawn toolCallId — if they
+    # are also marked subAgentId, drop_rows_never_sent_to_model strips them and
+    # the ASSISTANT tool_call is left unpaired (role_alternation). That happens
+    # on cancel/DAG-cancel when the handler never yields a twin ERROR event and
+    # Session Cancelled from this helper is the only terminal for the toolCallId.
+    if not is_init_message and action_type != "task_complete":
         metadata["subAgentId"] = task_id
 
     if status == MessageStatus.ERROR:
@@ -163,9 +171,27 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            raise Exception(
-                f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
+            message = (
+                f"Failed to create code session (provider={code_provider}): "
+                f"HTTP {response.status_code}{detail}"
             )
+            upper = f"{message} {response_text}".upper()
+            billing_markers = (
+                "MISSING PAYMENT METHOD",
+                "TEAM IS BLOCKED",
+                "CREDIT BALANCE IS TOO LOW",
+                "TOO LOW TO ACCESS THE ANTHROPIC API",
+                "YOUR CREDIT BALANCE IS TOO LOW",
+            )
+            if any(m in upper for m in billing_markers):
+                # Permanent billing blocks must not burn activity retries —
+                # the tool manager soft-fails and the agent continues.
+                raise ApplicationError(
+                    message,
+                    type="ClaudeCodeBillingBlocked",
+                    non_retryable=True,
+                )
+            raise Exception(message)
 
         return response.json()
 

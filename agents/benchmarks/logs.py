@@ -182,6 +182,107 @@ async def fetch_render_logs(
 # ---------------------------------------------------------------------------
 
 
+def _local_worker_log_paths() -> List[str]:
+    """Resolve local worker log files for isolated / cloud-local benchmark stacks.
+
+    Isolated ``run-bench`` / ``local.py`` stacks write ``<context>/logs/worker*.log``
+    (never the default ``agents/navi-worker-log.txt``). Diagnostics already point
+    ``NAVI_WORKER_LOGS`` at those files; ``collect_logs`` must read the same
+    paths so run JSON retains Claude Code / tool progress instead of an empty
+    ClickHouse/Fly placeholder.
+    """
+    paths: List[str] = []
+    seen: set[str] = set()
+
+    def _add(path: str) -> None:
+        if not path or path in seen:
+            return
+        if os.path.isfile(path):
+            seen.add(path)
+            paths.append(path)
+
+    for raw in (os.environ.get("NAVI_WORKER_LOGS") or "").split(","):
+        _add(raw.strip())
+
+    context_dir = (os.environ.get("BENCHMARK_CONTEXT_DIR") or "").strip()
+    if context_dir:
+        log_dir = os.path.join(context_dir, "logs")
+        if os.path.isdir(log_dir):
+            for name in sorted(os.listdir(log_dir)):
+                if name.startswith("worker") and name.endswith(".log"):
+                    _add(os.path.join(log_dir, name))
+
+    agents_dir = os.path.join(os.path.dirname(__file__), "..")
+    _add(os.path.join(agents_dir, "navi-worker-log.txt"))
+    _add(os.path.join(os.getcwd(), "navi-worker-log.txt"))
+    _add(os.path.join(os.getcwd(), "agents", "navi-worker-log.txt"))
+    return paths
+
+
+def _line_mentions_agent(line: str, agent_id: str) -> bool:
+    if not agent_id:
+        return False
+    if agent_id in line:
+        return True
+    short = agent_id[:12]
+    return bool(short) and short in line
+
+
+def fetch_local_worker_logs(
+    agent_id: str,
+    start_time: Optional[datetime] = None,
+    *,
+    limit: int = 20000,
+) -> List[str]:
+    """Read agent-scoped lines from local worker log files.
+
+    Returns JSONL/text lines that mention ``agent_id`` (full or 12-char prefix).
+    When ``start_time`` is set and a line parses as JSON with a timestamp, lines
+    before the window are skipped. Errors reading a file are returned as a
+    single placeholder line so callers can see the failure mode.
+    """
+    paths = _local_worker_log_paths()
+    if not paths:
+        return []
+
+    start_ts = start_time.astimezone(timezone.utc) if start_time is not None else None
+    matched: List[str] = []
+    for path in paths:
+        try:
+            with open(path, errors="replace") as handle:
+                for line in handle:
+                    line = line.rstrip("\n")
+                    if not line or not _line_mentions_agent(line, agent_id):
+                        continue
+                    if start_ts is not None:
+                        try:
+                            payload = json.loads(line)
+                        except json.JSONDecodeError:
+                            payload = None
+                        if isinstance(payload, dict):
+                            raw_ts = payload.get("timestamp") or payload.get("time")
+                            if isinstance(raw_ts, str) and raw_ts:
+                                try:
+                                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                                    if ts.tzinfo is None:
+                                        ts = ts.replace(tzinfo=timezone.utc)
+                                    if ts < start_ts:
+                                        continue
+                                except ValueError:
+                                    pass
+                    matched.append(line)
+                    if len(matched) >= limit:
+                        return matched
+        except OSError as exc:
+            matched.append(f"[local-worker] Error reading {path}: {exc}")
+    return matched
+
+
+def _is_remote_worker_log_placeholder(line: str) -> bool:
+    """True for non-content placeholders from Fly/ClickHouse collectors."""
+    return line.startswith("[fly.io]") or line.startswith("[clickhouse]")
+
+
 async def fetch_clickhouse_worker_logs(
     agent_id: str,
     start_time: datetime,
@@ -869,28 +970,42 @@ async def collect_logs(
     messages = extract_message_transcript(agent_data)
     realtime_logs = get_supabase_realtime_logs_for_agent(agent_id)
 
+    # Local isolated stacks write worker*.log under BENCHMARK_CONTEXT_DIR / NAVI_WORKER_LOGS.
+    # Prefer those over remote placeholders so Claude Code tool_use / SDK progress is retained
+    # in the run JSON (prod ClickHouse/Fly often empty or DNS-fail on cloud VMs).
+    local_worker_logs = fetch_local_worker_logs(agent_id, start_time)
+
     # Fly.io logs: merge retained ClickHouse rows + streaming collector + one-shot snapshot (deduped)
     stream_logs = get_flyio_logs_for_agent(agent_id)
     snapshot_logs, clickhouse_logs = await asyncio.gather(
         fetch_flyio_logs_snapshot(agent_id),
         fetch_clickhouse_worker_logs(agent_id, start_time),
     )
-    # Deduplicate: use set of raw strings, preserving order from retained logs first
+    # Deduplicate: local first (authoritative for local/cloudbench), then remote.
     seen = set()
     worker_logs = []
-    # Skip the "[fly.io] 0 logs..." placeholder messages
-    for log in clickhouse_logs + stream_logs + snapshot_logs:
-        if log.startswith("[fly.io]"):
+    for log in local_worker_logs + clickhouse_logs + stream_logs + snapshot_logs:
+        if _is_remote_worker_log_placeholder(log):
             continue
         if log not in seen:
             seen.add(log)
             worker_logs.append(log)
     if not worker_logs:
-        stream_total = _fly_collector.total_lines if _fly_collector else 0
-        worker_logs = [
-            f"[fly.io] 0 logs for agent {agent_id[:12]} "
-            f"({len(clickhouse_logs)} clickhouse + {stream_total} streamed + {len(snapshot_logs)} snapshot)"
-        ]
+        if local_worker_logs:
+            # Local read returned only error placeholders — keep them visible.
+            worker_logs = list(local_worker_logs)
+        else:
+            stream_total = _fly_collector.total_lines if _fly_collector else 0
+            remote_errors = [
+                log
+                for log in clickhouse_logs + snapshot_logs
+                if _is_remote_worker_log_placeholder(log)
+            ]
+            worker_logs = remote_errors or [
+                f"[fly.io] 0 logs for agent {agent_id[:12]} "
+                f"(0 local + {len(clickhouse_logs)} clickhouse + {stream_total} streamed "
+                f"+ {len(snapshot_logs)} snapshot)"
+            ]
 
     # Render logs are agent-filtered. Supabase gateway logs are only
     # time-window scoped, so tree diagnostics may prefetch and reuse them.

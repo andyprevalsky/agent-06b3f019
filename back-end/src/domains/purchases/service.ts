@@ -1,12 +1,8 @@
-import {
-  createCardProviderForAgent,
-  isCardLive,
-  type CardProvider,
-  type CardProviderDetailsResult,
-} from '../../providers/card-provider';
+import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { closedCardIndicatesMerchantSpend, tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
@@ -39,6 +35,7 @@ export {
 } from './reconcile';
 
 const log = createLogger('Purchases');
+
 function assertPositiveCents(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new PurchaseError(`${field} must be a positive integer`);
@@ -62,32 +59,6 @@ function isStaleChargingPurchase(purchase: PurchaseSpend, now: Date): boolean {
     purchase.status === PurchaseSpendStatus.CHARGING &&
     now.getTime() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
   );
-}
-
-/**
- * Returns the card details only if the card is still live; `null` if it has been
- * settled/closed/deleted or can't be read. Fail-safe: an unreadable card is treated as consumed
- * so we re-prompt instead of silently re-issuing a dead, already-charged card.
- */
-async function tryGetLiveCardDetails(
-  userId: string,
-  agentId: string | null,
-  cardId: string,
-  cardProvider?: CardProvider
-): Promise<CardProviderDetailsResult | null> {
-  // Provider selection may perform a database lookup. Let those errors propagate so a transient
-  // benchmark-classification failure cannot be mistaken for a consumed card and trigger billing.
-  const activeCardProvider = cardProvider ?? (await createCardProviderForAgent(userId, agentId));
-  try {
-    const details = await activeCardProvider.getDetails(cardId);
-    return isCardLive(details) ? details : null;
-  } catch (error) {
-    log.warn('Reuse liveness check failed; treating card as consumed', {
-      card_id: cardId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
 }
 
 export async function lookupPurchase(
@@ -126,9 +97,11 @@ export async function lookupPurchase(
       cardProvider
     );
     if (!liveDetails) {
-      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
       reusable = false;
-      status = PurchaseSpendStatus.CLEARED;
+      if (await closedCardIndicatesMerchantSpend(purchase.id)) {
+        await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+        status = PurchaseSpendStatus.CLEARED;
+      }
     }
   }
 
@@ -215,8 +188,10 @@ async function tryReuseExistingPurchase(
         status: existing.status,
       };
     }
-    // Held card already settled/closed — record it consumed; fall through to a fresh purchase.
-    await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
+    // Held card already settled/closed — record consumed unless Rose closed it for reclaim.
+    if (await closedCardIndicatesMerchantSpend(existing.id)) {
+      await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
+    }
   }
 
   // CLEARED / consumed / FAILED / REFUNDED / VOIDED → caller opens a fresh (or retried) purchase.

@@ -18,13 +18,7 @@
 import { createHash } from 'node:crypto';
 
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
-import {
-  RoseAuthError,
-  RoseError,
-  RoseInvalidRequest,
-  RoseRateLimitError,
-  RoseServerError,
-} from './errors';
+import { RoseAuthError, RoseInvalidRequest, RoseRateLimitError, RoseServerError } from './errors';
 import type { PoolSpec } from './pools';
 import {
   boundedRateLimitBackoffMs,
@@ -436,7 +430,12 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
       throw new RoseServerError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
     }
 
-    throw new RoseError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
+    // 404 (and any other unexpected non-2xx) must be RoseServerError so
+    // isFallThroughError() walks openai-api-key / waterfall. A bare RoseError
+    // is NOT fall-through — that gap made Cloudflare/edge 404s (empty body,
+    // same for garbage tokens) fail the whole agent instead of falling through.
+    // Do not retry 404 in place: the same egress IP keeps getting blocked.
+    throw new RoseServerError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
   }
 
   if (lastError) throw new RoseServerError(`Codex exhausted retries: ${lastError.message}`);
@@ -551,7 +550,9 @@ export async function* openAiApiKeyComplete(
       throw new RoseServerError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
     }
 
-    throw new RoseError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+    // Mirror Codex: unexpected statuses (incl. 404) fall through as
+    // RoseServerError, never bare RoseError (not in isFallThroughError).
+    throw new RoseServerError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
   }
 
   if (lastError) throw new RoseServerError(`OpenAI exhausted retries: ${lastError.message}`);
