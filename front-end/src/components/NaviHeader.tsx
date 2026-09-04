@@ -142,6 +142,16 @@ const NaviHeader = () => {
             Research
           </a>
           <a
+            href="/careers"
+            onClick={(event) => {
+              if (!openExternalFromElectron('/careers')) return;
+              event.preventDefault();
+            }}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Careers
+          </a>
+          <a
             href="/about"
             onClick={(event) => {
               if (!openExternalFromElectron('/about')) return;

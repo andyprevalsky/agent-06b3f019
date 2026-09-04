@@ -8,6 +8,7 @@ import agentQueuePointerRouter from './domains/agent-queue-pointer/routes';
 import formatRouter from './domains/format/routes';
 import toolsRouter from './domains/tools/routes';
 import waitlistRouter from './domains/waitlist/routes';
+import careersRouter from './domains/careers/routes';
 import blueprintsRouter from './domains/blueprints/routes';
 import modelsRouter from './domains/models/routes';
 import attentionRequestsRouter from './domains/attention-requests/routes';
@@ -418,6 +419,7 @@ if (process.env.NODE_ENV !== 'production') {
 // Public routes (no auth required)
 app.use('/api/auth', authRouter); // OTP send/verify (creates user + $5 credit)
 app.use('/api/waitlist', waitlistRouter);
+app.use('/api/careers', careersRouter);
 app.use('/api/models', modelsRouter); // Models list is public
 app.use('/api/tools', toolsRouter); // Tools list is public read
 app.use('/api/benchmarks', benchmarksRouter); // Benchmark tasks are public

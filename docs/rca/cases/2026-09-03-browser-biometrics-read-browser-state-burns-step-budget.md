@@ -16,10 +16,10 @@ tags:
   - smoke
   - biometrics
   - step-budget
-  - read_browser_state
+  - read-browser-state
 sources:
   - agent b4b36b53-d6ed-4574-a141-38687c6fab37
-  - fix agent 3d4a0f56-0c17-4c83-82b3-1cf9779c2f80
+  - agent 3d4a0f56-0c17-4c83-82b3-1cf9779c2f80
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_read_browser_state_does_not_consume_step_budget
 status: fixed
 ---
@@ -54,6 +54,10 @@ and click reset.
 
 Local proof on fixed revision: `scripts/run-bench --local browser-biometrics-webdecoy`
 → PASSED in 204s, agent `3d4a0f56-0c17-4c83-82b3-1cf9779c2f80`.
+
+## Human feedback
+
+None recorded.
 
 ## Reusable lesson
 

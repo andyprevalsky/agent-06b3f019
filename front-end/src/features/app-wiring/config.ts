@@ -10,6 +10,7 @@ import About from '@/features/about';
 import Terminal from '@/features/terminal';
 import ResearchBlog from '@/features/research-blog';
 import ResearchBlogPost from '@/features/research-blog-post';
+import Careers, { CareersRole } from '@/features/careers';
 import Download from '@/features/download';
 import TestPayment from '@/features/test-payment';
 import GatePlayground from '@/features/gate-playground';
@@ -44,6 +45,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/terminal', component: Index },
   { path: '/research', component: ResearchBlog },
   { path: '/research/:slug', component: ResearchBlogPost },
+  { path: '/careers', component: Careers },
+  { path: '/careers/:slug', component: CareersRole },
   { path: '/download', component: Download },
   { path: '/waitlist', component: Waitlist },
   { path: '/open-agent', component: OpenAgentRedirect },
