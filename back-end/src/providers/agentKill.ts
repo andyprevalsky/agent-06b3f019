@@ -21,6 +21,8 @@ import { cleanupAgentSessions } from './agentCleanup';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
+import { archiveEnabled } from './traceArchive';
+import { finalizeAgent } from './traceArchiveLifecycle';
 
 const log = createLogger('AgentKill');
 
@@ -31,6 +33,7 @@ export interface DeleteAgentOptions {
 
 interface SealedAgentKill {
   temporalWorkflowId: string | null;
+  parentAgentId: string | null;
   childIds: string[];
 }
 
@@ -53,6 +56,7 @@ export async function deleteAgentRecursive(
       where: { id: agentId, deletedAt: null },
       select: {
         temporalWorkflowId: true,
+        parentAgentId: true,
         children: { where: { deletedAt: null }, select: { id: true } },
       },
     });
@@ -65,6 +69,7 @@ export async function deleteAgentRecursive(
     });
     const result: SealedAgentKill = {
       temporalWorkflowId: agent.temporalWorkflowId,
+      parentAgentId: agent.parentAgentId,
       childIds: agent.children.map((child) => child.id),
     };
     return result;
@@ -113,6 +118,17 @@ export async function deleteAgentRecursive(
   await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
   // Fast Mode cache entries intentionally outlive agent deletion. They are keyed by
   // goal hash and only removed by the explicit fast-cache purge endpoint.
+
+  if (sealed.parentAgentId === null && archiveEnabled()) {
+    try {
+      await finalizeAgent({ rootAgentId: agentId, force: true });
+    } catch (error) {
+      log.warn('Trace archive finalization unavailable after agent deletion', {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   log.info('Deleted agent', { agent_id: agentId, terminate_reason: terminateReason });
 }

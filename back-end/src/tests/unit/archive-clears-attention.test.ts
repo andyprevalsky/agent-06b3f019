@@ -8,8 +8,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 
@@ -17,6 +18,8 @@ config();
 
 import { prisma } from '../../providers/database';
 import { deleteAgentRecursive } from '../../providers/agentKill';
+import { listArchivedObjectsStrict } from '../../providers/traceArchive';
+import { inspectFinalizedManifest } from '../../providers/traceArchiveManifest';
 
 let passed = 0;
 const failures: string[] = [];
@@ -57,6 +60,7 @@ async function main(): Promise<void> {
     assert.match(kill, /agentAttentionRequest\.deleteMany/);
     assert.match(kill, /deletedAt:\s*new Date\(\)/);
     assert.match(kill, /cleanupAgentSessions/);
+    assert.match(kill, /finalizeAgent\(\{ rootAgentId: agentId, force: true \}\)/);
     // Soft-delete under workflow-generation lock before recursing children so a
     // concurrent child create cannot commit after the descendant snapshot.
     assert.match(kill, /lockAgentWorkflowGeneration/);
@@ -99,6 +103,13 @@ async function main(): Promise<void> {
     const userId = `archive-attn-${randomUUID()}`;
     const parentId = randomUUID();
     const childId = randomUUID();
+    const archiveDir = mkdtempSync(join(tmpdir(), 'rose-agent-kill-archive-'));
+    const priorArchiveBackend = process.env.TRACE_ARCHIVE_BACKEND;
+    const priorArchiveEnabled = process.env.TRACE_ARCHIVE_ENABLED;
+    const priorArchiveDir = process.env.TRACE_ARCHIVE_LOCAL_DIR;
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_ENABLED = 'true';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDir;
 
     await prisma.user.create({
       data: { userId, phone: `+1555${String(Date.now()).slice(-7)}` },
@@ -160,12 +171,27 @@ async function main(): Promise<void> {
       });
       assert.equal(archived.length, 2);
       assert.ok(archived.every((row) => row.deletedAt !== null));
+
+      const rootObjects = await listArchivedObjectsStrict(parentId);
+      const rootPaths = new Set(rootObjects.map((object) => object.path));
+      assert.ok(rootPaths.has('db/end.fixture.json.gz.enc'));
+      assert.ok(rootPaths.has('manifest.json.gz.enc'));
+      assert.ok(rootPaths.has('manifest.public.json'));
+      assert.equal((await inspectFinalizedManifest(parentId)).status, 'current');
+      assert.deepEqual(await listArchivedObjectsStrict(childId), []);
     } finally {
       await prisma.agentAttentionRequest.deleteMany({
         where: { agentId: { in: [parentId, childId] } },
       });
       await prisma.agent.deleteMany({ where: { id: { in: [parentId, childId] } } });
       await prisma.user.deleteMany({ where: { userId } });
+      rmSync(archiveDir, { recursive: true, force: true });
+      if (priorArchiveBackend === undefined) delete process.env.TRACE_ARCHIVE_BACKEND;
+      else process.env.TRACE_ARCHIVE_BACKEND = priorArchiveBackend;
+      if (priorArchiveEnabled === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+      else process.env.TRACE_ARCHIVE_ENABLED = priorArchiveEnabled;
+      if (priorArchiveDir === undefined) delete process.env.TRACE_ARCHIVE_LOCAL_DIR;
+      else process.env.TRACE_ARCHIVE_LOCAL_DIR = priorArchiveDir;
     }
   });
 
