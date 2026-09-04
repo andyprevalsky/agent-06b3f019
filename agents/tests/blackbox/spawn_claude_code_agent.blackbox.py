@@ -1845,6 +1845,70 @@ async def test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout():
     assert any(e.get("name") == "ScheduleWakeup" for e in events), events
 
 
+async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
+    """Long-running Bash must stretch idle until tool_result, not die mid-command.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r22 CC#4 — Bash tool_use
+    with no tool_result for >180s (command still running) → SDK idle kill while
+    work was in flight. Progress chips do not refresh last_output_time.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangDuringBash(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("starting bash", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "Bash",
+                    }
+                )
+            # No tool_result — Bash still running. Stay connected.
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangDuringBash),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed >= 0.25, (
+        f"in-flight Bash idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    )
+    assert elapsed < 2.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+    assert any(e.get("name") == "Bash" for e in events), events
+
+
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
     """Codex proxy events are promoted into worker logs with cache details."""
     from domains.spawn_claude_code_agent import service
@@ -3136,6 +3200,10 @@ async def run_all_tests():
     await r.record_async(
         "run_agentic_loop_wait_tool_extends_sdk_idle",
         test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout,
+    )
+    await r.record_async(
+        "run_agentic_loop_in_flight_bash_extends_sdk_idle",
+        test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout,
     )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record(

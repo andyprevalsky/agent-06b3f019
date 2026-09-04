@@ -673,8 +673,11 @@ async def _run_agentic_loop(  # noqa: C901
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
-    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use.
+    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use and
+    # while any tool is in-flight (tool_use awaiting tool_result).
     effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
+    wait_tool_armed = False
+    in_flight_tool_count = 0
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -718,6 +721,7 @@ async def _run_agentic_loop(  # noqa: C901
 
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
+        nonlocal wait_tool_armed, in_flight_tool_count
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -728,7 +732,9 @@ async def _run_agentic_loop(  # noqa: C901
         event_type = event.get("type")
         tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
         if event_type == "tool_use" and isinstance(tool_name, str):
+            in_flight_tool_count += 1
             if tool_name in SDK_WAIT_TOOL_NAMES:
+                wait_tool_armed = True
                 if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
                     logger.info(
                         "[ClaudeCode] Extending SDK idle timeout for wait tool",
@@ -737,9 +743,25 @@ async def _run_agentic_loop(  # noqa: C901
                         tool_name=tool_name,
                         idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
                     )
-                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
             else:
-                # Non-wait tool activity restores the short hung-CLI window.
+                # Non-wait tool (e.g. long Bash) — stretch while in-flight so
+                # silence during execution is not mistaken for a hung CLI.
+                wait_tool_armed = False
+                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    logger.info(
+                        "[ClaudeCode] Extending SDK idle timeout for in-flight tool",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=tool_name,
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+            effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+        elif event_type == "tool_result":
+            if in_flight_tool_count > 0:
+                in_flight_tool_count -= 1
+            if in_flight_tool_count == 0 and not wait_tool_armed:
+                # All tools finished and no post-wait stretch armed — restore
+                # the short hung-CLI window.
                 effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
@@ -790,7 +812,8 @@ async def _run_agentic_loop(  # noqa: C901
             # Autonomous CC waits for SDK exit after the first silence observation
             # (parent-LLM nudge is intentionally skipped). If the CLI then goes
             # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
-            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup.
+            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup
+            # and while any tool is in-flight (awaiting tool_result).
             if (
                 silence_duration >= effective_idle_timeout_s
                 and not pending_output

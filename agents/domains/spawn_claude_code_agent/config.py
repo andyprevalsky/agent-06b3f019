@@ -35,7 +35,13 @@ SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
 # after those wait tools so productive sessions are not aborted mid-wait.
 # Still well below MAX_RUNTIME_S so a truly stuck Monitor cannot burn the full
 # budget.
-SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools
+#
+# The same stretched window applies while ANY tool is in-flight (tool_use with
+# no matching tool_result yet). Long Bash / Write / network calls emit no WS
+# events until they finish — cuda k=3 r22 CC#4 was idle-killed mid-Bash at
+# 180s despite active work. tool_result restores the short window unless a
+# wait tool has armed the post-wait stretch.
+SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools / in-flight
 SDK_WAIT_TOOL_NAMES: Final[frozenset[str]] = frozenset({"Monitor", "ScheduleWakeup"})
 
 # Maximum runtime before timeout.
