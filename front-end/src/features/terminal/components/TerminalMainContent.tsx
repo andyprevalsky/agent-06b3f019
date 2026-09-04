@@ -143,6 +143,12 @@ function DesktopNavLinks() {
       >
         Research
       </button>
+      <button
+        onClick={() => navigate('/careers')}
+        className="px-3 py-1.5 bg-navi-white text-navi-black text-xs font-medium rounded-full border border-border hover:bg-navi-white/80 transition-colors shadow-sm"
+      >
+        Careers
+      </button>
       <a
         href="/download"
         target="_blank"

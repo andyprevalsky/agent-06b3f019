@@ -121,17 +121,25 @@ function BrandButton({ onCreateNewAgent }: Pick<TerminalHeaderProps, 'onCreateNe
   );
 }
 
-function ResearchButton({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
+function SiteNavButtons({ clientSource }: Pick<TerminalHeaderProps, 'clientSource'>) {
   const navigate = useNavigate();
   if (clientSource !== 'WEB') return null;
 
   return (
-    <button
-      onClick={() => navigate('/research')}
-      className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-    >
-      Research
-    </button>
+    <nav className="flex items-center gap-3 whitespace-nowrap">
+      <button
+        onClick={() => navigate('/research')}
+        className="text-xs sm:text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        Research
+      </button>
+      <button
+        onClick={() => navigate('/careers')}
+        className="text-xs sm:text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        Careers
+      </button>
+    </nav>
   );
 }
 
@@ -202,7 +210,7 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
         <BrandButton onCreateNewAgent={onCreateNewAgent} />
       </div>
       <div className="justify-self-center">
-        <ResearchButton clientSource={clientSource} />
+        <SiteNavButtons clientSource={clientSource} />
       </div>
       <div className="flex items-center justify-self-end">
         <MobileAgentDrawer

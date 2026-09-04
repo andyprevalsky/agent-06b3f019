@@ -69,4 +69,7 @@ User confirmed the hypothesis: Spinning up is the code chip; it flips off
 
 ## Reusable lesson
 
-Make task terminality sticky and emit the same task-scoped completion contract from every cancellation path.
+A UI chip that derives terminality from one action_type on a scoped message is
+only as terminal as its narrowest producer: every cancel/abort path must emit
+that same terminal action with the same scoping key, and the reader must treat
+terminality as sticky so a late heartbeat cannot reopen it.
