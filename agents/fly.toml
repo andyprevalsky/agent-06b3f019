@@ -5,9 +5,12 @@
 app = "navi-whisper-lux"
 primary_region = "iad"  # Ashburn, Virginia
 
-# Finish in-flight activities (incl. 30m browser) before Fly SIGKILLs the machine.
+# Fly Machines cap stop_config.timeout at 5 minutes (API rejects anything
+# higher with "invalid stop_config.timeout, cannot exceed 5 minutes"). Longer
+# in-flight work (e.g. 30m browser) must drain via cooperative generation
+# cutover (continue_as_new at activity boundaries), not kill_timeout.
 kill_signal = "SIGTERM"
-kill_timeout = "35m"
+kill_timeout = "5m"
 
 [build]
   dockerfile = "Dockerfile"
@@ -35,9 +38,9 @@ kill_timeout = "35m"
   
   # Worker tuning
   HEALTH_CHECK_PORT = "8080"
-  # Must cover the longest in-flight activity (browser start_to_close = 30m).
-  # On SIGTERM the worker stops polling and waits for current activities to finish.
-  WORKER_SHUTDOWN_GRACE_PERIOD = "35m"
+  # Match Fly's 5m kill_timeout cap. Longer activities drain via cooperative
+  # generation cutover, not process-local shutdown grace.
+  WORKER_SHUTDOWN_GRACE_PERIOD = "5m"
   MAX_HEARTBEAT_THROTTLE_INTERVAL = "60s"
   DEFAULT_HEARTBEAT_THROTTLE_INTERVAL = "30s"
   MEMORY_SCALE_UP_THRESHOLD_PERCENT = "80"
