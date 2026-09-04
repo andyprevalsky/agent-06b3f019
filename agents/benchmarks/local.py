@@ -208,6 +208,25 @@ def _docker_ports_snapshot() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+def _linux_ephemeral_port_range() -> tuple[int, int] | None:
+    """Return the kernel-managed outbound port range when Linux exposes it."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        lower_text, upper_text = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+        lower, upper = int(lower_text), int(upper_text)
+    except (OSError, ValueError):
+        return None
+    if not (0 < lower <= upper < 65536):
+        return None
+    return lower, upper
+
+
+def _overlaps_port_range(base: int, occupied: tuple[int, int]) -> bool:
+    lower, upper = occupied
+    return base <= upper and base + max(PORT_RANGE_OFFSETS) >= lower
+
+
 def _reserve_port_range(base: int) -> bool:
     """Hold every occupied port across processes until the stack is ready."""
     ports = tuple(base + offset for offset in PORT_RANGE_OFFSETS)
@@ -258,8 +277,21 @@ def allocate_port_range(preferred_base: int | None = None) -> int:
         candidates.append(preferred_base)
     seed = int(hashlib.sha1(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:8], 16)
     start = 55000 + (seed % 400) * 20
-    candidates.extend(range(start, 65500, 20))
-    candidates.extend(range(55000, start, 20))
+    automatic_candidates = [*range(start, 65500, 20), *range(55000, start, 20)]
+    # A connect-based availability probe cannot reserve a port against the
+    # kernel's next outbound connection. On Linux, choosing inside
+    # ip_local_port_range therefore leaves a check-to-bind race: an unrelated
+    # HTTPS request can claim the worker metrics port after this function
+    # returns and make the primary Temporal worker fail readiness. File locks
+    # still coordinate Rose launchers; excluding the kernel-managed range
+    # coordinates with ephemeral sockets as well. Explicit --base-port values
+    # remain first so callers that own their range keep the existing contract.
+    ephemeral_range = _linux_ephemeral_port_range()
+    if ephemeral_range is not None:
+        automatic_candidates = [
+            base for base in automatic_candidates if not _overlaps_port_range(base, ephemeral_range)
+        ]
+    candidates.extend(automatic_candidates)
     for base in candidates:
         if base < 1024 or base + max(PORT_RANGE_OFFSETS) >= 65535:
             continue

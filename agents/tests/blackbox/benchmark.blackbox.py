@@ -12621,6 +12621,22 @@ def test_local_port_range_allocation_is_reserved_across_processes():
     )
 
 
+def test_local_automatic_port_range_avoids_linux_ephemeral_ports():
+    """Outbound sockets must not race an automatic worker port after probing."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    base = None
+    try:
+        with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(55000, 60999)):
+            base = local_bench.allocate_port_range()
+        assert base > 60999, f"automatic range {base} overlaps Linux ephemeral ports"
+    finally:
+        if base is not None:
+            local_bench._release_port_range(base)
+
+
 def test_local_start_services_releases_port_reservation_after_readiness():
     """A ready isolated stack must release its startup-only port reservation."""
     from unittest.mock import Mock, patch
