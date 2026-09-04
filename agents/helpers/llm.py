@@ -1209,6 +1209,10 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
 # must stay fully inlined. The prior 40k/48k caps head+tailed mid-ranks and
 # made verifier_execute score 0.5 despite a complete on-disk deliverable.
 VERIFIER_MAX_INLINE_FILE_CHARS = 120_000
+# Intermediate dumps (e.g. _prefiltered_shortlist.json multi-MB) must NOT share
+# the deliverable inline budget — a 120k head+tail of an 8MB shortlist crowded
+# out the real top100 and made the verifier score 0.5 (cuda-kernel r29 a2).
+VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS = 12_000
 VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 160_000
 _VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
     r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
@@ -1342,10 +1346,19 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
+                        filename = fp.original_filename or ""
+                        is_deliverable = bool(
+                            _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename)
+                        )
+                        per_file_cap = (
+                            VERIFIER_MAX_INLINE_FILE_CHARS
+                            if is_deliverable
+                            else VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS
+                        )
                         text_content = _truncate_text_for_verifier_inline(
                             text_content,
-                            max_chars=VERIFIER_MAX_INLINE_FILE_CHARS,
-                            filename=fp.original_filename,
+                            max_chars=per_file_cap,
+                            filename=filename,
                         )
                         result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True

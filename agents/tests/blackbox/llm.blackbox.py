@@ -5168,6 +5168,32 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
 
 
+def test_verifier_file_evidence_caps_nondeliverable_shortlist_small():
+    """Multi-MB intermediate shortlists must not consume the deliverable inline budget.
+
+    Regression (cuda-kernel-github-top100 r29 a2): `_prefiltered_shortlist.json`
+    (~8MB) was inlined at the 120k deliverable cap, crowding the real top100 and
+    yielding verifier score 0.5. Non-deliverable files stay on the small cap.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_INLINE_FILE_CHARS,
+        VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
+        _truncate_text_for_verifier_inline,
+        _VERIFIER_DELIVERABLE_FILENAME_RE,
+    )
+
+    assert not _VERIFIER_DELIVERABLE_FILENAME_RE.search("_prefiltered_shortlist.json")
+    huge = ("repo,stars\n" + "\n".join(f"org/r{i},{100000-i}" for i in range(200000)))
+    assert len(huge) > VERIFIER_MAX_INLINE_FILE_CHARS
+    kept = _truncate_text_for_verifier_inline(
+        huge,
+        max_chars=VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
+        filename="_prefiltered_shortlist.json",
+    )
+    assert "verifier truncated" in kept
+    assert len(kept) <= VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS + 32
+
+
 def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
     """Deliverable ranking JSON must not be head+tail truncated for verifier_execute.
 
