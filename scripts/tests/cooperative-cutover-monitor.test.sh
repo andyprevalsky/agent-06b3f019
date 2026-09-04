@@ -69,6 +69,10 @@ got="$(extract_open_with_status $'0' 0)"
 [ "$got" = "0" ] || fail "successful count-script status must keep integer (got: $got)"
 
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
+require_text "$CUTOVER" 'timeout --kill-after=30s 120' \
+  "old-gen retire must SIGKILL-follow hung flyctl stop/destroy"
+require_text "$CUTOVER" 'retire_deadline' \
+  "old-gen retire must bound total wall-clock across all machines"
 require_text "$WORKFLOW" 'timeout-minutes: 90' \
   "cutover step must allow >60m headroom past the 45m drain SLO"
 

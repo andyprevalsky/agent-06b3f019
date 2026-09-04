@@ -239,12 +239,20 @@ done
 
 echo "Retiring old-generation machines (hash=${CURRENT_HASH:-unknown})"
 if [ -n "$CURRENT_HASH" ]; then
+  # Cap total retire wall-clock so N serial machines cannot burn the GHA step
+  # after drain already succeeded (12 machines × 240s would be 48m alone).
+  retire_deadline=$((SECONDS + 900))
   for ID in $(machine_ids_for_hash "$CURRENT_HASH"); do
+    if [ "$SECONDS" -ge "$retire_deadline" ]; then
+      echo "⚠️  old-gen retire budget (15m) exhausted — leftover machines deferred to next deploy"
+      break
+    fi
     echo "  stopping+destroying old-gen machine $ID"
     # Bound each call — a hung stop/destroy previously burned the whole GHA
     # step after drain had already succeeded (pointer flipped, old queue=0).
-    timeout 120 flyctl machines stop "$ID" -a "$APP" || true
-    timeout 120 flyctl machines destroy "$ID" -a "$APP" --force || true
+    # --kill-after ensures flyctl cannot ignore SIGTERM and overrun the budget.
+    timeout --kill-after=30s 120 flyctl machines stop "$ID" -a "$APP" || true
+    timeout --kill-after=30s 120 flyctl machines destroy "$ID" -a "$APP" --force || true
   done
 fi
 
