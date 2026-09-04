@@ -1099,6 +1099,15 @@ class RoseClient:
                             timed_out = True
                             break
                 finally:
+                    # If the chunk landed in the same tick as the deadline,
+                    # consume it instead of reporting a stall (CodeRabbit #1260).
+                    if timed_out and next_item.done() and not next_item.cancelled():
+                        try:
+                            chunk = next_item.result()
+                            timed_out = False
+                        except StopAsyncIteration:
+                            chunk = None
+                            timed_out = False
                     # Always cancel an unfinished __anext__ on exit — including
                     # CancelledError while awaiting asyncio.wait. Leaving it
                     # running after the activity ends raises an unobserved
@@ -1107,6 +1116,8 @@ class RoseClient:
                         next_item.cancel()
                         with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                             await next_item
+                if chunk is None and not timed_out:
+                    return
                 if timed_out:
                     if outer_deadline_limited:
                         raise RoseDeadlineError(

@@ -2178,8 +2178,22 @@ async def run_agent(
                     # harness declared evaluator scored progress=0.
                     # Plan-loop verification still soft-fails and continues so a
                     # broken plan cannot skip review by starving the verifier.
-                    if not is_plan_loop and _structured_response_ready_for_infra_soft_accept(
-                        structured_response, response_schema
+                    # Soft-accept only when a response schema is configured.
+                    # Schema-less agents must keep the 0.5 soft-fail + retry
+                    # path and trip the consecutive-error circuit breaker —
+                    # otherwise the first verifier outage reports completed
+                    # with no deliverable check (CodeRabbit #1260).
+                    _schema_fields = (
+                        (response_schema or {}).get("fields")
+                        if isinstance(response_schema, dict)
+                        else None
+                    ) or []
+                    if (
+                        not is_plan_loop
+                        and _schema_fields
+                        and _structured_response_ready_for_infra_soft_accept(
+                            structured_response, response_schema
+                        )
                     ):
                         logger.warning(
                             "[run_agent] Accepting attempt_completion after "
