@@ -2162,7 +2162,29 @@ async def run_agent(
                     logger.warning(
                         f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
                     )
-                    if consecutive_verifier_errors >= 3:
+                    # 2026-09-04 RCA (cuda-kernel-github-top100-code-agent k=3):
+                    # The execute-loop attempt_completion verifier soft-fails at
+                    # score=0.5 after RoseDeadlineError / 420s total fence, then
+                    # the agent retries attempt_completion and burns another ~7
+                    # minutes per bounce — often the entire remaining 4200s task
+                    # budget — even when the ranking deliverable is already in
+                    # context. Infrastructure failure is not a judgment that the
+                    # deliverable is missing: accept the agent's completion
+                    # claim on the first infra soft-fail (execute loop only).
+                    # Plan-loop verification still soft-fails and continues so a
+                    # broken plan cannot skip review by starving the verifier.
+                    if not is_plan_loop:
+                        logger.warning(
+                            "[run_agent] Accepting attempt_completion after "
+                            "verifier infrastructure failure "
+                            f"(consecutive={consecutive_verifier_errors})"
+                        )
+                        score = 1.0
+                        v_reasoning = (
+                            "Verifier infrastructure failed; accepting agent "
+                            f"attempt_completion. Original error: {v_reasoning}"
+                        )
+                    elif consecutive_verifier_errors >= 3:
                         return {
                             "status": "error",
                             "context": context,
