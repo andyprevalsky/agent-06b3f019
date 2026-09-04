@@ -3,6 +3,7 @@ import {
   buildMockAgentPhoneNumber,
   isLocalBenchmarkAgentPhoneMockEnabled,
 } from './smsTransportMock';
+import { createHash } from './crypto';
 
 const log = createLogger('AgentPhone');
 
@@ -10,6 +11,8 @@ const DEFAULT_BASE_URL = 'https://api.agentphone.ai/v1';
 const DEFAULT_COUNTRY = 'US';
 const DEFAULT_AREA_CODE = '912';
 const CREATE_PHONE_TIMEOUT_MS = 10_000;
+const RECONCILE_PAGE_SIZE = 100;
+const MAX_RECONCILE_AGENTS = 10_000;
 
 export interface AgentPhoneNumber {
   agentId: string;
@@ -33,6 +36,36 @@ export interface AgentPhoneOutboundMessage {
   fromNumber: string;
   toNumber: string;
   conversationId: string | null;
+}
+
+type AgentPhoneAgent = {
+  id: string;
+  description: string;
+  numbers: Record<string, unknown>[];
+};
+
+class AgentPhoneHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'AgentPhoneHttpError';
+  }
+}
+
+export class AgentPhoneProvisioningError extends Error {
+  constructor(
+    message: string,
+    readonly emailFallbackSafe: boolean
+  ) {
+    super(message);
+    this.name = 'AgentPhoneProvisioningError';
+  }
+}
+
+export function isAgentPhoneEmailFallbackSafe(error: unknown): boolean {
+  return error instanceof AgentPhoneProvisioningError && error.emailFallbackSafe;
 }
 
 function apiKey() {
@@ -80,25 +113,65 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value : '';
 }
 
-async function createAgent(name: string, signal: AbortSignal) {
+function requestSignal() {
+  return AbortSignal.timeout(CREATE_PHONE_TIMEOUT_MS);
+}
+
+function agentFromPayload(payload: Record<string, unknown>): AgentPhoneAgent | null {
+  const id = stringValue(payload.id);
+  if (id === '') return null;
+  return {
+    id,
+    description: stringValue(payload.description),
+    numbers: Array.isArray(payload.numbers) ? payload.numbers.map(asRecord) : [],
+  };
+}
+
+function numberFromAgent(agent: AgentPhoneAgent): { id: string; phoneNumber: string } | null {
+  for (const rawNumber of agent.numbers) {
+    const id = stringValue(rawNumber.id);
+    const phoneNumber = stringValue(rawNumber.phoneNumber);
+    const status = stringValue(rawNumber.status);
+    if (id !== '' && phoneNumber !== '' && (status === '' || status === 'active')) {
+      return { id, phoneNumber };
+    }
+  }
+  return null;
+}
+
+function markerForUser(userId: string) {
+  return `rose-provisioning:${createHash('sha256').update(userId).digest('hex')}`;
+}
+
+function isConfirmedAgentCreateRejection(error: unknown) {
+  return (
+    error instanceof AgentPhoneHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    ![408, 409, 429].includes(error.status)
+  );
+}
+
+async function createAgent(name: string, description: string): Promise<AgentPhoneAgent> {
   const response = await fetch(`${baseUrl()}/agents`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ name, voiceMode: 'webhook' }),
-    signal,
+    body: JSON.stringify({ name, description, voiceMode: 'webhook' }),
+    signal: requestSignal(),
   });
   const data = await parseJson(response);
   if (!response.ok) {
-    throw new Error(
-      `AgentPhone agent creation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    throw new AgentPhoneHttpError(
+      `AgentPhone agent creation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`,
+      response.status
     );
   }
-  const id = typeof data.id === 'string' ? data.id : '';
-  if (id === '') throw new Error('AgentPhone agent creation response missing id');
-  return id;
+  const agent = agentFromPayload(data);
+  if (agent === null) throw new Error('AgentPhone agent creation response missing id');
+  return agent;
 }
 
-async function createNumber(agentId: string, areaCode: string, signal: AbortSignal) {
+async function createNumber(agentId: string, areaCode: string) {
   const response = await fetch(`${baseUrl()}/numbers`, {
     method: 'POST',
     headers: authHeaders(),
@@ -107,12 +180,13 @@ async function createNumber(agentId: string, areaCode: string, signal: AbortSign
       areaCode,
       agentId,
     }),
-    signal,
+    signal: requestSignal(),
   });
   const data = await parseJson(response);
   if (!response.ok) {
-    throw new Error(
-      `AgentPhone number creation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    throw new AgentPhoneHttpError(
+      `AgentPhone number creation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`,
+      response.status
     );
   }
 
@@ -122,6 +196,66 @@ async function createNumber(agentId: string, areaCode: string, signal: AbortSign
     throw new Error('AgentPhone number creation response missing id or phoneNumber');
   }
   return { id, phoneNumber };
+}
+
+async function findAgentByMarker(marker: string): Promise<AgentPhoneAgent | null> {
+  const signal = requestSignal();
+  const matches: AgentPhoneAgent[] = [];
+  let offset = 0;
+  while (offset < MAX_RECONCILE_AGENTS) {
+    const response = await fetch(
+      `${baseUrl()}/agents?limit=${RECONCILE_PAGE_SIZE}&offset=${offset}`,
+      { headers: authHeaders(), signal }
+    );
+    const data = await parseJson(response);
+    if (!response.ok) {
+      throw new Error(
+        `AgentPhone reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+      );
+    }
+    const page = dataArray(data);
+    for (const payload of page) {
+      const agent = agentFromPayload(payload);
+      if (agent?.description === marker) matches.push(agent);
+    }
+    const total = typeof data.total === 'number' ? data.total : offset + page.length;
+    offset += page.length;
+    if (page.length === 0 || page.length < RECONCILE_PAGE_SIZE || offset >= total) break;
+  }
+  if (matches.length > 1) {
+    throw new Error(`AgentPhone reconciliation found ${matches.length} resources for one marker`);
+  }
+  return matches[0] ?? null;
+}
+
+async function getAgent(agentId: string): Promise<AgentPhoneAgent> {
+  const response = await fetch(`${baseUrl()}/agents/${encodeURIComponent(agentId)}`, {
+    headers: authHeaders(),
+    signal: requestSignal(),
+  });
+  const data = await parseJson(response);
+  if (!response.ok) {
+    throw new Error(
+      `AgentPhone agent reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    );
+  }
+  const agent = agentFromPayload(data);
+  if (agent === null) throw new Error('AgentPhone reconciliation response missing agent id');
+  return agent;
+}
+
+async function deleteAgent(agentId: string): Promise<void> {
+  const response = await fetch(`${baseUrl()}/agents/${encodeURIComponent(agentId)}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+    signal: requestSignal(),
+  });
+  if (!response.ok && response.status !== 404) {
+    const data = await parseJson(response);
+    throw new Error(
+      `AgentPhone cleanup failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    );
+  }
 }
 
 export async function createAgentPhoneNumber(params: {
@@ -148,14 +282,75 @@ export async function createAgentPhoneNumber(params: {
 
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
-  // Both provider writes share one deadline so browser auth-options cannot be
-  // held open indefinitely by either half of the provisioning sequence.
-  const signal = AbortSignal.timeout(CREATE_PHONE_TIMEOUT_MS);
-  const agentId = await createAgent(displayName, signal);
-  const number = await createNumber(agentId, areaCode, signal);
+  const marker = markerForUser(params.userId);
+  let agent: AgentPhoneAgent;
+  try {
+    agent = await createAgent(displayName, marker);
+  } catch (error) {
+    if (isConfirmedAgentCreateRejection(error)) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
+        true
+      );
+    }
+    try {
+      const recovered = await findAgentByMarker(marker);
+      if (recovered === null) {
+        throw new Error('no exact provisioning marker was visible after a complete scan');
+      }
+      agent = recovered;
+    } catch (reconcileError) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone agent creation is uncertain; reconciliation failed: ${
+          reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+        }`,
+        false
+      );
+    }
+  }
+
+  const recoveredNumber = numberFromAgent(agent);
+  if (recoveredNumber) {
+    return {
+      agentId: agent.id,
+      numberId: recoveredNumber.id,
+      phoneNumber: recoveredNumber.phoneNumber,
+    };
+  }
+
+  let number: { id: string; phoneNumber: string };
+  try {
+    number = await createNumber(agent.id, areaCode);
+  } catch (createError) {
+    try {
+      const reconciledAgent = await getAgent(agent.id);
+      const reconciledNumber = numberFromAgent(reconciledAgent);
+      if (reconciledNumber) {
+        return {
+          agentId: agent.id,
+          numberId: reconciledNumber.id,
+          phoneNumber: reconciledNumber.phoneNumber,
+        };
+      }
+      await deleteAgent(agent.id);
+    } catch (reconcileError) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone number creation is uncertain; reconciliation or cleanup failed: ${
+          reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+        }`,
+        false
+      );
+    }
+    throw new AgentPhoneProvisioningError(
+      `AgentPhone number creation failed and provider-agent cleanup was confirmed: ${
+        createError instanceof Error ? createError.message : String(createError)
+      }`,
+      true
+    );
+  }
 
   return {
-    agentId,
+    agentId: agent.id,
     numberId: number.id,
     phoneNumber: number.phoneNumber,
   };

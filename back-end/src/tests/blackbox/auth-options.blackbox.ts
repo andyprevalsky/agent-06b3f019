@@ -536,10 +536,11 @@ test('enabled passkey is returned for its realm', async () => {
 test('disabled passkey is surfaced but marked disabled', async () => {
   const userId = await createUser();
   try {
-    await createPasskey({ userId, authRealm: 'amazon.com', disabled: true });
+    const disabled = await createPasskey({ userId, authRealm: 'amazon.com', disabled: true });
+    await createPasskey({ userId, authRealm: 'amazon.com' });
     const options = await getAuthOptions(userId, 'amazon.com');
-    assert(options.passkeys.length === 1, 'expected the disabled passkey to be listed');
-    assert(options.passkeys[0].disabled === true, 'expected passkey marked disabled');
+    const disabledOption = options.passkeys.find((passkey) => passkey.id === disabled.id);
+    assert(disabledOption?.disabled === true, 'expected disabled passkey to stay listed and marked');
   } finally {
     await cleanup(userId);
   }
@@ -593,6 +594,10 @@ test('markSteelSessionAuthFailed disables the session and resets its browser con
 test('passwords last used over a year ago are excluded', async () => {
   const userId = await createUser();
   try {
+    // Keep this password-filtering case out of the minted-identity fallback.
+    // The deploy environment intentionally has live provider credentials, and
+    // this test owns no assertion about provider provisioning.
+    await createPasskey({ userId, authRealm: 'amazon.com' });
     await prisma.browserPassword.create({
       data: {
         userId,

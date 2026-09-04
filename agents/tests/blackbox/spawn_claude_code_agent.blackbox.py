@@ -1391,6 +1391,54 @@ async def test_run_verifier_disabled_by_env_flag():
     assert called["check_progress"] == 0
 
 
+async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
+    """A partial file extraction cannot satisfy a multi-file response schema."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+
+    async def fake_activity(*_args, **_kwargs):
+        raise AssertionError("disabled verifier must not call the verifier LLM")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        score, reasoning, structured, input_tokens, output_tokens = await service._run_verifier(
+            agent_id="agent-partial-output",
+            task_id="task-partial-output",
+            goal="Write both requested output files",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=["wrote only one requested file"],
+            output_schema={
+                "fields": [
+                    {"name": "report", "type": "file_pointer", "required": True},
+                    {"name": "manifest", "type": "file_pointer", "required": True},
+                ]
+            },
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            output_files=[
+                {
+                    "original_filename": "report.txt",
+                    "mime_type": "text/plain",
+                    "size_bytes": 6,
+                }
+            ],
+        )
+
+    assert score == 0.5
+    assert "incomplete" in reasoning.lower()
+    assert structured is None
+    assert input_tokens == 0 and output_tokens == 0
+
+
 async def test_run_verifier_disabled_includes_sdk_event_stdout():
     """Disabled verifier must still hand Bash/Write stdout to the parent.
 
@@ -3131,6 +3179,10 @@ async def run_all_tests():
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
+    await r.record_async(
+        "run_verifier_disabled_schema_incomplete",
+        test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
+    )
     await r.record_async(
         "run_verifier_disabled_includes_sdk_stdout",
         test_run_verifier_disabled_includes_sdk_event_stdout,

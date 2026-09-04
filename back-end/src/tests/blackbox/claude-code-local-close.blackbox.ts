@@ -1,0 +1,169 @@
+#!/usr/bin/env tsx
+/**
+ * Black-box regressions for the backend-owned local Claude Code close boundary.
+ *
+ * The tests run the real local-session provider with a real child listener and
+ * captured storage boundary. Only persistence is replaced so the cases remain
+ * deterministic and cannot touch a developer or production database.
+ */
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, before, test } from 'node:test';
+import {
+  closeLocalClaudeCodeSession,
+  createLocalClaudeCodeSession,
+} from '../../providers/claudeCodeLocalSession';
+import { prisma } from '../../providers/database';
+
+const fixtureDir = mkdtempSync(join(tmpdir(), 'claude-local-close-blackbox-'));
+const fakeWsServerPath = join(fixtureDir, 'ws-server.mjs');
+writeFileSync(
+  fakeWsServerPath,
+  `
+import { createServer } from 'node:net';
+const port = Number(process.env.PORT);
+const server = createServer();
+server.listen(port, '127.0.0.1', () => {
+  process.stdout.write(JSON.stringify({
+    message: 'Server listening',
+    port,
+    readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN,
+  }) + '\\n');
+});
+`
+);
+
+const originalCreate = prisma.claudeCodeSession.create;
+const originalUpdate = prisma.claudeCodeSession.update;
+const originalFetch = globalThis.fetch;
+const originalWsServerPath = process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
+const originalSupabaseUrl = process.env.SUPABASE_URL;
+const originalSupabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+before(() => {
+  process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH = fakeWsServerPath;
+  process.env.SUPABASE_URL = 'https://supabase.local.test';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'local-close-blackbox-key';
+  prisma.claudeCodeSession.create = (async ({ data }: { data: { id: string } }) =>
+    data) as typeof prisma.claudeCodeSession.create;
+  prisma.claudeCodeSession.update = (async ({ where }: { where: { id: string } }) => ({
+    id: where.id,
+    status: 'CLOSED',
+  })) as typeof prisma.claudeCodeSession.update;
+});
+
+after(async () => {
+  prisma.claudeCodeSession.create = originalCreate;
+  prisma.claudeCodeSession.update = originalUpdate;
+  globalThis.fetch = originalFetch;
+  if (originalWsServerPath === undefined) delete process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH;
+  else process.env.CLAUDE_CODE_LOCAL_WS_SERVER_PATH = originalWsServerPath;
+  if (originalSupabaseUrl === undefined) delete process.env.SUPABASE_URL;
+  else process.env.SUPABASE_URL = originalSupabaseUrl;
+  if (originalSupabaseKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  else process.env.SUPABASE_SERVICE_ROLE_KEY = originalSupabaseKey;
+  rmSync(fixtureDir, { recursive: true, force: true });
+  await prisma.$disconnect();
+});
+
+async function createSession(taskId: string): Promise<string> {
+  await createLocalClaudeCodeSession({
+    taskId,
+    agentId: `agent-${taskId}`,
+    goal: 'exercise local close ownership',
+    envs: {},
+    claudeTokenSource: null,
+    claudeTokenIntegrationId: null,
+  });
+  return join('/tmp', 'claude-code-local', taskId);
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error('condition did not become true');
+}
+
+test('overlapping closes share one task-owned operation', async () => {
+  const taskId = `close-single-flight-${Date.now()}`;
+  await createSession(taskId);
+  let updateCalls = 0;
+  let releaseUpdate: (() => void) | undefined;
+  const updateGate = new Promise<void>((resolve) => {
+    releaseUpdate = resolve;
+  });
+  prisma.claudeCodeSession.update = (async ({ where }: { where: { id: string } }) => {
+    updateCalls += 1;
+    await updateGate;
+    return { id: where.id, status: 'CLOSED' };
+  }) as typeof prisma.claudeCodeSession.update;
+
+  const first = closeLocalClaudeCodeSession(taskId);
+  await waitFor(() => updateCalls === 1);
+  const second = closeLocalClaudeCodeSession(taskId);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  releaseUpdate?.();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(updateCalls, 1, 'one task may have only one close transaction in flight');
+  assert.deepEqual(secondResult, firstResult, 'overlapping callers must receive the same result');
+});
+
+test('partial extraction remains resumable and never reuploads completed files', async () => {
+  const taskId = `close-partial-output-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  writeFileSync(join(workDir, 'output', 'a.txt'), 'first');
+  writeFileSync(join(workDir, 'output', 'b.txt'), 'second');
+
+  let failSecondFile = true;
+  const uploadUrls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (!url.includes('/storage/v1/object/attachments/')) {
+      throw new Error(`unexpected outbound request: ${url}`);
+    }
+    uploadUrls.push(url);
+    if (failSecondFile && decodeURIComponent(url).endsWith('_b.txt')) {
+      return new Response(JSON.stringify({ message: 'forced second-file failure' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({ Key: url }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => closeLocalClaudeCodeSession(taskId, 'user-local-close'),
+    /forced second-file failure/
+  );
+  const ownershipPath = join(workDir, 'session.json');
+  assert.equal(existsSync(ownershipPath), true, 'failed extraction must retain ownership');
+  const ownershipAfterFailure = JSON.parse(readFileSync(ownershipPath, 'utf8')) as {
+    outputFiles?: unknown;
+  };
+  assert.equal(
+    ownershipAfterFailure.outputFiles,
+    undefined,
+    'a partial pointer list must not be persisted as complete'
+  );
+
+  failSecondFile = false;
+  const retried = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+  assert.equal(retried.outputFiles.length, 2);
+  const decodedUploadUrls = uploadUrls.map(decodeURIComponent);
+  assert.equal(decodedUploadUrls.filter((url) => url.endsWith('_a.txt')).length, 1);
+  const secondFileUrls = decodedUploadUrls.filter((url) => url.endsWith('_b.txt'));
+  assert.equal(secondFileUrls.length, 2);
+  assert.equal(
+    secondFileUrls[0],
+    secondFileUrls[1],
+    'retry must reuse the same storage object key'
+  );
+});

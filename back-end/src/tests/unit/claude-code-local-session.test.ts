@@ -305,9 +305,19 @@ test('local session task ids cannot escape or alias another ownership directory'
 test('closeLocalClaudeCodeSession extracts output files when userId is provided', async () => {
   const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
   const prevFly = process.env.FLY_APP_NAME;
+  const prevSupabaseUrl = process.env.SUPABASE_URL;
+  const prevSupabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const prevFetch = globalThis.fetch;
   try {
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     delete process.env.FLY_APP_NAME;
+    process.env.SUPABASE_URL = 'https://supabase.local.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'local-session-unit-key';
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ Key: 'stored' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     const taskId = `local-session-output-${Date.now()}`;
     await createLocalClaudeCodeSession({
       taskId,
@@ -319,15 +329,19 @@ test('closeLocalClaudeCodeSession extracts output files when userId is provided'
     });
     const outputPath = join('/tmp', 'claude-code-local', taskId, 'output', 'result.txt');
     writeFileSync(outputPath, 'hello-from-local-claude');
-    // uploadToStorage may throw in this environment; the extract loop must still run and
-    // soft-fail per file rather than aborting close.
     const closed = await closeLocalClaudeCodeSession(taskId, 'user-output-extract');
-    assert.ok(Array.isArray(closed.outputFiles));
+    assert.equal(closed.outputFiles.length, 1);
+    assert.equal(closed.outputFiles[0].original_filename, 'result.txt');
   } finally {
+    globalThis.fetch = prevFetch;
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
     if (prevFly === undefined) delete process.env.FLY_APP_NAME;
     else process.env.FLY_APP_NAME = prevFly;
+    if (prevSupabaseUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = prevSupabaseUrl;
+    if (prevSupabaseKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = prevSupabaseKey;
   }
 });
 

@@ -26,7 +26,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs';
-import { join, resolve, sep } from 'path';
+import { join, relative, resolve, sep } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { type FilePointer, downloadFromStorage, uploadToStorage } from './storage';
@@ -66,8 +66,17 @@ type LocalSessionOwnership = {
   workDir: string;
   port: number;
   pid: number | null;
+  /** Durable per-file upload progress; objectId makes retries storage-idempotent. */
+  outputCandidates?: LocalOutputCandidate[];
   /** Persisted before the DB close so retries never upload the same files twice. */
   outputFiles?: FilePointer[];
+};
+
+type LocalOutputCandidate = {
+  relativePath: string;
+  filename: string;
+  objectId: string;
+  pointer?: FilePointer;
 };
 
 type LocalSession = LocalSessionOwnership & {
@@ -75,6 +84,7 @@ type LocalSession = LocalSessionOwnership & {
 };
 
 const localSessions = new Map<string, LocalSession>();
+const closeOperations = new Map<string, Promise<{ outputFiles: FilePointer[] }>>();
 
 export function resolveLocalSessionWorkDir(taskId: string): string {
   if (
@@ -98,7 +108,16 @@ function writeOwnership(ownership: LocalSessionOwnership): void {
   const path = ownershipPath(ownership.workDir);
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporaryPath, JSON.stringify(ownership), { encoding: 'utf8', mode: 0o600 });
+    const durable: LocalSessionOwnership = {
+      taskId: ownership.taskId,
+      sandboxId: ownership.sandboxId,
+      workDir: ownership.workDir,
+      port: ownership.port,
+      pid: ownership.pid,
+      outputCandidates: ownership.outputCandidates,
+      outputFiles: ownership.outputFiles,
+    };
+    writeFileSync(temporaryPath, JSON.stringify(durable), { encoding: 'utf8', mode: 0o600 });
     renameSync(temporaryPath, path);
   } catch (error) {
     try {
@@ -121,6 +140,23 @@ function isFilePointer(value: unknown): value is FilePointer {
     typeof candidate.size_bytes === 'number' &&
     typeof candidate.created_at === 'string'
   );
+}
+
+function isOutputCandidate(value: unknown, workDir: string): value is LocalOutputCandidate {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<LocalOutputCandidate>;
+  if (
+    typeof candidate.relativePath !== 'string' ||
+    candidate.relativePath === '' ||
+    typeof candidate.filename !== 'string' ||
+    candidate.filename === '' ||
+    typeof candidate.objectId !== 'string' ||
+    !/^[a-zA-Z0-9-]{1,128}$/.test(candidate.objectId)
+  ) {
+    return false;
+  }
+  if (!isPathInsideWorkDir(workDir, resolve(workDir, candidate.relativePath))) return false;
+  return candidate.pointer === undefined || isFilePointer(candidate.pointer);
 }
 
 function readOwnership(taskId: string): LocalSessionOwnership | null {
@@ -146,6 +182,11 @@ function readOwnership(taskId: string): LocalSessionOwnership | null {
       workDir: parsed.workDir,
       port: parsed.port,
       pid: typeof parsed.pid === 'number' ? parsed.pid : null,
+      outputCandidates:
+        Array.isArray(parsed.outputCandidates) &&
+        parsed.outputCandidates.every((candidate) => isOutputCandidate(candidate, workDir))
+          ? parsed.outputCandidates
+          : undefined,
       outputFiles:
         Array.isArray(parsed.outputFiles) && parsed.outputFiles.every(isFilePointer)
           ? parsed.outputFiles
@@ -339,27 +380,23 @@ export function resolveLocalAttachmentPath(workDir: string, filename: string): s
 }
 
 async function extractLocalFiles(
-  workDir: string,
+  ownership: LocalSessionOwnership,
   userId: string | undefined,
   additionalPaths?: string[]
 ): Promise<FilePointer[]> {
-  const outputFiles: FilePointer[] = [];
-  if (!userId) return outputFiles;
+  if (!userId) return [];
 
-  const seen = new Set<string>();
-  const candidates: Array<{ fullPath: string; filename: string }> = [];
+  const { workDir } = ownership;
+  const byFilename = new Map(
+    (ownership.outputCandidates ?? []).map((candidate) => [candidate.filename, candidate])
+  );
+  const discovered: Array<{ fullPath: string; filename: string }> = [];
 
   const outputDir = join(workDir, 'output');
-  try {
-    if (existsSync(outputDir)) {
-      for (const filename of readdirSync(outputDir)) {
-        candidates.push({ fullPath: join(outputDir, filename), filename });
-      }
+  if (existsSync(outputDir)) {
+    for (const filename of readdirSync(outputDir)) {
+      discovered.push({ fullPath: join(outputDir, filename), filename });
     }
-  } catch (err) {
-    log.error('Failed to list local Claude Code output directory', {
-      error: err instanceof Error ? err.message : String(err),
-    });
   }
 
   if (additionalPaths && additionalPaths.length > 0) {
@@ -371,38 +408,65 @@ async function extractLocalFiles(
       }
       const filename = resolved.split('/').pop() || '';
       if (!filename) continue;
-      candidates.push({ fullPath: resolved, filename });
+      discovered.push({ fullPath: resolved, filename });
     }
   }
 
-  for (const { fullPath, filename } of candidates) {
-    if (seen.has(filename)) continue;
-    if (!existsSync(fullPath)) continue;
-    seen.add(filename);
+  for (const { fullPath, filename } of discovered) {
+    if (byFilename.has(filename) || !existsSync(fullPath)) continue;
+    byFilename.set(filename, {
+      relativePath: relative(workDir, fullPath),
+      filename,
+      objectId: randomUUID(),
+    });
+  }
+  ownership.outputCandidates = [...byFilename.values()];
+  // Persist every storage object key before its first upload. A crash after the
+  // provider commits can then retry the exact same key instead of duplicating it.
+  writeOwnership(ownership);
+
+  for (const candidate of ownership.outputCandidates) {
+    if (candidate.pointer) continue;
+    const fullPath = resolve(workDir, candidate.relativePath);
+    if (!isPathInsideWorkDir(workDir, fullPath)) {
+      throw new Error(
+        `Local output candidate escaped its session directory: ${candidate.filename}`
+      );
+    }
     try {
       const content = readFileSync(fullPath);
       const { storage_path } = await uploadToStorage(
         userId,
         content,
-        filename,
-        'application/octet-stream'
+        candidate.filename,
+        'application/octet-stream',
+        { objectId: candidate.objectId }
       );
-      outputFiles.push({
-        id: randomUUID(),
+      candidate.pointer = {
+        id: candidate.objectId,
         storage_path,
-        original_filename: filename,
+        original_filename: candidate.filename,
         mime_type: 'application/octet-stream',
         size_bytes: content.length,
         created_at: new Date().toISOString(),
-      });
+      };
+      // Checkpoint each successful file independently. A later failure must
+      // leave earlier pointers reusable while outputFiles remains incomplete.
+      writeOwnership(ownership);
     } catch (fileErr) {
-      log.error(`Failed to extract local output file ${filename}`, {
+      log.error(`Failed to extract local output file ${candidate.filename}`, {
         error: fileErr instanceof Error ? fileErr.message : String(fileErr),
       });
+      throw fileErr;
     }
   }
 
-  return outputFiles;
+  return ownership.outputCandidates.map((candidate) => {
+    if (!candidate.pointer) {
+      throw new Error(`Local output file was not uploaded: ${candidate.filename}`);
+    }
+    return candidate.pointer;
+  });
 }
 
 export async function createLocalClaudeCodeSession(params: {
@@ -559,7 +623,7 @@ export async function createLocalClaudeCodeSession(params: {
   return { wsUrl, taskId, sandboxId, uploadedFiles };
 }
 
-export async function closeLocalClaudeCodeSession(
+async function runLocalClaudeCodeClose(
   taskId: string,
   userId?: string,
   additionalPaths?: string[]
@@ -569,12 +633,11 @@ export async function closeLocalClaudeCodeSession(
   let outputFiles = ownership?.outputFiles ?? [];
 
   if (ownership && ownership.outputFiles === undefined) {
-    outputFiles = await extractLocalFiles(ownership.workDir, userId, additionalPaths);
-    const resumableOwnership = { ...ownership, outputFiles };
+    outputFiles = await extractLocalFiles(ownership, userId, additionalPaths);
+    ownership.outputFiles = outputFiles;
     // Upload results are part of close ownership state. Persist them before
     // stopping the process or updating the DB so every retry is side-effect free.
-    writeOwnership(resumableOwnership);
-    if (live) live.outputFiles = outputFiles;
+    writeOwnership(ownership);
   }
 
   if (ownership) {
@@ -598,4 +661,25 @@ export async function closeLocalClaudeCodeSession(
   }
 
   return { outputFiles };
+}
+
+export function closeLocalClaudeCodeSession(
+  taskId: string,
+  userId?: string,
+  additionalPaths?: string[]
+): Promise<{ outputFiles: FilePointer[] }> {
+  const inFlight = closeOperations.get(taskId);
+  if (inFlight) return inFlight;
+
+  const operation = runLocalClaudeCodeClose(taskId, userId, additionalPaths);
+  closeOperations.set(taskId, operation);
+  void operation.then(
+    () => {
+      if (closeOperations.get(taskId) === operation) closeOperations.delete(taskId);
+    },
+    () => {
+      if (closeOperations.get(taskId) === operation) closeOperations.delete(taskId);
+    }
+  );
+  return operation;
 }
