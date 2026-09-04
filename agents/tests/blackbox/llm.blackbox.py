@@ -5187,7 +5187,7 @@ def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
             "repo_name": f"org/cuda-repo-{i}",
             "repo_url": f"https://github.com/org/cuda-repo-{i}",
             "stars": 100000 - i,
-            "description": f"CUDA kernel library {i} " + ("x" * 200),
+            "description": f"CUDA kernel library {i} " + ("x" * 280),
         }
         for i in range(1, 101)
     ]
