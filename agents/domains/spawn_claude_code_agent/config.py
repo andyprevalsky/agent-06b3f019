@@ -28,6 +28,16 @@ SILENCE_TIMEOUT_S: Final[float] = 1.0
 # progress chips). Progress chips do not refresh last_output_time.
 SDK_IDLE_TIMEOUT_S: Final[float] = 180.0  # 3 minutes of no WS events
 
+# Claude Code's Monitor / ScheduleWakeup tools legitimately go quiet on the
+# WebSocket while background work continues (cuda k=3 r21 agent ce189356:
+# Monitor + ScheduleWakeup then 180s silence → idle kill, 0 artifacts, score
+# 0.5). Keep the short default for ordinary hangs, but stretch the idle window
+# after those wait tools so productive sessions are not aborted mid-wait.
+# Still well below MAX_RUNTIME_S so a truly stuck Monitor cannot burn the full
+# budget.
+SDK_WAIT_TOOL_IDLE_TIMEOUT_S: Final[float] = 900.0  # 15 minutes after wait tools
+SDK_WAIT_TOOL_NAMES: Final[frozenset[str]] = frozenset({"Monitor", "ScheduleWakeup"})
+
 # Maximum runtime before timeout.
 # Keep this well below long rose-bench task budgets (e.g. cuda-kernel 4200s).
 # A 60m cap let hung Claude Code sessions burn the whole bench with no parent

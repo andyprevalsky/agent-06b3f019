@@ -27,6 +27,8 @@ from domains.spawn_claude_code_agent.config import (
     MAX_RUNTIME_S,
     MAX_UNCHANGED_OUTPUTS,
     SDK_IDLE_TIMEOUT_S,
+    SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+    SDK_WAIT_TOOL_NAMES,
     SILENCE_TIMEOUT_S,
     code_agent_verifier_disabled,
 )
@@ -671,6 +673,8 @@ async def _run_agentic_loop(  # noqa: C901
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
+    # Default short idle; stretched after Monitor/ScheduleWakeup tool_use.
+    effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -713,7 +717,7 @@ async def _run_agentic_loop(  # noqa: C901
         pending_output = True
 
     async def on_event(event: dict[str, Any]) -> None:
-        nonlocal completed_codex_turns, last_output_time
+        nonlocal completed_codex_turns, last_output_time, effective_idle_timeout_s
         last_output_time = safe_time()
         code_events.append(event)
         if is_codex_completed_turn_event(event):
@@ -721,12 +725,28 @@ async def _run_agentic_loop(  # noqa: C901
             if key not in completed_codex_turn_keys:
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
+        event_type = event.get("type")
+        tool_name = event.get("name") or event.get("tool_name") or event.get("tool")
+        if event_type == "tool_use" and isinstance(tool_name, str):
+            if tool_name in SDK_WAIT_TOOL_NAMES:
+                if effective_idle_timeout_s != SDK_WAIT_TOOL_IDLE_TIMEOUT_S:
+                    logger.info(
+                        "[ClaudeCode] Extending SDK idle timeout for wait tool",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        tool_name=tool_name,
+                        idle_limit_s=SDK_WAIT_TOOL_IDLE_TIMEOUT_S,
+                    )
+                effective_idle_timeout_s = SDK_WAIT_TOOL_IDLE_TIMEOUT_S
+            else:
+                # Non-wait tool activity restores the short hung-CLI window.
+                effective_idle_timeout_s = SDK_IDLE_TIMEOUT_S
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
             agent_id=agent_id,
             task_id=task_id,
-            event_type=event.get("type"),
+            event_type=event_type,
             provider=event.get("provider"),
         )
 
@@ -770,8 +790,9 @@ async def _run_agentic_loop(  # noqa: C901
             # Autonomous CC waits for SDK exit after the first silence observation
             # (parent-LLM nudge is intentionally skipped). If the CLI then goes
             # quiet without exit_code, break instead of spinning to MAX_RUNTIME_S.
+            # effective_idle_timeout_s stretches after Monitor/ScheduleWakeup.
             if (
-                silence_duration >= SDK_IDLE_TIMEOUT_S
+                silence_duration >= effective_idle_timeout_s
                 and not pending_output
                 and ws_connected
                 and exit_code is None
@@ -781,7 +802,7 @@ async def _run_agentic_loop(  # noqa: C901
                     agent_id=agent_id,
                     task_id=task_id,
                     silence_s=silence_duration,
-                    idle_limit_s=SDK_IDLE_TIMEOUT_S,
+                    idle_limit_s=effective_idle_timeout_s,
                 )
                 action_summary.append(
                     f"SDK idle timeout ({int(silence_duration)}s with no WebSocket events)"

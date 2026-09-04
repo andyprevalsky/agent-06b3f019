@@ -1781,6 +1781,70 @@ async def test_run_agentic_loop_sdk_idle_timeout_breaks():
     assert any("SDK idle timeout" in s for s in summary), summary
 
 
+async def test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout():
+    """Monitor/ScheduleWakeup must stretch idle so productive waits aren't killed.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r21 agent ce189356 —
+    ScheduleWakeup/Monitor then ~180s WebSocket silence while background work
+    continued → SDK idle kill, 0 artifacts, score 0.5 under verifier-disabled.
+    Progress chips do not refresh last_output_time; wait tools must.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterWaitTool(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("partial work", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "ScheduleWakeup",
+                    }
+                )
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterWaitTool),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed >= 0.25, (
+        f"wait-tool idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    )
+    assert elapsed < 2.0, f"wait-tool idle should still break, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+    assert any(e.get("name") == "ScheduleWakeup" for e in events), events
+
+
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
     """Codex proxy events are promoted into worker logs with cache details."""
     from domains.spawn_claude_code_agent import service
@@ -3068,6 +3132,10 @@ async def run_all_tests():
     await r.record_async(
         "run_agentic_loop_sdk_idle_timeout",
         test_run_agentic_loop_sdk_idle_timeout_breaks,
+    )
+    await r.record_async(
+        "run_agentic_loop_wait_tool_extends_sdk_idle",
+        test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout,
     )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record(
