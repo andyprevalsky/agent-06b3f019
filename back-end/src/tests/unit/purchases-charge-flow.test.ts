@@ -418,7 +418,6 @@ async function main(): Promise<void> {
     );
   });
 
-
   await test('lookupPurchase does not mark CLEARED a held card closed for reclaim', async () => {
     const userId = await seedSubscribedUser();
     const agent = await prisma.agent.create({

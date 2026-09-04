@@ -80,12 +80,7 @@ function isBlockedV6(address: string): boolean {
   }
 
   const firstHextet = lower.split(':')[0];
-  if (
-    firstHextet &&
-    firstHextet.length === 4 &&
-    firstHextet >= 'fe80' &&
-    firstHextet <= 'febf'
-  ) {
+  if (firstHextet && firstHextet.length === 4 && firstHextet >= 'fe80' && firstHextet <= 'febf') {
     return true;
   }
 
@@ -101,7 +96,10 @@ export function isBlockedExternalAddress(address: string): boolean {
 }
 
 function normalizeHostname(hostname: string): string {
-  return hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return hostname
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
 }
 
 function rejectBlockedHostnameReason(host: string): string | null {
