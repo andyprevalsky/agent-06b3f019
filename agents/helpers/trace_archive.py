@@ -649,16 +649,20 @@ def _drain_backend_outbox(
         for item in items:
             if drained >= limit or (deadline is not None and time.monotonic() >= deadline):
                 return drained
-            if not item.is_file() or item.name.endswith(".meta.json"):
+            if not item.is_file():
                 continue
-            meta_path = item.with_suffix(item.suffix + ".meta.json")
-            if not meta_path.exists():
+            target = _outbox_artifact_target(item)
+            if target is None:
                 continue
             root_agent_id = bundle.name
-            path = item.relative_to(bundle).as_posix()
+            path = target.relative_to(bundle).as_posix()
             try:
-                with _artifact_lock(item):
-                    pair = _read_artifact_pair_unlocked(item)
+                with _artifact_lock(target):
+                    _recover_artifact_transaction_unlocked(target)
+                    meta_path = target.with_suffix(target.suffix + ".meta.json")
+                    if not meta_path.exists():
+                        continue
+                    pair = _read_artifact_pair_unlocked(target)
                 if pair is None:
                     continue
                 ciphertext, metadata = pair
@@ -784,14 +788,22 @@ def _pending_archive_futures(root_agent_id: str) -> set[Future[None]]:
         return set(_ARCHIVE_PENDING_BY_ROOT.get(_safe_segment(root_agent_id), set()))
 
 
+def _outbox_artifact_target(item: Path) -> Optional[Path]:
+    """Map a durable outbox file to the artifact pair it can publish."""
+    if item.name.endswith(".meta.json"):
+        return None
+    if _ARTIFACT_TRANSACTION_SUFFIX not in item.name:
+        return item
+    if item.name.endswith(_ARTIFACT_TRANSACTION_SUFFIX):
+        return item.with_name(item.name[: -len(_ARTIFACT_TRANSACTION_SUFFIX)])
+    return None
+
+
 def _root_outbox_has_artifacts(root_agent_id: str) -> bool:
     bundle = _outbox_root() / _safe_segment(root_agent_id)
     if not bundle.exists():
         return False
-    return any(
-        item.is_file() and not item.name.endswith(".meta.json") and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
-        for item in bundle.rglob("*")
-    )
+    return any(item.is_file() and _outbox_artifact_target(item) is not None for item in bundle.rglob("*"))
 
 
 def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:

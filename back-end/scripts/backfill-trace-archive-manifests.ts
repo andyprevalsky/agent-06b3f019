@@ -40,7 +40,7 @@ function parseArgs(argv: string[]): Args {
   const args: Args = {
     all: false,
     apply: false,
-    concurrency: 24,
+    concurrency: 4,
     json: false,
     limit: 0,
     rootAgentIds: [],

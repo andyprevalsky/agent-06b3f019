@@ -315,6 +315,11 @@ def extract_entry(root_agent_id: str) -> tuple[Optional[PlanEntry], str]:
 ProgressCallback = Callable[[int, int, dict[str, int]], None]
 
 
+def is_pending_scan_state(reason: Optional[str]) -> bool:
+    """Return whether a prior bundle result must be probed again."""
+    return reason is None or reason in TRANSIENT_SKIP_REASONS or reason.startswith("error:")
+
+
 def scan_bundles(
     bundle_ids: list[str],
     *,
@@ -328,11 +333,7 @@ def scan_bundles(
     Returns ``(new_entries, updated_scan_state, reason_counts)``. Bundle reads
     are read-only and run on a thread pool (boto3 clients are thread-safe).
     """
-    pending = [
-        bundle_id
-        for bundle_id in bundle_ids
-        if scan_state.get(bundle_id) is None or scan_state.get(bundle_id) in TRANSIENT_SKIP_REASONS
-    ]
+    pending = [bundle_id for bundle_id in bundle_ids if is_pending_scan_state(scan_state.get(bundle_id))]
     updated = dict(scan_state)
     entries: list[PlanEntry] = []
     counts: dict[str, int] = {}

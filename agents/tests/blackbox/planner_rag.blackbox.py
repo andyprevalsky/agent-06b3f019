@@ -333,9 +333,13 @@ def test_scan_bundles_is_incremental_and_reprobes_transient():
         assert counts["ok"] == 5 and state["sim-1"] == "simulated:simulated"
         assert state["unfinished"] == "not_finalized" and state["no-dump"] == "no_llm_traces"
 
-        # Second pass: nothing new except the transient "not_finalized" bundle is re-probed.
-        entries2, state2, counts2 = scan_bundles(ids, scan_state=state, concurrency=4)
-        assert entries2 == [] and sum(counts2.values()) == 1 and counts2 == {"not_finalized": 1}
+        # Second pass: transient and failed reads are re-probed, while completed
+        # states remain excluded from bounded incremental builds.
+        retry_state = dict(state)
+        retry_state["pop-1"] = "error:TimeoutError"
+        entries2, state2, counts2 = scan_bundles(ids, scan_state=retry_state, concurrency=4)
+        assert {entry.root_agent_id for entry in entries2} == {"pop-1"}
+        assert sum(counts2.values()) == 2 and counts2 == {"ok": 1, "not_finalized": 1}
         assert state2 == state
 
 

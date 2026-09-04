@@ -69,7 +69,7 @@ def _write(entries: list[Any], scan_state: dict[str, str], *, backend: str, sour
 def main() -> int:
     from helpers.trace_archive import list_archive_bundle_ids
     from providers.planner_rag import store
-    from providers.planner_rag.corpus import scan_bundles
+    from providers.planner_rag.corpus import is_pending_scan_state, scan_bundles
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--limit", type=int, default=0, help="Scan at most N pending bundles (0 = all)")
@@ -113,7 +113,7 @@ def main() -> int:
         for bundle_id in args.bundle_id:
             scan_state.pop(bundle_id, None)
     if args.limit:
-        pending = [b for b in bundle_ids if b not in scan_state]
+        pending = [b for b in bundle_ids if is_pending_scan_state(scan_state.get(b))]
         bundle_ids = pending[: args.limit]
 
     def _progress(done: int, total: int, counts: dict[str, int]) -> None:
