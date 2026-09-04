@@ -31,4 +31,24 @@ require_text "$DEPLOY" 'cooperative cutover handover progress' \
 require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' \
   "/deploy Step 13ab must verify via monitor --verify"
 
+CUTOVER="$ROOT/scripts/deploy-agents-cooperative-cutover.sh"
+[ -f "$CUTOVER" ] || fail "deploy-agents-cooperative-cutover.sh must exist"
+require_text "$CUTOVER" 'count_open_on_queue' \
+  "cutover must sanitize Temporal stdout before comparing open-workflow counts"
+require_text "$CUTOVER" '/^[0-9]+$/' \
+  "cutover open-count sanitizer must keep only pure integer lines"
+
+# Extractor contract: INFO lines on stdout must not prevent seeing 0.
+extract_open() {
+  printf '%s\n' "$1" | awk '/^[0-9]+$/{n=$0} END{if (n == "") print "?"; else print n}'
+}
+got="$(extract_open $'[2026-09-04T00:55:30.771Z] INFO [Temporal] Connecting...\n0')"
+[ "$got" = "0" ] || fail "polluted Temporal stdout must still yield open-count 0 (got: $got)"
+got="$(extract_open $'not-a-number\n')"
+[ "$got" = "?" ] || fail "non-integer stdout must yield ? (got: $got)"
+
+WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
+require_text "$WORKFLOW" 'timeout-minutes: 75' \
+  "cutover step must allow >60m headroom past the 45m drain SLO"
+
 echo "cooperative cutover monitor structural tests: PASS"
