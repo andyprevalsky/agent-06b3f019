@@ -96,13 +96,18 @@ export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
   for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
     if (cursor instanceof Error) {
       parts.push(cursor.message);
+      // Nested transport timeouts often carry only errno / undici codes
+      // (no TimeoutError name) — still treat them as create timeouts so the
+      // local Claude Code fallback can engage.
+      const code = (cursor as NodeJS.ErrnoException).code;
+      if (typeof code === 'string') parts.push(code);
       cursor = (cursor as { cause?: unknown }).cause;
       continue;
     }
     parts.push(String(cursor));
     break;
   }
-  return /aborted due to timeout|operation was aborted|TimeoutError|request handshake timed out/i.test(
+  return /aborted due to timeout|operation was aborted|TimeoutError|request handshake timed out|ETIMEDOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT/i.test(
     parts.join(' | ')
   );
 }

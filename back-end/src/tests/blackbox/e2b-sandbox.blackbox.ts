@@ -163,6 +163,29 @@ function testDomExceptionTimeoutNamesAreNarrow(): void {
     !isTransientSandboxCreateError(security),
     'SecurityError must not be treated as a transient sandbox create error'
   );
+
+  // Nested errno-only timeouts (no TimeoutError name) must still engage local fallback.
+  const nestedHeadersTimeout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
+  });
+  const nestedBodyTimeout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('body timeout'), { code: 'UND_ERR_BODY_TIMEOUT' }),
+  });
+  const nestedEtimedout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('connect'), { code: 'ETIMEDOUT' }),
+  });
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedHeadersTimeout),
+    'UND_ERR_HEADERS_TIMEOUT cause must count as sandbox create timeout'
+  );
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedBodyTimeout),
+    'UND_ERR_BODY_TIMEOUT cause must count as sandbox create timeout'
+  );
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedEtimedout),
+    'ETIMEDOUT cause must count as sandbox create timeout'
+  );
 }
 
 /**
