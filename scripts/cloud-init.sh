@@ -293,14 +293,27 @@ fi
 # smoke gate before a single task starts.
 if ! command -v cloudflared >/dev/null 2>&1; then
     log "installing cloudflared…"
-    CLOUDFLARED_TMP="$(mktemp "${TMPDIR:-/tmp}/cloudflared.XXXXXX")"
-    ( curl -fsSL --connect-timeout 10 --max-time 120 \
-        --retry 2 --retry-delay 2 --retry-max-time 300 \
-        https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-        -o "$CLOUDFLARED_TMP" \
-        && $SUDO install -m 0755 "$CLOUDFLARED_TMP" /usr/local/bin/cloudflared ) >/dev/null 2>&1 \
-        || log "WARN: cloudflared install failed (isolated benchmark tunnels will fail)"
-    rm -f "$CLOUDFLARED_TMP"
+    # Match the host architecture. Installing the amd64 artifact on arm64 yields
+    # a binary that cannot exec, and run.sh then hard-fails the whole smoke gate
+    # on a missing tunnel. uname is used rather than dpkg because this script
+    # also runs on rpm-based images (Amazon Linux) that ship no dpkg.
+    case "$(uname -m)" in
+        x86_64|amd64) CLOUDFLARED_ARCH=amd64 ;;
+        aarch64|arm64) CLOUDFLARED_ARCH=arm64 ;;
+        *) CLOUDFLARED_ARCH="" ;;
+    esac
+    if [ -z "$CLOUDFLARED_ARCH" ]; then
+        log "WARN: unsupported architecture $(uname -m) for cloudflared; skipping install"
+    else
+        CLOUDFLARED_TMP="$(mktemp "${TMPDIR:-/tmp}/cloudflared.XXXXXX")"
+        ( curl -fsSL --connect-timeout 10 --max-time 120 \
+            --retry 2 --retry-delay 2 --retry-max-time 300 \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CLOUDFLARED_ARCH}" \
+            -o "$CLOUDFLARED_TMP" \
+            && $SUDO install -m 0755 "$CLOUDFLARED_TMP" /usr/local/bin/cloudflared ) >/dev/null 2>&1 \
+            || log "WARN: cloudflared install failed (isolated benchmark tunnels will fail)"
+        rm -f "$CLOUDFLARED_TMP"
+    fi
 fi
 
 # shlock — the cloud benchmark fleet's cross-workspace app-env lock requires it

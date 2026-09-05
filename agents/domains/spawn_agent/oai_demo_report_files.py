@@ -28,10 +28,13 @@ import json
 import re
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+import httpx
 from markdown_it import MarkdownIt
 from temporalio import activity
 
+from config import load_config
 from helpers.attachments import upload_to_storage
+from helpers.workflow_generation import workflow_generation_headers
 
 # filename, MIME type, display title, renderer
 ReportFileSpec = Tuple[str, str, str, str]
@@ -85,19 +88,12 @@ def value_to_markdown(value: Any) -> str:
         return value.strip()
     if isinstance(value, list):
         if all(isinstance(item, str) for item in value):
-            return "\n".join(
-                f"{index}. {item.strip()}"
-                for index, item in enumerate(value, start=1)
-                if item.strip()
-            )
+            return "\n".join(f"{index}. {item.strip()}" for index, item in enumerate(value, start=1) if item.strip())
         if all(isinstance(item, Mapping) for item in value):
             blocks: List[str] = []
             for index, item in enumerate(value, start=1):
                 title = str(
-                    item.get("creator_name")
-                    or item.get("name")
-                    or item.get("title")
-                    or f"Item {index}"
+                    item.get("creator_name") or item.get("name") or item.get("title") or f"Item {index}"
                 ).strip()
                 lines = [f"### {index}. {title}"]
                 for key, nested in item.items():
@@ -152,12 +148,28 @@ def render_html_document(title: str, markdown: str) -> str:
 """
 
 
+def _safe_csv_cell(value: Any) -> Any:
+    """Neutralize spreadsheet formulas before a value reaches a CSV cell.
+
+    CSV quoting stops delimiter injection but not formula evaluation: a cell
+    beginning with =, +, - or @ is executed when the file is opened in Excel or
+    Sheets. Report text and record keys are model- and web-derived, so prefix
+    those cells with an apostrophe to force literal text.
+    """
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def _csv_text(fieldnames: List[str], rows: List[Mapping[str, Any]]) -> str:
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
+    safe_fieldnames = [str(_safe_csv_cell(name)) for name in fieldnames]
+    writer = csv.DictWriter(output, fieldnames=safe_fieldnames, lineterminator="\n")
     writer.writeheader()
     for row in rows:
-        writer.writerow({name: row.get(name, "") for name in fieldnames})
+        writer.writerow(
+            {safe_name: _safe_csv_cell(row.get(name, "")) for name, safe_name in zip(fieldnames, safe_fieldnames)}
+        )
     return output.getvalue()
 
 
@@ -265,10 +277,7 @@ def render_records_csv(value: Any) -> str:
                 fieldnames.append(name)
     if not fieldnames:
         fieldnames = ["details"]
-    normalized = [
-        {str(key): _csv_cell(nested) for key, nested in record.items()}
-        for record in records
-    ]
+    normalized = [{str(key): _csv_cell(nested) for key, nested in record.items()} for record in records]
     return _csv_text(fieldnames, normalized)
 
 
@@ -301,6 +310,30 @@ def plan_oai_demo_report_files(structured_response: Optional[Mapping[str, Any]])
     return planned
 
 
+def passthrough_file_pointer_specs(
+    structured_response: Optional[Mapping[str, Any]],
+) -> Dict[str, ReportFileSpec]:
+    """Specs for report fields that already arrived as FilePointers.
+
+    `plan_oai_demo_report_files` deliberately skips these (there is nothing to
+    upload), but the response still carries a file pointer for them. Their
+    schema fields must be rewritten to the file type anyway, or the declared
+    schema contradicts the value it describes.
+    """
+    specs: Dict[str, ReportFileSpec] = {}
+    if not isinstance(structured_response, Mapping):
+        return specs
+    for key, spec in OAI_DEMO_REPORT_FILES.items():
+        value = structured_response.get(key)
+        if value in (None, "", [], {}):
+            continue
+        if is_file_pointer_value(value) or (
+            isinstance(value, list) and value and all(is_file_pointer_value(item) for item in value)
+        ):
+            specs[key] = spec
+    return specs
+
+
 def rewrite_schema_file_pointer_fields(
     schema: Optional[Mapping[str, Any]],
     specs: Mapping[str, ReportFileSpec],
@@ -326,6 +359,36 @@ def rewrite_schema_file_pointer_fields(
     return rewritten
 
 
+async def _persist_rewritten_schema(agent_id: str, schema: Optional[Dict[str, Any]]) -> None:
+    """Durably store the file-pointer schema alongside the response it describes.
+
+    `mark_finished` carries `structured_response` but not the schema, so without
+    this the DB keeps the pre-rewrite field types while the stored response holds
+    FilePointers, and the UI renders a file value against a text schema. Uses the
+    existing `PATCH /api/agents/:id` `response_schema` field. Best effort: the
+    reports themselves are already uploaded, so a persistence failure must not
+    fail completion.
+    """
+    if not agent_id or not isinstance(schema, dict):
+        return
+    try:
+        config = load_config()
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{config.backend.api_url}/api/agents/{agent_id}",
+                json={"response_schema": schema},
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
+                timeout=30.0,
+            )
+            response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 - completion must survive this
+        activity.logger.warning(f"[oai-demo] failed to persist rewritten output schema for {agent_id}: {exc}")
+
+
 @activity.defn
 async def materialize_oai_demo_report_files_activity(
     user_id: str,
@@ -335,10 +398,18 @@ async def materialize_oai_demo_report_files_activity(
 ) -> Dict[str, Any]:
     """Upload demo-root report fields as retry-safe HTML/CSV FilePointers."""
     planned = plan_oai_demo_report_files(structured_response)
+    passthrough_specs = passthrough_file_pointer_specs(structured_response)
     if not planned or not user_id:
+        if not passthrough_specs:
+            return {
+                "structured_response": structured_response,
+                "output_schema": output_schema,
+            }
+        passthrough_schema = rewrite_schema_file_pointer_fields(output_schema, passthrough_specs)
+        await _persist_rewritten_schema(agent_id, passthrough_schema)
         return {
             "structured_response": structured_response,
-            "output_schema": output_schema,
+            "output_schema": passthrough_schema,
         }
     rewritten = dict(structured_response or {})
     planned_specs: Dict[str, ReportFileSpec] = {}
@@ -353,7 +424,9 @@ async def materialize_oai_demo_report_files_activity(
             idempotency_key=f"oai-demo-report:{retry_scope}:{item['filename']}",
         )
         planned_specs[item["key"]] = OAI_DEMO_REPORT_FILES[item["key"]]
+    rewritten_schema = rewrite_schema_file_pointer_fields(output_schema, {**passthrough_specs, **planned_specs})
+    await _persist_rewritten_schema(agent_id, rewritten_schema)
     return {
         "structured_response": rewritten,
-        "output_schema": rewrite_schema_file_pointer_fields(output_schema, planned_specs),
+        "output_schema": rewritten_schema,
     }

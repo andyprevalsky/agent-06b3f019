@@ -19,8 +19,11 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.oai_demo_report_files import (
+    _csv_text,
+    _safe_csv_cell,
     is_file_pointer_value,
     materialize_oai_demo_report_files_activity,
+    passthrough_file_pointer_specs,
     plan_oai_demo_report_files,
     render_calendar_csv,
     render_html_document,
@@ -50,9 +53,7 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
 
 def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
-    assert is_oai_demo_mass_agent_task(
-        SimpleNamespace(goal="Buy socks", fast_cache_goal=OAI_DEMO_CHILD_GOAL_PREFIX)
-    )
+    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=OAI_DEMO_CHILD_GOAL_PREFIX))
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
 
 
@@ -195,9 +196,7 @@ def test_materialize_oai_demo_report_files_activity_uploads_readable_formats_ide
                         "**Stop Biohacking** — Build a measurable system."
                     ),
                     "hook_tested_video_script_openings": ["Track the metric nobody sees."],
-                    "weekly_engagement_target_creators": [
-                        {"creator_name": "Siim Land", "platform": "YouTube"}
-                    ],
+                    "weekly_engagement_target_creators": [{"creator_name": "Siim Land", "platform": "YouTube"}],
                     "creator_name": "ignored",
                 },
                 {"fields": [{"name": "positioning_statement", "type": "str"}]},
@@ -215,9 +214,7 @@ def test_materialize_oai_demo_report_files_activity_uploads_readable_formats_ide
     ]
     assert [item[3] for item in uploads] == ["text/html", "text/html", "text/csv", "text/html", "text/csv"]
     assert all(item[4] == f"oai-demo-report:agent-1:{item[2]}" for item in uploads)
-    assert result["structured_response"]["positioning_statement"]["original_filename"] == (
-        "positioning-statement.html"
-    )
+    assert result["structured_response"]["positioning_statement"]["original_filename"] == ("positioning-statement.html")
     assert result["output_schema"]["fields"][0]["type"] == "file_pointer"
     assert result["output_schema"]["fields"][0]["file_types"] == ["html"]
 
@@ -523,14 +520,8 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
         _schedule_broadcast_flush,
     )
 
-    assert (
-        _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"stream_id": "s1"}}})
-        == "t:e:s1"
-    )
-    assert (
-        _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"taskId": "tid"}}})
-        == "t:e:tid"
-    )
+    assert _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"stream_id": "s1"}}}) == "t:e:s1"
+    assert _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"taskId": "tid"}}}) == "t:e:tid"
     assert _message_order_key({"topic": "t", "event": "e", "payload": {}}) == "t:e"
     assert _assistant_delta_coalesce_key({"event": "OTHER"}) is None
     assert _assistant_delta_coalesce_key({"event": "ASSISTANT_STREAM", "payload": {}}) is None
@@ -789,23 +780,29 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
 
     async def _recover():
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "", TimeoutError("timed out")) is None
-        assert await _recover_oai_demo_for_each_timeout(
-            SimpleNamespace(fast_mode_cache_enabled=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX),
-            "cid",
-            TimeoutError("timed out"),
-        ) is None
+        assert (
+            await _recover_oai_demo_for_each_timeout(
+                SimpleNamespace(fast_mode_cache_enabled=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX),
+                "cid",
+                TimeoutError("timed out"),
+            )
+            is None
+        )
         assert await _recover_oai_demo_for_each_timeout(live_wf, "cid", TimeoutError("timed out")) is None
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "cid", RuntimeError("other")) is None
-        assert await _recover_oai_demo_for_each_timeout(
-            SimpleNamespace(
-                goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-                fast_cache_goal="",
-                fast_mode_cache_enabled=True,
-                child_results="bad",
-            ),
-            "cid",
-            TimeoutError("timed out"),
-        ) is None
+        assert (
+            await _recover_oai_demo_for_each_timeout(
+                SimpleNamespace(
+                    goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+                    fast_cache_goal="",
+                    fast_mode_cache_enabled=True,
+                    child_results="bad",
+                ),
+                "cid",
+                TimeoutError("timed out"),
+            )
+            is None
+        )
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "cid", TimeoutError("timed out")) == {
             "status": "completed"
         }
@@ -838,9 +835,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert _unavailable_source_is_required("gmail", "anything", True) is True
     assert _unavailable_source_is_required("gmail", "use gmail inbox", False) is True
     assert _unavailable_source_is_required("calendar", "buy coffee", False) is False
-    validate_spawn_params(
-        {"type": "explore", "goal": "research sleep", "_phase": "PLAN"}
-    )
+    validate_spawn_params({"type": "explore", "goal": "research sleep", "_phase": "PLAN"})
     with pytest.raises(ValueError, match="requires 'type'"):
         validate_spawn_params({})
     with pytest.raises(ValueError, match="invalid"):
@@ -894,3 +889,62 @@ def test_misc_low_coverage_helpers():
         rows = fetch_search_results_ddgs("sleep", max_results=2)
     assert rows[0]["url"] == "https://a"
     assert rows[1]["excerpts"] == []
+
+
+def test_csv_cells_neutralize_spreadsheet_formulas():
+    """CSV quoting stops delimiter injection but not formula execution.
+
+    Report text and record keys are model- and web-derived, so a value starting
+    with =, +, - or @ would execute on open in Excel/Sheets.
+    """
+    assert _safe_csv_cell("=cmd|'/c calc'!A1") == "'=cmd|'/c calc'!A1"
+    for prefix in ("=", "+", "-", "@"):
+        assert _safe_csv_cell(f"{prefix}danger").startswith("'")
+    # Leading whitespace must not smuggle a formula past the check.
+    assert _safe_csv_cell("   =sneaky").startswith("'")
+    # Ordinary values and non-strings are untouched.
+    assert _safe_csv_cell("safe text") == "safe text"
+    assert _safe_csv_cell(7) == 7
+
+    rendered = _csv_text(["=header", "plain"], [{"=header": "=evil", "plain": "ok"}])
+    assert "'=header" in rendered
+    assert "'=evil" in rendered
+    assert rendered.endswith("\n")
+
+
+def test_passthrough_file_pointers_still_rewrite_their_schema_fields():
+    """Values that arrive as FilePointers are skipped for upload but still typed.
+
+    plan_oai_demo_report_files intentionally skips them (nothing to upload); if
+    their schema fields kept the old type the declared schema would contradict
+    the value it describes.
+    """
+    pointer = {"storage_path": "p/x.html", "original_filename": "x.html"}
+    response = {"positioning_statement": pointer, "top_creators_analysis": "prose"}
+
+    assert plan_oai_demo_report_files(response) != []
+    assert sorted(passthrough_file_pointer_specs(response)) == ["positioning_statement"]
+
+    # A response made entirely of pass-through pointers plans no uploads at all.
+    all_pointers = {"positioning_statement": pointer}
+    assert plan_oai_demo_report_files(all_pointers) == []
+    assert sorted(passthrough_file_pointer_specs(all_pointers)) == ["positioning_statement"]
+
+    schema = {"fields": [{"name": "positioning_statement", "type": "string"}]}
+    rewritten = rewrite_schema_file_pointer_fields(schema, passthrough_file_pointer_specs(all_pointers))
+    assert rewritten["fields"][0]["type"] != "string"
+
+
+def test_materialize_persists_rewritten_schema_for_passthrough_only_response():
+    """mark_finished carries structured_response but not the schema.
+
+    Without an explicit persist the DB keeps pre-rewrite field types while the
+    stored response holds FilePointers.
+    """
+    pointer = {"storage_path": "p/x.html", "original_filename": "x.html"}
+    response = {"positioning_statement": pointer}
+    schema = {"fields": [{"name": "positioning_statement", "type": "string"}]}
+
+    result = asyncio.run(materialize_oai_demo_report_files_activity("user-1", response, schema, "agent-1"))
+    # No uploads were planned, but the schema must still describe a file.
+    assert result["output_schema"]["fields"][0]["type"] != "string"
