@@ -88,6 +88,28 @@ function cursorMatchesTimeoutName(error: unknown): boolean {
 }
 
 /**
+ * True when sandbox create failed specifically on control-plane abort/timeout
+ * (not billing/auth). Used by same-host local Claude Code fallback.
+ */
+export function isSandboxCreateTimeoutOrAbortError(error: unknown): boolean {
+  if (cursorMatchesTimeoutName(error)) return true;
+  const parts: string[] = [];
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
+    if (cursor instanceof Error) {
+      parts.push(cursor.message);
+      cursor = (cursor as { cause?: unknown }).cause;
+      continue;
+    }
+    parts.push(String(cursor));
+    break;
+  }
+  return /aborted due to timeout|operation was aborted|TimeoutError|request handshake timed out/i.test(
+    parts.join(' | ')
+  );
+}
+
+/**
  * Create an E2B sandbox with transport retries and client-side idempotency.
  *
  * E2B has no create idempotency key. A transport error is therefore ambiguous: the sandbox may
@@ -111,10 +133,7 @@ export async function createSandboxWithRetry(
     ...options,
     // Never inherit the SDK's 60s default when a keep-alive socket is half-dead —
     // give the control plane enough room, and still classify abort as transient.
-    requestTimeoutMs: Math.max(
-      callerRequestTimeoutMs ?? 0,
-      SANDBOX_CREATE_REQUEST_TIMEOUT_MS
-    ),
+    requestTimeoutMs: Math.max(callerRequestTimeoutMs ?? 0, SANDBOX_CREATE_REQUEST_TIMEOUT_MS),
     metadata: { ...(options?.metadata ?? {}), createRequestId },
   } as Parameters<typeof Sandbox.create>[1];
 
