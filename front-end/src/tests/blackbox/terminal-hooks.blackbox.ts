@@ -39,12 +39,11 @@ const ctxState = {
   streamingAttention: null,
   streamingTools: new Map(),
   streamedTextsRef: { current: new Set<string>() } as never,
-  setAgent: vi.fn(),
+  applyAgentDetail: vi.fn(() => true),
   setSelectedAgentId: vi.fn(),
   stagePendingAgentCreation: vi.fn(),
   reconcilePendingAgentCreation: vi.fn(async () => {}),
   rollbackPendingAgentCreation: vi.fn(() => true),
-  setMessages: vi.fn(),
   registerMessageHandler: vi.fn(() => () => {}),
   sendMessage: vi.fn(async () => {}),
   isLoadingAgent: false,
@@ -91,9 +90,7 @@ describe('useAgentActions', () => {
     return {
       selectedAgentId: 'agent-001',
       agentDetail: makeAgent(),
-      setAgentDetail: vi.fn(),
-      setMessages: vi.fn(),
-      setSelectedModel: vi.fn(),
+      applyAgentDetail: vi.fn(() => true),
       setSelectedAgentIdContext: vi.fn(),
       setCurrentView: vi.fn(),
       clientSource: 'WEB',
@@ -121,7 +118,7 @@ describe('useAgentActions', () => {
     expect(args.setSelectedAgentIdContext).toHaveBeenCalledWith(null);
   });
 
-  it('refreshAgentDetail sets agent + messages + model on success', async () => {
+  it('refreshAgentDetail applies the selected agent response on success', async () => {
     server.use(
       http.get(`${API_BASE}/agents/:agentId`, () =>
         HttpResponse.json({
@@ -136,9 +133,7 @@ describe('useAgentActions', () => {
     await act(async () => {
       await result.current.refreshAgentDetail('agent-001');
     });
-    expect(args.setAgentDetail).toHaveBeenCalled();
-    expect(args.setMessages).toHaveBeenCalled();
-    expect(args.setSelectedModel).toHaveBeenCalledWith('rose-1-ultra');
+    expect(args.applyAgentDetail).toHaveBeenCalledWith('agent-001', expect.any(Object));
   });
 
   it('refreshAgentDetail logs error on fetch failure', async () => {
@@ -232,7 +227,7 @@ describe('useAgentActions', () => {
     await act(async () => {
       await result.current.handlePauseAgent();
     });
-    expect(args.setAgentDetail).toHaveBeenCalled();
+    expect(args.applyAgentDetail).toHaveBeenCalled();
     expect(result.current.isPausing).toBe(false);
   });
 

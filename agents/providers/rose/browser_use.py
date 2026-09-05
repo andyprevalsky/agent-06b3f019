@@ -1163,6 +1163,60 @@ def normalize_browser_use_tool_call(
     )
 
 
+def normalize_browser_use_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+    *,
+    thinking: Optional[str] = None,
+    validation_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Normalize one provider turn without discarding a printable key batch.
+
+    Browser execution consumes one unified action per turn. Providers can still
+    emit several native calls in one response, though. A sequence made entirely
+    of single printable ``press_key`` calls is one text-entry operation against
+    the already-focused element, so preserve it as focused ``input_text``. Mixed
+    or stateful batches retain the historical first-call-only behavior.
+    """
+    if not tool_calls:
+        raise ValueError("normalize_browser_use_tool_calls: no tool calls")
+
+    if len(tool_calls) > 1:
+        try:
+            normalized_calls = [
+                normalize_browser_use_tool_call(
+                    tool_call,
+                    thinking=thinking,
+                    validation_context=validation_context,
+                )
+                for tool_call in tool_calls
+            ]
+        except ValueError:
+            normalized_calls = []
+
+        keys = [call.get("params", {}).get("key") for call in normalized_calls]
+        if normalized_calls and all(
+            call.get("action") == "press_key"
+            and isinstance(key, str)
+            and len(key) == 1
+            and key.isprintable()
+            for call, key in zip(normalized_calls, keys)
+        ):
+            return {
+                "action": "input_text",
+                "thinking": thinking,
+                "index": None,
+                "coordinates": None,
+                "element_description": None,
+                "params": {"text": "".join(keys), "clear": False},
+            }
+
+    return normalize_browser_use_tool_call(
+        tool_calls[0],
+        thinking=thinking,
+        validation_context=validation_context,
+    )
+
+
 _ACTION_NAME_MAP: Dict[str, str] = {
     "navigate": "goto",
     "go_back": "navback",

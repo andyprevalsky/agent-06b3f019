@@ -8,7 +8,7 @@
  * - Prevents subscribing before setRealtimeAuth() has been called by useAuth
  * - realtimeReady is set true only after setRealtimeAuth completes
  *
- * AGENT SELECTION (agentId filtering pattern):
+ * AGENT SELECTION (live identity boundary):
  * +-------------------------------------------------------------------------+
  * | SWITCH FROM AGENT A -> AGENT B:                                        |
  * |                                                                         |
@@ -19,16 +19,16 @@
  * | 3. CONNECT NEW -------> subscribeToAgent(newAgentId)                   |
  * |                          loadAgentDetail(newAgentId)                    |
  * |                                                                         |
- * | Message filtering: Each payload includes agentId, handlers check       |
- * | data.agentId === selectedAgentId to prevent cross-agent contamination. |
- * | Messages from wrong agent are simply discarded.                        |
+ * | Every async callback owns an agent-scoped token and checks it against  |
+ * | selectedAgentIdRef immediately before every state write. Unsubscribe   |
+ * | is cleanup, not cancellation: already-queued callbacks are discarded.  |
  * |                                                                         |
  * | Race prevention: loadAgentDetail merges API messages with any          |
  * | realtime messages that arrived, using message_id for deduplication.    |
  * +-------------------------------------------------------------------------+
  *
  * AGENT SELECTION STATES:
- * [NO_AGENT] <-- selectedAgentId: null, gate: open, URL: no agent-id param
+ * [NO_AGENT] <-- selectedAgentId: null, URL: no agent-id param
  *     |
  *     v (new goal) -> mint id -> sync URL -> project agent + USER message
  * [PENDING_CREATION] <-- detail GET suppressed, realtime subscribes immediately
@@ -40,20 +40,20 @@
  *
  * [NO_AGENT]
  *     |
- *     v (setSelectedAgentId) -> SYNC URL -> CLOSE GATE -> KILL -> FLUSH
- * [LOADING_AGENT] <-- fetch agent detail + subscribe, gate: closed, URL: ?agent-id=X
+ *     v (setSelectedAgentId) -> UPDATE LIVE ID -> SYNC URL -> KILL -> FLUSH
+ * [LOADING_AGENT] <-- fetch agent detail + subscribe, URL: ?agent-id=X
  *     |
  *     v (benchmark dev preview without auth) -> fetch retained run only, skip realtime
  *     |   (preview fetch FAILS without full access -> KEEP selection + URL;
  *     |    retry via authenticated path once canSubscribe flips true.
  *     |    Only a failure WITH full access clears selection -> [NO_AGENT])
  *     |
- *     v (subscription + fetch complete) -> OPEN GATE
- * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open, URL: ?agent-id=X
+ *     v (subscription + fetch complete for current ID)
+ * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], URL: ?agent-id=X
  *     | own run: inspectionContext=null
  *     | admin + foreign run: inspectionContext=owner identity -> floating read-only badge
  *     |
- *     | (change agent) -> SYNC URL -> CLOSE GATE first, prevents cross-agent contamination
+ *     | (change agent) -> live ID changes before any queued work can commit
  *     v
  * [NO_AGENT] or [LOADING_AGENT]
  *
@@ -72,6 +72,11 @@
  *     |
  *     v (stream complete)
  * [IDLE] --> content moved to messages array
+ *
+ * API DETAIL COMMITS:
+ * - Responses must contain the same agent_id that was requested.
+ * - applyAgentDetail is the only public detail commit API; it rejects stale selections.
+ * - Ancestors and MessageList animation buffers are also keyed by selectedAgentId.
  *
  * MESSAGE SENDING:
  * [IDLE] <-- isSending: false

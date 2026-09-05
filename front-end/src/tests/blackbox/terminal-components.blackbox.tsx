@@ -129,11 +129,10 @@ function makeAgentDetail(overrides: Partial<AgentDetail> = {}): AgentDetail {
 function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
   return {
     agent: null,
-    setAgent: vi.fn(),
+    applyAgentDetail: vi.fn(() => true),
     selectedAgentId: null,
     setSelectedAgentId: vi.fn(),
     messages,
-    setMessages: vi.fn(),
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,

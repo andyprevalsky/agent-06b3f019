@@ -3,6 +3,18 @@ import { getAdminAccessToken } from '../impersonation';
 import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
 
+function assertAgentDetailIdentity(
+  agentId: string,
+  data: AgentDetailResponse,
+): AgentDetailResponse {
+  if (data.agent.agent_id !== agentId) {
+    throw new Error(
+      `Agent detail identity mismatch: requested ${agentId}, received ${data.agent.agent_id}`,
+    );
+  }
+  return data;
+}
+
 export function benchmarkAgentPreviewEnabled(): boolean {
   return import.meta.env.DEV === true || Boolean(import.meta.env.VITEST);
 }
@@ -41,7 +53,11 @@ export async function searchAgents(query: string, signal?: AbortSignal): Promise
 }
 
 // Get agent details with messages
-export async function getAgent(agentId: string, before?: string): Promise<AgentDetailResponse> {
+export async function getAgent(
+  agentId: string,
+  before?: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
   const headers = getAuthHeaders();
   const url = before
     ? `${API_BASE_WITH_PATH}/agents/${agentId}?before=${before}`
@@ -49,27 +65,33 @@ export async function getAgent(agentId: string, before?: string): Promise<AgentD
 
   const response = await fetch(url, {
     headers,
+    signal,
   });
 
   if (!response.ok) {
     throw new Error('Failed to fetch agent');
   }
 
-  return hydrateAgentDetail(await response.json());
+  return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
-export async function getBenchmarkAgentPreview(agentId: string): Promise<AgentDetailResponse> {
+export async function getBenchmarkAgentPreview(
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
   if (!benchmarkAgentPreviewEnabled()) {
     throw new Error('Benchmark agent preview is disabled');
   }
 
-  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/agent-preview/${agentId}`);
+  const response = await fetch(`${API_BASE_WITH_PATH}/benchmarks/agent-preview/${agentId}`, {
+    signal,
+  });
 
   if (!response.ok) {
     throw new Error('Failed to fetch benchmark agent preview');
   }
 
-  return hydrateAgentDetail(await response.json());
+  return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 
 // Create a new agent

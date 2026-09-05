@@ -292,10 +292,21 @@ export async function findUserPoolTokensByDefault(userId: string): Promise<boole
  * Current pool state of a credential integration: the materialized effective
  * value plus the explicit per-integration override (null = inherit account).
  */
-export async function findIntegrationPoolingState(userId: string, name: string) {
+export async function findIntegrationPoolingState(
+  userId: string,
+  name: string,
+  accountId?: string | null
+) {
+  const normalizedAccountId = accountId?.trim() ?? '';
+  const select = { poolingEnabled: true, poolingEnabledOverride: true } as const;
+  const exact = await prisma.integration.findUnique({
+    where: { userId_name_accountId: { userId, name, accountId: normalizedAccountId } },
+    select,
+  });
+  if (exact !== null || normalizedAccountId === '') return exact;
   return prisma.integration.findUnique({
     where: { userId_name_accountId: { userId, name, accountId: '' } },
-    select: { poolingEnabled: true, poolingEnabledOverride: true },
+    select,
   });
 }
 

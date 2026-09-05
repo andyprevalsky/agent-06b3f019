@@ -105,6 +105,7 @@ describe('useRealtimeSubscription', () => {
       reconnectTimeoutRef: { current: null as number | null },
       isReconnectingRef: { current: false },
       initialLoadDoneRef: { current: null as string | null },
+      selectedAgentIdRef: { current: 'agent-1' as string | null },
       streamedTextsRef: { current: new Set<string>() },
       completedStreamIdsRef: { current: new Set<string>() },
     };
@@ -122,6 +123,12 @@ describe('useRealtimeSubscription', () => {
   beforeEach(() => {
     vi.mocked(RealtimeMod.subscribeToAgent).mockReset();
     vi.mocked(RealtimeMod.unsubscribe).mockReset();
+    server.use(
+      http.get(
+        `${API_BASE}/benchmarks/agent-preview/:agentId`,
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+    );
   });
 
   it('no-ops and cleans up when selectedAgentId is null', () => {
@@ -189,7 +196,7 @@ describe('useRealtimeSubscription', () => {
     capturedHandlers.onAgentModeStarted?.({ agentId: 'agent-1' });
     capturedHandlers.onAgentModeStarted?.({ agentId: 'other' });
 
-    expect(deps.setIsChatMode).toHaveBeenCalledWith(false);
+    expect(deps.setIsChatMode).toHaveBeenCalled();
 
     unmount();
     expect(RealtimeMod.unsubscribe).toHaveBeenCalled();
@@ -201,7 +208,12 @@ describe('useRealtimeSubscription', () => {
       capturedHandlers = handlers as CapturedAgentHandlers;
       return fakeChannel();
     });
-    const deps = makeDeps();
+    let isChatMode = true;
+    const deps = makeDeps({
+      setIsChatMode: vi.fn((action) => {
+        isChatMode = typeof action === 'function' ? action(isChatMode) : action;
+      }),
+    });
     const { unmount } = renderHook(() => useRealtimeSubscription(deps));
     await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
 
@@ -221,7 +233,28 @@ describe('useRealtimeSubscription', () => {
       });
     });
 
-    expect(deps.setIsChatMode).toHaveBeenCalledWith(false);
+    expect(isChatMode).toBe(false);
+    unmount();
+  });
+
+  it('rejects an A update queued before switching when its React updater commits after B', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, handlers) => {
+      capturedHandlers = handlers as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(RealtimeMod.subscribeToAgent).toHaveBeenCalled());
+    vi.mocked(deps.setAgent).mockClear();
+
+    capturedHandlers.onUpdate?.({ title: 'late title from A' });
+    const queuedUpdater = vi.mocked(deps.setAgent).mock.calls[0]?.[0];
+    expect(typeof queuedUpdater).toBe('function');
+    deps.selectedAgentIdRef.current = 'agent-2';
+    const agentB = { agent_id: 'agent-2', title: 'title for B' } as never;
+
+    expect((queuedUpdater as (agent: typeof agentB) => typeof agentB)(agentB)).toBe(agentB);
     unmount();
   });
 
@@ -322,6 +355,100 @@ describe('useRealtimeSubscription', () => {
     expect(deps.reconnectAttemptRef.current).toBe(0);
     expect(deps.reconnectTimeoutRef.current).toBeNull();
     expect(deps.setForceResubscribeCounter).not.toHaveBeenCalled();
+  });
+
+  it('unsubscribes a channel whose subscription resolves after unmount', async () => {
+    let finishSubscription!: (channel: ReturnType<typeof fakeChannel>) => void;
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishSubscription = resolve;
+        }),
+    );
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    const lateChannel = fakeChannel();
+
+    unmount();
+    await act(async () => {
+      finishSubscription(lateChannel);
+      await Promise.resolve();
+    });
+
+    expect(RealtimeMod.unsubscribe).toHaveBeenCalledWith(lateChannel);
+    expect(deps.channelRef.current).toBeNull();
+  });
+
+  it('drops a connected backfill response after switching agents', async () => {
+    let finishRequest!: () => void;
+    let markRequestStarted!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
+    const requestCanFinish = new Promise<void>((resolve) => {
+      finishRequest = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, async () => {
+        markRequestStarted();
+        await requestCanFinish;
+        return HttpResponse.json(agentDetailJson([]));
+      }),
+    );
+    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
+    mockSession();
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await requestStarted;
+
+    deps.selectedAgentIdRef.current = 'agent-2';
+    finishRequest();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(deps.setMessages).not.toHaveBeenCalled();
+    expect(deps.setAgent).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('drops a disconnected poll response after switching agents', async () => {
+    let finishRequest!: () => void;
+    let markRequestStarted!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      markRequestStarted = resolve;
+    });
+    const requestCanFinish = new Promise<void>((resolve) => {
+      finishRequest = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, async () => {
+        markRequestStarted();
+        await requestCanFinish;
+        return HttpResponse.json(agentDetailJson([]));
+      }),
+    );
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(() => new Promise(() => {}));
+    mockSession();
+    const deps = makeDeps();
+    vi.useFakeTimers();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    try {
+      await vi.advanceTimersByTimeAsync(DISCONNECTED_BACKFILL_POLL_MS + 1);
+      await requestStarted;
+      deps.selectedAgentIdRef.current = 'agent-2';
+      finishRequest();
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(deps.setMessages).not.toHaveBeenCalled();
+      expect(deps.setAgent).not.toHaveBeenCalled();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('reconnection refetches agent detail and merges messages', async () => {

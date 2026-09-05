@@ -288,6 +288,11 @@ function buildMergedMessages(
 
 export function useSubAgentTreeMerge(messages: Message[], rootAgentId?: string): Message[] {
   const prevMergedRef = useRef<Map<string, Message>>(new Map());
+  const cacheOwnerRef = useRef(rootAgentId);
+  if (cacheOwnerRef.current !== rootAgentId) {
+    prevMergedRef.current = new Map();
+    cacheOwnerRef.current = rootAgentId;
+  }
 
   return useMemo(() => {
     const { result, newCache } = mergeSubAgentTreeMessages(

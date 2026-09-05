@@ -14,6 +14,7 @@ import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
 import type { TerminalView } from '../types';
+import { DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
 import type { useAgentActions } from './useAgentActions';
@@ -34,6 +35,33 @@ export function overlaySelectedAgentTitle(
     agent.agent_id === selectedAgent.agent_id && agent.title !== selectedAgent.title
       ? { ...agent, title: selectedAgent.title }
       : agent,
+  );
+}
+
+export function useSelectedAgentModel(
+  selectedAgentId: string | null,
+  modelOwnerId: string | undefined,
+  model: string | undefined,
+  setSelectedModel: (model: string) => void,
+  isInitialLoadRef: React.MutableRefObject<boolean>,
+) {
+  useEffect(() => {
+    setSelectedModel(modelOwnerId === selectedAgentId ? (model ?? DEFAULT_MODEL) : DEFAULT_MODEL);
+    isInitialLoadRef.current = true;
+  }, [isInitialLoadRef, model, modelOwnerId, selectedAgentId, setSelectedModel]);
+}
+
+function useContextSelectedAgentModel(
+  ctx: ReturnType<typeof useAgentContext>,
+  messaging: ReturnType<typeof useMessageSending>,
+  isInitialLoadRef: React.MutableRefObject<boolean>,
+) {
+  useSelectedAgentModel(
+    ctx.selectedAgentId,
+    ctx.agent?.agent_id,
+    ctx.agent?.model,
+    messaging.setSelectedModel,
+    isInitialLoadRef,
   );
 }
 
@@ -69,14 +97,9 @@ export function useTerminalAgents(
   });
 
   const isInitialLoadRef = useRef(false);
-  const { setIsSendingMessage, setMessageInput, setSelectedModel } = messaging;
-  const { agent, setSelectedAgentId } = ctx;
-  useEffect(() => {
-    if (agent?.model) {
-      setSelectedModel(agent.model);
-      isInitialLoadRef.current = true;
-    }
-  }, [agent?.model, setSelectedModel]);
+  const { setIsSendingMessage, setMessageInput } = messaging;
+  const { setSelectedAgentId } = ctx;
+  useContextSelectedAgentModel(ctx, messaging, isInitialLoadRef);
 
   const cleanupAgentState = useCallback(() => {
     setSelectedAgentId(null);

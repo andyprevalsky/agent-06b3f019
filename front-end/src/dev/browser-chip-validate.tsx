@@ -107,11 +107,10 @@ const terminalChipMessages = messages.filter(
 function makeContext(): AgentContextValue {
   return {
     agent: null,
-    setAgent: () => undefined,
+    applyAgentDetail: () => true,
     selectedAgentId: 'e1fa0fad-02d7-4a3c-983d-ef9739111f32',
     setSelectedAgentId: () => undefined,
     messages,
-    setMessages: () => undefined,
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,

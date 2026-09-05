@@ -1,5 +1,14 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
+
+export async function lockPurchaseWalletTransition(
+  transaction: Prisma.TransactionClient,
+  purchaseId: string
+): Promise<void> {
+  await transaction.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext(${`purchase-wallet-transition:${purchaseId}`}))
+  `;
+}
 
 export async function createOrGetWalletFunding(data: {
   purchaseId: string;
@@ -167,25 +176,35 @@ export async function markWalletFundingReclaiming(
     allowReclaiming: boolean;
   }
 ) {
-  return prisma.purchaseWalletFunding.updateMany({
-    where: {
-      id,
-      reclaimLeaseToken: data.expectedReclaimLeaseToken,
-      status: {
-        in: [
-          PurchaseWalletFundingStatus.FUNDED,
-          PurchaseWalletFundingStatus.RECLAIM_FAILED,
-          ...(data.allowReclaiming ? [PurchaseWalletFundingStatus.RECLAIMING] : []),
-          ...(data.allowConsumed ? [PurchaseWalletFundingStatus.CONSUMED] : []),
-        ],
+  return runTransactionWithRetry(async (transaction) => {
+    const funding = await transaction.purchaseWalletFunding.findUnique({
+      where: { id },
+      select: { purchaseId: true },
+    });
+    if (funding === null) return { count: 0 };
+    await lockPurchaseWalletTransition(transaction, funding.purchaseId);
+    return transaction.purchaseWalletFunding.updateMany({
+      where: {
+        id,
+        purchaseId: funding.purchaseId,
+        reclaimLeaseToken: data.expectedReclaimLeaseToken,
+        status: {
+          in: [
+            PurchaseWalletFundingStatus.FUNDED,
+            PurchaseWalletFundingStatus.RECLAIM_FAILED,
+            ...(data.allowReclaiming ? [PurchaseWalletFundingStatus.RECLAIMING] : []),
+            ...(data.allowConsumed ? [PurchaseWalletFundingStatus.CONSUMED] : []),
+          ],
+        },
+        purchase: { status: { not: PurchaseSpendStatus.CLEARED } },
       },
-    },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMING,
-      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
-      reclaimLeaseToken: data.reclaimLeaseToken,
-      errorMessage: null,
-    },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+        reclaimLeaseToken: data.reclaimLeaseToken,
+        errorMessage: null,
+      },
+    });
   });
 }
 
@@ -198,16 +217,27 @@ export async function markWalletFundingReclaiming(
  */
 export async function claimWalletFundingReclaim(
   id: string,
+  purchaseId: string,
   data: { reclaimIdempotencyKey: string; reclaimLeaseToken: string }
 ) {
-  return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.FUNDED },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMING,
-      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
-      reclaimLeaseToken: data.reclaimLeaseToken,
-      errorMessage: null,
-    },
+  return runTransactionWithRetry(async (transaction) => {
+    await lockPurchaseWalletTransition(transaction, purchaseId);
+    return transaction.purchaseWalletFunding.updateMany({
+      where: {
+        id,
+        purchaseId,
+        status: PurchaseWalletFundingStatus.FUNDED,
+        // Reciprocal guard: if clearing won the serialized transition, a
+        // later reclaim must not create CLEARED + RECLAIMING.
+        purchase: { status: { not: PurchaseSpendStatus.CLEARED } },
+      },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+        reclaimLeaseToken: data.reclaimLeaseToken,
+        errorMessage: null,
+      },
+    });
   });
 }
 
@@ -225,24 +255,34 @@ export async function claimWalletFundingReclaimRetry(
     staleReclaimingBefore: Date;
   }
 ) {
-  return prisma.purchaseWalletFunding.updateMany({
-    where: {
-      id,
-      OR: [
-        { status: PurchaseWalletFundingStatus.FUNDED },
-        { status: PurchaseWalletFundingStatus.RECLAIM_FAILED },
-        {
-          status: PurchaseWalletFundingStatus.RECLAIMING,
-          updatedAt: { lte: data.staleReclaimingBefore },
-        },
-      ],
-    },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMING,
-      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
-      reclaimLeaseToken: data.reclaimLeaseToken,
-      errorMessage: null,
-    },
+  return runTransactionWithRetry(async (transaction) => {
+    const funding = await transaction.purchaseWalletFunding.findUnique({
+      where: { id },
+      select: { purchaseId: true },
+    });
+    if (funding === null) return { count: 0 };
+    await lockPurchaseWalletTransition(transaction, funding.purchaseId);
+    return transaction.purchaseWalletFunding.updateMany({
+      where: {
+        id,
+        purchaseId: funding.purchaseId,
+        OR: [
+          { status: PurchaseWalletFundingStatus.FUNDED },
+          { status: PurchaseWalletFundingStatus.RECLAIM_FAILED },
+          {
+            status: PurchaseWalletFundingStatus.RECLAIMING,
+            updatedAt: { lte: data.staleReclaimingBefore },
+          },
+        ],
+        purchase: { status: { not: PurchaseSpendStatus.CLEARED } },
+      },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+        reclaimLeaseToken: data.reclaimLeaseToken,
+        errorMessage: null,
+      },
+    });
   });
 }
 

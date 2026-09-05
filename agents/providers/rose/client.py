@@ -38,7 +38,7 @@ from providers.rose.browser_use import (
     build_browser_use_tools,
     filter_browser_use_actions_for_state,
     normalize_browser_use_response,
-    normalize_browser_use_tool_call,
+    normalize_browser_use_tool_calls,
 )
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
@@ -1753,8 +1753,8 @@ class RoseClient:
         is_claude = actual_model.endswith("-claude")
         mode = "claude" if is_claude else ("gpt" if actual_model.endswith("-gpt") else "waterfall")
         if response.tool_calls:
-            action = normalize_browser_use_tool_call(
-                response.tool_calls[0],
+            action = normalize_browser_use_tool_calls(
+                response.tool_calls,
                 thinking=(response.reasoning or response.content or None),
             )
         else:

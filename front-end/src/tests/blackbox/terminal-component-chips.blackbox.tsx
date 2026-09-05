@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- cross-agent chip isolation scenarios share one hoisted component harness */
 /**
  * Blackbox tests for ClaudeCodeChip and SubAgentTree.
  *

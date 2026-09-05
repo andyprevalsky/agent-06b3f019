@@ -197,6 +197,13 @@ function useSidebarAgentActions({
   return { handlers, renameDialog, archiveRefreshToken };
 }
 
+function useSidebarLocalState(agents: Agent[]) {
+  const [isArchiveOpen, setIsArchiveOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const search = useSidebarSearch(agents, searchQuery);
+  return { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search };
+}
+
 export default function AppSidebar({
   currentView,
   onViewChange,
@@ -220,9 +227,8 @@ export default function AppSidebar({
   borderColor = 0,
 }: AppSidebarProps) {
   const { width, isCollapsed, isDragging, startDrag, setWidth } = useSidebarWidth();
-  const [isArchiveOpen, setIsArchiveOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const search = useSidebarSearch(agents, searchQuery);
+  const { isArchiveOpen, setIsArchiveOpen, searchQuery, setSearchQuery, search } =
+    useSidebarLocalState(agents);
 
   const collapse = useCallback(() => setWidth(SIDEBAR_WIDTH_COLLAPSED), [setWidth]);
   const handleViewChange = useCollapsingViewChange(onViewChange, collapse);

@@ -152,7 +152,7 @@ async def _queue_realtime_message(message: Dict[str, Any]) -> None:
         if existing is not None and existing in _broadcast_queue and _coalesce_assistant_delta(existing, message):
             logger.debug(
                 "Realtime broadcast coalesced",
-                event=message.get("event"),
+                event_type=message.get("event"),
                 topic=message.get("topic"),
                 queue_depth=len(_broadcast_queue),
                 coalesced_count=existing.coalesced_count,

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import {
+  buildMockAgentPhoneNumber,
   buildMockAgentPhoneSendResult,
   buildMockSurgeSendResult,
   buildMockWhatsAppSendResult,
@@ -17,6 +18,8 @@ async function run() {
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
   const oldFakeAgentPhone = process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
   const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
+  const oldNodeEnv = process.env.NODE_ENV;
+  const oldBenchmarkIsolatedRun = process.env.BENCHMARK_ISOLATED_RUN;
 
   delete process.env.BLACKBOX_TEST_FAKE_SURGE;
   delete process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
@@ -30,6 +33,23 @@ async function run() {
 
   process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = '1';
   assert.equal(isLocalBenchmarkAgentPhoneMockEnabled(), true);
+  process.env.NODE_ENV = 'production';
+  delete process.env.BENCHMARK_ISOLATED_RUN;
+  assert.equal(
+    isLocalBenchmarkAgentPhoneMockEnabled(),
+    false,
+    'a production backend cannot enable synthetic AgentPhone identities by flag alone'
+  );
+  process.env.BENCHMARK_ISOLATED_RUN = 'true';
+  assert.equal(
+    isLocalBenchmarkAgentPhoneMockEnabled(),
+    true,
+    'an explicitly isolated benchmark may use the provider mock'
+  );
+  if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = oldNodeEnv;
+  if (oldBenchmarkIsolatedRun === undefined) delete process.env.BENCHMARK_ISOLATED_RUN;
+  else process.env.BENCHMARK_ISOLATED_RUN = oldBenchmarkIsolatedRun;
 
   process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
   assert.equal(isLocalBenchmarkWhatsAppTransportMockEnabled(), true);
@@ -40,6 +60,16 @@ async function run() {
 
   const agentPhoneId = mockAgentPhoneMessageId('seed-b');
   assert.match(agentPhoneId, /^ap_msg_[0-9a-f]{12}$/);
+
+  const agentPhoneNumber = buildMockAgentPhoneNumber('benchmark-user');
+  assert.match(agentPhoneNumber.agentId, /^ap_agent_[0-9a-f]{12}$/);
+  assert.match(agentPhoneNumber.numberId, /^ap_num_[0-9a-f]{12}$/);
+  assert.match(agentPhoneNumber.phoneNumber, /^\+1555\d{7}$/);
+  assert.deepEqual(buildMockAgentPhoneNumber('benchmark-user'), agentPhoneNumber);
+  assert.notEqual(
+    buildMockAgentPhoneNumber('other-user').phoneNumber,
+    agentPhoneNumber.phoneNumber
+  );
 
   const whatsappId = mockWhatsAppMessageId('seed-c');
   assert.match(whatsappId, /^wamid\.[0-9a-f]{16}$/);
@@ -82,8 +112,12 @@ async function run() {
   else process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = oldFakeAgentPhone;
   if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
   else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
+  if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = oldNodeEnv;
+  if (oldBenchmarkIsolatedRun === undefined) delete process.env.BENCHMARK_ISOLATED_RUN;
+  else process.env.BENCHMARK_ISOLATED_RUN = oldBenchmarkIsolatedRun;
 
-  process.stdout.write('sms-transport-mock: 11 passed, 0 failed\n');
+  process.stdout.write('sms-transport-mock: 18 passed, 0 failed\n');
 }
 
 run().catch((error) => {

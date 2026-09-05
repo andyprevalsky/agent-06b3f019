@@ -48,7 +48,7 @@ export function useAgentProvider({
 
   return {
     agent: state.agent,
-    setAgent: state.setAgent,
+    applyAgentDetail: selection.applyAgentDetail,
     inspectionContext: state.inspectionContext,
     selectedAgentId: state.selectedAgentId,
     setSelectedAgentId: selection.setSelectedAgentId,
@@ -56,7 +56,6 @@ export function useAgentProvider({
     reconcilePendingAgentCreation: selection.reconcilePendingAgentCreation,
     rollbackPendingAgentCreation: selection.rollbackPendingAgentCreation,
     messages: state.messages,
-    setMessages: state.setMessages,
     streamingBubbles: state.streamingBubbles,
     streamingPlan: state.streamingPlan,
     streamingAttention: state.streamingAttention,

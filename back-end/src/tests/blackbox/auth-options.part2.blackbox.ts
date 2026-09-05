@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
@@ -155,6 +154,12 @@ test('missing minted account mints a primitive inbox before returning fallback',
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents') {
       return {
         ok: true,
@@ -227,6 +232,155 @@ test('missing minted account mints a primitive inbox before returning fallback',
   }
 });
 
+test('ambiguous AgentPhone agent creation recovers the provider resource before persistence', async () => {
+  const userId = await createUser('Rose Recovery');
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
+  const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
+  const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string }> = [];
+  let createBody: Record<string, unknown> = {};
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
+  process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
+  process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ url, method });
+    if (
+      url === 'https://agentphone.test/v1/agents?limit=100&offset=0' &&
+      method === 'GET' &&
+      Object.keys(createBody).length === 0
+    ) {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === 'https://agentphone.test/v1/agents' && method === 'POST') {
+      createBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      throw new DOMException('request outcome unknown', 'AbortError');
+    }
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: 'agt-recovered',
+              name: createBody.name,
+              description: createBody.description,
+              numbers: [{ id: 'num-recovered', phoneNumber: '+19125550188', status: 'active' }],
+            },
+          ],
+          total: 1,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const options = await getAuthOptions(userId, 'https://uber.com');
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+
+    assert(
+      calls.some(
+        (call) =>
+          call.method === 'GET' &&
+          call.url === 'https://agentphone.test/v1/agents?limit=100&offset=0'
+      ),
+      'ambiguous create must reconcile through the provider before returning'
+    );
+    assert(options.minted?.phone === '+19125550188', 'expected recovered phone in auth options');
+    assert(identity.phoneProviderAgentId === 'agt-recovered', 'expected recovered agent id');
+    assert(identity.phoneProviderNumberId === 'num-recovered', 'expected recovered number id');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
+    if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
+    else process.env.AGENTPHONE_BASE_URL = previousAgentPhoneBaseUrl;
+    await cleanup(userId);
+  }
+});
+
+test('failed AgentPhone number creation cleans its agent before email-only fallback', async () => {
+  const userId = await createUser('Rose Cleanup');
+  const previousApiKey = process.env.PRIMITIVE_API_KEY;
+  const previousDomain = process.env.PRIMITIVE_DOMAIN;
+  const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
+  const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string }> = [];
+  process.env.PRIMITIVE_API_KEY = 'test-primitive-key';
+  process.env.PRIMITIVE_DOMAIN = 'mail.roselabs.test';
+  process.env.AGENTPHONE_API_KEY = 'test-agentphone-key';
+  process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ url, method });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === 'https://agentphone.test/v1/agents' && method === 'POST') {
+      return new Response(JSON.stringify({ id: 'agt-cleanup' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === 'https://agentphone.test/v1/numbers' && method === 'POST') {
+      throw new DOMException('request outcome unknown', 'AbortError');
+    }
+    if (url === 'https://agentphone.test/v1/agents/agt-cleanup' && method === 'GET') {
+      return new Response(JSON.stringify({ id: 'agt-cleanup', numbers: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (url === 'https://agentphone.test/v1/agents/agt-cleanup' && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const options = await getAuthOptions(userId, 'https://uber.com');
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+
+    assert(options.minted?.phone === null, 'confirmed cleanup may return email-only identity');
+    assert(identity.phone === null, 'cleaned provisioning must not persist a phantom phone');
+    assert(
+      calls.some(
+        (call) =>
+          call.method === 'DELETE' && call.url === 'https://agentphone.test/v1/agents/agt-cleanup'
+      ),
+      'created provider agent must be deleted before email-only fallback'
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousApiKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousApiKey;
+    if (previousDomain === undefined) delete process.env.PRIMITIVE_DOMAIN;
+    else process.env.PRIMITIVE_DOMAIN = previousDomain;
+    if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
+    else process.env.AGENTPHONE_BASE_URL = previousAgentPhoneBaseUrl;
+    await cleanup(userId);
+  }
+});
+
 test('minted identity reuses one primitive inbox and one AgentPhone number per user', async () => {
   const userId = await createUser('Rose Pilot');
   const previousApiKey = process.env.PRIMITIVE_API_KEY;
@@ -245,6 +399,12 @@ test('minted identity reuses one primitive inbox and one AgentPhone number per u
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
     calls.push({ url, method, body });
+    if (url === 'https://agentphone.test/v1/agents?limit=100&offset=0' && method === 'GET') {
+      return new Response(JSON.stringify({ data: [], total: 0 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
     if (url === 'https://agentphone.test/v1/agents') {
       return {
         ok: true,
@@ -306,6 +466,43 @@ test('minted identity reuses one primitive inbox and one AgentPhone number per u
     else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
     if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
     else process.env.AGENTPHONE_BASE_URL = previousAgentPhoneBaseUrl;
+    await cleanup(userId);
+  }
+});
+
+test('local benchmark AgentPhone mock provisions identity without live provider traffic', async () => {
+  const userId = await createUser('Rose Benchmark');
+  const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
+  const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
+  const previousFakeAgentPhone = process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+  const previousFetch = globalThis.fetch;
+  const calls: string[] = [];
+  process.env.AGENTPHONE_API_KEY = 'live-key-must-not-be-used';
+  process.env.AGENTPHONE_BASE_URL = 'https://agentphone.test/v1';
+  process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = '1';
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    throw new Error(`unexpected live AgentPhone fetch to ${String(input)}`);
+  }) as typeof fetch;
+
+  try {
+    const first = await getAuthOptions(userId, 'https://uber.com');
+    const second = await getAuthOptions(userId, 'https://lyft.com');
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+
+    assert(calls.length === 0, 'expected benchmark AgentPhone provisioning to stay offline');
+    assert(first.minted?.phone !== null, 'expected deterministic benchmark phone');
+    assert(first.minted?.phone === second.minted?.phone, 'expected one stable phone per user');
+    assert(identity.phone === first.minted?.phone, 'expected benchmark phone persisted');
+    assert(first.minted?.phoneProvider === 'agentphone', 'expected AgentPhone provider marker');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
+    if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
+    else process.env.AGENTPHONE_BASE_URL = previousAgentPhoneBaseUrl;
+    if (previousFakeAgentPhone === undefined) delete process.env.BLACKBOX_TEST_FAKE_AGENTPHONE;
+    else process.env.BLACKBOX_TEST_FAKE_AGENTPHONE = previousFakeAgentPhone;
     await cleanup(userId);
   }
 });

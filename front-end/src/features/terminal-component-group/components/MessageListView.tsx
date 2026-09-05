@@ -35,6 +35,8 @@ import { ThinkingIndicator } from './ThinkingIndicator';
 import { StreamingTools, StreamingAttentionBubble } from './StreamingMessageItems';
 import { shouldShowStreamingAttention } from './streamingAttentionVisibility';
 
+const EMPTY_STREAMING_METRICS = { charCount: 0 };
+
 export interface MessageListViewProps {
   containerRef: React.RefObject<HTMLDivElement>;
   scrollEndRef: React.RefObject<HTMLDivElement>;
@@ -146,9 +148,8 @@ export function MessageListView(props: MessageListViewProps) {
     streamingTools,
   );
   const targetStreamingKey = subAgentId ?? '';
-  const targetStreamingMetrics = streamingMetricsBySubAgentId.get(targetStreamingKey) ?? {
-    charCount: 0,
-  };
+  const targetStreamingMetrics =
+    streamingMetricsBySubAgentId.get(targetStreamingKey) ?? EMPTY_STREAMING_METRICS;
   const thinkingStreamTokenCount = Math.round(targetStreamingMetrics.charCount / 4);
 
   return (

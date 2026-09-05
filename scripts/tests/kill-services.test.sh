@@ -78,6 +78,13 @@ assert_alive() {
     fi
 }
 
+# With `set -o pipefail`, a producer piped into `grep -q` can receive SIGPIPE
+# after grep finds an early match. That turns a true assertion into exit 141.
+if grep -nE '\|[[:space:]]*grep[[:space:]]+-q' "${BASH_SOURCE[0]}"; then
+    echo "FAIL: early-exit grep assertions must read from files or here-strings" >&2
+    exit 1
+fi
+
 # Unit-check controller token boundaries without running teardown. Exact
 # controller basenames must be protected; prefixes, suffixes, backup files, and
 # lookalike directories must not be.
@@ -279,17 +286,17 @@ assert_alive() {
 
     reduced="$(reduce_stable_identities "$observations")"
 
-    if printf '%s\n' "$reduced" | grep -q "^900${TAB}"; then
+    if grep -q "^900${TAB}" <<<"$reduced"; then
         echo "FAIL: PID with conflicting identity observations was not dropped" >&2
         printf '%s\n' "$reduced" >&2
         exit 1
     fi
-    if printf '%s\n' "$reduced" | grep -q "^700${TAB}"; then
+    if grep -q "^700${TAB}" <<<"$reduced"; then
         echo "FAIL: PID poisoned during tree expansion was not dropped" >&2
         printf '%s\n' "$reduced" >&2
         exit 1
     fi
-    if printf '%s\n' "$reduced" | grep -q "^42424[23]${TAB}"; then
+    if grep -q "^42424[23]${TAB}" <<<"$reduced"; then
         echo "FAIL: reducer emitted self or parent as a target" >&2
         printf '%s\n' "$reduced" >&2
         exit 1
@@ -360,12 +367,12 @@ cat > "$WORKTREE/.context/services.json" <<JSON
 JSON
 
 list_output="$(cd "$WORKTREE" && bash scripts/list-services.sh)"
-if ! echo "$list_output" | grep -q "$worker_pid"; then
+if ! grep -q "$worker_pid" <<<"$list_output"; then
     echo "FAIL: list-services did not show worktree listener PID $worker_pid" >&2
     echo "$list_output" >&2
     exit 1
 fi
-if ! echo "$list_output" | grep -q "$cwd_only_pid"; then
+if ! grep -q "$cwd_only_pid" <<<"$list_output"; then
     echo "FAIL: list-services did not show cwd-only service PID $cwd_only_pid" >&2
     echo "$list_output" >&2
     exit 1

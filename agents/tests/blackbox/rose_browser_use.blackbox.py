@@ -41,6 +41,7 @@ from providers.rose.browser_use import (
     generate_tool_descriptions,
     normalize_browser_use_response,
     normalize_browser_use_tool_call,
+    normalize_browser_use_tool_calls,
     state_has_indexed_dom_targets,
 )
 from tools.prompts import attempt_completion_prompt
@@ -1330,6 +1331,48 @@ def test_normalize_input_text_remap():
     assert out["params"]["text"] == "hello"
 
 
+def test_normalize_provider_printable_key_batch_as_focused_input_text():
+    calls = [
+        {"name": "press_key", "arguments": json.dumps({"key": key})}
+        for key in "bench"
+    ]
+
+    out = normalize_browser_use_tool_calls(calls, thinking="type naturally")
+
+    assert out == {
+        "action": "input_text",
+        "thinking": "type naturally",
+        "index": None,
+        "coordinates": None,
+        "element_description": None,
+        "params": {"text": "bench", "clear": False},
+    }
+
+
+def test_normalize_provider_mixed_tool_batch_keeps_first_action():
+    out = normalize_browser_use_tool_calls(
+        [
+            {"name": "press_key", "arguments": '{"key": "b"}'},
+            {"name": "click", "arguments": '{"index": 7}'},
+        ]
+    )
+
+    assert out["action"] == "press_key"
+    assert out["params"] == {"key": "b"}
+
+
+def test_normalize_provider_special_key_batch_keeps_first_action():
+    out = normalize_browser_use_tool_calls(
+        [
+            {"name": "press_key", "arguments": '{"key": "Tab"}'},
+            {"name": "press_key", "arguments": '{"key": "Enter"}'},
+        ]
+    )
+
+    assert out["action"] == "press_key"
+    assert out["params"] == {"key": "Tab"}
+
+
 def test_normalize_request_user_assistance():
     out = normalize_browser_use_response(
         {
@@ -1737,6 +1780,49 @@ async def test_complete_browser_use_waterfall_only_path():
     assert "# Available Actions" not in body["messages"][0]["content"]
 
 
+async def test_complete_browser_use_preserves_printable_native_tool_batch():
+    """A provider turn that types several characters must not discard calls 2..N."""
+    tool_calls = [
+        {
+            "index": index,
+            "id": f"call_key_{index}",
+            "type": "function",
+            "function": {"name": "press_key", "arguments": json.dumps({"key": key})},
+        }
+        for index, key in enumerate("bench")
+    ]
+    sse_body = _openai_sse(
+        [
+            {"choices": [{"delta": {"tool_calls": tool_calls}, "finish_reason": "tool_calls"}]},
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
+    )
+
+    def handler(_req):
+        return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+        result = await client.complete_browser_use(
+            task="type bench into the focused field",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["input_text", "press_key"],
+            include_screenshot=False,
+            call_site="test-bu-printable-key-batch",
+        )
+
+    assert result["action"] == {
+        "action": "input_text",
+        "thinking": None,
+        "index": None,
+        "coordinates": None,
+        "element_description": None,
+        "params": {"text": "bench", "clear": False},
+    }
+
+
 async def test_complete_browser_use_claude_path_succeeds():
     """Valid claudeAuth receives native tools and returns a native tool call."""
     captured_bodies: list[dict] = []
@@ -2120,6 +2206,18 @@ async def run_all_tests():
     r.record("normalize_remap_done", test_normalize_remaps_done_to_attempt_completion)
     r.record("normalize_click_coordinates", test_normalize_click_coordinates_to_click_with_coords)
     r.record("normalize_input_text_remap", test_normalize_input_text_remap)
+    r.record(
+        "normalize_provider_printable_key_batch",
+        test_normalize_provider_printable_key_batch_as_focused_input_text,
+    )
+    r.record(
+        "normalize_provider_mixed_tool_batch",
+        test_normalize_provider_mixed_tool_batch_keeps_first_action,
+    )
+    r.record(
+        "normalize_provider_special_key_batch",
+        test_normalize_provider_special_key_batch_keeps_first_action,
+    )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
     r.record(
@@ -2174,6 +2272,10 @@ async def run_all_tests():
     )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
+    await r.record_async(
+        "complete_browser_use_printable_native_tool_batch",
+        test_complete_browser_use_preserves_printable_native_tool_batch,
+    )
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
     await r.record_async("complete_browser_use_gpt_path", test_complete_browser_use_gpt_path_succeeds)
     await r.record_async(

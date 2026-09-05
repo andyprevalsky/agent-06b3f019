@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -10,6 +10,8 @@ import {
   createLocalClaudeCodeSessionIfBillingBlocked,
   isE2bTeamBillingBlockError,
   isLocalClaudeCodeSandboxId,
+  resolveLocalAttachmentPath,
+  resolveLocalSessionWorkDir,
   shouldAllowLocalClaudeCodeFallback,
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
@@ -101,7 +103,11 @@ import { createServer } from 'node:net';
 const port = Number(process.env.PORT);
 const server = createServer();
 server.listen(port, '127.0.0.1', () => {
-  process.stdout.write('listening ' + port + '\\n');
+  process.stdout.write(JSON.stringify({
+    message: 'Server listening',
+    port,
+    readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN,
+  }) + '\\n');
 });
 `
 );
@@ -165,7 +171,7 @@ test('createLocalClaudeCodeSession boots a local ws listener and close tears it 
       });
     });
 
-    const closed = await closeLocalClaudeCodeSession(taskId);
+    const closed = await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
     assert.deepEqual(closed.outputFiles, []);
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
@@ -195,13 +201,52 @@ test('createLocalClaudeCodeSessionIfBillingBlocked creates when billing-blocked'
     );
     assert.ok(session);
     assert.equal(session!.sandboxId, `local-${taskId}`);
-    await closeLocalClaudeCodeSession(taskId);
+    await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
     if (prevFly === undefined) delete process.env.FLY_APP_NAME;
     else process.env.FLY_APP_NAME = prevFly;
   }
+});
+
+test('close preserves ownership metadata until the database records CLOSED', async () => {
+  const taskId = `local-session-close-retry-${Date.now()}`;
+  await createLocalClaudeCodeSession({
+    taskId,
+    agentId: 'agent-close-retry',
+    goal: 'close ordering',
+    envs: {},
+    claudeTokenSource: null,
+    claudeTokenIntegrationId: null,
+  });
+  const workingUpdate = prisma.claudeCodeSession.update;
+  try {
+    prisma.claudeCodeSession.update = (async () => {
+      throw new Error('database close unavailable');
+    }) as typeof prisma.claudeCodeSession.update;
+    await assert.rejects(
+      () => closeLocalClaudeCodeSession(taskId, 'unit-close-retry'),
+      /database close unavailable/
+    );
+    assert.equal(
+      existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')),
+      true,
+      'ownership must survive a failed CLOSED update so cleanup can retry'
+    );
+    const ownership = JSON.parse(
+      readFileSync(join('/tmp', 'claude-code-local', taskId, 'session.json'), 'utf8')
+    ) as { outputFiles?: unknown };
+    assert.deepEqual(
+      ownership.outputFiles,
+      [],
+      'uploaded output pointers must be persisted before the fallible DB close'
+    );
+  } finally {
+    prisma.claudeCodeSession.update = workingUpdate;
+  }
+  await closeLocalClaudeCodeSession(taskId, 'unit-close-retry');
+  assert.equal(existsSync(join('/tmp', 'claude-code-local', taskId, 'session.json')), false);
 });
 
 test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async () => {
@@ -231,7 +276,7 @@ test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async
     });
     // Staging failed, so nothing was uploaded into the workdir attachments list.
     assert.equal(session.uploadedFiles.length, 0);
-    await closeLocalClaudeCodeSession(taskId);
+    await closeLocalClaudeCodeSession(taskId, 'unit-cleanup');
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
@@ -240,12 +285,42 @@ test('createLocalClaudeCodeSession soft-fails undownloadable attachments', async
   }
 });
 
+test('local attachment paths cannot escape the session attachment directory', () => {
+  const workDir = join('/tmp', 'claude-code-local', 'path-boundary');
+  assert.equal(
+    resolveLocalAttachmentPath(workDir, 'evidence.txt'),
+    join(workDir, 'attachments', 'evidence.txt')
+  );
+  assert.throws(() => resolveLocalAttachmentPath(workDir, '../session.json'), /escapes/);
+  assert.throws(() => resolveLocalAttachmentPath(workDir, '/tmp/outside.txt'), /escapes/);
+});
+
+test('local session task ids cannot escape or alias another ownership directory', () => {
+  assert.equal(
+    resolveLocalSessionWorkDir('task-owned-by-this-session'),
+    join('/tmp', 'claude-code-local', 'task-owned-by-this-session')
+  );
+  for (const taskId of ['', '.', '..', '../other-agent', 'nested/other-agent', 'nested\\other']) {
+    assert.throws(() => resolveLocalSessionWorkDir(taskId), /Invalid local Claude Code task id/);
+  }
+});
+
 test('closeLocalClaudeCodeSession extracts output files when userId is provided', async () => {
   const prevFlag = process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
   const prevFly = process.env.FLY_APP_NAME;
+  const prevSupabaseUrl = process.env.SUPABASE_URL;
+  const prevSupabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const prevFetch = globalThis.fetch;
   try {
     process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = '1';
     delete process.env.FLY_APP_NAME;
+    process.env.SUPABASE_URL = 'https://supabase.local.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'local-session-unit-key';
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ Key: 'stored' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     const taskId = `local-session-output-${Date.now()}`;
     await createLocalClaudeCodeSession({
       taskId,
@@ -257,15 +332,19 @@ test('closeLocalClaudeCodeSession extracts output files when userId is provided'
     });
     const outputPath = join('/tmp', 'claude-code-local', taskId, 'output', 'result.txt');
     writeFileSync(outputPath, 'hello-from-local-claude');
-    // uploadToStorage may throw in this environment; the extract loop must still run and
-    // soft-fail per file rather than aborting close.
     const closed = await closeLocalClaudeCodeSession(taskId, 'user-output-extract');
-    assert.ok(Array.isArray(closed.outputFiles));
+    assert.equal(closed.outputFiles.length, 1);
+    assert.equal(closed.outputFiles[0].original_filename, 'result.txt');
   } finally {
+    globalThis.fetch = prevFetch;
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
     else process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK = prevFlag;
     if (prevFly === undefined) delete process.env.FLY_APP_NAME;
     else process.env.FLY_APP_NAME = prevFly;
+    if (prevSupabaseUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = prevSupabaseUrl;
+    if (prevSupabaseKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = prevSupabaseKey;
   }
 });
 
@@ -292,7 +371,7 @@ test('createLocalClaudeCodeSession throws when the ws-server never listens', asy
           claudeTokenSource: null,
           claudeTokenIntegrationId: null,
         }),
-      /failed to listen on port/i
+      /did not prove readiness on port/i
     );
   } finally {
     if (prevFlag === undefined) delete process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK;
