@@ -513,10 +513,13 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
     from helpers.messages import (
         _QueuedRealtimeMessage,
         _assistant_delta_coalesce_key,
+        _broadcast_coalesce_items,
+        _broadcast_queue,
         _coalesce_assistant_delta,
         _get_broadcast_batch_lock,
         _get_broadcast_client,
         _message_order_key,
+        _queue_realtime_message,
         _schedule_broadcast_flush,
     )
 
@@ -558,6 +561,25 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
         assert lock is _get_broadcast_batch_lock()
         _schedule_broadcast_flush(0.0)
         _schedule_broadcast_flush(0.2)
+
+        message = {
+            "topic": "agent:a",
+            "event": "ASSISTANT_STREAM",
+            "payload": {"record": {"done": False, "stream_id": "s", "delta": "a", "sequence": 1}},
+        }
+        _broadcast_queue.clear()
+        _broadcast_coalesce_items.clear()
+        with patch("helpers.messages._schedule_broadcast_flush"):
+            await _queue_realtime_message(message)
+            await _queue_realtime_message(
+                {
+                    **message,
+                    "payload": {"record": {**message["payload"]["record"], "delta": "b", "sequence": 2}},
+                }
+            )
+        assert _broadcast_queue[0].message["payload"]["record"]["delta"] == "ab"
+        _broadcast_queue.clear()
+        _broadcast_coalesce_items.clear()
 
     asyncio.run(_run())
 

@@ -30,6 +30,8 @@ from _test_utils import (
     teardown_mock,
 )
 
+AGENTS_ROOT = Path(__file__).resolve().parents[2]
+
 # ========================================
 # Helpers: build a real encrypted envelope
 # ========================================
@@ -6112,9 +6114,7 @@ def test_challenge_recovery_uses_cross_recovery_config_blacklist():
     restoring challenge recovery to main. Keep the API contract that the Python
     client can forward blocked keys and read failed_config_keys / blacklist_expired.
     """
-    from pathlib import Path
-
-    repo = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "repo.py").read_text()
+    repo = (AGENTS_ROOT / "domains/spawn_browser_agent_v3/repo.py").read_text()
     assert "blocked_config_keys" in repo
     assert "failed_config_keys" in repo
     assert "blacklist_expired" in repo
@@ -6123,18 +6123,14 @@ def test_challenge_recovery_uses_cross_recovery_config_blacklist():
 
 def test_challenge_recovery_live_verifies_after_promote_unless_preloaded():
     """Non-preloaded config winners still live-verify; preloaded winners skip a second LLM gate."""
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "handler.py").read_text()
+    source = (AGENTS_ROOT / "domains/spawn_browser_agent_v3/handler.py").read_text()
     assert "await verify_live_page_cleared_challenge(" in source
     assert 'config_result.get("storage_state_preloaded")' in source
     assert "probe already verified clean" in source
 
 
 def test_recover_browser_challenge_repo_forwards_blocked_config_keys():
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parents[2] / "domains" / "spawn_browser_agent_v3" / "repo.py").read_text()
+    source = (AGENTS_ROOT / "domains/spawn_browser_agent_v3/repo.py").read_text()
     assert "blocked_config_keys" in source
     assert 'payload["blocked_config_keys"]' in source or "payload['blocked_config_keys']" in source
 
@@ -14358,6 +14354,38 @@ async def test_execute_input_text_no_element_no_coords_humanizer():
     ]
     hu.type_text.assert_awaited_once_with("typed")
 
+
+async def test_execute_focused_input_text_clear_false_humanizes_without_clearing():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    out = await service_actions._execute_input_text(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=None,
+        index=None,
+        coords=None,
+        params={"text": "bench", "clear": False},
+        thinking=None,
+        humanizer=hu,
+        secret_refs=None,
+        password_origins=None,
+        current_url="",
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+    )
+    assert out["success"] is True
+    hu.press_key.assert_not_awaited()
+    hu.type_text.assert_awaited_once_with("bench")
+
 # ── _execute_goto ────────────────────────────────────────────────────
 
 async def test_execute_goto_auto_adds_https():
@@ -18485,6 +18513,29 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "recovery_call_id = _browser_action_tool_call_id(llm_result)" in recovery_branch
 
+
+def test_challenge_recovery_call_keywords_match_callee_contract():
+    """The live handler must not drift from the keyword-only recovery API."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.challenge_recovery import recover_from_challenge
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = textwrap.dedent(inspect.getsource(_spawn_browser_agent_activity_v3_real))
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "recover_from_challenge"
+    ]
+    assert len(calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    assert set(keywords) <= set(inspect.signature(recover_from_challenge).parameters)
+    assert ast.unparse(keywords["skip_cookie_probes"]) == (
+        "provider_exit_rejected or escalate_after_cookie_false_stable"
+    )
+
 async def test_playwright_page_tracks_browser_use_tab_focus():
     """Humanized clicks, recorder, and live view must follow browser-use focus."""
     import inspect
@@ -19485,6 +19536,10 @@ async def run_all_tests():
         "challenge_recovery_stream_tool_id",
         test_challenge_recovery_reuses_one_tool_call_id_for_every_stage,
     )
+    r.record(
+        "challenge_recovery_call_contract",
+        test_challenge_recovery_call_keywords_match_callee_contract,
+    )
     await r.record_async(
         "playwright_page_tracks_browser_use_tab_focus",
         test_playwright_page_tracks_browser_use_tab_focus,
@@ -20157,6 +20212,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_no_target_hum",
         test_execute_input_text_no_element_no_coords_humanizer,
+    )
+    await r.record_async(
+        "execute_focused_input_text_clear_false_hum",
+        test_execute_focused_input_text_clear_false_humanizes_without_clearing,
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)

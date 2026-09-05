@@ -651,6 +651,11 @@ function testSandboxRetry_classifiesTransientOnly() {
     Object.assign(new TypeError('fetch failed'), {
       cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
     }),
+    // Wedged keep-alive → AbortSignal.timeout (cuda-kernel k=3 r29).
+    Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    }),
+    Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }),
   ];
   for (const error of transient) {
     assert(

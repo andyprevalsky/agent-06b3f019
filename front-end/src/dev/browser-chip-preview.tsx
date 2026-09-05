@@ -62,11 +62,10 @@ const messages: Message[] = [
 function makeContext(): AgentContextValue {
   return {
     agent: null,
-    setAgent: () => undefined,
+    applyAgentDetail: () => true,
     selectedAgentId: null,
     setSelectedAgentId: () => undefined,
     messages,
-    setMessages: () => undefined,
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,

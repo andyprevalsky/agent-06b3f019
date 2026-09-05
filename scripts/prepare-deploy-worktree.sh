@@ -400,7 +400,16 @@ SOURCE_WORKSPACE="$(canonical_dir "$SOURCE_WORKSPACE")"
 }
 
 mkdir -p "$WORKTREE/.context"
-OWNER_HASH="$(printf '%s' "$WORKTREE" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
+# `shasum` is a macOS-ism; Linux hosts ship coreutils' sha256sum instead. Both
+# emit the same hex digest, so either satisfies the owner-lock identity.
+deploy_worktree_sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256
+  else
+    sha256sum
+  fi
+}
+OWNER_HASH="$(printf '%s' "$WORKTREE" | deploy_worktree_sha256_stdin | awk '{print substr($1, 1, 12)}')"
 if [ "${ROSE_DEPLOY_PREFLIGHT_LOCKED:-0}" != "1" ]; then
   exec python3 "$SCRIPT_DIR/deploy-worktree-lock.py" \
     --lock "$PORT_REGISTRY/owner-$OWNER_HASH.lock" \

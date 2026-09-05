@@ -210,7 +210,14 @@ describe('useAgentTree helpers', () => {
     });
 
     it('returns empty map when busId is null', () => {
-      const { result } = renderHook(() => useAgentTree(null));
+      const { result, rerender } = renderHook(() => useAgentTree(null));
+      const emptyTree = result.current;
+      expect(result.current.size).toBe(0);
+      rerender();
+      expect(result.current).toBe(emptyTree);
+      expect(() => (result.current as Map<string, TreeNode>).set('leak', {} as TreeNode)).toThrow(
+        'The shared empty agent tree is read-only',
+      );
       expect(result.current.size).toBe(0);
     });
 
@@ -248,6 +255,188 @@ describe('useAgentTree helpers', () => {
       unmount();
       // unsubscribe should run on last listener cleanup
       expect(vi.mocked(RealtimeMod.unsubscribe)).toHaveBeenCalled();
+    });
+
+    it('returns no previous-bus nodes during an agent-tree switch', async () => {
+      server.use(
+        http.get(`${API_BASE}/agents/tree`, ({ request }) => {
+          const busId = new URL(request.url).searchParams.get('busId');
+          return HttpResponse.json({
+            agents: [
+              {
+                agent_id: `root-${busId}`,
+                parent_agent_id: null,
+                goal: `goal for ${busId}`,
+                status: 'ACTIVE',
+                progress: 0.5,
+                tools_in_use: [],
+                message_count: 1,
+                tree_cost_cents: 0,
+              },
+            ],
+          });
+        }),
+      );
+      vi.mocked(RealtimeMod.subscribeToBus).mockResolvedValue(fakeChannel('joined'));
+      const initialProps = { busId: 'agent-a' as string | null };
+      const { result, rerender, unmount } = renderHook(
+        (props: typeof initialProps) => useAgentTree(props.busId),
+        { initialProps },
+      );
+      await waitFor(() => expect(result.current.has('root-agent-a')).toBe(true));
+
+      rerender({ busId: 'agent-b' });
+
+      expect(result.current.has('root-agent-a')).toBe(false);
+      await waitFor(() => expect(result.current.has('root-agent-b')).toBe(true));
+      unmount();
+    });
+
+    it('starts the new bus while the previous subscription is still resolving', async () => {
+      let finishAgentASubscription!: (channel: ReturnType<typeof fakeChannel>) => void;
+      vi.mocked(RealtimeMod.subscribeToBus).mockImplementation((busId) => {
+        if (busId === 'agent-a') {
+          return new Promise((resolve) => {
+            finishAgentASubscription = resolve;
+          });
+        }
+        return Promise.resolve(fakeChannel('joined'));
+      });
+      const initialProps = { busId: 'agent-a' as string | null };
+      const { rerender, unmount } = renderHook(
+        (props: typeof initialProps) => useAgentTree(props.busId),
+        { initialProps },
+      );
+      rerender({ busId: 'agent-b' });
+
+      await waitFor(() =>
+        expect(vi.mocked(RealtimeMod.subscribeToBus).mock.calls.map(([busId]) => busId)).toContain(
+          'agent-b',
+        ),
+      );
+      const staleChannel = fakeChannel('joined');
+      await act(async () => {
+        finishAgentASubscription(staleChannel);
+        await Promise.resolve();
+      });
+      expect(RealtimeMod.unsubscribe).toHaveBeenCalledWith(staleChannel);
+      unmount();
+    });
+
+    it('keeps one shared channel alive when its creating consumer unmounts', async () => {
+      let handlers: Parameters<typeof RealtimeMod.subscribeToBus>[1] = {};
+      vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(async (_busId, nextHandlers) => {
+        handlers = nextHandlers;
+        return fakeChannel('joined');
+      });
+      const creator = renderHook(() => useAgentTree('shared-bus'));
+      const survivor = renderHook(() => useAgentTree('shared-bus'));
+      await waitFor(() => expect(survivor.result.current.has('root')).toBe(true));
+      expect(RealtimeMod.subscribeToBus).toHaveBeenCalledTimes(1);
+      vi.mocked(RealtimeMod.unsubscribe).mockClear();
+
+      creator.unmount();
+      expect(RealtimeMod.unsubscribe).not.toHaveBeenCalled();
+      act(() => {
+        handlers.onAgentStateChanged?.({
+          agentId: 'survivor-child',
+          parentAgentId: 'root',
+          goal: 'delivered to survivor',
+          status: 'ACTIVE',
+          progress: 0.5,
+          toolsInUse: [],
+          messageCount: 1,
+          costCents: 0,
+        });
+      });
+
+      expect(survivor.result.current.get('survivor-child')?.goal).toBe('delivered to survivor');
+      let reconnect!: () => void;
+      const staleHandlers = handlers;
+      const timeoutSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((
+        callback: TimerHandler,
+      ) => {
+        reconnect = callback as () => void;
+        return 1;
+      }) as typeof window.setTimeout);
+      handlers.onDisconnect?.();
+      reconnect();
+      timeoutSpy.mockRestore();
+      expect(RealtimeMod.subscribeToBus).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const discardSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      for (let index = 0; index < 10_000; index += 1) {
+        staleHandlers.onAgentStateChanged?.({ agentId: `stale-${index}` } as never);
+      }
+      expect(
+        discardSpy.mock.calls.filter(
+          ([message]) => message === 'Agent scope: discarded stale work',
+        ),
+      ).toHaveLength(1);
+      discardSpy.mockRestore();
+      survivor.unmount();
+    });
+
+    it('hands pending fetch and channel ownership to a surviving same-bus consumer', async () => {
+      let finishFetch!: () => void;
+      const fetchCanFinish = new Promise<void>((resolve) => {
+        finishFetch = resolve;
+      });
+      server.use(
+        http.get(`${API_BASE}/agents/tree`, async () => {
+          await fetchCanFinish;
+          return HttpResponse.json({
+            agents: [
+              {
+                agent_id: 'pending-root',
+                parent_agent_id: null,
+                goal: 'pending root',
+                status: 'ACTIVE',
+                progress: 0,
+                tools_in_use: [],
+                message_count: 0,
+                tree_cost_cents: 0,
+              },
+            ],
+          });
+        }),
+      );
+      let finishSubscription!: (channel: ReturnType<typeof fakeChannel>) => void;
+      let handlers: Parameters<typeof RealtimeMod.subscribeToBus>[1] = {};
+      vi.mocked(RealtimeMod.subscribeToBus).mockImplementation(
+        (_busId, nextHandlers) =>
+          new Promise((resolve) => {
+            handlers = nextHandlers;
+            finishSubscription = resolve;
+          }),
+      );
+      const creator = renderHook(() => useAgentTree('pending-shared-bus'));
+      const survivor = renderHook(() => useAgentTree('pending-shared-bus'));
+      expect(RealtimeMod.subscribeToBus).toHaveBeenCalledTimes(1);
+
+      creator.unmount();
+      finishFetch();
+      await act(async () => {
+        finishSubscription(fakeChannel('joined'));
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(survivor.result.current.has('pending-root')).toBe(true));
+      act(() => {
+        handlers.onAgentStateChanged?.({
+          agentId: 'pending-child',
+          parentAgentId: 'pending-root',
+          goal: 'still live',
+          status: 'ACTIVE',
+          progress: 0,
+          toolsInUse: [],
+          messageCount: 0,
+          costCents: 0,
+        });
+      });
+      expect(survivor.result.current.has('pending-child')).toBe(true);
+      survivor.unmount();
     });
 
     it('gracefully handles AGENT_STATE_CHANGED payload missing agentId', async () => {

@@ -10,16 +10,26 @@ import { useEffect, useState } from 'react';
 import { refreshAuthAssistanceSession } from '../../hooks';
 import type { PendingAuthAssistance } from './types';
 
+interface RefreshedUrlState {
+  requestId: string | undefined;
+  requestedLiveViewUrl: string | null;
+  liveViewUrl: string | null;
+}
+
 export function useRefreshedAuthAssistanceUrl(
   pendingAuthAssistance: PendingAuthAssistance | null,
 ): string | null {
   const requestId = pendingAuthAssistance?.requestId;
   const requestedLiveViewUrl = pendingAuthAssistance?.liveViewUrl ?? null;
-  const [liveViewUrl, setLiveViewUrl] = useState<string | null>(requestedLiveViewUrl);
+  const [state, setState] = useState<RefreshedUrlState>({
+    requestId,
+    requestedLiveViewUrl,
+    liveViewUrl: requestedLiveViewUrl,
+  });
 
   useEffect(() => {
     let cancelled = false;
-    setLiveViewUrl(requestedLiveViewUrl);
+    setState({ requestId, requestedLiveViewUrl, liveViewUrl: requestedLiveViewUrl });
 
     if (!requestId) {
       return () => {
@@ -30,9 +40,12 @@ export function useRefreshedAuthAssistanceUrl(
     refreshAuthAssistanceSession(requestId)
       .then((result) => {
         if (cancelled) return;
-        setLiveViewUrl(
-          result.liveViewUrl ?? result.handoff?.liveViewUrl ?? requestedLiveViewUrl ?? null,
-        );
+        setState({
+          requestId,
+          requestedLiveViewUrl,
+          liveViewUrl:
+            result.liveViewUrl ?? result.handoff?.liveViewUrl ?? requestedLiveViewUrl ?? null,
+        });
       })
       .catch((error) => {
         console.error('Failed to refresh auth assistance live view:', error);
@@ -43,5 +56,7 @@ export function useRefreshedAuthAssistanceUrl(
     };
   }, [requestId, requestedLiveViewUrl]);
 
-  return liveViewUrl;
+  const stateOwnsRequest =
+    state.requestId === requestId && state.requestedLiveViewUrl === requestedLiveViewUrl;
+  return stateOwnsRequest ? state.liveViewUrl : requestedLiveViewUrl;
 }

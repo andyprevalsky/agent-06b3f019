@@ -97,7 +97,10 @@ jobs:
 
       - name: Install frontend dependencies (shared UI)
         working-directory: front-end
-        run: npm install --ignore-scripts
+        # The release runner must honor the committed dependency graph. `npm install`
+        # asks Arborist to mutate/re-resolve the workspace and has repeatedly crashed
+        # on macOS with a null `edgesOut` node before the app can even build.
+        run: npm ci --ignore-scripts --workspaces=false
 
       - name: Install dependencies
         working-directory: mac-app

@@ -519,6 +519,17 @@ async function testGptAuth_happyPathUsesCodexResponses() {
       'xhigh',
       'max effort normalized'
     );
+    const invalidEffortBody = buildCodexResponsesBody({
+      poolSpec: getPool('rose-1-lite'),
+      messages: [{ role: 'user', content: 'hi' }],
+      effort: 'unsupported-provider-value',
+      requestId: 'invalid-effort',
+    });
+    assertEqual(
+      (invalidEffortBody.reasoning as Record<string, unknown>).effort,
+      'xhigh',
+      'unsupported effort falls back to xhigh'
+    );
     assertEqual(
       ((capturedBody?.text as Record<string, unknown>)?.format as Record<string, unknown>)?.name,
       'unit_test',

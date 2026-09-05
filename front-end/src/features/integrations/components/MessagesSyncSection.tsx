@@ -16,12 +16,7 @@ import { hasDamagedGmailAccount } from '../hooks/useIntegrationData';
 import type { ConnectedIntegration, MessageSyncType } from '../types';
 import DropdownIconFrame, { DropdownIconPreset, warningGlowGradient } from './DropdownIconFrame';
 import GmailRow from './GmailRow';
-import {
-  ChatSyncIcon,
-  IMessageIcon,
-  MessengerIcon,
-  TelegramIcon,
-} from './MessageSyncIcons';
+import { ChatSyncIcon, IMessageIcon, MessengerIcon, TelegramIcon } from './MessageSyncIcons';
 import SectionToggleButton from './SectionToggleButton';
 import WhatsAppRow from './WhatsAppRow';
 import SyncItemButton from './SyncItemButton';
@@ -121,9 +116,7 @@ function IMessageRow({
   );
 }
 
-export default function MessagesSyncSection({
-  expanded,
-  onToggle,
+function MessageServiceRows({
   isIMessageAvailable,
   isWhatsAppAvailable,
   iMessageSynced,
@@ -139,6 +132,46 @@ export default function MessagesSyncSection({
   onGmailDisconnect,
   onGmailResync,
 }: MessagesSyncSectionProps) {
+  return (
+    <div className="border-t border-border">
+      <IMessageRow
+        isAvailable={isIMessageAvailable}
+        synced={iMessageSynced}
+        loading={messageSyncLoading}
+        onSync={onIMessageSync}
+      />
+      <GmailRow
+        connectedIntegrations={connectedIntegrations}
+        connectingProvider={connectingProvider}
+        disconnectingEmail={disconnectingEmail}
+        resyncingEmail={resyncingEmail}
+        onGmailConnect={onGmailConnect}
+        onGmailDisconnect={onGmailDisconnect}
+        onGmailResync={onGmailResync}
+      />
+      <WhatsAppRow
+        connected={whatsAppConnected}
+        isAvailable={isWhatsAppAvailable}
+        isLoading={messageSyncLoading === 'whatsapp'}
+        onConnect={onWhatsAppConnect}
+      />
+      <ComingSoonRow
+        icon={<TelegramIcon />}
+        iconFrameProps={DropdownIconPreset.telegram}
+        label="Telegram"
+      />
+      <ComingSoonRow
+        icon={<MessengerIcon />}
+        iconFrameProps={DropdownIconPreset.messenger}
+        label="Messenger"
+        borderBottom={false}
+      />
+    </div>
+  );
+}
+
+export default function MessagesSyncSection(props: MessagesSyncSectionProps) {
+  const { expanded, onToggle, iMessageSynced, whatsAppConnected, connectedIntegrations } = props;
   const anyMessageConnected =
     iMessageSynced || whatsAppConnected || connectedIntegrations.some((i) => i.name === 'gmail');
   const needsReconnection = hasDamagedGmailAccount(connectedIntegrations);
@@ -165,42 +198,7 @@ export default function MessagesSyncSection({
           sectionLabel="Messages"
         />
       </div>
-      {expanded && (
-        <div className="border-t border-border">
-          <IMessageRow
-            isAvailable={isIMessageAvailable}
-            synced={iMessageSynced}
-            loading={messageSyncLoading}
-            onSync={onIMessageSync}
-          />
-          <GmailRow
-            connectedIntegrations={connectedIntegrations}
-            connectingProvider={connectingProvider}
-            disconnectingEmail={disconnectingEmail}
-            resyncingEmail={resyncingEmail}
-            onGmailConnect={onGmailConnect}
-            onGmailDisconnect={onGmailDisconnect}
-            onGmailResync={onGmailResync}
-          />
-          <WhatsAppRow
-            connected={whatsAppConnected}
-            isAvailable={isWhatsAppAvailable}
-            isLoading={messageSyncLoading === 'whatsapp'}
-            onConnect={onWhatsAppConnect}
-          />
-          <ComingSoonRow
-            icon={<TelegramIcon />}
-            iconFrameProps={DropdownIconPreset.telegram}
-            label="Telegram"
-          />
-          <ComingSoonRow
-            icon={<MessengerIcon />}
-            iconFrameProps={DropdownIconPreset.messenger}
-            label="Messenger"
-            borderBottom={false}
-          />
-        </div>
-      )}
+      {expanded && <MessageServiceRows {...props} />}
     </div>
   );
 }

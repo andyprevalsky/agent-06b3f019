@@ -562,13 +562,31 @@ def test_structured_response_from_output_files_single_pointer():
 
 
 def test_structured_response_from_output_files_rejects_non_file_schema():
-    """The deterministic file path shortcut only handles pure file output schemas."""
+    """The deterministic shortcut returns nothing when a schema has no file fields."""
     from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
 
     schema = {"fields": [{"name": "summary", "type": "string"}]}
     files = [{"original_filename": "report.txt"}]
 
     assert _structured_response_from_output_files(schema, files) is None
+
+
+def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
+    """Primitive fields do not prevent extracted files from satisfying file artifacts."""
+    from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
+
+    schema = {
+        "fields": [
+            {"name": "summary", "type": "string"},
+            {"name": "report", "type": "file_pointer"},
+            {"name": "count", "type": "int"},
+        ]
+    }
+    files = [{"original_filename": "report.txt"}]
+
+    assert _structured_response_from_output_files(schema, files) == {
+        "report": {"path": "/home/user/output/report.txt"}
+    }
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
@@ -1312,7 +1330,11 @@ async def test_run_verifier_happy_path():
 
 
 async def test_run_verifier_disabled_by_env_flag():
-    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex."""
+    """ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier for claude and codex.
+
+    Also persists non-orchestration SDK/history evidence chips so harness
+    `_agent_class_step_counts` records grounded code-agent steps for judges.
+    """
     from domains.spawn_claude_code_agent import service
     from utils.terminal_filter import TerminalFilter
 
@@ -1331,7 +1353,7 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
-            # No artifacts → incomplete (must not report success without output files)
+            # A success exit cannot satisfy an unmaterialized primitive schema.
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1339,11 +1361,12 @@ async def test_run_verifier_disabled_by_env_flag():
                 model="rose-labs/rose-1-lite",
                 terminal=terminal,
                 action_summary=["wrote output"],
-                output_schema={"fields": []},
+                output_schema={"fields": [{"name": "summary", "type": "string"}]},
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
                 output_files=[],
+                code_events=[{"type": "tool_use", "name": "Bash"}],
             )
             assert score == 0.5, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
@@ -1358,19 +1381,114 @@ async def test_run_verifier_disabled_by_env_flag():
                 goal="g",
                 model="rose-labs/rose-1-lite",
                 terminal=terminal,
-                action_summary=["wrote output"],
+                action_summary=["wrote output", "fetched github repos"],
                 output_schema={"fields": []},
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
                 output_files=[{"path": "/home/user/output/result.json", "content": "{}"}],
+                code_events=[
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "curl api.github.com"}},
+                    {"type": "tool_result", "content": "items"},
+                ],
             )
             assert score_ok == 1.0, provider
             assert "verifier disabled" in reasoning_ok.lower(), reasoning_ok
             assert struct_ok is None
             assert itok_ok == 0 and otok_ok == 0
 
+            # Leftover artifacts from a failed process are evidence, not a
+            # successful session.
+            score_failed, _, _, _, _ = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["process failed after writing"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=1,
+                attempt_completion=False,
+                code_provider=provider,
+                output_files=[{"path": "/home/user/output/partial.json", "content": "{}"}],
+            )
+            assert score_failed == 0.5, provider
+
     assert called["check_progress"] == 0
+
+    evidence_metas = []
+    for call in get_captured_requests():
+        if call.get("method") != "POST" or "/api/agents/" not in (call.get("url") or ""):
+            continue
+        body = json.loads(call["requestBody"])
+        meta = body.get("metadata") or {}
+        if meta.get("toolName") in {"code_agent_sdk_events", "claude_code_history"}:
+            evidence_metas.append(meta)
+    tool_names = {m["toolName"] for m in evidence_metas}
+    assert "code_agent_sdk_events" in tool_names, evidence_metas
+    assert "claude_code_history" in tool_names, evidence_metas
+    assert all(m.get("agentType") == "code" for m in evidence_metas), evidence_metas
+    assert all(m.get("task_id") == "t" for m in evidence_metas), evidence_metas
+    assert all(m.get("subAgentId") == "t" for m in evidence_metas), evidence_metas
+    assert all(int(m.get("steps_taken") or 0) > 0 for m in evidence_metas), evidence_metas
+    # 2 providers × 1 schema-complete verifier call × 2 evidence chips = 4.
+    assert len(evidence_metas) == 4, len(evidence_metas)
+
+
+
+async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
+    """A partial file extraction cannot satisfy a multi-file response schema."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+
+    async def fake_activity(*_args, **_kwargs):
+        raise AssertionError("disabled verifier must not call the verifier LLM")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+        patch.object(
+            service,
+            "_persist_code_agent_judge_evidence",
+            new_callable=AsyncMock,
+        ) as persist_evidence,
+    ):
+        score, reasoning, structured, input_tokens, output_tokens = await service._run_verifier(
+            agent_id="agent-partial-output",
+            task_id="task-partial-output",
+            goal="Write both requested output files",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=["wrote only one requested file"],
+            output_schema={
+                "fields": [
+                    {"name": "report", "type": "file_pointer", "required": True},
+                    {"name": "manifest", "type": "file_pointer", "required": True},
+                ]
+            },
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            output_files=[
+                {
+                    "original_filename": "report.txt",
+                    "mime_type": "text/plain",
+                    "size_bytes": 6,
+                }
+            ],
+        )
+
+    assert score == 0.5
+    assert "incomplete" in reasoning.lower()
+    assert structured is None
+    assert input_tokens == 0 and output_tokens == 0
+    persist_evidence.assert_not_awaited()
 
 
 async def test_run_verifier_disabled_includes_sdk_event_stdout():
@@ -1421,8 +1539,13 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
                 {"type": "tool_use", "provider": "claude", "tool": "Write", "input": {"path": "/home/user/output/collatz_27.py"}},
                 {"type": "tool_result", "provider": "claude", "status": "completed"},
                 {"type": "tool_use", "provider": "claude", "tool": "Bash", "input": {"command": "python collatz_27.py"}},
-                {"type": "tool_result", "provider": "claude", "content": stdout},
-                {"type": "result", "provider": "claude", "status": "completed", "text": stdout},
+                {"type": "tool_result", "provider": "claude", "status": "completed"},
+                {
+                    "type": "agent_message",
+                    "provider": "claude",
+                    "status": "completed",
+                    "message": stdout,
+                },
             ],
             output_files=[{"original_filename": "collatz_27.py", "mime_type": "application/octet-stream", "size_bytes": 414}],
         )
@@ -1432,7 +1555,12 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
     assert "verifier disabled" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning
-    assert struct is None
+    assert struct == {
+        "stdout": stdout,
+        "collatz_sequence": [int(value) for value in stdout.splitlines()[:-1]],
+        "total_steps": 111,
+        "python_script": {"path": "/home/user/output/collatz_27.py"},
+    }
     assert itok == 0 and otok == 0
 
 
@@ -1842,6 +1970,371 @@ async def test_run_agentic_loop_sdk_idle_timeout_breaks():
     assert attempt is False
     assert elapsed < 5.0, f"idle break should be fast, took {elapsed:.2f}s"
     assert any("SDK idle timeout" in s for s in summary), summary
+
+
+async def test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout():
+    """Monitor/ScheduleWakeup must stretch idle so productive waits aren't killed.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r21 agent ce189356 —
+    ScheduleWakeup/Monitor then ~180s WebSocket silence while background work
+    continued → SDK idle kill, 0 artifacts, score 0.5 under verifier-disabled.
+    Progress chips do not refresh last_output_time; wait tools must.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterWaitTool(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("partial work", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "ScheduleWakeup",
+                    }
+                )
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterWaitTool),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed >= 0.25, (
+        f"wait-tool idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    )
+    assert elapsed < 2.0, f"wait-tool idle should still break, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+    assert any(e.get("name") == "ScheduleWakeup" for e in events), events
+
+
+async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
+    """Long-running Bash must stretch idle until tool_result, not die mid-command.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r22 CC#4 — Bash tool_use
+    with no tool_result for >180s (command still running) → SDK idle kill while
+    work was in flight. Progress chips do not refresh last_output_time.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangDuringBash(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("starting bash", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "Bash",
+                    }
+                )
+            # No tool_result — Bash still running. Stay connected.
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangDuringBash),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed >= 0.25, (
+        f"in-flight Bash idle extension should survive short 0.05s idle, took {elapsed:.2f}s"
+    )
+    assert elapsed < 2.0, f"in-flight Bash idle should still break, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+    assert any(e.get("name") == "Bash" for e in events), events
+
+
+async def test_run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle():
+    """Bash tool_result must NOT snap idle back to 180s (background work continues).
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r24 — Bash tool_use stretched
+    idle to 900s, then tool_result restored 180s while background Bash/network
+    work continued with no WS events → SDK idle kill, 0 artifacts, score 0.5.
+    Arm Bash like wait tools so post-result stretch survives until SDK `result`.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterBashResult(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("running bash", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "Bash",
+                    }
+                )
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_result",
+                        "name": "Bash",
+                    }
+                )
+            # Background work continues — no further WS events.
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterBashResult),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed >= 0.25, (
+        f"post-Bash-result stretch should survive short 0.05s idle, took {elapsed:.2f}s"
+    )
+    assert elapsed < 2.0, f"post-Bash-result idle should still break, took {elapsed:.2f}s"
+    assert any("SDK idle timeout" in s for s in summary), summary
+    assert any(e.get("name") == "Bash" for e in events), events
+
+
+async def test_run_agentic_loop_sdk_result_blocks_stretch_rearm():
+    """After SDK result, Bash must not re-arm 900s stretch (r31 a2 repro).
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r31 a2 — SDK emitted
+    result=completed, then Bash/ScheduleWakeup re-armed the post-result stretch
+    and the session burned Max runtime (1800s) with 0 artifacts. Healthy
+    sessions (r31 a1) exit within ~1s of result. After result, stretch must
+    stay disarmed so short idle ends the zombie CLI.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class HangAfterResultThenBash(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "Bash",
+                    }
+                )
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_result",
+                        "name": "Bash",
+                    }
+                )
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "result",
+                        "status": "completed",
+                    }
+                )
+                # Zombie CLI continues tooling after result (r31 a2 pattern).
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_use",
+                        "name": "Bash",
+                    }
+                )
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "tool_result",
+                        "name": "Bash",
+                    }
+                )
+            await aio.Event().wait()
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", HangAfterResultThenBash),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 0.05),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 0.35),
+        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 2.0),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    # Must end on short idle (~0.05s), NOT the 0.35s stretch window.
+    assert elapsed < 0.25, (
+        f"post-SDK-result Bash must not re-arm stretch; took {elapsed:.2f}s (summary={summary})"
+    )
+    assert any(
+        "SDK idle timeout" in s or "Post-result exit grace" in s for s in summary
+    ), summary
+    assert any(e.get("type") == "result" for e in events), events
+
+
+async def test_run_agentic_loop_post_result_exit_grace_breaks():
+    """Stdout after SDK result that refreshes idle must still hit exit grace.
+
+    If the zombie CLI keeps emitting PTY output after result, last_output_time
+    never goes silent long enough for short idle — grace is the backstop so we
+    do not burn MAX_RUNTIME_S.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class ChattyAfterResult(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            if self.on_event:
+                await self.on_event(
+                    {
+                        "version": 1,
+                        "provider": "claude",
+                        "type": "result",
+                        "status": "completed",
+                    }
+                )
+            # Keep refreshing last_output_time so short idle never fires.
+            while True:
+                await aio.sleep(0.02)
+                await self.on_output("chip\n", False)
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", ChattyAfterResult),
+        patch.object(service, "SDK_IDLE_TIMEOUT_S", 5.0),
+        patch.object(service, "SDK_WAIT_TOOL_IDLE_TIMEOUT_S", 5.0),
+        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.15),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "MAX_RUNTIME_S", 30),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, history, itok, otok, events = await service._run_agentic_loop(
+            agent_id="a",
+            task_id="t",
+            sandbox_id="sb",
+            goal="g",
+            ws_url="wss://x",
+            terminal=terminal,
+            model="rose-labs/rose-1-lite",
+            claude_token=None,
+            action_summary=summary,
+            tool_call_id="tc",
+        )
+        elapsed = aio.get_event_loop().time() - t0
+
+    assert exit_code == -1
+    assert attempt is False
+    assert elapsed < 1.0, f"grace should end chatty post-result session quickly, took {elapsed:.2f}s"
+    assert any("Post-result exit grace" in s for s in summary), summary
 
 
 def test_log_code_agent_event_promotes_codex_fast_cache_request():
@@ -3048,6 +3541,10 @@ async def run_all_tests():
     r.record("extract_paths_non_dict", test_extract_additional_paths_non_dict_value)
     r.record("structured_from_output_single", test_structured_response_from_output_files_single_pointer)
     r.record("structured_from_output_rejects_non_file", test_structured_response_from_output_files_rejects_non_file_schema)
+    r.record(
+        "structured_from_output_mixed_schema",
+        test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
+    )
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
@@ -3114,6 +3611,10 @@ async def run_all_tests():
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
     await r.record_async(
+        "run_verifier_disabled_schema_incomplete",
+        test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
+    )
+    await r.record_async(
         "run_verifier_disabled_includes_sdk_stdout",
         test_run_verifier_disabled_includes_sdk_event_stdout,
     )
@@ -3136,6 +3637,26 @@ async def run_all_tests():
     await r.record_async(
         "run_agentic_loop_sdk_idle_timeout",
         test_run_agentic_loop_sdk_idle_timeout_breaks,
+    )
+    await r.record_async(
+        "run_agentic_loop_wait_tool_extends_sdk_idle",
+        test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout,
+    )
+    await r.record_async(
+        "run_agentic_loop_in_flight_bash_extends_sdk_idle",
+        test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout,
+    )
+    await r.record_async(
+        "run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle",
+        test_run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle,
+    )
+    await r.record_async(
+        "run_agentic_loop_sdk_result_blocks_stretch_rearm",
+        test_run_agentic_loop_sdk_result_blocks_stretch_rearm,
+    )
+    await r.record_async(
+        "run_agentic_loop_post_result_exit_grace_breaks",
+        test_run_agentic_loop_post_result_exit_grace_breaks,
     )
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record(

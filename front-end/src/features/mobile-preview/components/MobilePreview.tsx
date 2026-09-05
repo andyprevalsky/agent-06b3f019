@@ -133,7 +133,7 @@ function noop(): void {
 
 export const PREVIEW_AGENT_CONTEXT = {
   agent: MOCK_AGENTS[0],
-  setAgent: noop,
+  applyAgentDetail: () => true,
   inspectionContext: null,
   selectedAgentId: 'a1',
   setSelectedAgentId: noop,
@@ -141,7 +141,6 @@ export const PREVIEW_AGENT_CONTEXT = {
   reconcilePendingAgentCreation: async () => {},
   rollbackPendingAgentCreation: () => false,
   messages: MOCK_BROWSER_MESSAGES,
-  setMessages: noop,
   streamingBubbles: new Map(),
   streamingPlan: null,
   streamingAttention: null,

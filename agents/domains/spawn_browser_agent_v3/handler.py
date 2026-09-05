@@ -8243,7 +8243,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=provider_exit_rejected
+                        skip_cookie_probes=provider_exit_rejected
                         or escalate_after_cookie_false_stable,
                         allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
                     )

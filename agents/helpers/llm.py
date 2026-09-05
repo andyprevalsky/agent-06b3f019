@@ -923,12 +923,18 @@ def build_verifier_context_messages(
     context: List[Dict[str, Any]],
     system_prompt: str,
     verifier_file_evidence_by_message: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    call_site: str = "verifier",
 ) -> List[Dict[str, Any]]:
     """Build verifier messages with compressed tool results and progressive cache.
 
     Strips ASSISTANT and SYSTEM messages. Compresses USER + TOOL messages into
     user-role batches, split by prior verifier responses (which become the
     assistant turns to maintain user/assistant alternation).
+
+    For ``call_site="benchmark_declared_evaluator"``, skip TOOL_RESULT budgeting.
+    Declared-judge evidence is already bounded by the single-turn evidence builder
+    (~320k). Re-applying the generic 12k tool cap head+tails the completion card
+    and drops middle ranks of large structured deliverables (cuda-kernel top100).
 
     Sequential verifier calls share a growing cached prefix:
       call N reads [sys, user_batch1, asst_v1, ..., user_batchN-1, asst_vN-1]
@@ -1023,11 +1029,35 @@ def build_verifier_context_messages(
             # covers resolved file pointers; spawn_agent / artifact_file tool
             # bodies still embed full ranking JSON (cuda-kernel agent2: 134k
             # user batch → GPT RoseDeadline). Truncate before dump.
-            tool_text, truncated = _budget_verifier_tool_result_text(
-                "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str),
-                tool_name=str(tool_name or "tool"),
-                used_chars=_tool_result_chars_used,
-            )
+            #
+            # Declared-evaluator evidence is pre-bounded (~320k) and often carries
+            # the full structured deliverable (e.g. top-100 repos). Applying the
+            # generic 12k tool cap here head+tails that card and fails the judge
+            # even when the agent completed correctly.
+            dumped = "TOOL_RESULT " + json.dumps(tool_payload, ensure_ascii=False, default=str)
+            if str(call_site or "") == "benchmark_declared_evaluator":
+                # Evidence builders already bound content (~320k), but
+                # json.dumps(tool_payload) re-serializes and can exceed that.
+                # Cap across ALL declared-evaluator TOOL rows (e.g. DoorDash
+                # supplemental cart evidence) so the combined prompt stays
+                # inside the single-turn budget (CodeRabbit #1260).
+                _declared_total_cap = 320_000
+                _marker = "...[declared-evaluator truncated]"
+                _remaining = _declared_total_cap - _tool_result_chars_used
+                if _remaining <= 0:
+                    tool_text, truncated = "", True
+                elif len(dumped) > _remaining:
+                    _keep = max(0, _remaining - len(_marker))
+                    tool_text = dumped[:_keep] + _marker
+                    truncated = True
+                else:
+                    tool_text, truncated = dumped, False
+            else:
+                tool_text, truncated = _budget_verifier_tool_result_text(
+                    dumped,
+                    tool_name=str(tool_name or "tool"),
+                    used_chars=_tool_result_chars_used,
+                )
             if truncated:
                 _tool_result_budget_hits += 1
             # Aggregate budget exhausted → empty text; skip append so later
@@ -1093,8 +1123,11 @@ def build_verifier_context_messages(
 # the file-evidence budget: spawn_agent and artifact_file tool rows often embed
 # full ranking JSON directly in `result`, bypassing file-pointer inlining.
 VERIFIER_MAX_TOOL_RESULT_CHARS = 12_000
-VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 40_000
-VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 64_000
+# Deliverable tools (attempt_completion / artifact writes) must fit a full
+# top-100 ranking JSON (~50–80k with descriptions). The prior 40k/64k caps
+# head+tailed cuda-kernel top100 completion cards during verifier_execute.
+VERIFIER_MAX_DELIVERABLE_TOOL_RESULT_CHARS = 100_000
+VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS = 160_000
 _VERIFIER_DELIVERABLE_TOOL_NAMES = frozenset(
     {
         "attempt_completion",
@@ -1187,8 +1220,15 @@ def _verifier_file_metadata(fp: FilePointer) -> Dict[str, Any]:
 # Rose streams mid-JSON past the attempt deadline, soft-fails score=0.5, and the
 # finished agent is bounced back into execute (cuda-kernel top100). Cap verifier
 # inlining separately; prefer deliverable-looking filenames within the budget.
-VERIFIER_MAX_INLINE_FILE_CHARS = 40_000
-VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 48_000
+# Deliverable ranking artifacts (e.g. top100_cuda_repos_fresh.json ~45–80k)
+# must stay fully inlined. The prior 40k/48k caps head+tailed mid-ranks and
+# made verifier_execute score 0.5 despite a complete on-disk deliverable.
+VERIFIER_MAX_INLINE_FILE_CHARS = 120_000
+# Intermediate dumps (e.g. _prefiltered_shortlist.json multi-MB) must NOT share
+# the deliverable inline budget — a 120k head+tail of an 8MB shortlist crowded
+# out the real top100 and made the verifier score 0.5 (cuda-kernel r29 a2).
+VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS = 12_000
+VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS = 160_000
 _VERIFIER_DELIVERABLE_FILENAME_RE = re.compile(
     r"(top[_\-]?\d+|final|result|output|repos|deliverable|answer)",
     re.IGNORECASE,
@@ -1321,10 +1361,19 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
+                        filename = fp.original_filename or ""
+                        is_deliverable = bool(
+                            _VERIFIER_DELIVERABLE_FILENAME_RE.search(filename)
+                        )
+                        per_file_cap = (
+                            VERIFIER_MAX_INLINE_FILE_CHARS
+                            if is_deliverable
+                            else VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS
+                        )
                         text_content = _truncate_text_for_verifier_inline(
                             text_content,
-                            max_chars=VERIFIER_MAX_INLINE_FILE_CHARS,
-                            filename=fp.original_filename,
+                            max_chars=per_file_cap,
+                            filename=filename,
                         )
                         result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True
@@ -4868,10 +4917,80 @@ def _schema_field_names(response_schema: Optional[Dict[str, Any]]) -> List[str]:
 def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     if value is None:
         return False
-    if field_type in ("file_pointer", "session_file_pointer"):
+    normalized = _normalize_schema_field_type(field_type) if field_type else None
+    if normalized == "session_file_pointer":
+        # Soft-accept requires the declared path — id-only stubs are incomplete.
+        return isinstance(value, dict) and bool(value.get("path"))
+    if normalized == "file_pointer":
         return isinstance(value, dict) and any(value.get(key) for key in ("id", "path", "storage_path"))
-    if field_type in ("list[file_pointer]", "list[session_file_pointer]"):
-        return isinstance(value, list) and all(_has_schema_value(item, "file_pointer") for item in value)
+    if normalized == "list[session_file_pointer]":
+        # Empty lists must not satisfy pointer-list deliverables (all([]) is True).
+        return (
+            isinstance(value, list)
+            and len(value) > 0
+            and all(_has_schema_value(item, "session_file_pointer") for item in value)
+        )
+    if normalized == "list[file_pointer]":
+        return (
+            isinstance(value, list)
+            and len(value) > 0
+            and all(_has_schema_value(item, "file_pointer") for item in value)
+        )
+    # Structured deliverables must match the declared container type. A markdown
+    # string in a list[object] field (seen on cuda-kernel-github-top100 soft-accept)
+    # is not a populated ranking and must not satisfy the schema.
+    if normalized in ("list[object]", "list[dict]"):
+        # Empty {} placeholders must not satisfy object-list deliverables.
+        return (
+            isinstance(value, list)
+            and len(value) > 0
+            and all(isinstance(item, dict) and bool(item) for item in value)
+        )
+    if normalized == "object":
+        return isinstance(value, dict) and bool(value)
+    if normalized and normalized.startswith("list["):
+        return isinstance(value, list) and len(value) > 0
+    if normalized == "str":
+        # Empty strings must not soft-satisfy required str fields.
+        return isinstance(value, str) and bool(value.strip())
+    if normalized == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if normalized == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if normalized == "bool":
+        return isinstance(value, bool)
+    return True
+
+
+def _structured_response_ready_for_infra_soft_accept(
+    structured_response: Any,
+    response_schema: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether an infra soft-fail may accept attempt_completion.
+
+    Infrastructure timeouts are not a judgment that the deliverable is missing,
+    but accepting completion still requires a schema-shaped structured response.
+    Without this gate, soft-accept can COMPLETE agents whose ``repos`` field is a
+    truncated markdown string and fail the harness declared evaluator at progress=0.
+    When no response_schema is configured, preserve the prior accept-on-infra-fail
+    behavior.
+    """
+    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
+    if not fields:
+        return True
+    if not _structured_response_satisfies_schema(structured_response, response_schema):
+        return False
+    # Require non-empty lists so an empty repos=[] extraction cannot soft-complete.
+    for field in fields:
+        if not isinstance(field, dict):
+            return False
+        name = field.get("name")
+        field_type = _normalize_schema_field_type(field.get("type"))
+        if not isinstance(name, str) or not field_type or not field_type.startswith("list["):
+            continue
+        value = structured_response.get(name)
+        if not isinstance(value, list) or len(value) == 0:
+            return False
     return True
 
 
@@ -5282,10 +5401,14 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
-# Declared-evaluator judges return a short score JSON. OpenRouter reserves
-# max_tokens against remaining credits, so a 16000-token reservation 402s
-# an otherwise cheap cached judge when the account is low.
-DECLARED_EVALUATOR_MAX_TOKENS = 512
+# Declared-evaluator judges return a short score JSON, but reasoning models
+# (kimi-k3 / gpt-5.x-sol waterfall) often burn hundreds of tokens on reasoning
+# before emitting that JSON. 512 caused finish_reason=length with reasoning-only
+# streams and "No JSON content received" false fails on otherwise-good agent
+# runs (cuda-kernel-github-top100-code-agent k=3, 2026-09-04). Keep well under
+# VERIFIER_MAX_TOKENS so OpenRouter still does not 402 on a low credit balance
+# when the reservation is checked against remaining credits.
+DECLARED_EVALUATOR_MAX_TOKENS = 4096
 
 
 def max_tokens_for_verifier_call_site(call_site: str) -> int:
@@ -5529,6 +5652,7 @@ async def check_progress(
             context,
             system_prompt,
             verifier_file_evidence_by_message=verifier_file_evidence,
+            call_site=call_site,
         )
 
         # Resolve context pointers

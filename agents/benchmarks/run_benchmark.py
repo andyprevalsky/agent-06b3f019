@@ -53,6 +53,10 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from helpers.completion_summary_contract import (
+    has_fast_mode_summary_marker,
+    is_ablated_completion_summary,
+)
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -8876,11 +8880,6 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
-_JUDGE_STUB_MARKERS = (
-    "fm_cold_namespace_passthrough",
-    "fm_trajectory_end_passthrough",
-    "Fast Mode cache trajectory ended",
-)
 _JUDGE_RESEARCH_TOOLS = {"web_search", "web_fetch", "grep"}
 
 
@@ -8943,7 +8942,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
             continue
         text_value = _message_text_for_judge(message)
         blob_parts.append(text_value[:400])
-        if any(marker in text_value for marker in _JUDGE_STUB_MARKERS):
+        if has_fast_mode_summary_marker(text_value):
             has_traj_end_marker = True
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         tool_name = str(metadata.get("toolName") or "")
@@ -8991,10 +8990,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         "completion_outputs_count": len((completion_card or {}).get("outputs") or [])
         if isinstance((completion_card or {}).get("outputs"), list)
         else 0,
-        "completion_is_ablated": any(
-            marker.lower() in str((completion_card or {}).get("summary") or "").lower()
-            for marker in _JUDGE_STUB_MARKERS
-        ),
+        "completion_is_ablated": is_ablated_completion_summary((completion_card or {}).get("summary")),
     }
 
 
@@ -9311,6 +9307,29 @@ def _apply_compact_benchmark_state(evidence: list[dict], compact_state: dict) ->
     return evidence
 
 
+def _append_structured_output_evidence(evidence: list[dict], data: dict) -> list[dict]:
+    """Prefer the agent's populated response-schema output for declared judges.
+
+    Completion-card prose can be huge and previously got head+tail truncated by
+    the verifier TOOL_RESULT budget, hiding middle ranks. ``structured_output``
+    is the compact schema payload (e.g. 100 repos) and should always be visible.
+    """
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    structured = agent.get("structured_output")
+    if structured is None:
+        structured = agent.get("structuredOutput")
+    if structured is None:
+        return evidence
+    row = {
+        "role": "ASSISTANT",
+        "text": json.dumps({"structured_output": structured}, default=str),
+        "metadata": {"evidence_type": "structured_output"},
+    }
+    # Put structured output first so budget-sensitive judges see it even if a
+    # later layer ever reintroduces truncation.
+    return [row, *evidence]
+
+
 def _declared_evaluator_evidence(data: dict) -> list[dict]:
     """Build a bounded evidence-only context for a declared LLM judge.
 
@@ -9319,31 +9338,40 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
     hydrated child transcripts still blow the single-turn budget, drop them.
     When the remaining root tail (120 × 12k GP rows) is still over budget,
-    keep only the completion card + compact typed state — T-row judges are
-    written for that compact view, not the agentic Codex fallback.
+    keep completion + structured_output + compact typed state, then pack
+    coding-agent / explore / search grounding rows by priority under the
+    single-turn budget (never drop all tool evidence for fat Claude Code runs).
     """
     from benchmarks.semantic_evaluator_evidence import (
         SINGLE_TURN_TEXT_CAP,
         _append_completion_card,
         build_single_turn_evidence,
+        pack_grounding_priority_rows,
         single_turn_evidence_exceeds_budget,
     )
 
     compact_state = _compact_benchmark_state_for_judge(data)
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(data), compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
     slim = dict(data)
     slim["_semantic_evaluator_tree"] = None
     evidence = _apply_compact_benchmark_state(build_single_turn_evidence(slim), compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
+    # Full/slim transcripts blew the budget. Keep completion + structured_output
+    # + compact typed state, then pack coding-agent / explore / search grounding
+    # by priority instead of dropping every tool row (cuda-kernel judge regression).
     compact_only: list[dict] = []
     _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
     evidence = _apply_compact_benchmark_state(compact_only, compact_state)
+    evidence = _append_structured_output_evidence(evidence, data)
+    evidence = pack_grounding_priority_rows(data, base_rows=evidence)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
-    return [{"benchmark_state": compact_state}]
+    return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
 
 
 _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -9577,6 +9605,37 @@ async def _benchmark_judge_claude_auth_kwargs(user_id: str | None = None) -> dic
     }
 
 
+async def _benchmark_judge_gpt_auth_kwargs(user_id: str | None = None) -> dict:
+    """Fetch GPT/Codex OAuth for harness-side declared judges.
+
+    Same failure mode as Claude: post-run ``check_progress`` previously omitted
+    GPT OAuth, so Rose used the org OpenAI API key (often credit-exhausted) then
+    OpenRouter waterfall. Reasoning models there hit the declared-evaluator
+    max_tokens ceiling with reasoning-only streams and failed the judge even when
+    the agent completed successfully. Pass the user's GPT token so the judge
+    shares the agent auth path (direct_auth:gpt).
+    """
+    from helpers.llm import fetch_gpt_code_token_activity
+
+    resolved_user_id = (user_id or "").strip() or _current_benchmark_user_id()
+    if not resolved_user_id:
+        return {}
+    try:
+        token_data = await fetch_gpt_code_token_activity(resolved_user_id)
+    except Exception as exc:  # noqa: BLE001 — judge still runs; auth is best-effort
+        print(f"    ⚠ Declared-judge GPT auth fetch failed: {exc}")
+        return {}
+    if not token_data or not token_data.get("accessToken"):
+        return {}
+    return {
+        "gpt_token": token_data["accessToken"],
+        "gpt_account_id": token_data.get("accountId"),
+        "gpt_token_source": token_data.get("source"),
+        "gpt_token_pool_id": token_data.get("poolTokenId"),
+        "gpt_token_user_id": resolved_user_id,
+    }
+
+
 async def _call_declared_llm_judge(
     task: BenchmarkTask,
     evaluator: dict,
@@ -9631,6 +9690,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         or _current_benchmark_user_id()
     )
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
+    gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
     return await check_progress(
         context=[
             {
@@ -9647,6 +9707,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
         call_site="benchmark_declared_evaluator",
         agent_id=agent.get("agent_id") or agent.get("id"),
         **claude_auth,
+        **gpt_auth,
     )
 
 
@@ -11049,7 +11110,9 @@ def _run_declared_static_check(
             for card in cards:
                 summary = str(card.get("summary") or "").strip()
                 label = str(card.get("agent_id") or "root")[:8]
-                if any(marker.lower() in summary.lower() for marker in forbidden):
+                if is_ablated_completion_summary(summary) or any(
+                    marker.lower() in summary.lower() for marker in forbidden
+                ):
                     return (
                         False,
                         f"T7: {label} Task Complete summary is Fast Mode-ablated",
@@ -11411,12 +11474,18 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
-    if any(
+    from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
+
+    _needs_cc_hydrate = any(
         check.get("type") == "claude_code_session_output"
         for evaluator in task.evaluators
         if evaluator.get("method") == "static_check"
         for check in evaluator.get("checks", [])
-    ):
+    ) or (
+        any(evaluator.get("method") == "single_turn_llm_judge" for evaluator in task.evaluators)
+        and messages_have_code_agent_grounding(data)
+    )
+    if _needs_cc_hydrate:
         await _hydrate_claude_code_sessions(data)
 
     needs_tree_evidence = any(

@@ -3,6 +3,7 @@
  *
  * MESSAGE ANIMATION QUEUE (see useMessageAnimationBuffer):
  * [IDLE] --> buffer pulls one message at a time --> [ANIMATING] --> [IDLE]
+ * Any selected-agent transition clears the local queue before paint.
  *
  * MESSAGE FILTERING (see useFilteredMessages -> deduplicateToolMessages):
  * ├─ Filter by subAgentId (main chat vs sub-agent panels)

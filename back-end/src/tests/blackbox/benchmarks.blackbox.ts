@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+
 /**
  * Black-box tests for /api/benchmarks
  *

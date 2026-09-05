@@ -161,6 +161,7 @@ export function handleAssistantStream(
   streamedTextsRef: React.MutableRefObject<Set<string>>,
   setStreamingBubbles: RealtimeSetters['setStreamingBubbles'],
   completedStreamIdsRef?: React.MutableRefObject<Set<string>>,
+  isCurrentAgent: () => boolean = () => true,
 ) {
   if (chunk.agentId !== selectedAgentId) return;
 
@@ -196,6 +197,7 @@ export function handleAssistantStream(
         }
 
         timeoutId = window.setTimeout(() => {
+          if (!isCurrentAgent()) return;
           console.warn(`Stream ${chunk.stream_id} timeout`);
           setStreamingBubbles((p) => {
             const m = new Map(p);

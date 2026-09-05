@@ -108,6 +108,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         style={{ opacity: a.messages.length > 0 ? 1 : 0, zIndex: 20 }}
       >
         <MessageList
+          key={a.selectedAgentId ?? 'no-agent'}
           onAddCredits={() => a.setShowCreditModal(true)}
           onIncreaseCostLimit={() => a.setShowCostLimitModal(true)}
           onNavigateToAgent={a.handleSelectAgent}

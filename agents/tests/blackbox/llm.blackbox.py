@@ -3334,13 +3334,14 @@ async def test_call_llm_verifier_uses_large_output_cap():
 async def test_call_llm_verifier_caps_declared_evaluator_output():
     """Declared-evaluator judges must not reserve the 16000-token OpenRouter cap.
 
-    OpenRouter 402s when remaining credits cannot cover max_tokens. A score JSON
-    fits in 512 tokens; keep the large cap for live agent verifiers.
+    OpenRouter 402s when remaining credits cannot cover max_tokens. Score JSON is
+    small, but reasoning models need headroom before the JSON lands — keep a
+    mid-size cap (not the full live-verifier 16000).
     """
     import httpx
     from config import load_config
     from helpers.httpx_capture import set_mock_handler
-    from helpers.llm import DECLARED_EVALUATOR_MAX_TOKENS, _call_llm_verifier
+    from helpers.llm import DECLARED_EVALUATOR_MAX_TOKENS, VERIFIER_MAX_TOKENS, _call_llm_verifier
 
     seen_max_tokens = []
     body = _sse_body(
@@ -3369,7 +3370,8 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
     provider_max_tokens = [value for value in seen_max_tokens if value is not None]
     assert provider_max_tokens
     assert all(value == DECLARED_EVALUATOR_MAX_TOKENS for value in provider_max_tokens)
-    assert DECLARED_EVALUATOR_MAX_TOKENS == 512
+    assert DECLARED_EVALUATOR_MAX_TOKENS == 4096
+    assert DECLARED_EVALUATOR_MAX_TOKENS < VERIFIER_MAX_TOKENS
 
 
 async def test_call_llm_verifier_bounds_provider_stream_time():
@@ -4132,7 +4134,7 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
 
 
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
-    """A failed code child cannot satisfy the parent with schema-shaped defaults."""
+    """A failed code child cannot satisfy the parent with empty schema defaults."""
     from helpers.llm import _completed_child_task_structured_response, _structured_response_satisfies_schema
 
     schema = {
@@ -4149,7 +4151,10 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         "collatz_step_count": 0,
         "collatz_sequence_from_27": [],
     }
-    assert _structured_response_satisfies_schema(placeholder, schema) is True
+    # Required object/string/list outputs must carry useful values.  The
+    # success-metadata checks below remain a separate defense for schemas whose
+    # legitimate output can contain zero-valued primitives.
+    assert _structured_response_satisfies_schema(placeholder, schema) is False
 
     for success_value in (False, None):
         metadata = {
@@ -5094,19 +5099,26 @@ async def test_resolve_verifier_file_evidence_uses_cached_text_file_content():
 
 
 async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
-    """Verifier file evidence keeps deliverables; demotes huge intermediate dumps.
+    """Verifier file evidence keeps deliverables; caps huge intermediate dumps.
 
-    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB–300KB)
+    Regression for cuda-kernel top100: intermediate ranking JSONs (100KB-300KB)
     were fully inlined into verifier_execute, Rose hit the attempt deadline
     mid-JSON, soft-failed score=0.5, and the finished agent looped on CC spawns.
+
+    Current policy: non-deliverables are truncated to the small per-file cap
+    (still may remain inlined), while deliverables keep the large cap and the
+    total budget remains hard. Demotion-to-metadata only kicks in when the
+    post-cap sum still exceeds VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS.
     """
     from helpers.llm import (
+        VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
         VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS,
         _resolve_verifier_file_evidence,
     )
 
     intermediate = "x" * 80_000
-    # ~30k deliverable so truncated intermediate (40k) cannot also fit in 48k budget.
+    # ~30k deliverable: fits the deliverable cap and leaves room under the total
+    # budget after the intermediate is reduced to the small non-deliverable cap.
     deliverable = '{"repos":[' + ",".join(
         f'{{"name":"repo_{i:03d}","url":"https://github.com/org/repo_{i:03d}","stars":{10000-i},"desc":"cuda kernels for workload {i:03d}"}}'
         for i in range(350)
@@ -5158,12 +5170,80 @@ async def test_resolve_verifier_file_evidence_budget_prefers_deliverable():
     final = evidence["msg-deliverable"][0]
     assert final["content_inlined"] is True
     assert "repo_000" in final["result"]
-    assert inter["content_inlined"] is False, "huge intermediate dump must be demoted to metadata"
-    assert "Omitted from verifier inline" in inter["result"]
+    # Huge intermediate must not consume the deliverable budget: either demoted
+    # to metadata, or truncated to the small non-deliverable inline cap.
+    if inter["content_inlined"]:
+        assert "verifier truncated" in inter["result"] or len(inter["result"]) <= (
+            VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS + 512
+        )
+        assert inter["result"].count("x") <= VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS
+    else:
+        assert "Omitted from verifier inline" in inter["result"]
     total_inlined = sum(
         len(p["result"]) for payloads in evidence.values() for p in payloads if p.get("content_inlined")
     )
     assert total_inlined <= VERIFIER_MAX_TOTAL_FILE_EVIDENCE_CHARS
+
+
+def test_verifier_file_evidence_caps_nondeliverable_shortlist_small():
+    """Multi-MB intermediate shortlists must not consume the deliverable inline budget.
+
+    Regression (cuda-kernel-github-top100 r29 a2): `_prefiltered_shortlist.json`
+    (~8MB) was inlined at the 120k deliverable cap, crowding the real top100 and
+    yielding verifier score 0.5. Non-deliverable files stay on the small cap.
+    """
+    from helpers.llm import (
+        VERIFIER_MAX_INLINE_FILE_CHARS,
+        VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
+        _truncate_text_for_verifier_inline,
+        _VERIFIER_DELIVERABLE_FILENAME_RE,
+    )
+
+    assert not _VERIFIER_DELIVERABLE_FILENAME_RE.search("_prefiltered_shortlist.json")
+    huge = ("repo,stars\n" + "\n".join(f"org/r{i},{100000-i}" for i in range(200000)))
+    assert len(huge) > VERIFIER_MAX_INLINE_FILE_CHARS
+    kept = _truncate_text_for_verifier_inline(
+        huge,
+        max_chars=VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS,
+        filename="_prefiltered_shortlist.json",
+    )
+    assert "verifier truncated" in kept
+    assert len(kept) <= VERIFIER_MAX_NON_DELIVERABLE_INLINE_FILE_CHARS + 32
+
+
+def test_verifier_file_evidence_keeps_full_top100_deliverable_json():
+    """Deliverable ranking JSON must not be head+tail truncated for verifier_execute.
+
+    Regression (cuda-kernel-github-top100 r28): top100_cuda_repos_fresh.json (~45k)
+    exceeded VERIFIER_MAX_INLINE_FILE_CHARS=40k, so ranks ~47–57 vanished and the
+    in-agent verifier scored 0.5 despite a complete on-disk deliverable.
+    """
+    import json
+    from helpers.llm import (
+        VERIFIER_MAX_INLINE_FILE_CHARS,
+        _truncate_text_for_verifier_inline,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/cuda-repo-{i}",
+            "repo_url": f"https://github.com/org/cuda-repo-{i}",
+            "stars": 100000 - i,
+            "description": f"CUDA kernel library {i} " + ("x" * 280),
+        }
+        for i in range(1, 101)
+    ]
+    payload = json.dumps({"repos": repos}, indent=2)
+    assert len(payload) > 40_000
+    assert len(payload) < VERIFIER_MAX_INLINE_FILE_CHARS
+    kept = _truncate_text_for_verifier_inline(
+        payload, max_chars=VERIFIER_MAX_INLINE_FILE_CHARS, filename="top100_cuda_repos_fresh.json"
+    )
+    assert "verifier truncated" not in kept
+    assert '"rank": 1' in kept or '"rank":1' in kept
+    assert '"rank": 50' in kept or '"rank":50' in kept
+    assert '"rank": 100' in kept or '"rank":100' in kept
 
 
 def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agent():
@@ -5222,6 +5302,91 @@ def test_build_verifier_context_messages_tool_result_budget_truncates_spawn_agen
     assert len(spawn_segments[0]) <= VERIFIER_MAX_TOOL_RESULT_CHARS + 64
     tool_only = sum(len(s) for s in joined.split("\n\n") if s.startswith("TOOL_RESULT "))
     assert tool_only <= VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 200
+
+
+def test_build_verifier_context_messages_skips_budget_for_declared_evaluator():
+    """Declared-evaluator evidence must keep middle ranks of large deliverables.
+
+    Regression (cuda-kernel-github-top100 r27 a1): agent completed with 100 repos in
+    structured_output / completion outputs, but check_progress re-wrapped the
+    evidence as TOOL_RESULT tool_name=tool and the 12k generic cap head+tailed
+    ranks ~22–91. The declared judge then failed criterion 1 despite a valid run.
+    """
+    import json
+    from helpers.llm import (
+        VERIFIER_MAX_TOOL_RESULT_CHARS,
+        build_verifier_context_messages,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/cuda-repo-{i}",
+            "repo_url": f"https://github.com/org/cuda-repo-{i}",
+            "stars": 100000 - i,
+            "description": (
+                f"CUDA kernel library number {i} with enough text to inflate the payload"
+            ),
+        }
+        for i in range(1, 101)
+    ]
+    evidence = [
+        {
+            "role": "ASSISTANT",
+            "text": json.dumps({"structured_output": {"repos": repos}}, default=str),
+            "metadata": {"evidence_type": "structured_output"},
+        },
+        {
+            "role": "ASSISTANT",
+            "text": json.dumps(
+                {
+                    "summary": "Ranked top 100 CUDA kernel repos",
+                    "outputs": [{"key": "repos", "value": repos}],
+                },
+                default=str,
+            ),
+            "metadata": {"evidence_type": "final_completion"},
+        },
+    ]
+    blob = json.dumps(evidence, default=str)
+    assert len(blob) > VERIFIER_MAX_TOOL_RESULT_CHARS
+
+    ctx = [
+        {
+            "role": "USER",
+            "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+            "timestamp": "2026-09-04T11:41:00Z",
+        },
+        {
+            "role": "TOOL",
+            "text": blob,
+            "timestamp": "2026-09-04T11:41:01Z",
+            "metadata": {"toolName": "tool", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    truncated = build_verifier_context_messages(ctx, "system", call_site="verifier")
+    truncated_joined = "\n".join(
+        m["content"]
+        for m in truncated
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
+    assert "verifier truncated" in truncated_joined
+
+    kept = build_verifier_context_messages(
+        ctx, "system", call_site="benchmark_declared_evaluator"
+    )
+    kept_joined = "\n".join(
+        m["content"]
+        for m in kept
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
+    assert "verifier truncated" not in kept_joined
+    # Nested JSON is escaped inside TOOL_RESULT; assert on unique repo markers.
+    assert "cuda-repo-1" in kept_joined
+    assert "cuda-repo-50" in kept_joined
+    assert "cuda-repo-100" in kept_joined
+    assert kept_joined.count("cuda-repo-") >= 100
 
 
 async def test_build_verifier_context_messages_self_closes_trailing_refs():

@@ -11,7 +11,10 @@ export function isLocalBenchmarkSmsTransportMockEnabled(): boolean {
 }
 
 export function isLocalBenchmarkAgentPhoneMockEnabled(): boolean {
-  return process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1';
+  return (
+    process.env.BLACKBOX_TEST_FAKE_AGENTPHONE === '1' &&
+    (process.env.NODE_ENV !== 'production' || process.env.BENCHMARK_ISOLATED_RUN === 'true')
+  );
 }
 
 export function isLocalBenchmarkWhatsAppTransportMockEnabled(): boolean {
@@ -27,6 +30,16 @@ export function mockSurgeMessageId(seed: string): string {
 export function mockAgentPhoneMessageId(seed: string): string {
   const digest = createHash('sha256').update(seed).digest('hex').slice(0, 12);
   return `ap_msg_${digest}`;
+}
+
+export function buildMockAgentPhoneNumber(userId: string) {
+  const digest = createHash('sha256').update(userId).digest('hex');
+  const subscriber = (parseInt(digest.slice(0, 8), 16) % 10_000_000).toString().padStart(7, '0');
+  return {
+    agentId: `ap_agent_${digest.slice(0, 12)}`,
+    numberId: `ap_num_${digest.slice(12, 24)}`,
+    phoneNumber: `+1555${subscriber}`,
+  };
 }
 
 /** Meta Cloud API message ids (`wamid.…`) from captured webhook transcripts. */

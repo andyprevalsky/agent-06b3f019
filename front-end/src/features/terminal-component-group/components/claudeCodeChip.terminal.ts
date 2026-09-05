@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- terminal manager, WebSocket ownership, and persisted output share one session lifecycle */
 /**
  * Terminal + transport hooks for ClaudeCodeChip.
  *

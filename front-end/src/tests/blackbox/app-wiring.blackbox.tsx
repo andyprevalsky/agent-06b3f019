@@ -94,6 +94,26 @@ describe('App wiring', () => {
       expect(screen.getByText('Post not found')).toBeInTheDocument();
     });
 
+    it('"/careers" renders the Careers overview page', () => {
+      renderWithProviders(<AppRoutes />, { route: '/careers' });
+      expect(screen.getByRole('heading', { level: 1, name: /hiring/i })).toBeInTheDocument();
+      expect(screen.queryByText('404')).not.toBeInTheDocument();
+    });
+
+    it('"/careers/:slug" renders a role page', () => {
+      renderWithProviders(<AppRoutes />, { route: '/careers/founding-product-engineer' });
+      expect(
+        screen.getByRole('heading', { level: 1, name: 'Founding Product Engineer' }),
+      ).toBeInTheDocument();
+    });
+
+    it('"/careers/:slug" falls back to NotFound for an unknown role', () => {
+      renderWithProviders(<AppRoutes />, { route: '/careers/nonexistent-role' });
+      expect(
+        screen.queryByRole('heading', { level: 1, name: 'Founding Product Engineer' }),
+      ).not.toBeInTheDocument();
+    });
+
     it('"/download" renders the Download page', () => {
       renderWithProviders(<AppRoutes />, { route: '/download' });
       expect(screen.getByText(/downloading rose for mac/i)).toBeInTheDocument();

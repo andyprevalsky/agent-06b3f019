@@ -26,7 +26,9 @@ function log(level, message, data = {}) {
 // E2B template defaults to 3000; local fallback overrides via PORT.
 const rawPort = process.env.PORT || "3000";
 if (!/^\d+$/.test(rawPort)) {
-  log("error", "Invalid PORT — require a complete decimal value", { port: rawPort });
+  log("error", "Invalid PORT — require a complete decimal value", {
+    port: rawPort,
+  });
   process.exit(1);
 }
 const PORT = Number.parseInt(rawPort, 10);
@@ -68,7 +70,14 @@ const clients = new Set();
 // Create WebSocket server
 const wss = new WebSocketServer({ port: PORT });
 
-log("info", "Server listening", { port: PORT });
+wss.on("listening", () => {
+  log("info", "Server listening", {
+    port: PORT,
+    ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
+      ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
+      : {}),
+  });
+});
 
 wss.on("connection", (ws) => {
   log("info", "Client connected", { total: clients.size + 1 });

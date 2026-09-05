@@ -194,7 +194,7 @@ export async function beginPurchaseWalletReclaim(
   const reclaimIdempotencyKey =
     funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchaseId}`;
   const reclaimLeaseToken = randomUUID();
-  const claimed = await repo.claimWalletFundingReclaim(funding.id, {
+  const claimed = await repo.claimWalletFundingReclaim(funding.id, purchaseId, {
     reclaimIdempotencyKey,
     reclaimLeaseToken,
   });

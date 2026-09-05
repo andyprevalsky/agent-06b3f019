@@ -1,5 +1,6 @@
-import { Prisma, PurchaseSpendStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { Prisma, PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { lockPurchaseWalletTransition } from '../../providers/purchase-wallet-funding-repo';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 
 const FINGERPRINT_BACKFILL_LOCK_SEED = 8_675_309;
@@ -163,6 +164,35 @@ export async function updatePurchaseStatus(
         ? { lineItemsJson: lineItemsJson as Prisma.InputJsonValue }
         : {}),
     },
+  });
+}
+
+/**
+ * Mark an unavailable HELD card as merchant-spent without racing the abandon
+ * path. Both the observed purchase state and the absence of an active/finished
+ * reclaim are predicates of the same database statement.
+ */
+export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
+  return runTransactionWithRetry(async (transaction) => {
+    await lockPurchaseWalletTransition(transaction, id);
+    return transaction.purchaseSpend.updateMany({
+      where: {
+        id,
+        status: PurchaseSpendStatus.HELD,
+        walletFunding: {
+          isNot: {
+            status: {
+              in: [
+                PurchaseWalletFundingStatus.RECLAIMING,
+                PurchaseWalletFundingStatus.RECLAIMED,
+                PurchaseWalletFundingStatus.RECLAIM_FAILED,
+              ],
+            },
+          },
+        },
+      },
+      data: { status: PurchaseSpendStatus.CLEARED },
+    });
   });
 }
 

@@ -87,9 +87,14 @@ jobs:
       # Changed-hash: overlap old+new gen machines, flip pointer, wait up to 45m
       # for cooperative continue_as_new handoff, then force-migrate stragglers and
       # retire old-gen machines. migrate-open is break-glass after the SLO only.
+      # 45m drain SLO + build/overlap + old-gen retire can exceed 60m; 90m
+      # prevents false-fail after a successful pointer flip + drain.
       - name: Cooperative Fly deploy + generation cutover
         id: cutover
-        timeout-minutes: 60
+        # 45m drain SLO + image build/overlap + old-gen machine destroy needs
+        # headroom past 60m (run 33817062156 hit the step timeout mid-destroy;
+        # 90m also covers post-drain retire hangs bounded by timeout 120).
+        timeout-minutes: 90
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           GH_TOKEN: ${{ github.token }}

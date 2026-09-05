@@ -2992,6 +2992,167 @@ def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
     )
 
 
+def test_declared_evaluator_evidence_includes_structured_output_first():
+    """Structured response-schema output must lead declared-judge evidence.
+
+    Regression (cuda-kernel-github-top100): completion cards alone were large enough
+    that verifier TOOL_RESULT budgeting head+tailed the repo list. Preferring the
+    compact structured_output payload keeps all 100 ranks visible to the judge.
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"org/r{i}",
+            "repo_url": f"https://github.com/org/r{i}",
+            "stars": 1000 - i,
+            "description": f"repo {i}",
+        }
+        for i in range(1, 101)
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {
+                "agent_id": "agent-structured",
+                "status": "COMPLETED",
+                "structured_output": {"repos": repos},
+            },
+            "messages": [],
+            "_benchmark": {"approvals_triggered": 0},
+        }
+    )
+    assert evidence, evidence
+    first = evidence[0]
+    assert first.get("metadata", {}).get("evidence_type") == "structured_output"
+    text = first.get("text") or ""
+    assert "org/r1" in text
+    assert "org/r50" in text
+    assert "org/r100" in text
+
+
+def test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget():
+    """Fat Claude Code transcripts must not collapse judge evidence to completion-only.
+
+    Regression (cuda-kernel-github-top100-code-agent k=3 r24 agent b977534d):
+    root had 100+ messages including multi-100KB spawn_claude_code_agent /
+    code_agent_sdk_events / claude_code_history rows. build_single_turn_evidence
+    serialized to ~392k (>320k cap), so _declared_evaluator_evidence fell through
+    to compact_only (structured_output + final_completion + metadata) and the
+    declared judge correctly scored 0 for missing coding-agent grounding.
+
+    Expected: within SINGLE_TURN_CHAR_BUDGET, still retain at least one capped
+    code-agent grounding row (sdk events / history / spawn_claude_code_agent).
+    """
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+    from benchmarks.semantic_evaluator_evidence import (
+        SINGLE_TURN_CHAR_BUDGET,
+        single_turn_evidence_exceeds_budget,
+    )
+
+    repos = [
+        {
+            "rank": i,
+            "repo_name": f"ggml-org/repo-{i}",
+            "repo_url": f"https://github.com/ggml-org/repo-{i}",
+            "stars": 100000 - i,
+            "description": f"CUDA kernel library {i}",
+        }
+        for i in range(1, 101)
+    ]
+    # ~40 messages × ~12k capped bodies → >320k when naively kept, forcing the
+    # compact_only cascade on current code.
+    fat_cc = (
+        "GitHub API search results for CUDA kernels:\n"
+        + "\n".join(
+            f"{i}. ggml-org/repo-{i} stars={100000-i} "
+            f"https://github.com/ggml-org/repo-{i} desc=CUDA kernel library {i} "
+            + ("x" * 200)
+            for i in range(1, 80)
+        )
+    )
+    assert len(fat_cc) > 12_000
+    messages = []
+    for index in range(35):
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": fat_cc,
+                "message": fat_cc,
+                "metadata": {
+                    "toolName": "spawn_claude_code_agent",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": f"cc-{index}",
+                    "title": f"Claude Code session {index}",
+                },
+            }
+        )
+        messages.append(
+            {
+                "role": "TOOL",
+                "text": fat_cc,
+                "message": fat_cc,
+                "metadata": {
+                    "toolName": "code_agent_sdk_events",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": f"sdk-{index}",
+                    "agentType": "code",
+                },
+            }
+        )
+    messages.append(
+        {
+            "role": "TOOL",
+            "text": "done",
+            "message": "done",
+            "metadata": {
+                "toolName": "completion_summary",
+                "toolStatus": "FINISHED",
+                "completionSummary": {
+                    "summary": "Ranked top 100 CUDA kernel repos via Claude Code GitHub fetch",
+                    "outputs": [{"key": "repos", "value": repos}],
+                },
+            },
+        }
+    )
+    evidence = _declared_evaluator_evidence(
+        {
+            "agent": {
+                "agent_id": "b977534d-repro",
+                "status": "COMPLETED",
+                "structured_output": {"repos": repos},
+            },
+            "messages": messages,
+            "_benchmark": {
+                "api_base_url": "http://localhost:3901",
+                "agent_class_step_counts": {
+                    "code": {"cc-0": 12},
+                    "explore": {},
+                },
+            },
+        }
+    )
+    dumped = json.dumps(evidence, default=str)
+    assert len(dumped) <= SINGLE_TURN_CHAR_BUDGET
+    assert not single_turn_evidence_exceeds_budget(evidence)
+    tool_names = {
+        (row.get("metadata") or {}).get("toolName")
+        for row in evidence
+        if isinstance(row, dict) and isinstance(row.get("metadata"), dict)
+    }
+    grounding = tool_names & {
+        "spawn_claude_code_agent",
+        "code_agent_sdk_events",
+        "claude_code_history",
+    }
+    assert grounding, (
+        "compact_only dropped all code-agent grounding rows; "
+        f"tool_names={tool_names} evidence_types="
+        f"{[(row.get('metadata') or {}).get('evidence_type') for row in evidence if isinstance(row, dict)]}"
+    )
+    assert any("ggml-org/repo-1" in (row.get("text") or "") for row in evidence if isinstance(row, dict))
+
+
 def test_declared_evaluator_evidence_compacts_mass_agent_tree():
     """Mass-agent judges must not receive 35MB child transcripts (smoke10 413)."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -5127,6 +5288,8 @@ def test_completion_summary_and_sms_static_checks_are_fail_closed():
 
 def test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs():
     """T7 must fail when Task Complete is a Fast Mode stub or has no schema outputs."""
+    from copy import deepcopy
+
     from benchmarks.run_benchmark import _run_declared_static_check
 
     evaluator = {
@@ -5209,6 +5372,57 @@ def test_completion_summary_length_rejects_fast_mode_ablation_and_empty_outputs(
     passed, reason = _run_declared_static_check(evaluator, ablated)
     assert passed is False
     assert "ablat" in reason.lower() or "fast mode" in reason.lower() or "forbidden" in reason.lower()
+
+    raw_tool_envelope = {
+        **good,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": (
+                            '- **query**: Figure robot White House F.03 interview\n\n'
+                            '**Result:** This is a cached web_search result envelope, not a '
+                            'production completion summary. It is deliberately long enough to '
+                            'clear the minimum-character check that previously let raw prior-tool '
+                            'evidence appear in Task Complete cards.'
+                        ),
+                        "outputs": outputs,
+                    },
+                },
+            }
+        ],
+    }
+    passed, reason = _run_declared_static_check(evaluator, raw_tool_envelope)
+    assert passed is False
+    assert "ablat" in reason.lower()
+
+    for invalid_summary in (
+        (
+            "**Params Passed:**\n\n- **url**: https://example.com/profile\n\n"
+            "**Result:** You are filtering a fetched page; this is raw web-fetch output "
+            "that must never be accepted as completion narration, regardless of length."
+        ),
+        (
+            "You are filtering a fetched web page for an autonomous agent. Return only "
+            "the relevant material from this page and do not add unsupported details."
+        ),
+        (
+            '{"query":"robotics founder","results":["cached search hit"],'
+            '"content":"raw tool payload, not completion narration"}'
+        ),
+        (
+            "pattern: founder|robotics\npath: reports\nResult: raw grep matches copied "
+            "directly into a completion card instead of summarized narration"
+        ),
+    ):
+        invalid = deepcopy(raw_tool_envelope)
+        invalid["messages"][0]["metadata"]["completionSummary"]["summary"] = invalid_summary
+        passed, reason = _run_declared_static_check(evaluator, invalid)
+        assert passed is False, invalid_summary
+        assert "ablat" in reason.lower()
 
     empty_outputs = {
         **good,
@@ -12621,17 +12835,36 @@ def test_local_port_range_allocation_is_reserved_across_processes():
     )
 
 
-def test_local_automatic_port_range_avoids_linux_ephemeral_ports():
-    """Outbound sockets must not race an automatic worker port after probing."""
+def test_local_automatic_port_range_avoids_linux_ephemeral_clients():
+    """Automatic listener ports must not race the kernel's outbound port allocator."""
+    from benchmarks import local as local_bench
+
+    base = local_bench.allocate_port_range()
+    try:
+        assert local_bench.FALLBACK_PORT_BASE_START <= base < local_bench.FALLBACK_PORT_BASE_END
+        assert base + max(local_bench.PORT_RANGE_OFFSETS) < 32768
+    finally:
+        local_bench._release_port_range(base)
+
+
+def test_local_automatic_port_range_excludes_reported_ephemeral_window():
+    """The exclusion must react to the kernel's actual range, not a fixed guess.
+
+    The fallback window moved into FALLBACK_PORT_BASE_*, so this pins the
+    behaviour rather than a hard-coded boundary: when the reported ephemeral
+    range covers the low half of the window, allocation must land above it.
+    """
     from unittest.mock import patch
 
     from benchmarks import local as local_bench
 
+    low = local_bench.FALLBACK_PORT_BASE_START
+    mid = low + (local_bench.FALLBACK_PORT_BASE_END - low) // 2
     base = None
     try:
-        with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(55000, 60999)):
+        with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(low, mid)):
             base = local_bench.allocate_port_range()
-        assert base > 60999, f"automatic range {base} overlaps Linux ephemeral ports"
+        assert base > mid, f"automatic range {base} overlaps reported ephemeral ports ({low}, {mid})"
     finally:
         if base is not None:
             local_bench._release_port_range(base)
@@ -15545,6 +15778,78 @@ def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
     assert "recorded 0 trajectory step(s)" in reason
 
 
+
+def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
+    """Non-orchestration code-agent evidence chips must produce step_count > 0.
+
+    When ROSE_DISABLE_CODE_AGENT_VERIFIER skips the LLM verifier, spawn chips
+    alone leave every code agent at 0 steps and declared judges fail. Persisted
+    `code_agent_sdk_events` / `claude_code_history` chips (agentType=code) are
+    the grounded trajectory the harness expects.
+    """
+    from benchmarks.run_benchmark import _agent_class_step_counts
+
+    task_id = "code-task-1"
+    spawn_call_id = "spawn-call-1"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_claude_code_agent",
+                        "type": "code",
+                        "tool_call_id": spawn_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_claude_code_agent",
+                "toolCallId": spawn_call_id,
+                "task_id": task_id,
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Code-agent SDK event JSON:\n\n{\"events\":[1]}",
+            "metadata": {
+                "toolName": "code_agent_sdk_events",
+                "toolCallId": "evidence-sdk-1",
+                "task_id": task_id,
+                "subAgentId": task_id,
+                "agentType": "code",
+                "steps_taken": 3,
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Execution Summary:\n\ncurl api.github.com",
+            "metadata": {
+                "toolName": "claude_code_history",
+                "toolCallId": "evidence-hist-1",
+                "task_id": task_id,
+                "subAgentId": task_id,
+                "agentType": "code",
+                "steps_taken": 3,
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert "code" in counts, counts
+    # Union should attach evidence to the spawn/task instance.
+    assert any(v > 0 for v in counts["code"].values()), counts
+    assert counts["code"].get(task_id, counts["code"].get(spawn_call_id, 0)) > 0, counts
+
+
+
 def test_browser_min_steps_is_per_instance_not_aggregate():
     """Five steps on one browser cannot cover a second under-worked browser."""
     from benchmarks.run_benchmark import (
@@ -17522,6 +17827,10 @@ async def run_all_tests():
         test_local_port_range_allocation_is_reserved_across_processes,
     )
     r.record(
+        "local_automatic_port_range_avoids_ephemeral_clients",
+        test_local_automatic_port_range_avoids_linux_ephemeral_clients,
+    )
+    r.record(
         "local_start_services_ready_port_release",
         test_local_start_services_releases_port_reservation_after_readiness,
     )
@@ -17865,6 +18174,14 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
+    )
+    r.record(
+        "declared_evaluator_evidence_includes_structured_output_first",
+        test_declared_evaluator_evidence_includes_structured_output_first,
+    )
+    r.record(
+        "declared_evaluator_evidence_keeps_code_agent_grounding_under_budget",
+        test_declared_evaluator_evidence_keeps_code_agent_grounding_under_budget,
     )
     r.record(
         "declared_evaluator_evidence_compacts_mass_agent_tree",

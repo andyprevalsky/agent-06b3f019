@@ -835,6 +835,142 @@ async def test_verifier_score_1_returns_completed():
     assert finished_for_tc, "Expected FINISHED tool_result for attempt_completion in returned context"
 
 
+async def test_verifier_infra_soft_fail_accepts_attempt_completion():
+    """Execute-loop Rose deadline soft-fail must accept attempt_completion.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r26 — ranking already in
+    context, attempt_completion verifier RoseDeadlineError'd / hit the 420s
+    fence, soft-failed at score=0.5 ("Progress check failed: ..."), and the
+    agent bounced into another multi-minute verify loop until the 4200s task
+    budget died. Infrastructure failure is not a missing-deliverable judgment
+    when the structured response already covers the schema.
+    """
+    tool_calls = [{"tool": "attempt_completion"}]
+    detected_tools = [("attempt_completion", "tc-ac-infra-1", 1.0)]
+    schema = {
+        "fields": [
+            {
+                "name": "repos",
+                "type": "list[object]",
+                "properties": [
+                    {"name": "rank", "type": "int"},
+                    {"name": "repo_name", "type": "str"},
+                    {"name": "repo_url", "type": "str"},
+                    {"name": "stars", "type": "int"},
+                    {"name": "description", "type": "str"},
+                ],
+            }
+        ]
+    }
+    structured = {
+        "repos": [
+            {
+                "rank": 1,
+                "repo_name": "a/b",
+                "repo_url": "https://github.com/a/b",
+                "stars": 10,
+                "description": "cuda kernels",
+            }
+        ]
+    }
+
+    completion_calls = []
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        completion_calls.append((tool_name, tool_args, tool_call_id))
+        return {"message": "ok"}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=False,
+        max_iterations=3,
+        execute_tool_override=mock_execute_tool,
+        verifier_score=0.5,
+        verifier_reasoning=(
+            "Progress check failed: Verifier exceeded 420s total deadline"
+        ),
+        verifier_structured_response=structured,
+        response_schema=schema,
+    )
+
+    assert result["status"] == "completed"
+    assert result["score"] == 1.0
+    assert "infrastructure failed" in (result.get("message") or "").lower()
+    assert completion_calls == [
+        ("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")
+    ]
+
+
+async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
+    """Infra soft-fail must not COMPLETE when repos is truncated markdown.
+
+    Repro: cuda-kernel-github-top100-code-agent k=3 r30 a1 — verifier hit the
+    420s fence, soft-accept flipped score to 1.0, and structured_output.repos
+    was a markdown string. Harness declared evaluator scored progress=0.
+    """
+    tool_calls = [{"tool": "attempt_completion"}]
+    detected_tools = [("attempt_completion", "tc-ac-infra-bad-1", 1.0)]
+    schema = {"fields": [{"name": "repos", "type": "list[object]"}]}
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ok"}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=False,
+        max_iterations=1,
+        execute_tool_override=mock_execute_tool,
+        verifier_score=0.5,
+        verifier_reasoning=(
+            "Progress check failed: Verifier exceeded 420s total deadline"
+        ),
+        verifier_structured_response={
+            "repos": "- [cupy/cupy](https://github.com/cupy/cupy): NumPy for GPU\n..."
+        },
+        response_schema=schema,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert result.get("score") != 1.0
+    assert result.get("verifier_progress") == 0.5
+
+
+async def test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema():
+    """Execute-loop infra soft-fails without schema-ready output must error at 3.
+
+    CodeRabbit #1260: an `elif not is_plan_loop` branch used to consume every
+    execute path and skip the consecutive>=3 circuit breaker, letting agents
+    spin until the task budget died.
+    """
+    tool_calls = [{"tool": "attempt_completion"}]
+    detected_tools = [("attempt_completion", "tc-ac-infra-cb-1", 1.0)]
+    schema = {"fields": [{"name": "repos", "type": "list[object]"}]}
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"message": "ok"}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=False,
+        max_iterations=5,
+        execute_tool_override=mock_execute_tool,
+        verifier_score=0.5,
+        verifier_reasoning=(
+            "Progress check failed: Verifier exceeded 420s total deadline"
+        ),
+        verifier_structured_response={"repos": ""},
+        response_schema=schema,
+    )
+
+    assert result["status"] == "error"
+    assert "verifier unavailable after 3 consecutive failures" in (
+        result.get("message") or ""
+    ).lower()
+
+
 async def test_estimate_tokens():
     """_estimate_tokens counts everything rendered, not just m["text"].
 
@@ -2132,6 +2268,14 @@ async def run_all_tests():
         "verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops
     )
     await r.record_async("verifier_score_1_returns_completed", test_verifier_score_1_returns_completed)
+    await r.record_async(
+        "verifier_infra_soft_fail_accepts_attempt_completion",
+        test_verifier_infra_soft_fail_accepts_attempt_completion,
+    )
+    await r.record_async(
+        "verifier_infra_soft_fail_rejects_malformed_structured_response",
+        test_verifier_infra_soft_fail_rejects_malformed_structured_response,
+    )
     await r.record_async("estimate_tokens", test_estimate_tokens)
     await r.record_async(
         "compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success

@@ -1,5 +1,8 @@
+/* eslint-disable max-lines -- request validation, retry, redirect, and bounded response handling form one security boundary */
+import { lookup as lookupAtConnection } from 'node:dns';
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
+import { Agent } from 'undici';
 
 import { createLogger } from '../../providers/logger';
 import {
@@ -22,6 +25,64 @@ import {
 const log = createLogger('ExternalHttp');
 
 const IDEMPOTENT_METHODS = new Set<HttpMethod>(['GET', 'HEAD']);
+const BODY_HEADERS = ['content-encoding', 'content-language', 'content-length', 'content-type'];
+
+/**
+ * Undici invokes this resolver while it opens the socket. Revalidating every
+ * returned address here closes the DNS-rebinding gap between the friendly
+ * validation error above and the connection that actually leaves the process.
+ */
+const lookupPublicAddressAtConnection: LookupFunction = (hostname, options, callback) => {
+  lookupAtConnection(
+    hostname,
+    { all: true, verbatim: true, family: options.family },
+    (error, addresses) => {
+      const fail = (lookupError: NodeJS.ErrnoException | Error) => {
+        if (options.all === true) callback(lookupError, []);
+        else callback(lookupError, '', 0);
+      };
+
+      if (error) {
+        fail(error);
+        return;
+      }
+      try {
+        assertPublicResolvedAddresses(hostname, addresses);
+      } catch (addressError) {
+        fail(addressError as Error);
+        return;
+      }
+
+      if (options.all === true) {
+        callback(null, addresses);
+        return;
+      }
+      const first = addresses[0];
+      callback(null, first.address, first.family);
+    }
+  );
+};
+
+const publicAddressDispatcher = new Agent({
+  connect: { lookup: lookupPublicAddressAtConnection },
+});
+
+export function assertPublicResolvedAddresses(
+  hostname: string,
+  addresses: Array<{ address: string }>
+): void {
+  if (addresses.length === 0) {
+    throw new InvalidExternalHttpRequestError(
+      `api_request cannot fetch ${hostname}: DNS lookup returned no addresses`
+    );
+  }
+  const blocked = addresses.find(({ address }) => isBlockedExternalAddress(address));
+  if (blocked !== undefined) {
+    throw new InvalidExternalHttpRequestError(
+      `api_request cannot fetch ${hostname}: it resolves to non-public address ${blocked.address}`
+    );
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -115,19 +176,7 @@ async function assertUrlResolvesToPublicAddress(url: string): Promise<void> {
     );
   }
 
-  if (addresses.length === 0) {
-    throw new InvalidExternalHttpRequestError(
-      `api_request cannot fetch ${JSON.stringify(url)}: ${host} did not resolve to any address. Pass an absolute http(s) URL.`
-    );
-  }
-
-  for (const { address } of addresses) {
-    if (isBlockedExternalAddress(address)) {
-      throw new InvalidExternalHttpRequestError(
-        `api_request cannot fetch ${JSON.stringify(url)}: ${host} resolves to non-public address ${address}. Pass an absolute http(s) URL.`
-      );
-    }
-  }
+  assertPublicResolvedAddresses(host, addresses);
 }
 
 function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
@@ -164,12 +213,19 @@ function buildFetchInit(request: ExternalHttpRequestBody): RequestInit {
 
 async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit): Promise<Response> {
   let currentUrl = startUrl;
+  let currentInit: RequestInit = { ...init, headers: new Headers(init.headers) };
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     assertFetchableExternalUrl(currentUrl);
     await assertUrlResolvesToPublicAddress(currentUrl);
 
-    const response = await fetch(currentUrl, init);
+    const response = await fetch(currentUrl, {
+      ...currentInit,
+      // `dispatcher` is Undici's Node fetch extension. The URL keeps its
+      // original hostname for Host/SNI while the connection uses only an
+      // address approved by the socket-time resolver above.
+      dispatcher: publicAddressDispatcher,
+    } as unknown as RequestInit);
     const isRedirect = response.status >= 300 && response.status < 400;
     if (!isRedirect) {
       return response;
@@ -181,7 +237,26 @@ async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit):
     }
 
     await response.body?.cancel().catch(() => undefined);
-    currentUrl = new URL(location, currentUrl).toString();
+    const nextUrl = new URL(location, currentUrl);
+    const previousUrl = new URL(currentUrl);
+    if (nextUrl.origin !== previousUrl.origin) {
+      throw new InvalidExternalHttpRequestError(
+        'api_request refuses cross-origin redirects so credentials and request bodies cannot be forwarded to another host'
+      );
+    }
+
+    const nextHeaders = new Headers(currentInit.headers);
+    const method = String(currentInit.method ?? 'GET').toUpperCase();
+    if (
+      (response.status === 303 && method !== 'HEAD') ||
+      ((response.status === 301 || response.status === 302) && method === 'POST')
+    ) {
+      currentInit = { ...currentInit, method: 'GET', body: undefined, headers: nextHeaders };
+      for (const header of BODY_HEADERS) nextHeaders.delete(header);
+    } else {
+      currentInit = { ...currentInit, headers: nextHeaders };
+    }
+    currentUrl = nextUrl.toString();
   }
 
   throw new ExternalHttpRequestFailedError(
@@ -189,15 +264,42 @@ async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit):
   );
 }
 
+export function redactExternalUrlForLogs(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '(invalid external URL)';
+  }
+}
+
+function findKnownExternalHttpError(
+  error: unknown
+): InvalidExternalHttpRequestError | ExternalHttpRequestFailedError | null {
+  const visited = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === 'object' && !visited.has(current)) {
+    if (
+      current instanceof InvalidExternalHttpRequestError ||
+      current instanceof ExternalHttpRequestFailedError
+    ) {
+      return current;
+    }
+    visited.add(current);
+    current = 'cause' in current ? current.cause : null;
+  }
+  return null;
+}
+
 export async function executeExternalHttpRequest(
   rawRequest: ExternalHttpRequestBody
 ): Promise<ExternalHttpResponseBody> {
   const request = normalizeExternalHttpRequest(rawRequest);
   const finalUrl = appendQueryParams(request.url, request.query);
+  const logUrl = redactExternalUrlForLogs(finalUrl);
   const init = buildFetchInit(request);
   const retriesAllowed = canRetryMethod(request.method, request.headers);
   const maxAttempts = retriesAllowed ? MAX_ATTEMPTS : 1;
-
   let lastError: unknown = null;
   let lastResponse: Response | null = null;
 
@@ -210,7 +312,7 @@ export async function executeExternalHttpRequest(
       if (retriesAllowed && shouldRetryResponse(response) && attempt < maxAttempts) {
         const delay = retryDelayMs(response, attempt);
         log.warn('Retrying external HTTP request after retryable status', {
-          url: finalUrl,
+          url: logUrl,
           status: response.status,
           attempt,
           delay_ms: delay,
@@ -236,19 +338,15 @@ export async function executeExternalHttpRequest(
         attempts: attempt,
       };
     } catch (error) {
-      if (error instanceof InvalidExternalHttpRequestError) {
-        throw error;
-      }
-      if (error instanceof ExternalHttpRequestFailedError) {
-        throw error;
-      }
+      const knownError = findKnownExternalHttpError(error);
+      if (knownError !== null) throw knownError;
       lastError = error;
       if (!retriesAllowed || attempt >= maxAttempts) {
         break;
       }
       const delay = retryDelayMs(lastResponse, attempt);
       log.warn('Retrying external HTTP request after transport error', {
-        url: finalUrl,
+        url: logUrl,
         attempt,
         delay_ms: delay,
         error: error instanceof Error ? error.message : String(error),

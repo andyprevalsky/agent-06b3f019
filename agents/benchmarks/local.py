@@ -67,6 +67,12 @@ BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
 # Persistent empty lock files are harmless; flock ownership ends with the process.
 PORT_RANGE_LOCK_ROOT = Path(tempfile.gettempdir()) / f"rose-benchmark-port-locks-{os.getuid()}"
 PORT_RANGE_OFFSETS = (0, 1, 2, 3, 4, 5, 6, 9)
+# Keep automatically selected listener ports below the default Linux ephemeral
+# client range (32768-60999). A probed-but-not-yet-bound health port in that
+# range can otherwise be claimed by an outbound connection before the worker
+# starts, despite our cross-process file locks.
+FALLBACK_PORT_BASE_START = 22000
+FALLBACK_PORT_BASE_END = 30000
 CHECKPOINT_ROOT = REPO_ROOT / ".context" / "benchmark-checkpoints"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 # A fresh isolated stack syncs the production-backed benchmark fixture before
@@ -276,8 +282,8 @@ def allocate_port_range(preferred_base: int | None = None) -> int:
     if preferred_base:
         candidates.append(preferred_base)
     seed = int(hashlib.sha1(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:8], 16)
-    start = 55000 + (seed % 400) * 20
-    automatic_candidates = [*range(start, 65500, 20), *range(55000, start, 20)]
+    # Main moved the fallback window into FALLBACK_PORT_BASE_* constants; keep
+    # those, and keep this branch's exclusion of the kernel's ephemeral range.
     # A connect-based availability probe cannot reserve a port against the
     # kernel's next outbound connection. On Linux, choosing inside
     # ip_local_port_range therefore leaves a check-to-bind race: an unrelated
@@ -286,6 +292,12 @@ def allocate_port_range(preferred_base: int | None = None) -> int:
     # still coordinate Rose launchers; excluding the kernel-managed range
     # coordinates with ephemeral sockets as well. Explicit --base-port values
     # remain first so callers that own their range keep the existing contract.
+    candidate_count = (FALLBACK_PORT_BASE_END - FALLBACK_PORT_BASE_START) // 20
+    start = FALLBACK_PORT_BASE_START + (seed % candidate_count) * 20
+    automatic_candidates = [
+        *range(start, FALLBACK_PORT_BASE_END, 20),
+        *range(FALLBACK_PORT_BASE_START, start, 20),
+    ]
     ephemeral_range = _linux_ephemeral_port_range()
     if ephemeral_range is not None:
         automatic_candidates = [

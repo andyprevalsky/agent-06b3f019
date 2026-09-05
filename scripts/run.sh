@@ -1448,9 +1448,10 @@ PY
 # the public-tunnel smoke — which fatally tore down the whole stack with no
 # retry. Verify the edge actually routes, and recycle the tunnel when it does not.
 #
-# Any HTTP status proves the edge routes to us; the origin frontend is not up yet
-# at this point, so 502/404 are perfectly acceptable here. Only "no HTTP response
-# at all" (curl writes 000) means the hostname is dead.
+# An origin-facing HTTP status proves the edge routes to us; the origin frontend
+# is not up yet at this point, so 502/404 are perfectly acceptable here.
+# Cloudflare's HTTP 530 for a trycloudflare hostname means the edge has no live
+# tunnel route, so recycle it just like "no HTTP response" (curl writes 000).
 CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS:-45}"
 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
@@ -1552,7 +1553,7 @@ cloudflare_tunnel_edge_is_routing() {
         if [ -z "$status" ] || [ "$status" = "000" ]; then
             status="$(supervised_edge_probe "$url")"
         fi
-        if [ -n "$status" ] && [ "$status" != "000" ]; then
+        if [ -n "$status" ] && [ "$status" != "000" ] && [ "$status" != "530" ]; then
             return 0
         fi
         sleep "$retry_seconds"
