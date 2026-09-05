@@ -1782,7 +1782,7 @@ def test_workflow_coalesce_fills_gp_outputs_from_row_item_and_explore():
 
 
 def test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name():
-    """Name-only schema plus **Params Passed:** fetch bodies must still yield a real card."""
+    """A raw fetch must yield to a finished report; its envelope must not leak."""
     from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
 
     fetch_body = (
@@ -1797,11 +1797,23 @@ def test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name():
         "week-in-the-life operating cadence."
     )
     assert "**params passed:**" in fetch_body.lower()
+    assert is_ablated_completion_summary(fetch_body)
     context = [
         {
             "role": "TOOL",
             "text": fetch_body,
             "metadata": {"toolName": "web_fetch", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": (
+                "The completed creator report identifies BeerBiceps / Ranveer Allahbadia's "
+                "long-form health, business, and spirituality interviews; roughly three weekly "
+                "YouTube uploads; celebrity-plus-concrete-question hooks; an Indian-English "
+                "founder and student audience; sponsorship and course monetization; and an "
+                "opening for quantified founder-health protocols and operating-cadence stories."
+            ),
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
         },
         {
             "role": "TOOL",
@@ -1813,8 +1825,54 @@ def test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name():
     summary = card_summary_from_evidence(context, structured)
     assert not is_ablated_completion_summary(summary)
     assert "Fast Mode" not in summary
+    assert "Params Passed" not in summary
+    assert "**Result:**" not in summary
     assert "Ranveer" in summary or "BeerBiceps" in summary or "founders" in summary
     assert len(summary) >= 200
+
+
+def test_card_summary_from_evidence_rejects_long_cached_search_envelope():
+    """A >200-char cached web envelope must yield to a real spawn-agent report."""
+    from workflows.agent_workflow import card_summary_from_evidence, is_ablated_completion_summary
+
+    cached_search = (
+        '- **query**: Figure robot White House F.03 Brett Adcock interview\n\n'
+        '**Result:** Search result snippets and ranking metadata repeated from the prior '
+        'web_search trajectory. This intentionally exceeds two hundred characters so it '
+        'covers the bug where length alone made raw tool evidence look like a real Task '
+        'Complete summary even though the card exposed query and result plumbing.'
+    )
+    real_report = (
+        "Brett Adcock's creator analysis was completed with verified channel URLs, a "
+        "weekly posting cadence, repeatable robotics-demo hook formulas, core founder and "
+        "automation content pillars, audience positioning, monetization paths, recent "
+        "high-performing pieces, gaps, engagement opportunities, and source citations. "
+        "The finished dossier gives Andy a grounded competitive reference for founder-led "
+        "technical storytelling and launch content."
+    )
+    context = [
+        {
+            "role": "TOOL",
+            "text": cached_search,
+            "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": real_report,
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "Fast Mode cache trajectory ended; prior tool evidence is sufficient.",
+            "metadata": {"toolName": "attempt_completion", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    assert is_ablated_completion_summary(cached_search)
+    summary = card_summary_from_evidence(context, {"creator_name": "Brett Adcock"})
+    assert not is_ablated_completion_summary(summary)
+    assert "Brett Adcock" in summary
+    assert "**query**" not in summary
 
 
 def test_workflow_extract_failure_context_empty_context():
@@ -2047,7 +2105,7 @@ class _FakeWorkflowLogger:
     def __init__(self):
         self.records: List[tuple] = []
 
-    def info(self, msg, *args, **kwargs):
+    def info(self, msg, *args):
         self.records.append(("info", str(msg)))
 
     def warning(self, msg, *args, **kwargs):
@@ -5418,6 +5476,11 @@ async def test_workflow_mark_complete_no_parent_no_signal():
                 {"key": "order_total_usd", "label": "Order Total Usd", "value": 11.25},
             ],
         }
+        assert ("info", "Sent completion SMS notification: agent=root-mc") in fake.logger.records
+        assert not any(
+            level == "warning" and message.startswith("Failed to send completion SMS notification")
+            for level, message in fake.logger.records
+        )
     finally:
         _restore_workflow(original)
 
@@ -5563,6 +5626,67 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         assert outputs, "Task Complete must show schema outputs"
         keys = {item.get("key") for item in outputs}
         assert "creator_name" in keys
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_never_persists_raw_tool_envelope_for_any_task():
+    """The final Task Complete write enforces the shared narration contract globally."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "ordinary-agent-raw-summary"
+    wf.user_id = "u-mc"
+    wf.goal = "Research a robotics founder and summarize the findings."
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = "ordinary-parent"
+    wf.root_agent_id = "ordinary-root"
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": [{"name": "founder", "type": "str"}]}
+    cached_search = (
+        "- **query**: Figure robot Brett Adcock interview\n\n"
+        "**Result:** Search result snippets and ranking metadata replayed verbatim from the "
+        "web-search tool. This payload deliberately exceeds two hundred characters and is "
+        "tool I/O, not user-facing narration, so the final persistence boundary must reject it."
+    )
+    report = (
+        "The research identified Brett Adcock as Figure's founder and summarized his public "
+        "discussion of humanoid-robot deployment, manufacturing scale, and the Figure 03 "
+        "platform. The finished report separates sourced claims from interpretation and gives "
+        "the parent a concise foundation for its robotics-founder comparison."
+    )
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": cached_search,
+        "tool_counts": {"web_search": 1},
+        "usage": {"from_fast_cache": True, "actual_model": "fast-cache"},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[
+                {
+                    "role": "TOOL",
+                    "text": report,
+                    "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+                }
+            ],
+            structured_response={"founder": "Brett Adcock"},
+        )
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        summary = str(((finished or {}).get("completionSummary") or {}).get("summary") or "")
+        assert "Brett Adcock" in summary
+        assert "**query**" not in summary
+        assert "**Result:**" not in summary
+        mark_finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        assert mark_finished_args[7] == summary
     finally:
         _restore_workflow(original)
 
@@ -5726,6 +5850,22 @@ async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_p
                 "toolName": "web_fetch",
                 "toolStatus": "FINISHED",
                 "title": "Fetched https://www.youtube.com/@WesRoth",
+                "subAgentId": "explore-wes",
+                "taskId": "explore-wes",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": (
+                "The completed Wes Roth creator report covers his frequent long-form YouTube "
+                "explainers on AI research and launches, lab-name-plus-capability hooks, a "
+                "stay-current promise for builders, sponsorship and course monetization, and "
+                "the open opportunity for founder-health operating-cadence content. It gives "
+                "the parent concrete positioning evidence without exposing raw fetch syntax."
+            ),
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
                 "subAgentId": "explore-wes",
                 "taskId": "explore-wes",
             },
@@ -7205,6 +7345,10 @@ async def run_all_tests():
         "wf_card_summary_uses_long_web_fetch_not_creator_name",
         test_card_summary_from_evidence_uses_long_web_fetch_not_creator_name,
     )
+    r.record(
+        "wf_card_summary_rejects_cached_search_envelope",
+        test_card_summary_from_evidence_rejects_long_cached_search_envelope,
+    )
     r.record("wf_efc_empty", test_workflow_extract_failure_context_empty_context)
     r.record("wf_efc_assistant_reasoning", test_workflow_extract_failure_context_assistant_reasoning)
     r.record("wf_efc_skips_reasoning_meta", test_workflow_extract_failure_context_skips_reasoning_metadata)
@@ -7468,6 +7612,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_mark_complete_replaces_fast_mode_ablation",
         test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_rejects_raw_tool_envelope_globally",
+        test_workflow_mark_complete_never_persists_raw_tool_envelope_for_any_task,
     )
     await r.record_async(
         "wf_mark_complete_recovers_explore_web_fetch_on_unfiltered_poll",

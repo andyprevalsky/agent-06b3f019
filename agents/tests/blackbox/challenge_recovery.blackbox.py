@@ -41,7 +41,14 @@ def _state(*cookies):
     }
 
 
-async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie_commit=False):
+async def _run(
+    source,
+    probe,
+    *,
+    live_commit_clean=True,
+    allow_logged_out_cookie_commit=False,
+    skip_cookie_probes=False,
+):
     events = []
     committed = []
     config_inputs = []
@@ -76,9 +83,31 @@ async def _run(source, probe, *, live_commit_clean=True, allow_logged_out_cookie
         commit_cookie_removals=commit,
         search_configs=search_configs,
         progress=progress,
+        skip_cookie_probes=skip_cookie_probes,
         allow_logged_out_cookie_commit=allow_logged_out_cookie_commit,
     )
     return result, events, committed, config_inputs
+
+
+async def test_provider_exit_rejection_skips_cookie_probes_and_searches_configs():
+    """A poisoned provider exit must rotate without probing its cookie state."""
+    source = _state(_cookie("cf_clearance"), _cookie("authState"))
+
+    async def probe(_candidate):
+        raise AssertionError("provider-exit recovery must skip cookie probes")
+
+    result, events, committed, config_inputs = await _run(
+        source,
+        probe,
+        skip_cookie_probes=True,
+    )
+
+    assert result.recovery == "config_selected"
+    assert committed == []
+    assert len(config_inputs) == 1
+    stages = [event[1] for event in events]
+    assert "cookie_probe_wave" not in stages
+    assert "browser_config_search" in stages
 
 
 async def test_known_challenge_cookie_is_removed_without_touching_auth():
@@ -968,6 +997,10 @@ async def test_live_cookie_commit_requires_one_clean_load():
 async def run_all_tests():
     print("challenge-recovery blackbox tests:")
     result = BlackboxResult()
+    await result.record_async(
+        "provider_exit_skips_cookie_probes",
+        test_provider_exit_rejection_skips_cookie_probes_and_searches_configs,
+    )
     await result.record_async("known_challenge_cookie", test_known_challenge_cookie_is_removed_without_touching_auth)
     await result.record_async(
         "unknown_cookie_parallel_wave", test_unknown_cookie_wave_probes_in_parallel_without_ddmin,

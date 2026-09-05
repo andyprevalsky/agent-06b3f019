@@ -53,6 +53,10 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from helpers.completion_summary_contract import (
+    has_fast_mode_summary_marker,
+    is_ablated_completion_summary,
+)
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -8876,11 +8880,6 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
-_JUDGE_STUB_MARKERS = (
-    "fm_cold_namespace_passthrough",
-    "fm_trajectory_end_passthrough",
-    "Fast Mode cache trajectory ended",
-)
 _JUDGE_RESEARCH_TOOLS = {"web_search", "web_fetch", "grep"}
 
 
@@ -8943,7 +8942,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
             continue
         text_value = _message_text_for_judge(message)
         blob_parts.append(text_value[:400])
-        if any(marker in text_value for marker in _JUDGE_STUB_MARKERS):
+        if has_fast_mode_summary_marker(text_value):
             has_traj_end_marker = True
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         tool_name = str(metadata.get("toolName") or "")
@@ -8991,10 +8990,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         "completion_outputs_count": len((completion_card or {}).get("outputs") or [])
         if isinstance((completion_card or {}).get("outputs"), list)
         else 0,
-        "completion_is_ablated": any(
-            marker.lower() in str((completion_card or {}).get("summary") or "").lower()
-            for marker in _JUDGE_STUB_MARKERS
-        ),
+        "completion_is_ablated": is_ablated_completion_summary((completion_card or {}).get("summary")),
     }
 
 
@@ -11114,7 +11110,9 @@ def _run_declared_static_check(
             for card in cards:
                 summary = str(card.get("summary") or "").strip()
                 label = str(card.get("agent_id") or "root")[:8]
-                if any(marker.lower() in summary.lower() for marker in forbidden):
+                if is_ablated_completion_summary(summary) or any(
+                    marker.lower() in summary.lower() for marker in forbidden
+                ):
                     return (
                         False,
                         f"T7: {label} Task Complete summary is Fast Mode-ablated",

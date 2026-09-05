@@ -4134,7 +4134,7 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
 
 
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
-    """A failed code child cannot satisfy the parent with schema-shaped defaults."""
+    """A failed code child cannot satisfy the parent with empty schema defaults."""
     from helpers.llm import _completed_child_task_structured_response, _structured_response_satisfies_schema
 
     schema = {
@@ -4151,7 +4151,10 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         "collatz_step_count": 0,
         "collatz_sequence_from_27": [],
     }
-    assert _structured_response_satisfies_schema(placeholder, schema) is True
+    # Required object/string/list outputs must carry useful values.  The
+    # success-metadata checks below remain a separate defense for schemas whose
+    # legitimate output can contain zero-valued primitives.
+    assert _structured_response_satisfies_schema(placeholder, schema) is False
 
     for success_value in (False, None):
         metadata = {

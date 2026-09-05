@@ -50,6 +50,10 @@ with workflow.unsafe.imports_passed_through():
         update_agent_status,
     )
     from helpers.context_compaction import build_context_compaction_metadata
+    from helpers.completion_summary_contract import (
+        is_ablated_completion_summary,
+        is_raw_tool_envelope,
+    )
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
     from helpers.handle_tool_event import handle_tool_event
@@ -214,13 +218,6 @@ def structured_response_from_schema_headings(text: str, schema: Optional[Dict[st
     return out
 
 
-_FAST_MODE_SUMMARY_MARKERS = (
-    "fast mode",
-    "cached trajectory",
-    "from_fast_cache",
-    "based on prior tool evidence",
-    "the task completed successfully; verified results are included below",
-)
 _PLUMBING_TOOL_MARKERS = (
     "research started.",
     "agent initializing",
@@ -278,14 +275,6 @@ _EVIDENCE_TOOLS = {
 _FLEX_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", flags=re.MULTILINE)
 
 
-def is_ablated_completion_summary(text: Any) -> bool:
-    raw = str(text or "").strip()
-    if not raw:
-        return True
-    lowered = raw.lower()
-    return any(marker in lowered for marker in _FAST_MODE_SUMMARY_MARKERS)
-
-
 def _message_body(message: Dict[str, Any]) -> str:
     if not isinstance(message, dict):
         return ""
@@ -302,8 +291,9 @@ def _is_plumbing_tool_text(text: str) -> bool:
     lowered = str(text or "").strip().lower()
     if not lowered:
         return True
-    # web_search / web_fetch bodies start with **Params Passed:** then the
-    # actual result. A long result is evidence, not chip plumbing.
+    if is_raw_tool_envelope(text):
+        return True
+    # Long narrative reports are evidence; short status chips are plumbing.
     if len(lowered) >= 200:
         return False
     return any(marker in lowered for marker in _PLUMBING_TOOL_MARKERS)
@@ -321,7 +311,9 @@ def last_real_completion_text(
         tool_name = str(metadata.get("toolName") or "")
         status = str(metadata.get("toolStatus") or "").upper()
         text = _message_body(message)
-        if is_ablated_completion_summary(text) or _is_plumbing_tool_text(text):
+        if is_ablated_completion_summary(text):
+            continue
+        if _is_plumbing_tool_text(text):
             continue
         if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
             "FINISHED",
@@ -4986,16 +4978,23 @@ class AgentWorkflow:
             summary = summary_result.get("summary", "")
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
-            if is_oai_demo_mass_agent_task(self) and (
-                is_ablated_completion_summary(summary) or len(str(summary or "").strip()) < 200
-            ):
+            summary_is_invalid = is_ablated_completion_summary(summary)
+            needs_demo_detail = is_oai_demo_mass_agent_task(self) and len(
+                str(summary or "").strip()
+            ) < 200
+            if summary_is_invalid or needs_demo_detail:
                 recovered = card_summary_from_evidence(transcript, structured_response)
                 if (
                     recovered
                     and not is_ablated_completion_summary(recovered)
-                    and len(recovered) >= 200
+                    and (not needs_demo_detail or len(recovered) >= 200)
                 ):
                     summary = recovered
+            # This is the final, general publication boundary.  Never persist
+            # tool I/O or a cache sentinel as the Task Complete narration, even
+            # when no suitable report exists in the transcript.
+            if is_ablated_completion_summary(summary):
+                summary = f"Completed: {self.goal}" if self.goal else "Completed."
             if (
                 is_oai_demo_mass_agent_task(self)
                 and not self.parent_workflow_id
@@ -5130,7 +5129,7 @@ class AgentWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
-                    workflow.logger.info("Sent completion SMS notification", agent_id=self.agent_id)
+                    workflow.logger.info(f"Sent completion SMS notification: agent={self.agent_id}")
                 except Exception as sms_error:
                     # Log but don't fail completion if SMS fails
                     workflow.logger.warning(f"Failed to send completion SMS notification: {sms_error}")

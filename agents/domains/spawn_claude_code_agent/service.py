@@ -1377,7 +1377,115 @@ def _structured_response_from_output_files(
         elif field_type == "list[file_pointer]":
             structured[name] = [{"path": _remote_path_for_output_file(fp)} for fp in output_files]
         else:
-            return None
+            continue
+
+    return structured or None
+
+
+def _structured_response_satisfies_declared_schema(
+    output_schema: Optional[Dict[str, Any]],
+    structured_response: Optional[Dict[str, Any]],
+) -> bool:
+    """Return true only when every declared field has a non-empty value."""
+    fields = output_schema.get("fields", []) if isinstance(output_schema, dict) else []
+    if not fields:
+        return True
+    if not isinstance(structured_response, dict):
+        return False
+    for field in fields:
+        if not isinstance(field, dict):
+            return False
+        name = field.get("name")
+        if not name or name not in structured_response:
+            return False
+        value = structured_response[name]
+        if value is None or value == "" or value == [] or value == {}:
+            return False
+    return True
+
+
+def _code_event_text_evidence(code_events: list[Dict[str, Any]]) -> list[str]:
+    """Collect provider stdout/result strings without depending on terminal truncation."""
+    texts: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if value.strip():
+                texts.append(value.strip())
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        if isinstance(value, dict):
+            for key in ("content", "text", "output", "result", "stdout", "message"):
+                if key in value:
+                    collect(value[key])
+
+    for event in code_events:
+        if isinstance(event, dict):
+            collect(event)
+    return texts
+
+
+def _structured_response_from_code_evidence(
+    output_schema: Optional[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+    code_events: list[Dict[str, Any]],
+    terminal_output: str,
+) -> Optional[Dict[str, Any]]:
+    """Materialize supported primitive and file fields from normalized SDK evidence."""
+    if not output_schema:
+        return None
+
+    structured = _structured_response_from_output_files(output_schema, output_files) or {}
+    evidence_texts = _code_event_text_evidence(code_events)
+    if terminal_output.strip():
+        evidence_texts.append(terminal_output.strip())
+
+    total_steps: Optional[int] = None
+    sequence: list[int] = []
+    stdout = ""
+    for evidence in sorted(evidence_texts, key=len, reverse=True):
+        steps_match = re.search(
+            r"(?:Total steps|Step count|total step count|steps|[\"']total_steps[\"'])\s*:\s*`?(\d+)",
+            evidence,
+            re.IGNORECASE,
+        )
+        candidate_steps = int(steps_match.group(1)) if steps_match else None
+        candidate_sequence = [
+            int(match.group(1))
+            for match in re.finditer(r"(?m)^\s*(\d+)\s*$", evidence)
+        ]
+        if (
+            candidate_steps is not None
+            and _is_valid_collatz_sequence(candidate_sequence, candidate_steps)
+        ):
+            total_steps = candidate_steps
+            sequence = candidate_sequence
+            stdout = evidence
+            break
+
+    for field in output_schema.get("fields", []):
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name")
+        if not name or name in structured:
+            continue
+        field_type = str(field.get("type") or "").lower()
+        descriptor = " ".join(
+            str(field.get(key, "")) for key in ("name", "label", "description") if field.get(key)
+        ).lower()
+        if field_type.startswith("list") and "sequence" in descriptor and sequence:
+            structured[name] = sequence
+        elif field_type in {"integer", "int", "number"} and "step" in descriptor:
+            if total_steps is not None:
+                structured[name] = total_steps
+        elif field_type in {"str", "string"} and (
+            "stdout" in descriptor or "output" in descriptor
+        ):
+            if stdout:
+                structured[name] = stdout
 
     return structured or None
 
@@ -1508,27 +1616,41 @@ async def _run_verifier(
     input_tokens = 0
     output_tokens = 0
     extracted_output_files = output_files or []
-    output_file_structured = _structured_response_from_output_files(
-        output_schema, extracted_output_files
+    terminal_output = (terminal.get_display() or "").strip()
+    evidence_structured = _structured_response_from_code_evidence(
+        output_schema,
+        extracted_output_files,
+        code_events or [],
+        terminal_output,
+    )
+    schema_complete = _structured_response_satisfies_declared_schema(
+        output_schema, evidence_structured
     )
 
     if code_agent_verifier_disabled():
         # Skip the dual-agent LLM verifier, but do not claim success without
-        # extracted /home/user/output artifacts — otherwise a failed session
-        # reports success=True to the parent (score >= 1.0).
-        # Surface the same SDK-event JSON the LLM verifier would have read.
-        # A one-line skip note with no Bash/Write evidence made the parent
+        # both extracted /home/user/output artifacts and a process/completion
+        # success signal. A crashed process can leave stale partial files
+        # behind. Surface the same SDK-event JSON the LLM verifier would have
+        # read; a one-line skip note with no Bash/Write evidence made the parent
         # treat a completed Collatz session as empty and re-spawn until the
         # smoke cap (claude-code-agent 04977ce8, 2026-09-04).
-        has_artifacts = bool(extracted_output_files)
-        score = 1.0 if has_artifacts else 0.5
+        # The schema is the contract: file-only, primitive-only, and mixed
+        # schemas all require every declared field before the disabled verifier
+        # may report success or persist successful judge evidence.
+        has_artifacts = schema_complete
+        has_success_signal = attempt_completion or exit_code == 0
+        score = 1.0 if has_artifacts and has_success_signal else 0.5
         v_reasoning = (
             "Code-agent verifier disabled (ROSE_DISABLE_CODE_AGENT_VERIFIER). "
             f"Returning session result as-is (provider={code_provider}, exit_code={exit_code}"
             f", artifacts={len(extracted_output_files)})."
-            + ("" if has_artifacts else " No output artifacts extracted - incomplete.")
+            + (
+                ""
+                if has_artifacts
+                else " Required output artifacts were not completely extracted - incomplete."
+            )
         )
-        terminal_output = (terminal.get_display() or "").strip()
         if terminal_output:
             v_reasoning = f"{v_reasoning}\n\nTerminal output:\n\n{terminal_output}"
         event_context = _build_code_event_context(
@@ -1545,31 +1667,35 @@ async def _run_verifier(
             code_provider=code_provider,
             exit_code=exit_code,
             has_artifacts=has_artifacts,
-            has_structured_from_files=bool(output_file_structured),
+            has_success_signal=has_success_signal,
+            has_structured_response=bool(evidence_structured),
             score=score,
         )
         # Persist SDK/history evidence so harness step counts + declared judges
-        # still see grounded coding-agent work when the LLM verifier is off.
-        # Evidence write failures must not block verifier-disabled completion
-        # when artifacts / exit_code already prove success (CodeRabbit #1260).
-        try:
-            await _persist_code_agent_judge_evidence(
-                agent_id=agent_id,
-                task_id=task_id,
-                code_provider=code_provider,
-                code_events=code_events,
-                output_files=extracted_output_files,
-                action_summary=action_summary,
-            )
-        except Exception as evidence_err:
-            logger.warning(
-                "[ClaudeCode] judge evidence persist failed; continuing "
-                "verifier-disabled completion",
-                agent_id=agent_id,
-                task_id=task_id,
-                error=str(evidence_err)[:200],
-            )
-        return score, v_reasoning, output_file_structured, input_tokens, output_tokens
+        # still see grounded successful work when the LLM verifier is off. A
+        # failed process may leave files behind, but those are not completion
+        # evidence and must not inflate the judge's successful step count.
+        if has_success_signal and has_artifacts:
+            try:
+                await _persist_code_agent_judge_evidence(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    code_provider=code_provider,
+                    code_events=code_events,
+                    output_files=extracted_output_files,
+                    action_summary=action_summary,
+                )
+            except Exception as evidence_err:
+                # Evidence write failures must not block verifier-disabled
+                # completion when artifacts / exit_code already prove success.
+                logger.warning(
+                    "[ClaudeCode] judge evidence persist failed; continuing "
+                    "verifier-disabled completion",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=str(evidence_err)[:200],
+                )
+        return score, v_reasoning, evidence_structured, input_tokens, output_tokens
 
     try:
         await save_claude_code_message(
@@ -1585,7 +1711,7 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        if output_file_structured and (exit_code is None or exit_code == 0):
+        if evidence_structured and schema_complete and (exit_code is None or exit_code == 0):
             v_reasoning = (
                 "The code agent completed successfully and the requested file outputs were extracted "
                 "from /home/user/output using normalized SDK event context."
@@ -1600,7 +1726,7 @@ async def _run_verifier(
                 tool_call_id=verifier_call_id,
                 code_provider=code_provider,
             )
-            return 1.0, v_reasoning, output_file_structured, input_tokens, output_tokens
+            return 1.0, v_reasoning, evidence_structured, input_tokens, output_tokens
 
         event_context = _build_code_event_context(
             code_events=normalized_events,

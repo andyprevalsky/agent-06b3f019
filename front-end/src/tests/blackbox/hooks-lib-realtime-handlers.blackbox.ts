@@ -263,6 +263,36 @@ describe('realtimeHandlers', () => {
     expect(refSet.has('Hello World')).toBe(true);
   });
 
+  it('does not run a completed-stream cleanup timeout after the agent changes', () => {
+    const s = mkSetters();
+    let isCurrentAgent = true;
+    vi.useFakeTimers();
+    try {
+      handleAssistantStream(
+        {
+          agentId: 'agent-a',
+          stream_id: 'completed-a-stream',
+          sequence: 1,
+          delta: 'A result',
+          done: true,
+        },
+        'agent-a',
+        { current: new Set<string>() },
+        s.setStreamingBubbles,
+        { current: new Set<string>() },
+        () => isCurrentAgent,
+      );
+      expect(s.state.streamingBubbles.has('completed-a-stream')).toBe(true);
+
+      isCurrentAgent = false;
+      vi.runAllTimers();
+
+      expect(s.state.streamingBubbles.has('completed-a-stream')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('handleAssistantStream: clears router thinking on done and preserves text dedupe', () => {
     const s = mkSetters();
     const streamedTextsRef = { current: new Set<string>() };

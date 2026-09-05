@@ -7,7 +7,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { IntegrationStatus, IntegrationType } from '@prisma/client';
 
+import * as integrationRepo from '../../domains/integrations/repo';
 import { prisma } from '../../providers/database';
 import { markGptUserTokenRateLimited } from '../../providers/gptCredentials';
 import { markUserTokenRateLimited } from '../../providers/claudeCredentials';
@@ -236,6 +238,49 @@ test('credential recovery heals accountless needs_reconnect chips', async () => 
     `expected connected after accountless heal, got ${chip?.state}`
   );
   assert(chip?.lastErrorReason === null, 'healed chip must clear lastErrorReason');
+});
+
+test('concurrent credential uploads bind each payload to its recovered account atomically', async () => {
+  const firstAccountId = `${gptAccountId}-concurrent-first`;
+  const secondAccountId = `${gptAccountId}-concurrent-second`;
+  await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gpt_code',
+      accountId: '',
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.EXPIRED,
+      config: { encryptedCredentials: 'legacy' },
+    },
+  });
+
+  await Promise.all(
+    [firstAccountId, secondAccountId].map((accountId) =>
+      integrationRepo.upsertIntegrationRaw({
+        userId,
+        name: 'gpt_code',
+        accountId,
+        type: IntegrationType.TOOL_SETUP,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config: { encryptedCredentials: accountId },
+      })
+    )
+  );
+
+  const rows = await prisma.integration.findMany({
+    where: { userId, name: 'gpt_code' },
+    select: { accountId: true, config: true },
+  });
+  assert(rows.length === 2, `expected two account-bound rows, got ${rows.length}`);
+  assert(
+    rows.every(
+      (row) =>
+        row.accountId !== '' &&
+        (row.config as { encryptedCredentials?: string }).encryptedCredentials === row.accountId
+    ),
+    'every concurrent payload must remain bound to its own recovered account ID'
+  );
 });
 
 async function main() {

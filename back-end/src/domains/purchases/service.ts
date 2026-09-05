@@ -2,7 +2,7 @@ import { type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { cancelAuthorizedHold } from '../../providers/stripe';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
-import { closedCardIndicatesMerchantSpend, tryGetLiveCardDetails } from './cardLiveness';
+import { tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
@@ -98,9 +98,11 @@ export async function lookupPurchase(
     );
     if (!liveDetails) {
       reusable = false;
-      if (await closedCardIndicatesMerchantSpend(purchase.id)) {
-        await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+      const cleared = await repo.markHeldPurchaseClearedIfNoReclaim(purchase.id);
+      if (cleared.count === 1) {
         status = PurchaseSpendStatus.CLEARED;
+      } else {
+        status = (await repo.findPurchaseById(purchase.id))?.status ?? purchase.status;
       }
     }
   }
@@ -189,9 +191,7 @@ async function tryReuseExistingPurchase(
       };
     }
     // Held card already settled/closed — record consumed unless Rose closed it for reclaim.
-    if (await closedCardIndicatesMerchantSpend(existing.id)) {
-      await repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.CLEARED);
-    }
+    await repo.markHeldPurchaseClearedIfNoReclaim(existing.id);
   }
 
   // CLEARED / consumed / FAILED / REFUNDED / VOIDED → caller opens a fresh (or retried) purchase.

@@ -8,7 +8,11 @@ import {
   normalizeExternalHttpRequest,
 } from '../../domains/external-http/validate';
 import { InvalidExternalHttpRequestError } from '../../domains/external-http/errors';
-import { executeExternalHttpRequest } from '../../domains/external-http/service';
+import {
+  assertPublicResolvedAddresses,
+  executeExternalHttpRequest,
+  redactExternalUrlForLogs,
+} from '../../domains/external-http/service';
 
 const originalFetch = globalThis.fetch;
 
@@ -48,6 +52,46 @@ async function testValidation(): Promise<void> {
   assert.throws(
     () => assertFetchableExternalUrl('http://169.254.169.254/latest/meta-data/'),
     InvalidExternalHttpRequestError
+  );
+  for (const address of [
+    '198.18.0.1',
+    '192.0.2.1',
+    '198.51.100.1',
+    '203.0.113.1',
+    '240.0.0.1',
+    '2001:2::1',
+    '2001:db8::1',
+    '2002::1',
+    '3fff::1',
+    '5f00::1',
+    'fc00::1',
+  ]) {
+    const literalUrl = address.includes(':') ? `http://[${address}]/` : `http://${address}/`;
+    assert.throws(
+      () => assertFetchableExternalUrl(literalUrl),
+      InvalidExternalHttpRequestError,
+      address
+    );
+  }
+  assert.equal(assertFetchableExternalUrl('https://8.8.8.8/'), 'https://8.8.8.8/');
+  assert.equal(
+    assertFetchableExternalUrl('https://[2001:4860:4860::8888]/'),
+    'https://[2001:4860:4860::8888]/'
+  );
+
+  // A hostname that was public during an earlier validation must still fail
+  // when the socket-time resolution has rebound to a private destination.
+  assert.doesNotThrow(() =>
+    assertPublicResolvedAddresses('rebind.example', [{ address: '8.8.8.8' }])
+  );
+  assert.throws(
+    () => assertPublicResolvedAddresses('rebind.example', [{ address: '127.0.0.1' }]),
+    InvalidExternalHttpRequestError
+  );
+
+  assert.equal(
+    redactExternalUrlForLogs('https://user:pass@example.com/items?api_key=secret#token'),
+    'https://example.com/items'
   );
 
   const normalized = normalizeExternalHttpRequest({
@@ -131,6 +175,28 @@ async function testRetryOn503(): Promise<void> {
   assert.equal(callCount, 3);
   assert.equal(result.ok, true);
   assert.equal(result.attempts, 3);
+}
+
+async function testWrappedValidationErrorDoesNotRetry(): Promise<void> {
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    const wrapped = new TypeError('fetch failed') as TypeError & { cause?: unknown };
+    wrapped.cause = new InvalidExternalHttpRequestError(
+      'api_request cannot fetch rebind.example: it resolves to non-public address 127.0.0.1'
+    );
+    throw wrapped;
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'GET',
+        url: 'https://example.com/rebind-path',
+      }),
+    InvalidExternalHttpRequestError
+  );
+  assert.equal(callCount, 1, 'socket-time validation failures must not be retried');
 }
 
 async function testNoRetryOn401(): Promise<void> {
@@ -256,6 +322,51 @@ async function testPostDoesNotRetryWithoutIdempotencyKey(): Promise<void> {
   assert.equal(result.ok, false);
   assert.equal(result.status, 503);
   assert.equal(result.attempts, 1);
+}
+
+async function testRedirectSafety(): Promise<void> {
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount += 1;
+    return new Response('', {
+      status: 302,
+      headers: { location: 'https://other.example/credential-sink' },
+    });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () =>
+      executeExternalHttpRequest({
+        method: 'POST',
+        url: 'https://example.com/start',
+        headers: { Authorization: 'Bearer secret' },
+        body: { secret: true },
+      }),
+    /refuses cross-origin redirects/
+  );
+  assert.equal(callCount, 1);
+
+  const observed: RequestInit[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    observed.push(init ?? {});
+    if (observed.length === 1) {
+      return new Response('', { status: 302, headers: { location: '/done' } });
+    }
+    return jsonResponse({ ok: true });
+  }) as typeof fetch;
+
+  const result = await executeExternalHttpRequest({
+    method: 'POST',
+    url: 'https://example.com/start',
+    headers: { Authorization: 'Bearer same-origin', 'Content-Type': 'application/json' },
+    body: { request: true },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(observed[0]?.method, 'POST');
+  assert.equal(observed[1]?.method, 'GET');
+  assert.equal(observed[1]?.body, undefined);
+  assert.equal(new Headers(observed[1]?.headers).has('content-type'), false);
+  assert.equal(new Headers(observed[1]?.headers).get('authorization'), 'Bearer same-origin');
 }
 
 async function testRedirectsAreFollowedAndRevalidated(): Promise<void> {
@@ -454,11 +565,13 @@ async function main(): Promise<void> {
   await testSuccessfulJsonResponse();
   await testRetryOn429();
   await testRetryOn503();
+  await testWrappedValidationErrorDoesNotRetry();
   await testNoRetryOn401();
   await testLargeJsonBodyNotTruncated();
   await testTextXmlAndBinaryResponses();
   await testPostJsonBody();
   await testPostDoesNotRetryWithoutIdempotencyKey();
+  await testRedirectSafety();
   await testRedirectsAreFollowedAndRevalidated();
   await testEmptyBodyAndInvalidJsonFallback();
   await testStringPostBodyAndIdempotentRetry();

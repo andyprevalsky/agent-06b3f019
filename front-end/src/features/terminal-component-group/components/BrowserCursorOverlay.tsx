@@ -20,6 +20,7 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useMemo,
@@ -28,6 +29,7 @@ import {
   type RefObject,
 } from 'react';
 import { extractRecord, subscribeToChannel, unsubscribe } from '@/lib/realtime';
+import { recordAgentScopeDiscard } from '@/lib/agentScopeDiagnostics';
 import type { Message } from '../hooks';
 import {
   useCursorAnimation,
@@ -144,11 +146,25 @@ function useCursorPosition(
   messages: Message[],
 ): CursorPosition {
   const lastProcessedMessageRef = useRef<string | null>(null);
-  const { cursorPos, lastRealtimeSampleRef, updateCursorPos, stopAnimation, animateCursorTo } =
-    useCursorAnimation();
+  const liveAgentIdRef = useRef(agentId);
+  liveAgentIdRef.current = agentId;
+  const {
+    cursorPos,
+    lastRealtimeSampleRef,
+    updateCursorPos,
+    stopAnimation,
+    animateCursorTo,
+    resetCursor,
+  } = useCursorAnimation(agentId);
 
-  useRealtimeCursor(agentId, taskId, animateCursorTo, stopAnimation);
+  useLayoutEffect(() => {
+    lastProcessedMessageRef.current = null;
+    resetCursor(agentId);
+  }, [agentId, resetCursor]);
+
+  useRealtimeCursor(agentId, liveAgentIdRef, taskId, animateCursorTo, stopAnimation);
   useMessageCursor(
+    agentId,
     messages,
     taskId,
     lastProcessedMessageRef,
@@ -161,14 +177,16 @@ function useCursorPosition(
 
 function useRealtimeCursor(
   agentId: string | null | undefined,
+  liveAgentIdRef: MutableRefObject<string | null | undefined>,
   taskId: string,
-  animateCursorTo: (record: BrowserCursorPayload) => void,
+  animateCursorTo: (record: BrowserCursorPayload, ownerScopeId: string | null | undefined) => void,
   stopAnimation: () => void,
 ) {
   useEffect(() => {
     if (!agentId) return;
 
     let disposed = false;
+    let discardReported = false;
     let channel: Awaited<ReturnType<typeof subscribeToChannel>> | null = null;
 
     void subscribeToChannel(
@@ -177,7 +195,14 @@ function useRealtimeCursor(
         BROWSER_CURSOR: (wrapper: unknown) => {
           const record = extractRecord<BrowserCursorPayload>(wrapper);
           if (!isBrowserCursorPayload(record) || record.taskId !== taskId) return;
-          animateCursorTo(record);
+          if (disposed || liveAgentIdRef.current !== agentId || record.agentId !== agentId) {
+            if (!discardReported) {
+              discardReported = true;
+              recordAgentScopeDiscard('browser-cursor', record.agentId, liveAgentIdRef.current);
+            }
+            return;
+          }
+          animateCursorTo(record, agentId);
         },
       },
       'Browser cursor',
@@ -198,16 +223,17 @@ function useRealtimeCursor(
       stopAnimation();
       unsubscribe(channel);
     };
-  }, [agentId, animateCursorTo, stopAnimation, taskId]);
+  }, [agentId, animateCursorTo, liveAgentIdRef, stopAnimation, taskId]);
 }
 
 function useMessageCursor(
+  agentId: string | null | undefined,
   messages: Message[],
   taskId: string,
   lastProcessedMessageRef: MutableRefObject<string | null>,
   lastRealtimeSampleRef: MutableRefObject<BrowserCursorPayload | null>,
   stopAnimation: () => void,
-  updateCursorPos: (next: CursorPosition) => void,
+  updateCursorPos: (next: CursorPosition, ownerScopeId: string | null | undefined) => void,
 ) {
   const latestWithCoords = useMemo(() => {
     const browserMessages = messages.filter(
@@ -227,9 +253,10 @@ function useMessageCursor(
     if (coords?.x !== undefined && coords?.y !== undefined) {
       lastRealtimeSampleRef.current = null;
       stopAnimation();
-      updateCursorPos({ x: coords.x, y: coords.y });
+      updateCursorPos({ x: coords.x, y: coords.y }, agentId);
     }
   }, [
+    agentId,
     lastProcessedMessageRef,
     lastRealtimeSampleRef,
     latestWithCoords,

@@ -41,11 +41,10 @@ function makeAgentCtx(overrides: Partial<AgentContextValue> = {}): AgentContextV
   const streamedTextsRef = { current: new Set<string>() } as React.MutableRefObject<Set<string>>;
   return {
     agent: null,
-    setAgent: () => {},
+    applyAgentDetail: () => true,
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
-    setMessages: () => {},
     streamingBubbles: new Map(),
     streamingPlan: null,
     streamingAttention: null,

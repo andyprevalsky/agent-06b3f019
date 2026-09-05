@@ -21,8 +21,6 @@ tags:
   - spinning-up
 sources:
   - agent 182cf2ab-cb85-4437-9c4b-35d3b5afc2a4
-  - hub run f1c51827-0132-4e7a-bdc3-241a4b2e80f5
-  - task 45ce853d-aa0e-41c4-94b3-dabe3c561562
 repro: agents/tests/blackbox/spawn_claude_code_agent.blackbox.py::test_cc_execute_tool_cancelled_status_yields_error; front-end terminal-component-chips blackbox cancel cases
 status: fixed
 ---

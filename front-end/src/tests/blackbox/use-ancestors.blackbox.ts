@@ -4,7 +4,7 @@
  * on prod — the trail must come from those, like live runs: parent > current.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { mockTerminalHookSession } from './terminal-hooks.fixtures';
@@ -91,14 +91,78 @@ describe('useAncestors (hub / archived sub-agents)', () => {
   });
 
   it('uses parent_goal without another fetch when the API already has it', async () => {
-    const { result, unmount } = renderHook(() =>
-      useAncestors(GP, ROOT, PARENT_GOAL),
-    );
+    const { result, unmount } = renderHook(() => useAncestors(GP, ROOT, PARENT_GOAL));
     await waitFor(() => expect(result.current.length).toBe(1));
     expect(result.current[0]).toEqual({
       id: ROOT,
       goal: PARENT_GOAL,
     });
+    unmount();
+  });
+
+  it('does not replace the new agent breadcrumb with a late ancestor fallback', async () => {
+    let treeRequestStarted!: () => void;
+    const treeStarted = new Promise<void>((resolve) => {
+      treeRequestStarted = resolve;
+    });
+    let finishOldTree!: () => void;
+    const oldTreeCanFinish = new Promise<void>((resolve) => {
+      finishOldTree = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/ancestors`, ({ params }) => {
+        if (params.agentId === 'new-agent') {
+          return HttpResponse.json({
+            ancestors: [{ id: 'new-parent', goal: 'NEW AGENT PARENT' }],
+          });
+        }
+        return HttpResponse.json({ ancestors: [] });
+      }),
+      http.get(`${API_BASE}/agents/tree`, async () => {
+        treeRequestStarted();
+        await oldTreeCanFinish;
+        return HttpResponse.json({
+          agents: [
+            {
+              agent_id: 'old-parent',
+              parent_agent_id: null,
+              goal: 'OLD AGENT PARENT',
+              status: 'COMPLETED',
+              progress: 100,
+              tools_in_use: [],
+              message_count: 1,
+              tree_cost_cents: 0,
+            },
+            {
+              agent_id: 'old-agent',
+              parent_agent_id: 'old-parent',
+              goal: 'old child',
+              status: 'COMPLETED',
+              progress: 100,
+              tools_in_use: [],
+              message_count: 1,
+              tree_cost_cents: 0,
+            },
+          ],
+        });
+      }),
+    );
+
+    const { result, rerender, unmount } = renderHook(
+      ({ agentId, parentId }: { agentId: string; parentId: string }) =>
+        useAncestors(agentId, parentId, null),
+      { initialProps: { agentId: 'old-agent', parentId: 'old-parent' } },
+    );
+    await treeStarted;
+    rerender({ agentId: 'new-agent', parentId: 'new-parent' });
+    await waitFor(() => expect(result.current[0]?.goal).toBe('NEW AGENT PARENT'));
+
+    await act(async () => {
+      finishOldTree();
+      await oldTreeCanFinish;
+      await Promise.resolve();
+    });
+    expect(result.current).toEqual([{ id: 'new-parent', goal: 'NEW AGENT PARENT' }]);
     unmount();
   });
 });

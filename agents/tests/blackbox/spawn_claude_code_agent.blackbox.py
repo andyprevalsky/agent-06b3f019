@@ -562,13 +562,31 @@ def test_structured_response_from_output_files_single_pointer():
 
 
 def test_structured_response_from_output_files_rejects_non_file_schema():
-    """The deterministic file path shortcut only handles pure file output schemas."""
+    """The deterministic shortcut returns nothing when a schema has no file fields."""
     from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
 
     schema = {"fields": [{"name": "summary", "type": "string"}]}
     files = [{"original_filename": "report.txt"}]
 
     assert _structured_response_from_output_files(schema, files) is None
+
+
+def test_structured_response_from_output_files_keeps_mixed_schema_file_fields():
+    """Primitive fields do not prevent extracted files from satisfying file artifacts."""
+    from domains.spawn_claude_code_agent.service import _structured_response_from_output_files
+
+    schema = {
+        "fields": [
+            {"name": "summary", "type": "string"},
+            {"name": "report", "type": "file_pointer"},
+            {"name": "count", "type": "int"},
+        ]
+    }
+    files = [{"original_filename": "report.txt"}]
+
+    assert _structured_response_from_output_files(schema, files) == {
+        "report": {"path": "/home/user/output/report.txt"}
+    }
 
 
 def test_build_code_event_context_uses_json_and_extracted_files():
@@ -1335,7 +1353,7 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
-            # No artifacts → incomplete (must not report success without output files)
+            # A success exit cannot satisfy an unmaterialized primitive schema.
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1343,7 +1361,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 model="rose-labs/rose-1-lite",
                 terminal=terminal,
                 action_summary=["wrote output"],
-                output_schema={"fields": []},
+                output_schema={"fields": [{"name": "summary", "type": "string"}]},
                 claude_token=None,
                 exit_code=0,
                 code_provider=provider,
@@ -1379,6 +1397,24 @@ async def test_run_verifier_disabled_by_env_flag():
             assert struct_ok is None
             assert itok_ok == 0 and otok_ok == 0
 
+            # Leftover artifacts from a failed process are evidence, not a
+            # successful session.
+            score_failed, _, _, _, _ = await service._run_verifier(
+                agent_id="a",
+                task_id="t",
+                goal="g",
+                model="rose-labs/rose-1-lite",
+                terminal=terminal,
+                action_summary=["process failed after writing"],
+                output_schema={"fields": []},
+                claude_token=None,
+                exit_code=1,
+                attempt_completion=False,
+                code_provider=provider,
+                output_files=[{"path": "/home/user/output/partial.json", "content": "{}"}],
+            )
+            assert score_failed == 0.5, provider
+
     assert called["check_progress"] == 0
 
     evidence_metas = []
@@ -1396,9 +1432,63 @@ async def test_run_verifier_disabled_by_env_flag():
     assert all(m.get("task_id") == "t" for m in evidence_metas), evidence_metas
     assert all(m.get("subAgentId") == "t" for m in evidence_metas), evidence_metas
     assert all(int(m.get("steps_taken") or 0) > 0 for m in evidence_metas), evidence_metas
-    # 2 providers × 2 verifier calls × 2 evidence chips = 8
-    assert len(evidence_metas) == 8, len(evidence_metas)
+    # 2 providers × 1 schema-complete verifier call × 2 evidence chips = 4.
+    assert len(evidence_metas) == 4, len(evidence_metas)
 
+
+
+async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
+    """A partial file extraction cannot satisfy a multi-file response schema."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=80, rows=50)
+    terminal.feed("done")
+
+    async def fake_activity(*_args, **_kwargs):
+        raise AssertionError("disabled verifier must not call the verifier LLM")
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
+        patch("temporalio.activity.heartbeat"),
+        patch.object(
+            service,
+            "_persist_code_agent_judge_evidence",
+            new_callable=AsyncMock,
+        ) as persist_evidence,
+    ):
+        score, reasoning, structured, input_tokens, output_tokens = await service._run_verifier(
+            agent_id="agent-partial-output",
+            task_id="task-partial-output",
+            goal="Write both requested output files",
+            model="rose-labs/rose-1-lite",
+            terminal=terminal,
+            action_summary=["wrote only one requested file"],
+            output_schema={
+                "fields": [
+                    {"name": "report", "type": "file_pointer", "required": True},
+                    {"name": "manifest", "type": "file_pointer", "required": True},
+                ]
+            },
+            claude_token=None,
+            exit_code=0,
+            code_provider="claude",
+            output_files=[
+                {
+                    "original_filename": "report.txt",
+                    "mime_type": "text/plain",
+                    "size_bytes": 6,
+                }
+            ],
+        )
+
+    assert score == 0.5
+    assert "incomplete" in reasoning.lower()
+    assert structured is None
+    assert input_tokens == 0 and output_tokens == 0
+    persist_evidence.assert_not_awaited()
 
 
 async def test_run_verifier_disabled_includes_sdk_event_stdout():
@@ -1449,8 +1539,13 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
                 {"type": "tool_use", "provider": "claude", "tool": "Write", "input": {"path": "/home/user/output/collatz_27.py"}},
                 {"type": "tool_result", "provider": "claude", "status": "completed"},
                 {"type": "tool_use", "provider": "claude", "tool": "Bash", "input": {"command": "python collatz_27.py"}},
-                {"type": "tool_result", "provider": "claude", "content": stdout},
-                {"type": "result", "provider": "claude", "status": "completed", "text": stdout},
+                {"type": "tool_result", "provider": "claude", "status": "completed"},
+                {
+                    "type": "agent_message",
+                    "provider": "claude",
+                    "status": "completed",
+                    "message": stdout,
+                },
             ],
             output_files=[{"original_filename": "collatz_27.py", "mime_type": "application/octet-stream", "size_bytes": 414}],
         )
@@ -1460,7 +1555,12 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
     assert "verifier disabled" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning
-    assert struct is None
+    assert struct == {
+        "stdout": stdout,
+        "collatz_sequence": [int(value) for value in stdout.splitlines()[:-1]],
+        "total_steps": 111,
+        "python_script": {"path": "/home/user/output/collatz_27.py"},
+    }
     assert itok == 0 and otok == 0
 
 
@@ -3441,6 +3541,10 @@ async def run_all_tests():
     r.record("extract_paths_non_dict", test_extract_additional_paths_non_dict_value)
     r.record("structured_from_output_single", test_structured_response_from_output_files_single_pointer)
     r.record("structured_from_output_rejects_non_file", test_structured_response_from_output_files_rejects_non_file_schema)
+    r.record(
+        "structured_from_output_mixed_schema",
+        test_structured_response_from_output_files_keeps_mixed_schema_file_fields,
+    )
     r.record("code_event_context_json", test_build_code_event_context_uses_json_and_extracted_files)
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
@@ -3506,6 +3610,10 @@ async def run_all_tests():
     # _run_verifier
     await r.record_async("run_verifier_happy", test_run_verifier_happy_path)
     await r.record_async("run_verifier_disabled_env", test_run_verifier_disabled_by_env_flag)
+    await r.record_async(
+        "run_verifier_disabled_schema_incomplete",
+        test_run_verifier_disabled_rejects_schema_incomplete_artifacts,
+    )
     await r.record_async(
         "run_verifier_disabled_includes_sdk_stdout",
         test_run_verifier_disabled_includes_sdk_event_stdout,

@@ -39,9 +39,7 @@ export function useAgentOps({
   const actions = useAgentActions({
     selectedAgentId: ctx.selectedAgentId,
     agentDetail: ctx.agent,
-    setAgentDetail: ctx.setAgent,
-    setMessages: ctx.setMessages,
-    setSelectedModel: () => {},
+    applyAgentDetail: ctx.applyAgentDetail,
     setSelectedAgentIdContext: ctx.setSelectedAgentId,
     setCurrentView,
     clientSource,

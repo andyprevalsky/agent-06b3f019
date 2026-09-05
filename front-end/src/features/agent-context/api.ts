@@ -8,14 +8,14 @@ import {
 export { benchmarkAgentPreviewEnabled };
 
 /** Fetch agent detail and messages by agent ID. */
-export async function fetchAgentDetail(agentId: string) {
+export async function fetchAgentDetail(agentId: string, signal?: AbortSignal) {
   try {
-    return await getAgent(agentId);
+    return await getAgent(agentId, undefined, signal);
   } catch (error) {
     if (!benchmarkAgentPreviewEnabled()) {
       throw error;
     }
-    return getBenchmarkAgentPreview(agentId);
+    return getBenchmarkAgentPreview(agentId, signal);
   }
 }
 

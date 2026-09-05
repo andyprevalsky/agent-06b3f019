@@ -22,6 +22,9 @@ export const FOCUS_RECONNECT_DELAY_MS = 500;
  */
 export const DISCONNECTED_BACKFILL_POLL_MS = 2000;
 
+/** Bound a disconnected reconcile so one hung request cannot disable all later polls. */
+export const DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS = 10000;
+
 /**
  * Max attempts for the one-shot post-subscribe reconcile (cold-start backfill).
  * Once the channel is live the disconnected fallback poll is a no-op, so a

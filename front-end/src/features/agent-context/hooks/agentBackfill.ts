@@ -16,16 +16,19 @@ export function applyAgentBackfill(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>,
   setIsChatMode: React.Dispatch<React.SetStateAction<boolean>>,
+  isCurrentAgent: () => boolean = () => true,
 ): void {
+  if (!isCurrentAgent()) return;
   setMessages((previous) => {
+    if (!isCurrentAgent()) return previous;
     const apiIds = new Set(data.messages.map((message) => message.message_id));
     const realtimeOnly = previous.filter((message) => !apiIds.has(message.message_id));
     return [...data.messages, ...realtimeOnly].sort((left, right) =>
       (left.timestamp ?? '').localeCompare(right.timestamp ?? ''),
     );
   });
-  setAgent(data.agent);
-  setIsChatMode(!data.agent.temporal_workflow_id);
+  setAgent((previous) => (isCurrentAgent() ? data.agent : previous));
+  setIsChatMode((previous) => (isCurrentAgent() ? !data.agent.temporal_workflow_id : previous));
 }
 
 /** True while the latest chat turn has no canonical answer and has not entered agent mode. */
@@ -47,6 +50,7 @@ function latestChatTurnNeedsCompletionBackfill(data: AgentDetail): boolean {
 interface PostSubscribeBackfillDeps {
   selectedAgentId: string;
   isCancelled: () => boolean;
+  isCurrentAgent: () => boolean;
   initialLoadDoneRef: React.MutableRefObject<string | null>;
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
@@ -60,6 +64,7 @@ interface PostSubscribeBackfillDeps {
 export async function runPostSubscribeBackfill({
   selectedAgentId,
   isCancelled,
+  isCurrentAgent,
   initialLoadDoneRef,
   setMessages,
   setAgent,
@@ -70,8 +75,9 @@ export async function runPostSubscribeBackfill({
     let retryDelayMs = CONNECTED_COMPLETION_BACKFILL_POLL_MS;
     try {
       const data = await fetchAgentDetail(selectedAgentId);
-      if (isCancelled()) return;
-      applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+      if (isCancelled() || !isCurrentAgent()) return;
+      applyAgentBackfill(data, setMessages, setAgent, setIsChatMode, isCurrentAgent);
+      if (!isCurrentAgent()) return;
       initialLoadDoneRef.current = selectedAgentId;
       consecutiveFailures = 0;
       if (!latestChatTurnNeedsCompletionBackfill(data)) break;

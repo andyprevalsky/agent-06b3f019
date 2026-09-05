@@ -16,9 +16,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/auto-tag-mac-app.yml"
+RELEASE_WORKFLOW="$ROOT_DIR/.github/workflows/release-mac-app.yml"
 DECISION="$ROOT_DIR/scripts/mac-app-release-decision"
 MAC_VITE_CONFIG="$ROOT_DIR/mac-app/vite.config.ts"
 MAC_ROUTES="$ROOT_DIR/mac-app/ui/features/electron-app/components/AppRoutes.tsx"
+FRONTEND_PACKAGE="$ROOT_DIR/front-end/package.json"
+MAC_PACKAGE="$ROOT_DIR/mac-app/package.json"
 TEST_RUNNER="$ROOT_DIR/scripts/test.sh"
 
 fail() {
@@ -132,11 +135,30 @@ if grep -Fq "contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE'
 fi
 require_text "$WORKFLOW" "contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE')" \
   "the label must still be readable as an explicit override"
+require_text "$RELEASE_WORKFLOW" "npm ci --ignore-scripts --workspaces=false" \
+  "Mac release must install the locked shared frontend graph without resolving the root workspace"
+
+# Shared renderer modules resolve from mac-app/ui during the desktop build, so
+# every runtime package they import must also be a direct Mac dependency. Pin
+# the shader dependency to the same range on both surfaces; otherwise a clean
+# release runner can install the frontend package successfully and still fail
+# when Vite resolves the Mac renderer graph.
+node - "$FRONTEND_PACKAGE" "$MAC_PACKAGE" <<'NODE' || fail "Mac app must directly declare the shared shader dependency at the frontend version"
+const fs = require('node:fs');
+const [frontendPath, macPath] = process.argv.slice(2);
+const frontend = JSON.parse(fs.readFileSync(frontendPath, 'utf8'));
+const mac = JSON.parse(fs.readFileSync(macPath, 'utf8'));
+const frontendRange = frontend.dependencies?.['@paper-design/shaders'];
+const macRange = mac.dependencies?.['@paper-design/shaders'];
+if (!frontendRange || macRange !== frontendRange) process.exit(1);
+NODE
 
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
-  python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$WORKFLOW" || fail "workflow YAML must parse"
+  python3 -c 'import sys, yaml; [yaml.safe_load(open(path)) for path in sys.argv[1:]]' \
+    "$WORKFLOW" "$RELEASE_WORKFLOW" || fail "workflow YAML must parse"
 elif command -v ruby >/dev/null 2>&1; then
-  ruby -e 'require "yaml"; YAML.parse_file(ARGV[0])' "$WORKFLOW" || fail "workflow YAML must parse"
+  ruby -e 'require "yaml"; ARGV.each { |path| YAML.parse_file(path) }' \
+    "$WORKFLOW" "$RELEASE_WORKFLOW" || fail "workflow YAML must parse"
 else
   fail "workflow YAML must parse (need python3+PyYAML or ruby)"
 fi

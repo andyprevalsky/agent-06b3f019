@@ -61,11 +61,14 @@ export function useAncestors(
   parentAgentId?: string | null,
   parentGoal?: string | null,
 ): AncestorNode[] {
-  const [ancestors, setAncestors] = useState<AncestorNode[]>([]);
+  const [resolved, setResolved] = useState<{
+    agentId: string | null;
+    ancestors: AncestorNode[];
+  }>({ agentId: null, ancestors: [] });
 
   useEffect(() => {
     if (!selectedAgentId) {
-      setAncestors([]);
+      setResolved({ agentId: null, ancestors: [] });
       return;
     }
     let active = true;
@@ -73,19 +76,21 @@ export function useAncestors(
       .then(async (result) => {
         if (!active) return;
         if (result.length > 0) {
-          setAncestors(result);
+          setResolved({ agentId: selectedAgentId, ancestors: result });
           return;
         }
-        setAncestors(await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal));
+        const ancestors = await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal);
+        if (active) setResolved({ agentId: selectedAgentId, ancestors });
       })
       .catch(async () => {
         if (!active) return;
-        setAncestors(await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal));
+        const ancestors = await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal);
+        if (active) setResolved({ agentId: selectedAgentId, ancestors });
       });
     return () => {
       active = false;
     };
   }, [selectedAgentId, parentAgentId, parentGoal]);
 
-  return ancestors;
+  return resolved.agentId === selectedAgentId ? resolved.ancestors : [];
 }

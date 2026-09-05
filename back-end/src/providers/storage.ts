@@ -100,10 +100,14 @@ export async function uploadToStorage(
   userId: string,
   fileBuffer: Buffer,
   filename: string,
-  mimeType: string
+  mimeType: string,
+  options?: { objectId?: string }
 ): Promise<{ storage_path: string }> {
   const client = getSupabaseClient();
-  const fileId = crypto.randomUUID();
+  const fileId = options?.objectId ?? crypto.randomUUID();
+  if (!/^[a-zA-Z0-9-]{1,128}$/.test(fileId)) {
+    throw new Error('Storage object id contains invalid characters');
+  }
   const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storagePath = `${userId}/${fileId}_${safeFilename}`;
 

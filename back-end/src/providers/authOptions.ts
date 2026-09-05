@@ -9,7 +9,7 @@
 import { canonicalAuthRealm, hostnameFromRealmInput } from './authRealm';
 import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
-import { createAgentPhoneNumber } from './agentPhone';
+import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from './agentPhone';
 import { createLogger } from './logger';
 import * as repo from './authOptionsStore';
 import type { AuthOptionsResponse } from './authOptionsTypes';
@@ -300,6 +300,7 @@ async function ensureMintedIdentity(
         });
       }
     } catch (error) {
+      if (!isAgentPhoneEmailFallbackSafe(error)) throw error;
       log.warn('AgentPhone provisioning failed; continuing with agent email only', {
         userId,
         error: error instanceof Error ? error.message : String(error),
