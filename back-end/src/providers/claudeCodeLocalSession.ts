@@ -33,6 +33,7 @@ import { MAX_FILE_SIZE, type FilePointer, downloadFromStorage, uploadToStorage }
 import { randomUUID } from './crypto';
 import { isMissingLocalFileError, readRegularFileNoFollow } from './claudeCodeLocalFileRead';
 import { isFilePointer } from './claudeCodeLocalOwnership';
+import { isSandboxCreateTimeoutOrAbortError } from './e2bSandboxCreate';
 
 const log = createLogger('ClaudeCodeLocal');
 
@@ -267,11 +268,14 @@ export async function createLocalClaudeCodeSessionIfBillingBlocked(
   err: unknown,
   params: Parameters<typeof createLocalClaudeCodeSession>[0]
 ): Promise<Awaited<ReturnType<typeof createLocalClaudeCodeSession>> | null> {
-  if (!isE2bTeamBillingBlockError(err) || !shouldAllowLocalClaudeCodeFallback()) {
-    return null;
-  }
+  if (!shouldAllowLocalClaudeCodeFallback()) return null;
+  const billing = isE2bTeamBillingBlockError(err);
+  const timedOut = isSandboxCreateTimeoutOrAbortError(err);
+  if (!billing && !timedOut) return null;
   log.warn(
-    `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`,
+    billing
+      ? `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`
+      : `E2B sandbox create timed out/aborted; falling back to local Claude Code for agent ${params.agentId}`,
     { error: err instanceof Error ? err.message : String(err) }
   );
   return createLocalClaudeCodeSession(params);

@@ -9338,13 +9338,15 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     mass-agent trees cannot 413 the judge with 35MB child bodies. When the
     hydrated child transcripts still blow the single-turn budget, drop them.
     When the remaining root tail (120 × 12k GP rows) is still over budget,
-    keep only the completion card + compact typed state — T-row judges are
-    written for that compact view, not the agentic Codex fallback.
+    keep completion + structured_output + compact typed state, then pack
+    coding-agent / explore / search grounding rows by priority under the
+    single-turn budget (never drop all tool evidence for fat Claude Code runs).
     """
     from benchmarks.semantic_evaluator_evidence import (
         SINGLE_TURN_TEXT_CAP,
         _append_completion_card,
         build_single_turn_evidence,
+        pack_grounding_priority_rows,
         single_turn_evidence_exceeds_budget,
     )
 
@@ -9359,10 +9361,14 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
     evidence = _append_structured_output_evidence(evidence, data)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
+    # Full/slim transcripts blew the budget. Keep completion + structured_output
+    # + compact typed state, then pack coding-agent / explore / search grounding
+    # by priority instead of dropping every tool row (cuda-kernel judge regression).
     compact_only: list[dict] = []
     _append_completion_card(compact_only, data, SINGLE_TURN_TEXT_CAP)
     evidence = _apply_compact_benchmark_state(compact_only, compact_state)
     evidence = _append_structured_output_evidence(evidence, data)
+    evidence = pack_grounding_priority_rows(data, base_rows=evidence)
     if not single_turn_evidence_exceeds_budget(evidence):
         return evidence
     return _append_structured_output_evidence([{"benchmark_state": compact_state}], data)
@@ -11468,12 +11474,18 @@ async def _run_declared_evaluators(
     ):
         await _hydrate_completion_sms_events(data)
 
-    if any(
+    from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
+
+    _needs_cc_hydrate = any(
         check.get("type") == "claude_code_session_output"
         for evaluator in task.evaluators
         if evaluator.get("method") == "static_check"
         for check in evaluator.get("checks", [])
-    ):
+    ) or (
+        any(evaluator.get("method") == "single_turn_llm_judge" for evaluator in task.evaluators)
+        and messages_have_code_agent_grounding(data)
+    )
+    if _needs_cc_hydrate:
         await _hydrate_claude_code_sessions(data)
 
     needs_tree_evidence = any(

@@ -225,7 +225,7 @@ async function fetchWithValidatedRedirects(startUrl: string, init: RequestInit):
       // original hostname for Host/SNI while the connection uses only an
       // address approved by the socket-time resolver above.
       dispatcher: publicAddressDispatcher,
-    } as RequestInit);
+    } as unknown as RequestInit);
     const isRedirect = response.status >= 300 && response.status < 400;
     if (!isRedirect) {
       return response;

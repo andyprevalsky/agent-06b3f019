@@ -9,6 +9,7 @@
 import { Sandbox } from 'e2b';
 import {
   createSandboxWithRetry,
+  isSandboxCreateTimeoutOrAbortError,
   isTransientSandboxCreateError,
 } from '../../providers/e2bSandboxCreate';
 
@@ -137,6 +138,57 @@ function testDnsNotFoundIsTransient(): void {
 }
 
 /**
+ * Regression (CodeRabbit): constructor.name === 'DOMException' matched
+ * SecurityError / QuotaExceededError and routed them into the local Claude Code
+ * fallback. Only TimeoutError / AbortError may count as sandbox create timeouts.
+ */
+function testDomExceptionTimeoutNamesAreNarrow(): void {
+  const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  const abort = new DOMException('The operation was aborted', 'AbortError');
+  const security = new DOMException('blocked', 'SecurityError');
+  const quota = new DOMException('storage full', 'QuotaExceededError');
+
+  assert(isSandboxCreateTimeoutOrAbortError(timeout), 'TimeoutError DOMException must match');
+  assert(isSandboxCreateTimeoutOrAbortError(abort), 'AbortError DOMException must match');
+  assert(isTransientSandboxCreateError(timeout), 'TimeoutError must remain transient');
+  assert(
+    !isSandboxCreateTimeoutOrAbortError(security),
+    'SecurityError must not be classified as a sandbox create timeout'
+  );
+  assert(
+    !isSandboxCreateTimeoutOrAbortError(quota),
+    'QuotaExceededError must not be classified as a sandbox create timeout'
+  );
+  assert(
+    !isTransientSandboxCreateError(security),
+    'SecurityError must not be treated as a transient sandbox create error'
+  );
+
+  // Nested errno-only timeouts (no TimeoutError name) must still engage local fallback.
+  const nestedHeadersTimeout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('headers timeout'), { code: 'UND_ERR_HEADERS_TIMEOUT' }),
+  });
+  const nestedBodyTimeout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('body timeout'), { code: 'UND_ERR_BODY_TIMEOUT' }),
+  });
+  const nestedEtimedout = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('connect'), { code: 'ETIMEDOUT' }),
+  });
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedHeadersTimeout),
+    'UND_ERR_HEADERS_TIMEOUT cause must count as sandbox create timeout'
+  );
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedBodyTimeout),
+    'UND_ERR_BODY_TIMEOUT cause must count as sandbox create timeout'
+  );
+  assert(
+    isSandboxCreateTimeoutOrAbortError(nestedEtimedout),
+    'ETIMEDOUT cause must count as sandbox create timeout'
+  );
+}
+
+/**
  * Regression: an INCONCLUSIVE orphan lookup must never fall through to a second
  * create. Attempt 1's response is lost (the sandbox exists remotely), then the
  * first `Sandbox.list` fails. Collapsing that failure into "no orphan" made the
@@ -207,6 +259,10 @@ async function main(): Promise<void> {
       run: testAdoptionRetriesTransientConnectWithoutCreatingDuplicate,
     },
     { name: 'ENOTFOUND is a transient create failure', run: testDnsNotFoundIsTransient },
+    {
+      name: 'DOMException timeout names are narrow (not SecurityError/QuotaExceeded)',
+      run: testDomExceptionTimeoutNamesAreNarrow,
+    },
   ];
   let failed = 0;
 
