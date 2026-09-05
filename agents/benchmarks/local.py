@@ -214,6 +214,25 @@ def _docker_ports_snapshot() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+def _linux_ephemeral_port_range() -> tuple[int, int] | None:
+    """Return the kernel-managed outbound port range when Linux exposes it."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        lower_text, upper_text = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+        lower, upper = int(lower_text), int(upper_text)
+    except (OSError, ValueError):
+        return None
+    if not (0 < lower <= upper < 65536):
+        return None
+    return lower, upper
+
+
+def _overlaps_port_range(base: int, occupied: tuple[int, int]) -> bool:
+    lower, upper = occupied
+    return base <= upper and base + max(PORT_RANGE_OFFSETS) >= lower
+
+
 def _reserve_port_range(base: int) -> bool:
     """Hold every occupied port across processes until the stack is ready."""
     ports = tuple(base + offset for offset in PORT_RANGE_OFFSETS)
@@ -263,10 +282,28 @@ def allocate_port_range(preferred_base: int | None = None) -> int:
     if preferred_base:
         candidates.append(preferred_base)
     seed = int(hashlib.sha1(f"{time.time()}:{os.getpid()}".encode()).hexdigest()[:8], 16)
+    # Main moved the fallback window into FALLBACK_PORT_BASE_* constants; keep
+    # those, and keep this branch's exclusion of the kernel's ephemeral range.
+    # A connect-based availability probe cannot reserve a port against the
+    # kernel's next outbound connection. On Linux, choosing inside
+    # ip_local_port_range therefore leaves a check-to-bind race: an unrelated
+    # HTTPS request can claim the worker metrics port after this function
+    # returns and make the primary Temporal worker fail readiness. File locks
+    # still coordinate Rose launchers; excluding the kernel-managed range
+    # coordinates with ephemeral sockets as well. Explicit --base-port values
+    # remain first so callers that own their range keep the existing contract.
     candidate_count = (FALLBACK_PORT_BASE_END - FALLBACK_PORT_BASE_START) // 20
     start = FALLBACK_PORT_BASE_START + (seed % candidate_count) * 20
-    candidates.extend(range(start, FALLBACK_PORT_BASE_END, 20))
-    candidates.extend(range(FALLBACK_PORT_BASE_START, start, 20))
+    automatic_candidates = [
+        *range(start, FALLBACK_PORT_BASE_END, 20),
+        *range(FALLBACK_PORT_BASE_START, start, 20),
+    ]
+    ephemeral_range = _linux_ephemeral_port_range()
+    if ephemeral_range is not None:
+        automatic_candidates = [
+            base for base in automatic_candidates if not _overlaps_port_range(base, ephemeral_range)
+        ]
+    candidates.extend(automatic_candidates)
     for base in candidates:
         if base < 1024 or base + max(PORT_RANGE_OFFSETS) >= 65535:
             continue

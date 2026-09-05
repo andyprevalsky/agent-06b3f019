@@ -272,7 +272,9 @@ def format_required_output_schema_user_message(
         )
     return (
         "Required output schema:\n"
-        "Gather this data before calling attempt_completion:\n"
+        "Gather this evidence in your tool results before calling attempt_completion, "
+        "which takes no arguments; these fields are extracted from your tool history, "
+        "not passed to it:\n"
         f"{fields_desc}"
     )
 

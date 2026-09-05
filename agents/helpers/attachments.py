@@ -135,6 +135,8 @@ async def upload_to_storage(
     file_content: bytes,
     filename: str,
     mime_type: str,
+    *,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Upload a file to Supabase Storage and return a FilePointer dict.
@@ -144,6 +146,8 @@ async def upload_to_storage(
         file_content: Raw file bytes
         filename: Original filename
         mime_type: MIME type of the file
+        idempotency_key: Optional caller-scoped key for a deterministic object
+            path. Repeated uploads with this key overwrite the same object.
 
     Returns:
         FilePointer dict with id, storage_path, original_filename, mime_type, size_bytes, created_at
@@ -156,19 +160,27 @@ async def upload_to_storage(
         raise ValueError("Missing SUPABASE_SERVICE_ROLE_KEY environment variable")
 
     # Generate storage path: {user_id}/{uuid}_{safe_filename}
-    file_id = str(uuid.uuid4())
+    file_id = (
+        str(uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key))
+        if idempotency_key
+        else str(uuid.uuid4())
+    )
     safe_filename = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)
     storage_path = f"{user_id}/{file_id}_{safe_filename}"
 
     url = f"{supabase_url}/storage/v1/object/attachments/{storage_path}"
 
+    headers = {
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": mime_type,
+    }
+    if idempotency_key:
+        headers["x-upsert"] = "true"
+
     async with httpx.AsyncClient() as client:
         response = await client.post(
             url,
-            headers={
-                "Authorization": f"Bearer {supabase_key}",
-                "Content-Type": mime_type,
-            },
+            headers=headers,
             content=file_content,
             timeout=60.0,
         )

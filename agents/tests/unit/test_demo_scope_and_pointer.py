@@ -19,9 +19,15 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.oai_demo_report_files import (
+    _csv_text,
+    _safe_csv_cell,
     is_file_pointer_value,
     materialize_oai_demo_report_files_activity,
+    passthrough_file_pointer_specs,
     plan_oai_demo_report_files,
+    render_calendar_csv,
+    render_html_document,
+    render_records_csv,
     rewrite_schema_file_pointer_fields,
     value_to_markdown,
 )
@@ -47,9 +53,7 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
 
 def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
-    assert is_oai_demo_mass_agent_task(
-        SimpleNamespace(goal="Buy socks", fast_cache_goal=OAI_DEMO_CHILD_GOAL_PREFIX)
-    )
+    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=OAI_DEMO_CHILD_GOAL_PREFIX))
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
 
 
@@ -92,15 +96,16 @@ def test_plan_oai_demo_report_files_skips_existing_pointers_and_empty():
         }
     )
     assert [item["key"] for item in planned] == ["ninety_day_content_calendar"]
-    assert planned[0]["filename"] == "90-day-content-calendar.md"
-    assert planned[0]["mime_type"] == "text/markdown"
+    assert planned[0]["filename"] == "90-day-content-calendar.csv"
+    assert planned[0]["mime_type"] == "text/csv"
+    assert "section,week,dates,platform,format,title,details" in planned[0]["content"]
     assert "Founder Health OS" in planned[0]["content"]
     assert plan_oai_demo_report_files(None) == []
     assert is_file_pointer_value(pointer) is True
     assert is_file_pointer_value("not a file") is False
 
 
-def test_value_to_markdown_and_schema_rewrite_use_file_pointer_types():
+def test_human_readable_renderers_and_schema_rewrite_use_file_pointer_types():
     numbered = value_to_markdown(["first hook", "second hook"])
     assert numbered == "1. first hook\n2. second hook"
     creator_md = value_to_markdown(
@@ -108,6 +113,30 @@ def test_value_to_markdown_and_schema_rewrite_use_file_pointer_types():
     )
     assert "### 1. Siim Land" in creator_md
     assert "platform to engage on" in creator_md
+    html = render_html_document("Hook-tested script openings", numbered)
+    assert "<!DOCTYPE html>" in html
+    assert "Hook-tested script openings" in html
+    assert "<ol>" in html
+    assert "<li>first hook</li>" in html
+    assert "font-family" in html
+
+    calendar_csv = render_calendar_csv(
+        "**Strategy:** Treat healthspan like a product.\n\n"
+        "**Recurring series:**\n"
+        "- Founder Health OS (Substack, Weekly): Ship one evidence-led essay.\n"
+        "- Week 1 (Jul 13-19) / YouTube / long-form video: "
+        "**Stop Biohacking** — Build a measurable health system."
+    )
+    assert "strategy" in calendar_csv
+    assert "recurring_series" in calendar_csv
+    assert "calendar,1,Jul 13-19,YouTube,long-form video,Stop Biohacking" in calendar_csv
+
+    records_csv = render_records_csv(
+        '[{"creator_name":"Siim Land","platform":"YouTube","why_selected":"Strong overlap"}]'
+    )
+    assert records_csv.splitlines()[0] == "creator_name,platform,why_selected"
+    assert "Siim Land,YouTube,Strong overlap" in records_csv
+
     schema = rewrite_schema_file_pointer_fields(
         {
             "fields": [
@@ -120,19 +149,29 @@ def test_value_to_markdown_and_schema_rewrite_use_file_pointer_types():
                 {"name": "creator_name", "type": "str"},
             ]
         },
-        ["positioning_statement", "ninety_day_content_calendar"],
+        {
+            "positioning_statement": ("positioning-statement.html", "text/html", "Positioning statement", "html"),
+            "ninety_day_content_calendar": (
+                "90-day-content-calendar.csv",
+                "text/csv",
+                "90-day content calendar",
+                "calendar_csv",
+            ),
+        },
     )
     assert schema["fields"][0]["type"] == "file_pointer"
+    assert schema["fields"][0]["file_types"] == ["html"]
     assert schema["fields"][1]["type"] == "file_pointer"
+    assert schema["fields"][1]["file_types"] == ["csv"]
     assert "properties" not in schema["fields"][1]
     assert schema["fields"][2]["type"] == "str"
 
 
-def test_materialize_oai_demo_report_files_activity_uploads_markdown():
-    uploads: list[tuple[str, bytes, str, str]] = []
+def test_materialize_oai_demo_report_files_activity_uploads_readable_formats_idempotently():
+    uploads: list[tuple[str, bytes, str, str, str | None]] = []
 
-    async def _upload(user_id, content, filename, mime_type):
-        uploads.append((user_id, content, filename, mime_type))
+    async def _upload(user_id, content, filename, mime_type, *, idempotency_key=None):
+        uploads.append((user_id, content, filename, mime_type, idempotency_key))
         return {
             "id": f"fp-{len(uploads)}",
             "storage_path": f"{user_id}/{filename}",
@@ -151,19 +190,67 @@ def test_materialize_oai_demo_report_files_activity_uploads_markdown():
                 "user-1",
                 {
                     "positioning_statement": "Longevity OS for founders.",
+                    "top_creators_analysis": "1. **Andrew Huberman**\n   - Cadence: weekly",
+                    "ninety_day_content_calendar": (
+                        "- Week 1 (Jul 13-19) / YouTube / long-form video: "
+                        "**Stop Biohacking** — Build a measurable system."
+                    ),
+                    "hook_tested_video_script_openings": ["Track the metric nobody sees."],
+                    "weekly_engagement_target_creators": [{"creator_name": "Siim Land", "platform": "YouTube"}],
                     "creator_name": "ignored",
                 },
                 {"fields": [{"name": "positioning_statement", "type": "str"}]},
+                "agent-1",
             )
 
     result = asyncio.run(_run())
     assert uploads[0][0] == "user-1"
-    assert uploads[0][2] == "positioning-statement.md"
-    assert uploads[0][3] == "text/markdown"
-    assert result["structured_response"]["positioning_statement"]["original_filename"] == (
-        "positioning-statement.md"
-    )
+    assert [item[2] for item in uploads] == [
+        "positioning-statement.html",
+        "top-creators-analysis.html",
+        "90-day-content-calendar.csv",
+        "hook-tested-script-openings.html",
+        "weekly-engagement-targets.csv",
+    ]
+    assert [item[3] for item in uploads] == ["text/html", "text/html", "text/csv", "text/html", "text/csv"]
+    assert all(item[4] == f"oai-demo-report:agent-1:{item[2]}" for item in uploads)
+    assert result["structured_response"]["positioning_statement"]["original_filename"] == ("positioning-statement.html")
     assert result["output_schema"]["fields"][0]["type"] == "file_pointer"
+    assert result["output_schema"]["fields"][0]["file_types"] == ["html"]
+
+
+def test_materialize_oai_demo_report_files_activity_keeps_legacy_three_arg_calls_retry_safe():
+    idempotency_keys: list[str | None] = []
+
+    async def _upload(user_id, content, filename, mime_type, *, idempotency_key=None):
+        idempotency_keys.append(idempotency_key)
+        return {
+            "id": "fp-legacy",
+            "storage_path": f"{user_id}/{filename}",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(content),
+            "created_at": "2026-09-03T00:00:00Z",
+        }
+
+    async def _run():
+        with patch(
+            "domains.spawn_agent.oai_demo_report_files.upload_to_storage",
+            side_effect=_upload,
+        ):
+            args = (
+                "user-legacy",
+                {"positioning_statement": "Stable report."},
+                {"fields": [{"name": "positioning_statement", "type": "str"}]},
+            )
+            await materialize_oai_demo_report_files_activity(*args)
+            await materialize_oai_demo_report_files_activity(*args)
+
+    asyncio.run(_run())
+    assert len(idempotency_keys) == 2
+    assert idempotency_keys[0] == idempotency_keys[1]
+    assert idempotency_keys[0] is not None
+    assert idempotency_keys[0].startswith("oai-demo-report:")
 
 
 def test_should_skip_oai_demo_browser_spawn_is_demo_fast_mode_only():
@@ -436,14 +523,8 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
         _schedule_broadcast_flush,
     )
 
-    assert (
-        _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"stream_id": "s1"}}})
-        == "t:e:s1"
-    )
-    assert (
-        _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"taskId": "tid"}}})
-        == "t:e:tid"
-    )
+    assert _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"stream_id": "s1"}}}) == "t:e:s1"
+    assert _message_order_key({"topic": "t", "event": "e", "payload": {"record": {"taskId": "tid"}}}) == "t:e:tid"
     assert _message_order_key({"topic": "t", "event": "e", "payload": {}}) == "t:e"
     assert _assistant_delta_coalesce_key({"event": "OTHER"}) is None
     assert _assistant_delta_coalesce_key({"event": "ASSISTANT_STREAM", "payload": {}}) is None
@@ -721,23 +802,29 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
 
     async def _recover():
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "", TimeoutError("timed out")) is None
-        assert await _recover_oai_demo_for_each_timeout(
-            SimpleNamespace(fast_mode_cache_enabled=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX),
-            "cid",
-            TimeoutError("timed out"),
-        ) is None
+        assert (
+            await _recover_oai_demo_for_each_timeout(
+                SimpleNamespace(fast_mode_cache_enabled=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX),
+                "cid",
+                TimeoutError("timed out"),
+            )
+            is None
+        )
         assert await _recover_oai_demo_for_each_timeout(live_wf, "cid", TimeoutError("timed out")) is None
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "cid", RuntimeError("other")) is None
-        assert await _recover_oai_demo_for_each_timeout(
-            SimpleNamespace(
-                goal=OAI_DEMO_ROOT_GOAL_PREFIX,
-                fast_cache_goal="",
-                fast_mode_cache_enabled=True,
-                child_results="bad",
-            ),
-            "cid",
-            TimeoutError("timed out"),
-        ) is None
+        assert (
+            await _recover_oai_demo_for_each_timeout(
+                SimpleNamespace(
+                    goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+                    fast_cache_goal="",
+                    fast_mode_cache_enabled=True,
+                    child_results="bad",
+                ),
+                "cid",
+                TimeoutError("timed out"),
+            )
+            is None
+        )
         assert await _recover_oai_demo_for_each_timeout(demo_wf, "cid", TimeoutError("timed out")) == {
             "status": "completed"
         }
@@ -770,9 +857,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert _unavailable_source_is_required("gmail", "anything", True) is True
     assert _unavailable_source_is_required("gmail", "use gmail inbox", False) is True
     assert _unavailable_source_is_required("calendar", "buy coffee", False) is False
-    validate_spawn_params(
-        {"type": "explore", "goal": "research sleep", "_phase": "PLAN"}
-    )
+    validate_spawn_params({"type": "explore", "goal": "research sleep", "_phase": "PLAN"})
     with pytest.raises(ValueError, match="requires 'type'"):
         validate_spawn_params({})
     with pytest.raises(ValueError, match="invalid"):
@@ -826,3 +911,62 @@ def test_misc_low_coverage_helpers():
         rows = fetch_search_results_ddgs("sleep", max_results=2)
     assert rows[0]["url"] == "https://a"
     assert rows[1]["excerpts"] == []
+
+
+def test_csv_cells_neutralize_spreadsheet_formulas():
+    """CSV quoting stops delimiter injection but not formula execution.
+
+    Report text and record keys are model- and web-derived, so a value starting
+    with =, +, - or @ would execute on open in Excel/Sheets.
+    """
+    assert _safe_csv_cell("=cmd|'/c calc'!A1") == "'=cmd|'/c calc'!A1"
+    for prefix in ("=", "+", "-", "@"):
+        assert _safe_csv_cell(f"{prefix}danger").startswith("'")
+    # Leading whitespace must not smuggle a formula past the check.
+    assert _safe_csv_cell("   =sneaky").startswith("'")
+    # Ordinary values and non-strings are untouched.
+    assert _safe_csv_cell("safe text") == "safe text"
+    assert _safe_csv_cell(7) == 7
+
+    rendered = _csv_text(["=header", "plain"], [{"=header": "=evil", "plain": "ok"}])
+    assert "'=header" in rendered
+    assert "'=evil" in rendered
+    assert rendered.endswith("\n")
+
+
+def test_passthrough_file_pointers_still_rewrite_their_schema_fields():
+    """Values that arrive as FilePointers are skipped for upload but still typed.
+
+    plan_oai_demo_report_files intentionally skips them (nothing to upload); if
+    their schema fields kept the old type the declared schema would contradict
+    the value it describes.
+    """
+    pointer = {"storage_path": "p/x.html", "original_filename": "x.html"}
+    response = {"positioning_statement": pointer, "top_creators_analysis": "prose"}
+
+    assert plan_oai_demo_report_files(response) != []
+    assert sorted(passthrough_file_pointer_specs(response)) == ["positioning_statement"]
+
+    # A response made entirely of pass-through pointers plans no uploads at all.
+    all_pointers = {"positioning_statement": pointer}
+    assert plan_oai_demo_report_files(all_pointers) == []
+    assert sorted(passthrough_file_pointer_specs(all_pointers)) == ["positioning_statement"]
+
+    schema = {"fields": [{"name": "positioning_statement", "type": "string"}]}
+    rewritten = rewrite_schema_file_pointer_fields(schema, passthrough_file_pointer_specs(all_pointers))
+    assert rewritten["fields"][0]["type"] != "string"
+
+
+def test_materialize_persists_rewritten_schema_for_passthrough_only_response():
+    """mark_finished carries structured_response but not the schema.
+
+    Without an explicit persist the DB keeps pre-rewrite field types while the
+    stored response holds FilePointers.
+    """
+    pointer = {"storage_path": "p/x.html", "original_filename": "x.html"}
+    response = {"positioning_statement": pointer}
+    schema = {"fields": [{"name": "positioning_statement", "type": "string"}]}
+
+    result = asyncio.run(materialize_oai_demo_report_files_activity("user-1", response, schema, "agent-1"))
+    # No uploads were planned, but the schema must still describe a file.
+    assert result["output_schema"]["fields"][0]["type"] != "string"

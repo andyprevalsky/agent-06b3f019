@@ -7,7 +7,7 @@
  * [any] --disabled|file null|unmount--> [idle] (object URLs revoked; in-flight fetch aborted)
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { FilePointer } from '../hooks';
 import {
   DocumentPreviewLoadError,
@@ -21,6 +21,18 @@ export type DocumentPreviewLoadState =
   | { status: 'ready'; payload: DocumentPreviewPayload }
   | { status: 'error'; message: string; downloadUrl?: string };
 
+export function documentPreviewFileKey(file: FilePointer | null | undefined): string | null {
+  if (!file) return null;
+  return JSON.stringify([
+    file.id,
+    file.storage_path,
+    file.original_filename,
+    file.mime_type,
+    file.size_bytes,
+    file.created_at,
+  ]);
+}
+
 export function useDocumentPreview(
   file: FilePointer | null | undefined,
   enabled: boolean,
@@ -28,9 +40,13 @@ export function useDocumentPreview(
 ): DocumentPreviewLoadState {
   const [loadState, setLoadState] = useState<DocumentPreviewLoadState>({ status: 'idle' });
   const activeSheet = options?.activeSheet;
+  const fileRef = useRef(file);
+  fileRef.current = file;
+  const loadKey = documentPreviewFileKey(file);
 
   useEffect(() => {
-    if (!enabled || !file) {
+    const fileSnapshot = fileRef.current;
+    if (!enabled || !fileSnapshot) {
       setLoadState({ status: 'idle' });
       return;
     }
@@ -41,7 +57,7 @@ export function useDocumentPreview(
 
     void (async () => {
       try {
-        const result = await loadDocumentPreview(file, {
+        const result = await loadDocumentPreview(fileSnapshot, {
           activeSheet,
           signal: controller.signal,
         });
@@ -54,8 +70,7 @@ export function useDocumentPreview(
       } catch (err) {
         if (controller.signal.aborted) return;
         if (err instanceof DOMException && err.name === 'AbortError') return;
-        const downloadUrl =
-          err instanceof DocumentPreviewLoadError ? err.downloadUrl : undefined;
+        const downloadUrl = err instanceof DocumentPreviewLoadError ? err.downloadUrl : undefined;
         setLoadState({
           status: 'error',
           message: err instanceof Error ? err.message : 'Failed to load document',
@@ -68,7 +83,7 @@ export function useDocumentPreview(
       controller.abort();
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [enabled, file, activeSheet]);
+  }, [enabled, loadKey, activeSheet]);
 
   return loadState;
 }

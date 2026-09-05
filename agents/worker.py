@@ -1000,6 +1000,7 @@ async def main():
         "rich",
         "rich.console",
         "structlog.dev",
+        "markdown_it",
         "markdown_it_py",
         "pygments",
         "httpx",

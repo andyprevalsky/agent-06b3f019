@@ -12847,6 +12847,29 @@ def test_local_automatic_port_range_avoids_linux_ephemeral_clients():
         local_bench._release_port_range(base)
 
 
+def test_local_automatic_port_range_excludes_reported_ephemeral_window():
+    """The exclusion must react to the kernel's actual range, not a fixed guess.
+
+    The fallback window moved into FALLBACK_PORT_BASE_*, so this pins the
+    behaviour rather than a hard-coded boundary: when the reported ephemeral
+    range covers the low half of the window, allocation must land above it.
+    """
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    low = local_bench.FALLBACK_PORT_BASE_START
+    mid = low + (local_bench.FALLBACK_PORT_BASE_END - low) // 2
+    base = None
+    try:
+        with patch.object(local_bench, "_linux_ephemeral_port_range", return_value=(low, mid)):
+            base = local_bench.allocate_port_range()
+        assert base > mid, f"automatic range {base} overlaps reported ephemeral ports ({low}, {mid})"
+    finally:
+        if base is not None:
+            local_bench._release_port_range(base)
+
+
 def test_local_start_services_releases_port_reservation_after_readiness():
     """A ready isolated stack must release its startup-only port reservation."""
     from unittest.mock import Mock, patch
@@ -15143,6 +15166,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t5-zero-live-spend",
         "t6-no-nested-gps",
         "t7-real-deliverable",
+        "t7-readable-report-files",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
         "no-browser-agents",
@@ -15167,6 +15191,10 @@ def test_unified_catalog_delineates_bench_axes():
         "t5-zero-live-spend": ["zero_live_spend"],
         "t6-no-nested-gps": ["no_nested_general_purpose"],
         "t7-real-deliverable": ["root_deliverable_markers"],
+        "t7-readable-report-files": [
+            "completion_summary_file_outputs",
+            "completion_summary_file_outputs",
+        ],
         "t9-no-leftover-children": ["tree_agent_status"],
         "no-browser-agents": ["browser_agent_session_count"],
     }

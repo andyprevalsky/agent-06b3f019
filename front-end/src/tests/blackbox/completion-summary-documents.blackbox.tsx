@@ -3,13 +3,14 @@
  * and render file contents (HTML srcDoc, spreadsheet tables, text, etc.).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { renderWithProviders } from './test-wrapper';
 import type { FilePointer } from '@/lib/api';
 import { CompletionSummaryCard } from '@/features/terminal-component-group/components/CompletionSummaryCard';
+import { DocumentPreviewDrawer } from '@/features/terminal-component-group/components/DocumentPreviewDrawer';
 import {
   documentPreviewKind,
   documentTypeLabel,
@@ -19,7 +20,11 @@ vi.mock('@/lib/supabase', () => ({
   supabase: {
     storage: {
       from: () => ({
-        createSignedUrl: async () => ({ data: { signedUrl: 'https://signed.example/file' } }),
+        // Echo the storage path so per-file download stubs can tell two
+        // attachments apart; no test asserts on the URL itself.
+        createSignedUrl: async (path: string) => ({
+          data: { signedUrl: `https://signed.example/${path}` },
+        }),
       }),
     },
   },
@@ -65,6 +70,17 @@ function buildXlsxBlob(): Blob {
     ['Agents', '99'],
   ]);
   XLSX.utils.book_append_sheet(workbook, sheet, 'Budget');
+  const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  return new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
+
+function buildMultiSheetXlsxBlob(sheets: Array<[string, string[][]]>): Blob {
+  const workbook = XLSX.utils.book_new();
+  for (const [name, rows] of sheets) {
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), name);
+  }
   const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
   return new Blob([bytes], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -213,6 +229,25 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(screen.queryByTestId('document-preview-drawer')).not.toBeInTheDocument();
   });
 
+  it('renders file previews without redundant output labels or white row wrappers', async () => {
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
+    renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Weekly Engagement Target Creators', value: file }],
+        }}
+      />,
+    );
+
+    await screen.findByTestId('file-pointer-mini-html');
+    const preview = screen.getByTestId('file-pointer-chip-wrap');
+    expect(screen.queryByText('Output')).not.toBeInTheDocument();
+    expect(screen.queryByText('Weekly Engagement Target Creators')).not.toBeInTheDocument();
+    expect(preview.parentElement).not.toHaveClass('bg-card');
+    expect(preview).toHaveClass('border-border', 'shadow-sm');
+  });
+
   it('shows spreadsheet mini-preview cells in the summary', async () => {
     const file = makeFile({
       original_filename: 'budget.xlsx',
@@ -259,6 +294,41 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     expect(iframe.getAttribute('sandbox') ?? '').toContain('allow-scripts');
     expect(iframe.getAttribute('sandbox') ?? '').not.toContain('allow-same-origin');
     expect(downloadTextMock).toHaveBeenCalled();
+  });
+
+  it('keeps an open document mounted when polling returns an equivalent file pointer', async () => {
+    const user = userEvent.setup();
+    const file = makeFile({ original_filename: 'report.html', mime_type: 'text/html' });
+    const { rerender } = renderWithProviders(
+      <CompletionSummaryCard
+        data={{
+          summary: 'Done',
+          outputs: [{ key: 'doc', label: 'Document', value: file }],
+        }}
+      />,
+    );
+
+    await screen.findByTestId('file-pointer-mini-html');
+    await user.click(screen.getByTestId('file-pointer-chip'));
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    const originalIframe = await within(drawer).findByTestId('document-preview-html');
+    expect(downloadTextMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      rerender(
+        <CompletionSummaryCard
+          data={{
+            summary: 'Done',
+            outputs: [{ key: 'doc', label: 'Document', value: { ...file } }],
+          }}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(downloadTextMock).toHaveBeenCalledTimes(2);
+    expect(within(drawer).getByTestId('document-preview-html')).toBe(originalIframe);
   });
 
   it('renders Excel cell contents in the drawer table', async () => {
@@ -380,5 +450,50 @@ describe('CompletionSummaryCard inline mini-previews + right drawer', () => {
     const drawer = await screen.findByTestId('document-preview-drawer');
     await within(drawer).findByTestId('document-preview-text');
     expect(within(drawer).getByText(/Rose Labs Deck/)).toBeInTheDocument();
+  });
+  // Regression: switching files while the drawer stays open must not carry the
+  // previously selected sheet into the new workbook. Both workbooks below share
+  // a "Shared" sheet name, so a leaked selection silently renders the wrong tab.
+  it('clears the selected sheet when the open drawer switches files', async () => {
+    const user = userEvent.setup();
+    const first = makeFile({
+      original_filename: 'first.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const second = makeFile({
+      original_filename: 'second.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    downloadBlobMock.mockImplementation((...args: unknown[]) => {
+      const path = JSON.stringify(args);
+      return Promise.resolve(
+        path.includes('second.xlsx')
+          ? buildMultiSheetXlsxBlob([
+              ['Forecast', [['SecondDefaultCell']]],
+              ['Shared', [['SecondSharedCell']]],
+            ])
+          : buildMultiSheetXlsxBlob([
+              ['Budget', [['FirstDefaultCell']]],
+              ['Shared', [['FirstSharedCell']]],
+            ]),
+      );
+    });
+
+    const { rerender } = renderWithProviders(
+      <DocumentPreviewDrawer file={first} open onOpenChange={() => {}} />,
+    );
+
+    const drawer = await screen.findByTestId('document-preview-drawer');
+    await within(drawer).findByText('FirstDefaultCell');
+
+    // Explicitly select the non-default "Shared" tab on the first workbook.
+    await user.click(within(drawer).getByRole('button', { name: 'Shared' }));
+    await within(drawer).findByText('FirstSharedCell');
+
+    rerender(<DocumentPreviewDrawer file={second} open onOpenChange={() => {}} />);
+
+    // The second workbook must open on ITS default sheet, not the leaked "Shared".
+    await within(drawer).findByText('SecondDefaultCell');
+    expect(within(drawer).queryByText('SecondSharedCell')).not.toBeInTheDocument();
   });
 });

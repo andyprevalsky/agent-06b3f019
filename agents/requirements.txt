@@ -1,5 +1,6 @@
 # Temporal SDK
 temporalio>=1.18.1
+markdown-it-py>=4.0.0
 
 # HTTP and async support
 aiohttp>=3.9.0

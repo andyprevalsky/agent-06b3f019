@@ -32,7 +32,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
     from domains.wait_for.service import pending_timestamp_wait_to_resume
-    from helpers.generation_handoff import should_handoff_to_generation
     from helpers import (
         check_user_usage,
         fetch_agent_config,
@@ -56,6 +55,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
+    from helpers.generation_handoff import should_handoff_to_generation
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
@@ -5003,7 +5003,7 @@ class AgentWorkflow:
                 try:
                     materialized = await workflow.execute_activity(
                         materialize_oai_demo_report_files_activity,
-                        args=[self.user_id, structured_response, self.output_schema],
+                        args=[self.user_id, structured_response, self.output_schema, self.agent_id],
                         start_to_close_timeout=timedelta(seconds=60),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )

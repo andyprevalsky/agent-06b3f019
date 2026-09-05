@@ -1784,6 +1784,44 @@ def test_tool_prompt_length_budget():
 # ============================================================================
 
 
+def test_output_schema_states_attempt_completion_takes_no_arguments():
+    """The required-output-schema block must state the zero-argument contract.
+
+    `attempt_completion` is declared with an EMPTY input schema (no properties,
+    additionalProperties=False), while this block lists required fields. Without
+    an explicit statement that the fields are read from tool history rather than
+    passed as arguments, the model reads "required" as tool parameters, finds no
+    tool that accepts them, and substitutes a stalling call instead of
+    completing. Measured by replaying the real diverging call (agent 476ffdfb,
+    execute_loop turn 3, gptAuth + reasoning_effort=xhigh): 10/17 wait_for
+    without this sentence, 0/23 with it.
+    """
+    from utils.prompts import format_required_output_schema_user_message
+
+    schema = {
+        "fields": [
+            {"name": "order_confirmation_id", "type": "str", "required": True, "description": "id"}
+        ]
+    }
+    rendered = format_required_output_schema_user_message(schema)
+
+    assert "takes no arguments" in rendered, (
+        "The required-output-schema prompt no longer states that "
+        "attempt_completion takes no arguments. That sentence is what stops the "
+        "model treating the schema fields as tool parameters and stalling "
+        "instead of completing."
+    )
+    assert "extracted from your tool history" in rendered, (
+        "The required-output-schema prompt no longer explains where the fields "
+        "come from. Without it the model looks for a completion tool that "
+        "accepts a payload, does not find one, and stalls."
+    )
+    assert "Gather this data before calling attempt_completion:" not in rendered, (
+        "The ambiguous pre-fix wording is back; it reads as a list of tool "
+        "arguments for a tool that accepts none."
+    )
+
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -1997,6 +2035,12 @@ async def run_all_tests():
     r.record(
         "tool_prompt_length_budget",
         test_tool_prompt_length_budget,
+    )
+
+    # 20. Output-schema block states the attempt_completion zero-arg contract
+    r.record(
+        "output_schema_states_attempt_completion_takes_no_arguments",
+        test_output_schema_states_attempt_completion_takes_no_arguments,
     )
 
     teardown_mock()

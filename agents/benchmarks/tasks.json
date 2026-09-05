@@ -21,6 +21,9 @@
     "expected_tool_counts": {
       "spawn_general_purpose_agent_for_each": 1
     },
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
@@ -205,6 +208,36 @@
           "T7: Schema / Task Complete / assemble-final outputs are populated"
         ],
         "judge_prompt": "Score 1.0 only if Task Complete cards display the real summary and schema outputs like prod. FAIL if any completionSummary.summary contains Fast Mode / cache trajectory ended / prior tool evidence ablation. FAIL if root or first-level GP completion cards have empty outputs when response_schema.fields is populated. response_schema.fields plus assemble_deliverable is not enough when the visible Task Complete card is ablated. Use typed agent/tree completion_summary / completion_outputs_count / completion_is_ablated fields, not assistant claims."
+      },
+      {
+        "id": "t7-readable-report-files",
+        "method": "static_check",
+        "criteria": [
+          "T7: Task Complete exposes the narrative reports as three readable HTML files and the tabular deliverables as two CSV files"
+        ],
+        "checks": [
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".html",
+              ".htm"
+            ],
+            "mime_contains": [
+              "html"
+            ],
+            "min_files": 3
+          },
+          {
+            "type": "completion_summary_file_outputs",
+            "extensions": [
+              ".csv"
+            ],
+            "mime_contains": [
+              "csv"
+            ],
+            "min_files": 2
+          }
+        ]
       },
       {
         "id": "t9-no-leftover-children",
@@ -2926,13 +2959,14 @@
   {
     "name": "agent-payment-idempotent-abandonment",
     "title": "Agent Payment Idempotent Settlement",
-    "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints.",
+    "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints. After the second browser agent finishes, call attempt_completion exactly once with the grounded results. Do not call send_message_to_user_execute_phase or any progress-message tool.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": ["spawn_browser_agent"],
     "expected_tool_counts": {
       "spawn_browser_agent": 2
     },
+    "forbidden_tools": ["send_message_to_user_execute_phase"],
     "min_tool_counts": {
       "request_payment_card": 2
     },

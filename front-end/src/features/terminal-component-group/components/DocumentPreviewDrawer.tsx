@@ -26,19 +26,14 @@
 
 import { useEffect, useState } from 'react';
 import { Download, FileIcon } from 'lucide-react';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetTitle,
-} from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
 import { cn } from '@/lib/utils';
 import { type FilePointer } from '../hooks';
 import { formatFileSize } from './claudeCodeChip.utils';
 import { MarkdownText } from './MarkdownText';
 import { SpreadsheetTable } from './SpreadsheetTable';
 import { documentPreviewKind, documentTypeLabel } from './documentPreview.utils';
-import { useDocumentPreview } from './useDocumentPreview';
+import { documentPreviewFileKey, useDocumentPreview } from './useDocumentPreview';
 
 interface DocumentPreviewDrawerProps {
   file: FilePointer | null;
@@ -50,11 +45,16 @@ export function DocumentPreviewDrawer({ file, open, onOpenChange }: DocumentPrev
   // Only set after an explicit tab click. Passing the loader's default sheet back
   // into useDocumentPreview would remount the load and race blackbox assertions.
   const [selectedSheet, setSelectedSheet] = useState<string | undefined>(undefined);
+  const fileKey = documentPreviewFileKey(file);
   const loadState = useDocumentPreview(file, open, { activeSheet: selectedSheet });
 
+  // Reset on close AND on file change. `fileKey` was already a dependency, but
+  // clearing only on close meant switching files in an open drawer carried the
+  // previous sheet name into the new workbook — if that name also exists there,
+  // the preview silently opens on the wrong sheet.
   useEffect(() => {
-    if (!open) setSelectedSheet(undefined);
-  }, [open, file]);
+    setSelectedSheet(undefined);
+  }, [open, fileKey]);
 
   const kind = file ? documentPreviewKind(file) : 'download';
   const typeLabel = file ? documentTypeLabel(file) : 'File';
