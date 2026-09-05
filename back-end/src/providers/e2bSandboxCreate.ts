@@ -51,9 +51,40 @@ export function isTransientSandboxCreateError(error: unknown): boolean {
   if (/\b(401|403|404|invalid api key|unauthorized|forbidden|quota|not found)\b/i.test(haystack)) {
     return false;
   }
+  // Abort/timeout: E2B SDK defaults requestTimeoutMs to 60s. A wedged keep-alive
+  // socket (cuda-kernel k=3 r29, 2026-09-05) hung until AbortSignal.timeout fired
+  // with "The operation was aborted due to timeout" / empty TimeoutError — those
+  // must retry instead of hard-failing the code-agent spawn.
+  if (
+    cursorMatchesTimeoutName(error) ||
+    /aborted due to timeout|operation was aborted|TimeoutError|request handshake timed out|ETIMEDOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT/i.test(
+      haystack
+    )
+  ) {
+    return true;
+  }
   return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EADDRNOTAVAIL|EAI_AGAIN|ENOTFOUND|EPIPE|ENETUNREACH|socket hang up|UND_ERR|terminated/i.test(
     haystack
   );
+}
+
+function cursorMatchesTimeoutName(error: unknown): boolean {
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
+    if (cursor instanceof Error) {
+      if (
+        cursor.name === 'TimeoutError' ||
+        cursor.name === 'AbortError' ||
+        cursor.constructor?.name === 'DOMException'
+      ) {
+        return true;
+      }
+      cursor = (cursor as { cause?: unknown }).cause;
+      continue;
+    }
+    break;
+  }
+  return false;
 }
 
 /**
@@ -63,14 +94,27 @@ export function isTransientSandboxCreateError(error: unknown): boolean {
  * be running even though its response was lost. All attempts carry one metadata tag, and each
  * retry plus the terminal failure path adopts a sandbox already created for that logical request.
  */
+/** Floor for E2B control-plane requestTimeoutMs on sandbox create. */
+export const SANDBOX_CREATE_REQUEST_TIMEOUT_MS = 120_000;
+
 export async function createSandboxWithRetry(
   templateId: string,
   options: Parameters<typeof Sandbox.create>[1],
   label: string
 ): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
   const createRequestId = uuidv4();
+  const callerRequestTimeoutMs =
+    options && typeof options === 'object' && 'requestTimeoutMs' in options
+      ? (options as { requestTimeoutMs?: number }).requestTimeoutMs
+      : undefined;
   const taggedOptions = {
     ...options,
+    // Never inherit the SDK's 60s default when a keep-alive socket is half-dead —
+    // give the control plane enough room, and still classify abort as transient.
+    requestTimeoutMs: Math.max(
+      callerRequestTimeoutMs ?? 0,
+      SANDBOX_CREATE_REQUEST_TIMEOUT_MS
+    ),
     metadata: { ...(options?.metadata ?? {}), createRequestId },
   } as Parameters<typeof Sandbox.create>[1];
 

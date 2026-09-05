@@ -169,6 +169,39 @@ export function isE2bTeamBillingBlockError(error: unknown): boolean {
   );
 }
 
+/**
+ * True when E2B sandbox create failed on control-plane abort/timeout after retries.
+ * Same-host benches can fall back to a local Claude Code ws-server (cuda-kernel
+ * k=3 r29: wedged keep-alive sockets hung until AbortSignal.timeout).
+ */
+export function isE2bSandboxCreateTimeoutError(error: unknown): boolean {
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
+    if (cursor instanceof Error) {
+      if (
+        cursor.name === 'TimeoutError' ||
+        cursor.name === 'AbortError' ||
+        cursor.constructor?.name === 'DOMException'
+      ) {
+        return true;
+      }
+      const upper = cursor.message.toUpperCase();
+      if (
+        upper.includes('ABORTED DUE TO TIMEOUT') ||
+        upper.includes('OPERATION WAS ABORTED') ||
+        upper.includes('TIMEOUTERROR') ||
+        upper.includes('REQUEST HANDSHAKE TIMED OUT')
+      ) {
+        return true;
+      }
+      cursor = (cursor as { cause?: unknown }).cause;
+      continue;
+    }
+    break;
+  }
+  return false;
+}
+
 export function shouldAllowLocalClaudeCodeFallback(): boolean {
   if (process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK === '0') return false;
   if (process.env.CLAUDE_CODE_ALLOW_LOCAL_FALLBACK === '1') return true;
@@ -181,14 +214,24 @@ export async function createLocalClaudeCodeSessionIfBillingBlocked(
   err: unknown,
   params: Parameters<typeof createLocalClaudeCodeSession>[0]
 ): Promise<Awaited<ReturnType<typeof createLocalClaudeCodeSession>> | null> {
-  if (!isE2bTeamBillingBlockError(err) || !shouldAllowLocalClaudeCodeFallback()) {
+  if (!shouldAllowLocalClaudeCodeFallback()) {
     return null;
   }
-  log.warn(
-    `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`,
-    { error: err instanceof Error ? err.message : String(err) }
-  );
-  return createLocalClaudeCodeSession(params);
+  if (isE2bTeamBillingBlockError(err)) {
+    log.warn(
+      `E2B team billing blocked sandbox create; falling back to local Claude Code for agent ${params.agentId}`,
+      { error: err instanceof Error ? err.message : String(err) }
+    );
+    return createLocalClaudeCodeSession(params);
+  }
+  if (isE2bSandboxCreateTimeoutError(err)) {
+    log.warn(
+      `E2B sandbox create timed out/aborted; falling back to local Claude Code for agent ${params.agentId}`,
+      { error: err instanceof Error ? err.message : String(err) }
+    );
+    return createLocalClaudeCodeSession(params);
+  }
+  return null;
 }
 
 function findWsServerPath(): string {
