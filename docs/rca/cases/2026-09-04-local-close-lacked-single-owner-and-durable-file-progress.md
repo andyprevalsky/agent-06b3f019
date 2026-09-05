@@ -12,6 +12,7 @@ symptoms:
   - one failed output upload is silently persisted as a complete partial outputFiles list
   - retry skips a missing local Claude Code output file
   - a checked output path can be replaced with a symlink before upload
+  - Darwin descriptor resolution can block the backend event loop indefinitely in execFileSync lsof
 tags:
   - claude-code
   - local-session
@@ -20,6 +21,7 @@ tags:
   - partial-upload
 sources:
   - PR #1246
+  - PR #1261
 repro: back-end/src/tests/blackbox/claude-code-local-close.blackbox.ts
 status: fixed
 ---
@@ -88,6 +90,13 @@ descriptor as a regular file, and performs a size-bounded read from the same
 descriptor. This removes the path-check/stat/read symlink race. The permanent
 close blackbox places a symlink to another agent's file in the output directory
 and proves that no upload is attempted.
+
+PR #1261 review found a stability recurrence inside that descriptor-safe read:
+Darwin falls back to synchronous `/usr/sbin/lsof` when `/dev/fd` cannot reveal
+the vnode path, but the child call had no deadline. The fallback now has a hard
+two-second timeout, `SIGKILL`, and a 64 KiB output bound. Timeout, nonzero exit,
+or malformed output rejects the local file read closed instead of leaving the
+backend event loop blocked indefinitely.
 
 ## Human feedback
 

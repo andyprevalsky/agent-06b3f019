@@ -1353,7 +1353,7 @@ async def test_run_verifier_disabled_by_env_flag():
         patch("temporalio.activity.heartbeat"),
     ):
         for provider in ("claude", "codex"):
-            # Primitive-only schemas require no file artifacts.
+            # A success exit cannot satisfy an unmaterialized primitive schema.
             score, reasoning, struct, itok, otok = await service._run_verifier(
                 agent_id="a",
                 task_id="t",
@@ -1368,9 +1368,9 @@ async def test_run_verifier_disabled_by_env_flag():
                 output_files=[],
                 code_events=[{"type": "tool_use", "name": "Bash"}],
             )
-            assert score == 1.0, provider
+            assert score == 0.5, provider
             assert "verifier disabled" in reasoning.lower(), reasoning
-            assert "incomplete" not in reasoning.lower(), reasoning
+            assert "incomplete" in reasoning.lower(), reasoning
             assert struct is None
             assert itok == 0 and otok == 0
 
@@ -1432,8 +1432,8 @@ async def test_run_verifier_disabled_by_env_flag():
     assert all(m.get("task_id") == "t" for m in evidence_metas), evidence_metas
     assert all(m.get("subAgentId") == "t" for m in evidence_metas), evidence_metas
     assert all(int(m.get("steps_taken") or 0) > 0 for m in evidence_metas), evidence_metas
-    # 2 providers × 2 verifier calls × 2 evidence chips = 8
-    assert len(evidence_metas) == 8, len(evidence_metas)
+    # 2 providers × 1 schema-complete verifier call × 2 evidence chips = 4.
+    assert len(evidence_metas) == 4, len(evidence_metas)
 
 
 
@@ -1550,7 +1550,12 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
     assert "verifier disabled" in reasoning.lower(), reasoning
     assert "Total steps: 111" in reasoning, reasoning
     assert "code_agent_events" in reasoning, reasoning
-    assert struct == {"python_script": {"path": "/home/user/output/collatz_27.py"}}
+    assert struct == {
+        "stdout": stdout,
+        "collatz_sequence": [int(value) for value in stdout.splitlines()[:-1]],
+        "total_steps": 111,
+        "python_script": {"path": "/home/user/output/collatz_27.py"},
+    }
     assert itok == 0 and otok == 0
 
 

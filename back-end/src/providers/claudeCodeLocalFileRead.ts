@@ -31,7 +31,15 @@ function resolveOpenDescriptorPath(descriptor: number): string {
     const output = execFileSync(
       '/usr/sbin/lsof',
       ['-a', '-p', String(process.pid), '-d', String(descriptor), '-Fn'],
-      { encoding: 'utf8' }
+      {
+        encoding: 'utf8',
+        // Descriptor resolution is part of the synchronous local-file read
+        // boundary. Never let a wedged Darwin lsof block the backend event
+        // loop indefinitely; timeout/overflow errors fail this read closed.
+        timeout: 2_000,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+      }
     );
     const pathLine = output.split('\n').find((line) => line.startsWith('n/'));
     if (pathLine) return realpathSync.native(pathLine.slice(1));

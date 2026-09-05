@@ -21,6 +21,7 @@ tags:
   - harness-contract
 sources:
   - PR #1246
+  - PR #1261
 repro: agents/tests/blackbox/spawn_claude_code_agent.blackbox.py:test_run_verifier_disabled_rejects_schema_incomplete_artifacts
 status: fixed
 ---
@@ -36,6 +37,12 @@ The permanent regression supplied two required `file_pointer` fields, one
 extracted file, and exit code zero. Before the fix, the runner logged
 `has_artifacts=True`, `has_structured_from_files=False`, and `score=1.0`; the new
 test failed on the expected 0.5 score.
+
+The issue recurred during PR #1261 review in the broader schema contract. The
+first guard fixed multi-file shapes but still forced primitive-only schemas to
+artifact-complete and accepted mixed schemas after materializing only their file
+fields. Thus the disabled branch could again persist successful judge evidence
+and return 1.0 with declared primitive fields absent.
 
 ## Diagnosis
 
@@ -61,6 +68,14 @@ The constructor skips primitive fields it cannot infer while still filling and
 validating every declared file field. Thus a mixed schema preserves valid file
 artifacts without mistaking one file for multiple required pointers.
 
+The recurrence fix removes the file-only definition of completeness. Normalized
+SDK result/stdout evidence and extracted file pointers are now materialized into
+one response, and a single schema predicate requires a non-empty value for every
+declared field before either success or successful judge evidence is allowed.
+Unsupported primitive-only schemas return 0.5 rather than inventing completion;
+the Collatz mixed-schema regression proves that stdout, the validated sequence,
+step count, and script pointer are all present on the successful path.
+
 The later main-sync evidence path is gated on the same process-success signal.
 Files left behind by a failed process remain diagnostic context but no longer
 produce non-orchestration success chips that inflate a declared judge's code
@@ -78,4 +93,4 @@ the prior review cycle found this blocker.
 
 ## Reusable lesson
 
-Keep skip and fallback paths subject to the same file-field completeness predicate as the primary verifier path; preserve supported fields in mixed schemas and never approximate typed requirements with raw file counts.
+Keep skip and fallback paths subject to the same every-declared-field completeness predicate as the primary verifier; never approximate a typed schema contract with raw file counts.
