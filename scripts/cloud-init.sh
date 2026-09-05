@@ -293,10 +293,14 @@ fi
 # smoke gate before a single task starts.
 if ! command -v cloudflared >/dev/null 2>&1; then
     log "installing cloudflared…"
-    ( curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-        -o /tmp/cloudflared \
-        && $SUDO install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared ) >/dev/null 2>&1 \
+    CLOUDFLARED_TMP="$(mktemp "${TMPDIR:-/tmp}/cloudflared.XXXXXX")"
+    ( curl -fsSL --connect-timeout 10 --max-time 120 \
+        --retry 2 --retry-delay 2 --retry-max-time 300 \
+        https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+        -o "$CLOUDFLARED_TMP" \
+        && $SUDO install -m 0755 "$CLOUDFLARED_TMP" /usr/local/bin/cloudflared ) >/dev/null 2>&1 \
         || log "WARN: cloudflared install failed (isolated benchmark tunnels will fail)"
+    rm -f "$CLOUDFLARED_TMP"
 fi
 
 # shlock — the cloud benchmark fleet's cross-workspace app-env lock requires it

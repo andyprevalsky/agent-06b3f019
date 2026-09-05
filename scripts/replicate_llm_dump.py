@@ -412,6 +412,55 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     }
     if config.get("response_model") == "PlannerResponse" or data.get("call_site") == "planner":
         kwargs["response_model"] = PlannerResponse
+    # Forward the dump's tool definitions. Without them the model is replayed
+    # against a system prompt that advertises tools it cannot see, so it can
+    # never emit a tool call and every tool-choice assertion fails for the
+    # wrong reason (it narrates call syntax as prose instead).
+    tools = data.get("tools") or config.get("tools") or []
+    if tools:
+        kwargs["tools"] = tools
+        requested_choice = requested.get("tool_choice") or config.get("tool_choice")
+        if requested_choice:
+            kwargs["tool_choice"] = requested_choice
+    # Replay on the transport the dump actually used. Falling through to the
+    # OpenRouter waterfall silently swaps the provider, so a direct-auth
+    # (claudeAuth/gptAuth) divergence cannot be reproduced at all.
+    gpt_auth = gpt_auth_from_dump(data)
+    if gpt_auth is not None:
+        kwargs["gpt_auth"] = gpt_auth
+    # Reasoning effort materially changes tool choice, so a replay that drops it
+    # is not the same call. `collect()` cannot express it — it forwards a fixed
+    # arg list to `complete()` — so stream `complete()` directly and accumulate
+    # whenever the dump recorded an effort.
+    effort = config.get("reasoning_effort")
+    if effort:
+        stream_kwargs = dict(kwargs)
+        stream_kwargs.pop("skip_cache_write", None)
+        stream_kwargs["effort"] = effort
+        if requested.get("provider_fast_mode") is not None:
+            stream_kwargs["provider_fast_mode"] = bool(requested["provider_fast_mode"])
+        content_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        actual_model = None
+        usage: dict[str, Any] = {}
+        async for chunk in client.complete(**stream_kwargs):
+            if chunk.kind == "metadata":
+                actual_model = chunk.data.get("actual_model") or actual_model
+            elif chunk.kind == "content":
+                content_parts.append(str(chunk.data.get("text") or chunk.data.get("content") or ""))
+            elif chunk.kind == "tool_call":
+                tool_calls.append(chunk.data)
+            elif chunk.kind == "usage":
+                usage = chunk.data
+        return {
+            "call_site": data.get("call_site"),
+            "actual_model": actual_model,
+            "content": "".join(content_parts),
+            "tool_calls": tool_calls,
+            "usage": usage,
+            "timing": {},
+            "request_id": None,
+        }
     response = await client.collect(**kwargs)  # type: ignore[arg-type]
     return {
         "call_site": data.get("call_site"),

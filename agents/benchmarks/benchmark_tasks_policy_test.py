@@ -50,6 +50,14 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
     assert goal == task.prompt
 
 
+def test_agentcard_idempotency_task_terminates_after_reporting_results():
+    """The root must grade its result instead of looping on progress messages."""
+    task = get_task_by_name("agent-payment-idempotent-abandonment")
+    assert "call attempt_completion exactly once" in task.prompt
+    assert "send_message_to_user_execute_phase" in task.forbidden_tools
+    assert task.timeout_seconds == 900
+
+
 def test_browser_event_ticket_omits_standard_format_from_prompt_and_judge():
     """H-03 edit: do not require standard-format / reject LASER-at-AMC labels.
 
