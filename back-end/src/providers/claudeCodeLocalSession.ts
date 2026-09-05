@@ -427,7 +427,7 @@ async function extractLocalFiles(
     try {
       // Open with O_NOFOLLOW, then validate and read the same descriptor. Path
       // checks followed by stat/read can otherwise be swapped to a symlink.
-      const content = readRegularFileNoFollow(fullPath, MAX_FILE_SIZE);
+      const content = readRegularFileNoFollow(fullPath, workDir, MAX_FILE_SIZE);
       const { storage_path } = await uploadToStorage(
         userId,
         content,

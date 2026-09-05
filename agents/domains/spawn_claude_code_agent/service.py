@@ -1570,7 +1570,7 @@ async def _run_verifier(
         # still see grounded successful work when the LLM verifier is off. A
         # failed process may leave files behind, but those are not completion
         # evidence and must not inflate the judge's successful step count.
-        if has_success_signal:
+        if has_success_signal and has_artifacts:
             try:
                 await _persist_code_agent_judge_evidence(
                     agent_id=agent_id,

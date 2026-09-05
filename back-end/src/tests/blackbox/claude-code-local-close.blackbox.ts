@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -248,6 +249,30 @@ test('a symlink candidate is never followed or uploaded', async () => {
   await assert.rejects(() => closeLocalClaudeCodeSession(taskId, 'user-local-close'));
   assert.equal(uploadCalls, 0, 'a symlink target must never cross the upload boundary');
   rmSync(symlinkPath);
+  await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+});
+
+test('an intermediate-directory symlink cannot escape the session', async () => {
+  const taskId = `close-intermediate-symlink-${Date.now()}`;
+  const workDir = await createSession(taskId);
+  const outsideDir = join(fixtureDir, `outside-dir-${taskId}`);
+  const outsidePath = join(outsideDir, 'leak.txt');
+  const linkedDir = join(workDir, 'linked');
+  mkdirSync(outsideDir);
+  writeFileSync(outsidePath, 'belongs to another agent');
+  symlinkSync(outsideDir, linkedDir, 'dir');
+  let uploadCalls = 0;
+  globalThis.fetch = (async () => {
+    uploadCalls += 1;
+    return new Response(JSON.stringify({ Key: 'unexpected' }), { status: 200 });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    () => closeLocalClaudeCodeSession(taskId, 'user-local-close', ['linked/leak.txt']),
+    /escaped its session directory through a symlink/
+  );
+  assert.equal(uploadCalls, 0, 'an intermediate symlink target must never be uploaded');
+  rmSync(linkedDir);
   await closeLocalClaudeCodeSession(taskId, 'user-local-close');
 });
 

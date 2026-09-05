@@ -1453,6 +1453,11 @@ async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
         patch.dict("os.environ", {"ROSE_DISABLE_CODE_AGENT_VERIFIER": "1"}),
         patch("loop.activity_helper.call_temporal_activity_from_activity", side_effect=fake_activity),
         patch("temporalio.activity.heartbeat"),
+        patch.object(
+            service,
+            "_persist_code_agent_judge_evidence",
+            new_callable=AsyncMock,
+        ) as persist_evidence,
     ):
         score, reasoning, structured, input_tokens, output_tokens = await service._run_verifier(
             agent_id="agent-partial-output",
@@ -1483,6 +1488,7 @@ async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
     assert "incomplete" in reasoning.lower()
     assert structured is None
     assert input_tokens == 0 and output_tokens == 0
+    persist_evidence.assert_not_awaited()
 
 
 async def test_run_verifier_disabled_includes_sdk_event_stdout():

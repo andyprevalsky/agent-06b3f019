@@ -88,6 +88,38 @@ async function main(): Promise<void> {
   } finally {
     await prisma.user.deleteMany({ where: { userId } });
   }
+
+  const contendedUserId = `agentphone-contended-${randomUUID()}`;
+  const markerStartedAt = 1_000_000;
+  await prisma.user.create({ data: { userId: contendedUserId, isAnonymous: true } });
+  await prisma.agentIdentity.create({
+    data: {
+      userId: contendedUserId,
+      email: `${contendedUserId}@example.test`,
+      phoneProvider: `agentphone:provisioning:${markerStartedAt}:other-owner`,
+    },
+  });
+  const originalDateNow = Date.now;
+  let dateNowCalls = 0;
+  Date.now = () => {
+    dateNowCalls += 1;
+    return dateNowCalls <= 3 ? markerStartedAt : markerStartedAt + 180_001;
+  };
+  const createsBeforeDeadlineTest = agentCreates;
+  try {
+    await assert.rejects(
+      () => createAgentPhoneNumber({ userId: contendedUserId }),
+      /AgentPhone provisioning exceeded the 180000ms request deadline/
+    );
+    assert.equal(
+      agentCreates,
+      createsBeforeDeadlineTest,
+      'an expired request must not re-enter provider provisioning after waiting on another lease'
+    );
+  } finally {
+    Date.now = originalDateNow;
+    await prisma.user.deleteMany({ where: { userId: contendedUserId } });
+  }
 }
 
 main()

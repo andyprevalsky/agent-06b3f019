@@ -5,6 +5,7 @@ import {
 } from './smsTransportMock';
 import { createHash } from './crypto';
 import {
+  AGENT_PHONE_PROVISIONING_LEASE_MS,
   claimAgentPhoneProvisioning,
   completeAgentPhoneProvisioning,
   releaseAgentPhoneProvisioning,
@@ -120,8 +121,26 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value : '';
 }
 
-function requestSignal() {
-  return AbortSignal.timeout(CREATE_PHONE_TIMEOUT_MS);
+function provisioningDeadlineError(): AgentPhoneProvisioningError {
+  return new AgentPhoneProvisioningError(
+    `AgentPhone provisioning exceeded the ${AGENT_PHONE_PROVISIONING_LEASE_MS}ms request deadline`,
+    false
+  );
+}
+
+function remainingProvisioningTime(requestDeadlineAt: number): number {
+  const remaining = requestDeadlineAt - Date.now();
+  if (remaining <= 0) throw provisioningDeadlineError();
+  return remaining;
+}
+
+function requestSignal(requestDeadlineAt: number) {
+  return AbortSignal.timeout(
+    Math.max(
+      1,
+      Math.ceil(Math.min(CREATE_PHONE_TIMEOUT_MS, remainingProvisioningTime(requestDeadlineAt)))
+    )
+  );
 }
 
 function agentFromPayload(payload: Record<string, unknown>): AgentPhoneAgent | null {
@@ -159,12 +178,16 @@ function isConfirmedAgentCreateRejection(error: unknown) {
   );
 }
 
-async function createAgent(name: string, description: string): Promise<AgentPhoneAgent> {
+async function createAgent(
+  name: string,
+  description: string,
+  requestDeadlineAt: number
+): Promise<AgentPhoneAgent> {
   const response = await fetch(`${baseUrl()}/agents`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({ name, description, voiceMode: 'webhook' }),
-    signal: requestSignal(),
+    signal: requestSignal(requestDeadlineAt),
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -178,7 +201,7 @@ async function createAgent(name: string, description: string): Promise<AgentPhon
   return agent;
 }
 
-async function createNumber(agentId: string, areaCode: string) {
+async function createNumber(agentId: string, areaCode: string, requestDeadlineAt: number) {
   const response = await fetch(`${baseUrl()}/numbers`, {
     method: 'POST',
     headers: authHeaders(),
@@ -187,7 +210,7 @@ async function createNumber(agentId: string, areaCode: string) {
       areaCode,
       agentId,
     }),
-    signal: requestSignal(),
+    signal: requestSignal(requestDeadlineAt),
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -205,18 +228,21 @@ async function createNumber(agentId: string, areaCode: string) {
   return { id, phoneNumber };
 }
 
-async function findAgentByMarker(marker: string): Promise<AgentPhoneAgent | null> {
+async function findAgentByMarker(
+  marker: string,
+  requestDeadlineAt: number
+): Promise<AgentPhoneAgent | null> {
   const matches: AgentPhoneAgent[] = [];
   let offset = 0;
   let scanComplete = false;
-  const deadline = Date.now() + RECONCILE_TIMEOUT_MS;
+  const deadline = Math.min(requestDeadlineAt, Date.now() + RECONCILE_TIMEOUT_MS);
   while (offset < MAX_RECONCILE_AGENTS) {
     if (Date.now() >= deadline) {
       throw new Error(`AgentPhone reconciliation exceeded the ${RECONCILE_TIMEOUT_MS}ms deadline`);
     }
     const response = await fetch(
       `${baseUrl()}/agents?limit=${RECONCILE_PAGE_SIZE}&offset=${offset}`,
-      { headers: authHeaders(), signal: requestSignal() }
+      { headers: authHeaders(), signal: requestSignal(deadline) }
     );
     const data = await parseJson(response);
     if (!response.ok) {
@@ -254,10 +280,10 @@ async function findAgentByMarker(marker: string): Promise<AgentPhoneAgent | null
   return matches[0] ?? null;
 }
 
-async function getAgent(agentId: string): Promise<AgentPhoneAgent> {
+async function getAgent(agentId: string, requestDeadlineAt: number): Promise<AgentPhoneAgent> {
   const response = await fetch(`${baseUrl()}/agents/${encodeURIComponent(agentId)}`, {
     headers: authHeaders(),
-    signal: requestSignal(),
+    signal: requestSignal(requestDeadlineAt),
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -270,11 +296,11 @@ async function getAgent(agentId: string): Promise<AgentPhoneAgent> {
   return agent;
 }
 
-async function deleteAgent(agentId: string): Promise<void> {
+async function deleteAgent(agentId: string, requestDeadlineAt: number): Promise<void> {
   const response = await fetch(`${baseUrl()}/agents/${encodeURIComponent(agentId)}`, {
     method: 'DELETE',
     headers: authHeaders(),
-    signal: requestSignal(),
+    signal: requestSignal(requestDeadlineAt),
   });
   if (!response.ok && response.status !== 404) {
     const data = await parseJson(response);
@@ -290,7 +316,8 @@ async function provisionAgentPhoneNumber(
     agentName?: string | null;
     areaCode?: string | null;
   },
-  recoveryRequired = false
+  recoveryRequired: boolean,
+  requestDeadlineAt: number
 ): Promise<AgentPhoneNumber> {
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
@@ -298,11 +325,11 @@ async function provisionAgentPhoneNumber(
   let agent: AgentPhoneAgent;
   if (recoveryRequired) {
     try {
-      const recovered = await findAgentByMarker(marker);
+      const recovered = await findAgentByMarker(marker, requestDeadlineAt);
       if (recovered !== null) {
         agent = recovered;
       } else {
-        agent = await createAgent(displayName, marker);
+        agent = await createAgent(displayName, marker, requestDeadlineAt);
       }
     } catch (error) {
       throw new AgentPhoneProvisioningError(
@@ -312,7 +339,7 @@ async function provisionAgentPhoneNumber(
     }
   } else {
     try {
-      agent = await createAgent(displayName, marker);
+      agent = await createAgent(displayName, marker, requestDeadlineAt);
     } catch (error) {
       if (isConfirmedAgentCreateRejection(error)) {
         throw new AgentPhoneProvisioningError(
@@ -321,7 +348,7 @@ async function provisionAgentPhoneNumber(
         );
       }
       try {
-        const recovered = await findAgentByMarker(marker);
+        const recovered = await findAgentByMarker(marker, requestDeadlineAt);
         if (recovered === null) {
           throw new Error('no exact provisioning marker was visible after a complete scan');
         }
@@ -348,10 +375,10 @@ async function provisionAgentPhoneNumber(
 
   let number: { id: string; phoneNumber: string };
   try {
-    number = await createNumber(agent.id, areaCode);
+    number = await createNumber(agent.id, areaCode, requestDeadlineAt);
   } catch (createError) {
     try {
-      const reconciledAgent = await getAgent(agent.id);
+      const reconciledAgent = await getAgent(agent.id, requestDeadlineAt);
       const reconciledNumber = numberFromAgent(reconciledAgent);
       if (reconciledNumber) {
         return {
@@ -360,7 +387,7 @@ async function provisionAgentPhoneNumber(
           phoneNumber: reconciledNumber.phoneNumber,
         };
       }
-      await deleteAgent(agent.id);
+      await deleteAgent(agent.id, requestDeadlineAt);
     } catch (reconcileError) {
       throw new AgentPhoneProvisioningError(
         `AgentPhone number creation is uncertain; reconciliation or cleanup failed: ${
@@ -406,21 +433,33 @@ export async function createAgentPhoneNumber(params: {
     return null;
   }
 
+  const requestDeadlineAt = Date.now() + AGENT_PHONE_PROVISIONING_LEASE_MS;
+
   // The database stores a committed per-user lease. Network calls happen after
   // that short transaction commits, so slow provider I/O never occupies a
   // Prisma transaction or pool connection. Waiters reuse the persisted result;
   // expired/uncertain owners force a marker reconciliation before any create.
   while (true) {
+    remainingProvisioningTime(requestDeadlineAt);
     const claim = await claimAgentPhoneProvisioning(params.userId);
     if (claim.kind === 'complete') return claim.number;
     if (claim.kind === 'wait') {
-      const completed = await waitForAgentPhoneProvisioning(params.userId, claim.marker);
+      const completed = await waitForAgentPhoneProvisioning(
+        params.userId,
+        claim.marker,
+        requestDeadlineAt
+      );
       if (completed !== null) return completed;
       continue;
     }
 
     try {
-      const provisioned = await provisionAgentPhoneNumber(params, claim.recoveryRequired);
+      remainingProvisioningTime(requestDeadlineAt);
+      const provisioned = await provisionAgentPhoneNumber(
+        params,
+        claim.recoveryRequired,
+        requestDeadlineAt
+      );
       await completeAgentPhoneProvisioning(params.userId, claim.marker, provisioned);
       return provisioned;
     } catch (error) {

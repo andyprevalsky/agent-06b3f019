@@ -4,7 +4,7 @@ import { randomUUID } from './crypto';
 
 const ACTIVE_PREFIX = 'agentphone:provisioning:';
 const RECOVERY_PREFIX = 'agentphone:recovery:';
-const LEASE_MS = 180_000;
+export const AGENT_PHONE_PROVISIONING_LEASE_MS = 180_000;
 const POLL_MS = 250;
 
 export type PersistedAgentPhoneNumber = {
@@ -72,7 +72,10 @@ export async function claimAgentPhoneProvisioning(
     if (number !== null) return { kind: 'complete', number };
 
     const parsed = parseMarker(identity.phoneProvider);
-    if (parsed?.kind === 'active' && Date.now() - parsed.startedAt < LEASE_MS) {
+    if (
+      parsed?.kind === 'active' &&
+      Date.now() - parsed.startedAt < AGENT_PHONE_PROVISIONING_LEASE_MS
+    ) {
       return { kind: 'wait', marker: identity.phoneProvider as string };
     }
 
@@ -91,16 +94,21 @@ export async function claimAgentPhoneProvisioning(
 
 export async function waitForAgentPhoneProvisioning(
   userId: string,
-  marker: string
+  marker: string,
+  requestDeadlineAt: number
 ): Promise<PersistedAgentPhoneNumber | null> {
   const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
   const number = persistedNumber(identity);
   if (number !== null) return number;
   if (identity.phoneProvider !== marker) return null;
   const parsed = parseMarker(marker);
-  if (parsed === null || Date.now() - parsed.startedAt >= LEASE_MS) return null;
-  await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-  return waitForAgentPhoneProvisioning(userId, marker);
+  if (parsed === null) return null;
+  const now = Date.now();
+  const markerDeadlineAt = parsed.startedAt + AGENT_PHONE_PROVISIONING_LEASE_MS;
+  const nextDeadlineAt = Math.min(markerDeadlineAt, requestDeadlineAt);
+  if (now >= nextDeadlineAt) return null;
+  await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_MS, nextDeadlineAt - now)));
+  return waitForAgentPhoneProvisioning(userId, marker, requestDeadlineAt);
 }
 
 export async function completeAgentPhoneProvisioning(
