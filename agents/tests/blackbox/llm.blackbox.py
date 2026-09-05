@@ -3336,8 +3336,7 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
 
     OpenRouter 402s when remaining credits cannot cover max_tokens. Score JSON is
     small, but reasoning models need headroom before the JSON lands — keep a
-    mid-size cap (8192; 4096 still exhausted on cuda top100 evidence) rather than
-    the full live-verifier 16000.
+    mid-size cap (not the full live-verifier 16000).
     """
     import httpx
     from config import load_config
@@ -3371,7 +3370,7 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
     provider_max_tokens = [value for value in seen_max_tokens if value is not None]
     assert provider_max_tokens
     assert all(value == DECLARED_EVALUATOR_MAX_TOKENS for value in provider_max_tokens)
-    assert DECLARED_EVALUATOR_MAX_TOKENS == 8192
+    assert DECLARED_EVALUATOR_MAX_TOKENS == 4096
     assert DECLARED_EVALUATOR_MAX_TOKENS < VERIFIER_MAX_TOKENS
 
 
