@@ -12,12 +12,14 @@ symptoms:
   - No JSON content received in response (chunks=3, model=fast-cache)
   - cost_cents is 16
   - cache_creation_input_tokens is 163201
+  - Visible spawn_agent complete cards claimed nested research was skipped
 tags:
   - fast-cache
   - saved-trajectory
   - browser-agent
   - cache-replay
   - oai-demo
+  - nested-agent
 sources:
   - agent 149f16bd-58e1-471e-90b3-d3e9a0cefd8f
   - fleet run a19002d6-005e-47c3-abc8-23aa969f28f9
@@ -25,6 +27,13 @@ sources:
   - fleet run 3f4eaee8-6da5-4189-b2d2-ad1e14b76f12
   - agent 5f8eb7f8-881d-4531-a94a-9b65dd42120b
   - fleet run b8398b56-fb95-42a3-af90-aa6aa6be21c7
+  - agent 732a714e-4d91-42c0-954b-8973533f35bb
+  - agent 131eac5e-4501-4b6c-9d62-97c955997d4c
+  - fleet run 4a3f33b5-7e16-406f-a4fc-90de361e4428
+  - agent 30e3ac36-d72e-48c1-8242-fbbb4c244daa
+  - fleet run 062084fe-9d2a-4576-9caf-7f145084ec52
+  - agent 2e15fec3-fe6e-449f-838c-a0a00cfec081
+  - fleet run 5df83f8e-3705-4b9a-b746-1884026759a9
 repro: back-end/src/tests/blackbox/fast-cache.blackbox.ts
 status: fixed
 ---
@@ -87,7 +96,61 @@ the result presented as the cleanest, crispest possible demo and judged by the
 IDEA validation criteria. They also required the final files to use the newly
 supported formats that maximize human readability.
 
+On 2026-09-05, the human additionally required the mass-agent benchmark to show
+no synthetic `spawn_agent complete` cards saying that research or code work was
+skipped and required that behavior to be enforced by the benchmark's declared
+validation criteria.
+
+## 2026-09-05 recurrence: nested-agent replay slots
+
+A run that passed the older benchmark contract still exposed six first-level
+creator cards with the exact text `Research already gathered; skipping nested
+spawn so the main sub-agent handles it.` and the title `spawn_agent complete`.
+The runtime guard prevented a cached nested spawn from multiplying the fan-out,
+but presented the guard as successful work. The benchmark had no criterion for
+that visible defect.
+
+A bounded scan of all 50 known creator-child namespaces found 1,153 runtime
+rows with nested general-purpose calls across seven namespaces. The maintenance
+job archived those exact rows in place under `oai_demo_backup`; a second scan
+found zero browser or nested-agent calls in those runtime namespaces. The
+recognizer covers unified general-purpose, for-each, and code types plus their
+legacy tool names, so the code-agent variant fails closed even though this
+fixture contained no current code-agent row.
+
+The exact current task was then tested with one archived child namespace
+temporarily and reversibly restored. With task definition SHA-256
+`7ea233a2830a858874356cfa29b65e33225cd747c2ad4ef4d0a97dc431c232ae`, the
+following command failed on fleet run
+`062084fe-9d2a-4576-9caf-7f145084ec52` (agent
+`30e3ac36-d72e-48c1-8242-fbbb4c244daa`) at
+`t6-no-synthetic-agent-skips` with the original visible skip text. Reapplying
+the maintenance job archived the restored namespace's 221 then-current rows;
+the immediate dry-run audit found zero remaining disallowed rows.
+
+```bash
+set -a; source back-end/.env; set +a
+export FAST_MODE_CACHE_DATABASE_URL="$DATABASE_URL"
+scripts/run-bench --local test-mass-agent-run-0
+```
+
+The identical task definition and benchmark command then passed on fleet run
+`5df83f8e-3705-4b9a-b746-1884026759a9` (agent
+`2e15fec3-fe6e-449f-838c-a0a00cfec081`) with 51 agents, 264 messages, 100%
+Fast Mode cache hits, zero agent cost, and every declared evaluator satisfied.
+The durable viewer was verified at
+`https://www.roselabs.ai/?agent-id=2e15fec3-fe6e-449f-838c-a0a00cfec081`.
+
+At 10k-agent scale, the maintenance path remains a one-time scan of 50 explicit
+goal hashes followed by one transactional bulk update. Runtime validation scans
+only the already-collected raw trees for its single benchmark run. The root
+namespace is intentionally outside the cull because it owns the legitimate
+first-level fan-out to 50 creator children; the declared evaluator fails closed
+if any root or child source renders a nested GP, for-each, or code replay as a
+synthetic success card.
+
 ## Reusable lesson
 
 When removing a tool action from a recorded trajectory, archive its entire
-replay slot; never mutate that slot into replacement work or an empty response.
+replay slot; never mutate that slot into replacement work, an empty response,
+or a synthetic success card.

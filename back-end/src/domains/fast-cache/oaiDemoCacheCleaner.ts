@@ -10,6 +10,7 @@ export type CacheRewriteResult = {
   changed: boolean;
   deleteEntry: boolean;
   browserCallsRemoved: number;
+  nestedAgentCallsRemoved: number;
   exploreCallsAdded: number;
 };
 
@@ -49,6 +50,23 @@ function isBrowserCall(view: ToolCallView): boolean {
   );
 }
 
+function isNestedAgentCall(view: ToolCallView): boolean {
+  if (
+    view.name === 'spawn_general_purpose_agent' ||
+    view.name === 'spawn_general_purpose_agent_for_each' ||
+    view.name === 'spawn_code_agent' ||
+    view.name === 'spawn_claude_code_agent'
+  ) {
+    return true;
+  }
+  return (
+    view.name === 'spawn_agent' &&
+    (view.args?.type === 'general_purpose' ||
+      view.args?.type === 'for_each' ||
+      view.args?.type === 'code')
+  );
+}
+
 function browserFreeNarration(value: unknown): unknown {
   if (typeof value !== 'string' || !/browser|navigat/i.test(value)) return value;
   return value
@@ -67,20 +85,31 @@ export function containsBrowserToolCall(value: unknown): boolean {
   });
 }
 
+export function containsNestedAgentToolCall(value: unknown): boolean {
+  const record = asRecord(value);
+  if (!record || !Array.isArray(record.tool_calls)) return false;
+  return record.tool_calls.some((raw) => {
+    const view = viewToolCall(raw);
+    return view !== null && isNestedAgentCall(view);
+  });
+}
+
 /**
- * Remove executable browser work from a cached OAI-demo LLM response.
+ * Remove executable browser and nested-agent work from a cached OAI-demo LLM response.
  *
- * Browser calls are deleted instead of converted into executable replacement
- * work. These saved creator trajectories already contain their explore/search
- * evidence; adding a new explore branch changes the replay and can miss cache.
+ * The row is archived instead of rewritten in place. These saved creator
+ * trajectories already contain their explore/search evidence; adding new work
+ * changes the replay and can miss cache, while leaving the slot would replay a
+ * stale spawn decision.
  */
 export function rewriteOaiDemoCacheValue(value: unknown): CacheRewriteResult {
-  if (!containsBrowserToolCall(value)) {
+  if (!containsBrowserToolCall(value) && !containsNestedAgentToolCall(value)) {
     return {
       value,
       changed: false,
       deleteEntry: false,
       browserCallsRemoved: 0,
+      nestedAgentCallsRemoved: 0,
       exploreCallsAdded: 0,
     };
   }
@@ -89,14 +118,23 @@ export function rewriteOaiDemoCacheValue(value: unknown): CacheRewriteResult {
   const rawCalls = Array.isArray(rewritten.tool_calls) ? rewritten.tool_calls : [];
   const nextCalls: unknown[] = [];
   let browserCallsRemoved = 0;
+  let nestedAgentCallsRemoved = 0;
 
   for (const raw of rawCalls) {
     const view = viewToolCall(raw);
-    if (!view || !isBrowserCall(view)) {
+    if (!view) {
       nextCalls.push(raw);
       continue;
     }
-    browserCallsRemoved += 1;
+    if (isBrowserCall(view)) {
+      browserCallsRemoved += 1;
+      continue;
+    }
+    if (isNestedAgentCall(view)) {
+      nestedAgentCallsRemoved += 1;
+      continue;
+    }
+    nextCalls.push(raw);
   }
 
   rewritten.tool_calls = nextCalls;
@@ -107,6 +145,7 @@ export function rewriteOaiDemoCacheValue(value: unknown): CacheRewriteResult {
     changed: true,
     deleteEntry: true,
     browserCallsRemoved,
+    nestedAgentCallsRemoved,
     exploreCallsAdded: 0,
   };
 }

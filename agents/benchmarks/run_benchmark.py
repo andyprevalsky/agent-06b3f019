@@ -9208,13 +9208,19 @@ def _principal_user_andy_check(data: dict) -> tuple[bool, str]:
     return True, "All declared static checks passed"
 
 
-def _judge_source_tree(data: dict) -> dict:
-    """Prefer collected transcripts; fall back to logs.tree when `_benchmark.tree` is metadata-only."""
+def _judge_source_trees(data: dict) -> list[dict]:
+    """Return every raw tree source; validators may need evidence from either one."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
     trees: list[dict] = []
     for candidate in (raw.get("tree"), (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else None):
         if isinstance(candidate, dict) and candidate:
             trees.append(candidate)
+    return trees
+
+
+def _judge_source_tree(data: dict) -> dict:
+    """Prefer collected transcripts; fall back to logs.tree when `_benchmark.tree` is metadata-only."""
+    trees = _judge_source_trees(data)
     if not trees:
         return {}
     if len(trees) == 1:
@@ -10679,6 +10685,61 @@ def _completion_cards_for_static_check(data: dict, *, include_first_level_gps: b
     return cards
 
 
+def _synthetic_agent_skip_failures(data: dict) -> list[str]:
+    """Visible FINISHED placeholders for cached GP/code actions are not real work."""
+    failures: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    sources: list[tuple[str, list]] = [("root", data.get("messages") or [])]
+    # Do not scan only the merged judge tree: its longest-transcript preference
+    # intentionally drops a shorter duplicate node. A forbidden user-visible
+    # card in either raw source must still fail this criterion.
+    for tree in _judge_source_trees(data):
+        for agent_id, node in tree.items():
+            if isinstance(node, dict):
+                sources.append((str(agent_id), node.get("messages") or []))
+    for agent_id, messages in sources:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            text = str(message.get("message") or message.get("text") or "").strip()
+            title = str(metadata.get("title") or "")
+            agent_type = str(metadata.get("agentType") or metadata.get("agent_type") or "")
+            is_skipped = bool(metadata.get("skippedNestedSpawn")) or (
+                title == "spawn_agent complete"
+                and agent_type in {"general_purpose", "for_each", "code"}
+                and "skipping" in text.lower()
+            )
+            if not is_skipped:
+                continue
+            signature = (agent_id, str(metadata.get("toolCallId") or ""), text)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            failures.append(
+                f"{agent_id[:8]} {agent_type or 'agent'}: {text or title}"
+            )
+    return failures
+
+
+def _agent_task_title_check(data: dict, check: dict) -> tuple[bool, str]:
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    title = str(agent.get("title") or agent.get("name") or "").strip()
+    if not title:
+        return False, "Root task title is missing"
+    forbidden = {
+        str(item).strip().casefold()
+        for item in check.get("forbidden_titles", [])
+        if str(item).strip()
+    }
+    if title.casefold() in forbidden:
+        return False, f"Root task title {title!r} is generic"
+    expected = str(check.get("value") or check.get("expected_title") or "").strip()
+    if expected and title != expected:
+        return False, f"Root task title was {title!r}; expected {expected!r}"
+    return True, "All declared static checks passed"
+
+
 def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
     """Collect FilePointer-shaped values from Task Complete outputs (single or list)."""
     pointers: list[dict] = []
@@ -11387,6 +11448,16 @@ def _run_declared_static_check(
                 )
             if not compact_tree:
                 return False, "T6: typed tree was empty"
+            continue
+        if check_type == "no_synthetic_agent_skip_messages":
+            failures = _synthetic_agent_skip_failures(data)
+            if failures:
+                return False, f"T6: visible synthetic agent completion: {failures[0]}"
+            continue
+        if check_type == "agent_task_title":
+            ok, reason = _agent_task_title_check(data, check)
+            if not ok:
+                return False, reason
             continue
         if check_type == "principal_user_andy":
             ok, reason = _principal_user_andy_check(data)

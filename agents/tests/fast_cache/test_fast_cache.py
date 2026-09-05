@@ -2884,7 +2884,7 @@ def test_coerce_activity_shaped_response_schema_payload():
     }
     coerced = rose_cache.coerce_cached_llm_payload(stored)
     parsed = json.loads(coerced["content"])
-    assert parsed["title"]
+    assert parsed["title"] == "Creator Brand Strategy"
     assert [field["name"] for field in parsed["fields"]] == [
         "positioning_statement",
         "top_creators_analysis",
@@ -2898,6 +2898,25 @@ def test_coerce_activity_shaped_response_schema_payload():
         assert replayed["fields"][0]["name"] == "positioning_statement"
 
     asyncio.run(body())
+
+
+def test_coerce_activity_shaped_creator_schema_uses_meaningful_title():
+    stored = {
+        "title": "Task Output",
+        "schema": {
+            "fields": [
+                {"name": "creator_name", "type": "str", "required": True},
+                {"name": "posting_cadence_by_platform", "type": "str", "required": True},
+                {"name": "hook_formulas", "type": "list[str]", "required": True},
+            ]
+        }
+    }
+
+    coerced = rose_cache.coerce_cached_llm_payload(stored)
+    parsed = json.loads(coerced["content"])
+
+    assert parsed["title"] == "Creator Analysis"
+    assert parsed["title"] != "Task Output"
 
 
 def test_swf_miss_uses_scrape_passthrough_not_soft(mem):

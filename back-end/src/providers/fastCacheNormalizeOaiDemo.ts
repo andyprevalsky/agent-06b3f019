@@ -33,7 +33,7 @@ export function canonicalizeOaiDemoGoalForHash(goal: string): string {
     .join("Aman's");
 }
 
-const OAI_DEMO_JULY_GP_GOAL_HASHES: Record<string, string> = {
+export const OAI_DEMO_JULY_GP_GOAL_HASHES: Record<string, string> = {
   'andrew huberman': '5e1731f836723fb1',
   'bryan johnson': '2ffa1fbe4843a00f',
   'peter attia': '65d4e0248f84bef8',

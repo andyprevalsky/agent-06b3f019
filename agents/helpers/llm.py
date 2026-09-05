@@ -6382,6 +6382,10 @@ async def set_response_schema_activity(
             if _fc_cached is not None:
                 schema = _fc_cached.get("schema", {})
                 title = _fc_cached.get("title") if include_title else None
+                if include_title:
+                    from providers.fast_cache.rose_cache import meaningful_response_schema_title
+
+                    title = meaningful_response_schema_title(schema, title)
                 usage = _fc_cached.get("usage", {})
             else:
                 schema, title, usage = await _generate_response_schema_with_rose(

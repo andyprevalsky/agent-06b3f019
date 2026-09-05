@@ -3540,6 +3540,114 @@ def test_no_nested_general_purpose_static_uses_typed_parentage():
     assert nested_compact["nested_general_purpose_violations"][0]["parent_agent_id"] == gp0
 
 
+def test_mass_agent_static_rejects_synthetic_spawn_skips_and_generic_title():
+    """The OAI demo must expose real work and a descriptive task title."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    root_id = "root-oai"
+    gp_id = "gp-huberman"
+    evaluator = {
+        "checks": [
+            {"type": "no_synthetic_agent_skip_messages"},
+            {
+                "type": "agent_task_title",
+                "value": "Creator Brand Strategy",
+                "forbidden_titles": ["Task Output"],
+            },
+        ]
+    }
+    good = {
+        "agent": {
+            "agent_id": root_id,
+            "status": "COMPLETED",
+            "title": "Creator Brand Strategy",
+            "response_schema": {
+                "fields": [{"name": "creator_analyses", "type": "list[object]"}],
+            },
+        },
+        "messages": [],
+        "logs": {
+            "tree": {
+                root_id: {
+                    "parent_agent_id": None,
+                    "goal": "Analyze the top 50 creators",
+                    "messages": [],
+                },
+                gp_id: {
+                    "parent_agent_id": root_id,
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky.",
+                    "messages": [],
+                },
+            }
+        },
+    }
+    assert _run_declared_static_check(evaluator, good) == (
+        True,
+        "All declared static checks passed",
+    )
+
+    for agent_type, message in (
+        (
+            "general_purpose",
+            "Research already gathered; skipping nested spawn so the main sub-agent handles it.",
+        ),
+        ("code", "Research already gathered; skipping further spawn."),
+    ):
+        skipped = deepcopy(good)
+        skipped["logs"]["tree"][gp_id]["messages"] = [
+            {
+                "role": "TOOL",
+                "message": message,
+                "metadata": {
+                    "title": "spawn_agent complete",
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "agentType": agent_type,
+                    "skippedNestedSpawn": agent_type == "general_purpose",
+                },
+            }
+        ]
+        passed, reason = _run_declared_static_check(evaluator, skipped)
+        assert passed is False
+        assert "synthetic" in reason.lower() or "skipping" in reason.lower()
+
+    divergent_sources = deepcopy(good)
+    divergent_sources["_benchmark"] = {
+        "tree": {
+            gp_id: {
+                "parent_agent_id": root_id,
+                "messages": [
+                    {
+                        "role": "TOOL",
+                        "message": "Research already gathered; skipping nested spawn.",
+                        "metadata": {
+                            "title": "spawn_agent complete",
+                            "toolStatus": "FINISHED",
+                            "agentType": "general_purpose",
+                            "skippedNestedSpawn": True,
+                        },
+                    }
+                ],
+            }
+        }
+    }
+    divergent_sources["logs"]["tree"][gp_id]["messages"] = [
+        {"role": "ASSISTANT", "message": "Longer clean transcript."},
+        {"role": "ASSISTANT", "message": "No synthetic card here."},
+    ]
+    passed, reason = _run_declared_static_check(evaluator, divergent_sources)
+    assert passed is False
+    assert "skipping nested spawn" in reason.lower()
+
+    generic_title = deepcopy(good)
+    generic_title["agent"]["title"] = "Task Output"
+    passed, reason = _run_declared_static_check(evaluator, generic_title)
+    assert passed is False
+    assert "title" in reason.lower()
+
+
 def test_principal_user_andy_static_ignores_schema_key_leftovers():
     """T1 is a named static row: Andy principal wins; opportunities_for_aman does not fail."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -15165,7 +15273,9 @@ def test_unified_catalog_delineates_bench_axes():
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
         "t6-no-nested-gps",
+        "t6-no-synthetic-agent-skips",
         "t7-real-deliverable",
+        "t7-meaningful-task-title",
         "t7-readable-report-files",
         "t7-schema-task-complete",
         "t9-no-leftover-children",
@@ -15190,7 +15300,9 @@ def test_unified_catalog_delineates_bench_axes():
         "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
         "t5-zero-live-spend": ["zero_live_spend"],
         "t6-no-nested-gps": ["no_nested_general_purpose"],
+        "t6-no-synthetic-agent-skips": ["no_synthetic_agent_skip_messages"],
         "t7-real-deliverable": ["root_deliverable_markers"],
+        "t7-meaningful-task-title": ["agent_task_title"],
         "t7-readable-report-files": [
             "completion_summary_file_outputs",
             "completion_summary_file_outputs",
@@ -18198,6 +18310,10 @@ async def run_all_tests():
     r.record(
         "no_nested_general_purpose_static_uses_typed_parentage",
         test_no_nested_general_purpose_static_uses_typed_parentage,
+    )
+    r.record(
+        "mass_agent_no_synthetic_spawns_and_meaningful_title",
+        test_mass_agent_static_rejects_synthetic_spawn_skips_and_generic_title,
     )
     r.record(
         "principal_user_andy_static_ignores_schema_key_leftovers",

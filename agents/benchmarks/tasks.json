@@ -170,6 +170,18 @@
         ]
       },
       {
+        "id": "t6-no-synthetic-agent-skips",
+        "method": "static_check",
+        "criteria": [
+          "T6: No cached nested general-purpose or code-agent call is shown as a synthetic successful spawn"
+        ],
+        "checks": [
+          {
+            "type": "no_synthetic_agent_skip_messages"
+          }
+        ]
+      },
+      {
         "id": "t7-real-deliverable",
         "method": "static_check",
         "criteria": [
@@ -198,6 +210,20 @@
               "Isenberg"
             ],
             "min_creator_names": 10
+          }
+        ]
+      },
+      {
+        "id": "t7-meaningful-task-title",
+        "method": "static_check",
+        "criteria": [
+          "T7: The root task uses the descriptive title Creator Brand Strategy, never the generic Task Output fallback"
+        ],
+        "checks": [
+          {
+            "type": "agent_task_title",
+            "value": "Creator Brand Strategy",
+            "forbidden_titles": ["Task Output"]
           }
         ]
       },

@@ -1,4 +1,5 @@
 import type { Page } from 'playwright';
+import { retryWithBackoff } from '../../providers/retry';
 
 export function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -6,14 +7,40 @@ export function assert(condition: unknown, message: string): void {
 
 export function isTransientKernelConnectionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
+  const cause = error instanceof Error ? error.cause : undefined;
+  const causeText =
+    cause instanceof Error
+      ? `${cause.message} ${cause.name}`
+      : cause !== null && typeof cause === 'object'
+        ? `${String((cause as { message?: unknown }).message ?? '')} ${String(
+            (cause as { code?: unknown }).code ?? ''
+          )}`
+        : String(cause ?? '');
+  const transportError = `${message} ${causeText}`;
   return (
     message.includes('proxy connection failed') ||
     message.includes('context deadline exceeded') ||
     message.includes('Client.Timeout exceeded') ||
     // Steel create/replace flakes under parallel coverage load (SDK "Connection error").
     message.includes('Failed to create Steel replacement') ||
-    message.includes('Connection error')
+    message.includes('Connection error') ||
+    transportError.includes('fetch failed') ||
+    transportError.includes('other side closed') ||
+    transportError.includes('socket hang up') ||
+    transportError.includes('ECONNRESET') ||
+    transportError.includes('ECONNREFUSED') ||
+    transportError.includes('UND_ERR')
   );
+}
+
+/** Retry localhost transport resets without weakening HTTP response assertions. */
+export function retryBackendFetch(url: string, init?: RequestInit): Promise<Response> {
+  return retryWithBackoff(() => fetch(url, init), {
+    maxRetries: 4,
+    fixedDelays: [250, 500, 750],
+    isRetryable: isTransientKernelConnectionError,
+    component: 'browser-provider:backend-fetch',
+  });
 }
 
 export function isRetryableKernelNavigationError(error: unknown): boolean {
