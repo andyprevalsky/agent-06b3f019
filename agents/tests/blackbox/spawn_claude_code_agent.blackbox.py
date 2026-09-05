@@ -1539,8 +1539,13 @@ async def test_run_verifier_disabled_includes_sdk_event_stdout():
                 {"type": "tool_use", "provider": "claude", "tool": "Write", "input": {"path": "/home/user/output/collatz_27.py"}},
                 {"type": "tool_result", "provider": "claude", "status": "completed"},
                 {"type": "tool_use", "provider": "claude", "tool": "Bash", "input": {"command": "python collatz_27.py"}},
-                {"type": "tool_result", "provider": "claude", "content": stdout},
-                {"type": "result", "provider": "claude", "status": "completed", "text": stdout},
+                {"type": "tool_result", "provider": "claude", "status": "completed"},
+                {
+                    "type": "agent_message",
+                    "provider": "claude",
+                    "status": "completed",
+                    "message": stdout,
+                },
             ],
             output_files=[{"original_filename": "collatz_27.py", "mime_type": "application/octet-stream", "size_bytes": 414}],
         )

@@ -1418,7 +1418,7 @@ def _code_event_text_evidence(code_events: list[Dict[str, Any]]) -> list[str]:
                 collect(item)
             return
         if isinstance(value, dict):
-            for key in ("content", "text", "output", "result", "stdout"):
+            for key in ("content", "text", "output", "result", "stdout", "message"):
                 if key in value:
                     collect(value[key])
 
