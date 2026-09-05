@@ -72,11 +72,9 @@ function cursorMatchesTimeoutName(error: unknown): boolean {
   let cursor: unknown = error;
   for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
     if (cursor instanceof Error) {
-      if (
-        cursor.name === 'TimeoutError' ||
-        cursor.name === 'AbortError' ||
-        cursor.constructor?.name === 'DOMException'
-      ) {
+      // Only TimeoutError / AbortError — never treat SecurityError,
+      // QuotaExceededError, or other DOMExceptions as sandbox timeouts.
+      if (cursor.name === 'TimeoutError' || cursor.name === 'AbortError') {
         return true;
       }
       cursor = (cursor as { cause?: unknown }).cause;
