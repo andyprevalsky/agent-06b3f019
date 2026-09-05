@@ -32,6 +32,7 @@
     "test:blackbox": "bash scripts/run-blackbox-tests.sh"
   },
   "dependencies": {
+    "@paper-design/shaders": "^0.0.68",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-slot": "^1.2.4",
     "@supabase/supabase-js": "^2.38.0",
