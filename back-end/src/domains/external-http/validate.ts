@@ -16,20 +16,21 @@ export function assertExternalHttpMethod(method: string): HttpMethod {
   return normalized as HttpMethod;
 }
 
-const BENCHMARK_V4 = ipaddr.parseCIDR('198.18.0.0/15');
-const GLOBAL_V6_UNICAST = ipaddr.parseCIDR('2000::/3');
-const GLOBAL_NAT64_V6 = ipaddr.parseCIDR('64:ff9b::/96');
-const IETF_PROTOCOL_V6 = ipaddr.parseCIDR('2001::/23');
+// parseCIDR is typed as [IPv4 | IPv6, number]; narrow literals so .match() accepts them.
+const BENCHMARK_V4 = ipaddr.parseCIDR('198.18.0.0/15') as [ipaddr.IPv4, number];
+const GLOBAL_V6_UNICAST = ipaddr.parseCIDR('2000::/3') as [ipaddr.IPv6, number];
+const GLOBAL_NAT64_V6 = ipaddr.parseCIDR('64:ff9b::/96') as [ipaddr.IPv6, number];
+const IETF_PROTOCOL_V6 = ipaddr.parseCIDR('2001::/23') as [ipaddr.IPv6, number];
 const GLOBAL_IETF_V6_EXCEPTIONS = [
-  ipaddr.parseCIDR('2001:1::1/128'),
-  ipaddr.parseCIDR('2001:1::2/128'),
-  ipaddr.parseCIDR('2001:1::3/128'),
-  ipaddr.parseCIDR('2001:3::/32'),
-  ipaddr.parseCIDR('2001:4:112::/48'),
-  ipaddr.parseCIDR('2001:20::/28'),
-  ipaddr.parseCIDR('2001:30::/28'),
+  ipaddr.parseCIDR('2001:1::1/128') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:1::2/128') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:1::3/128') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:3::/32') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:4:112::/48') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:20::/28') as [ipaddr.IPv6, number],
+  ipaddr.parseCIDR('2001:30::/28') as [ipaddr.IPv6, number],
 ] as const;
-const DOCUMENTATION_V6 = ipaddr.parseCIDR('3fff::/20');
+const DOCUMENTATION_V6 = ipaddr.parseCIDR('3fff::/20') as [ipaddr.IPv6, number];
 
 function isBlockedV4(address: ipaddr.IPv4): boolean {
   const normalized = address.toString();
