@@ -2979,6 +2979,27 @@ async function testEmailSend_missingFromEmail() {
   }
 }
 
+async function testEmailSend_idempotencyKeyRequiresAgentId() {
+  // Temporal email sends pass idempotency_key; agent_id is required to claim the side effect.
+  const res = await request(`${BASE_URL}/api/integrations/email/send`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+    body: JSON.stringify({
+      to: 'test@test.com',
+      subject: 'test',
+      body: 'test',
+      from_email: 'sender@test.com',
+      idempotency_key: 'call-email-1',
+    }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const err = (res.data as { error?: string; message?: string }).error ?? '';
+  const msg = (res.data as { error?: string; message?: string }).message ?? '';
+  if (!`${err} ${msg}`.toLowerCase().includes('agent_id')) {
+    throw new Error(`Expected agent_id requirement in response, got ${JSON.stringify(res.data)}`);
+  }
+}
+
 async function testEmailSend_accountNotFound() {
   const res = await request(`${BASE_URL}/api/integrations/email/send`, {
     method: 'POST',
@@ -6741,6 +6762,10 @@ async function runAll() {
     { name: 'POST /email/send missing subject -> 400', fn: testEmailSend_missingSubject },
     { name: 'POST /email/send missing body -> 400', fn: testEmailSend_missingBody },
     { name: 'POST /email/send missing from_email', fn: testEmailSend_missingFromEmail },
+    {
+      name: 'POST /email/send idempotency_key requires agent_id',
+      fn: testEmailSend_idempotencyKeyRequiresAgentId,
+    },
     { name: 'POST /email/send account not found', fn: testEmailSend_accountNotFound },
     {
       name: 'GET /email/messages valid since empty account',

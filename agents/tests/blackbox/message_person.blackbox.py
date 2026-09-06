@@ -269,6 +269,87 @@ async def test_queue_imessage_activity_online_timeout_stays_queued_for_later():
     sleep.assert_awaited_once_with(2)
 
 
+async def test_send_email_activity_posts_to_integrations_send():
+    """email channel posts once to /api/integrations/email/send with idempotency."""
+    setup_mock(
+        {
+            "/api/integrations/email/send": {
+                "status": 200,
+                "json": {
+                    "success": True,
+                    "messageId": "gmail-msg-1",
+                    "threadId": "gmail-thread-1",
+                },
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import send_email_activity
+
+        result = await send_email_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-email-1",
+            to_email="office@example.com",
+            from_email="me@roselabs.ai",
+            subject="Hello",
+            body="Hi there",
+        )
+
+    assert result == {
+        "success": True,
+        "status": "sent",
+        "channel": "email",
+        "message_id": "gmail-msg-1",
+        "thread_id": "gmail-thread-1",
+        "to": "office@example.com",
+        "from_email": "me@roselabs.ai",
+        "subject": "Hello",
+    }
+    calls = get_captured_requests()
+    assert len(calls) == 1
+    assert "/api/integrations/email/send" in calls[0]["url"]
+    assert json.loads(calls[0]["requestBody"]) == {
+        "user_id": "user-42",
+        "agent_id": "agent-42",
+        "idempotency_key": "call-email-1",
+        "to": "office@example.com",
+        "from_email": "me@roselabs.ai",
+        "subject": "Hello",
+        "body": "Hi there",
+    }
+
+
+async def test_send_email_activity_surfaces_gmail_rejection():
+    """A Gmail/config rejection is terminal and returns success=False."""
+    setup_mock(
+        {
+            "/api/integrations/email/send": {
+                "status": 400,
+                "json": {
+                    "error": "Gmail not connected",
+                    "message": "No Gmail accounts connected",
+                },
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import send_email_activity
+
+        result = await send_email_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-email-fail",
+            to_email="office@example.com",
+            from_email="me@roselabs.ai",
+            subject="Hello",
+            body="Hi there",
+        )
+
+    assert result["success"] is False
+    assert "No Gmail accounts connected" in result["error"]
+
+
 async def test_send_agent_sms_activity_is_immediate_and_never_touches_imessage_queue():
     """agent_sms uses the AgentPhone boundary exactly once and has no queue lifecycle."""
     setup_mock(
@@ -1257,7 +1338,7 @@ async def test_handler_generate_message_raises_yields_error():
 
 
 async def test_handler_cold_outreach_email_path():
-    """Unsupported email delivery fails instead of claiming that it was sent."""
+    """Approved email cold outreach delivers via send_email_activity and finishes."""
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
@@ -1276,6 +1357,15 @@ async def test_handler_cold_outreach_email_path():
                 "message": "Hi Alice!",
                 "subject": "Hello",
                 "usage": {"prompt_tokens": 5, "completion_tokens": 3, "actual_model": "rose-1-lite"},
+            },
+            "send_email_activity": {
+                "success": True,
+                "status": "sent",
+                "message_id": "gmail-1",
+                "thread_id": "thread-1",
+                "to": "alice@example.com",
+                "from_email": "me@roselabs.ai",
+                "subject": "Hello",
             },
         }
     )
@@ -1301,9 +1391,70 @@ async def test_handler_cold_outreach_email_path():
     assert approved["called"]
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
     errors = [e for e in events if e.status == MessageStatus.ERROR]
-    assert finished == []
+    assert errors == []
+    assert len(finished) == 1
+    assert "Email sent" in (finished[0].title or "")
+    assert finished[0].data and finished[0].data["delivery"]["message_id"] == "gmail-1"
+    sends = [call for call in fake.calls if call["name"] == "send_email_activity"]
+    assert len(sends) == 1
+    assert sends[0]["args"] == [
+        "user-1",
+        "agent-1",
+        "tc-cold",
+        "alice@example.com",
+        "me@roselabs.ai",
+        "Hello",
+        "Hi Alice!",
+    ]
+    assert sends[0]["kwargs"]["retry_policy"].maximum_attempts == 1
+
+
+async def test_handler_email_delivery_failure_surfaces_provider_error():
+    """Provider rejection after approval yields ERROR and does not claim sent."""
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    async def fake_approval(*args, **kwargs):
+        return {"response": "ok", "question": "", "attention_request_id": None}
+
+    fake = _FakeWFModule(
+        activity_results={
+            "read_message_history_activity": {"person": None, "messages": []},
+            "fetch_recent_messages_activity": {"messages": []},
+            "generate_message_activity": {
+                "message": "Hi Alice!",
+                "subject": "Hello",
+                "usage": {},
+            },
+            "send_email_activity": {
+                "success": False,
+                "error": "Gmail token expired",
+            },
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
+        try:
+            events = await _collect(
+                MessagePersonManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={
+                        "person_id": "alice@example.com",
+                        "channel": "email",
+                        "from_email": "me@roselabs.ai",
+                        "intent": "say hi",
+                    },
+                    tool_call_id="tc-email-fail",
+                )
+            )
+        finally:
+            restore()
+
+    assert [e for e in events if e.status == MessageStatus.FINISHED] == []
+    errors = [e for e in events if e.status == MessageStatus.ERROR]
     assert len(errors) == 1
-    assert "Email delivery is not available" in errors[0].message
+    assert "Failed to send Email" in (errors[0].title or "")
+    assert "Gmail token expired" in (errors[0].message or "")
 
 
 async def test_handler_user_rejects_approval():
@@ -1621,6 +1772,14 @@ async def run_all_tests():
         "send_agent_sms_activity_provider_rejection_no_queue",
         test_send_agent_sms_activity_surfaces_provider_rejection_without_queue_fallback,
     )
+    await r.record_async(
+        "send_email_activity_posts_to_integrations_send",
+        test_send_email_activity_posts_to_integrations_send,
+    )
+    await r.record_async(
+        "send_email_activity_surfaces_gmail_rejection",
+        test_send_email_activity_surfaces_gmail_rejection,
+    )
     await r.record_async("fetch_recent_messages_happy_path", test_fetch_recent_messages_happy_path)
     await r.record_async("fetch_recent_messages_boundary", test_fetch_recent_messages_boundary)
     await r.record_async(
@@ -1709,6 +1868,10 @@ async def run_all_tests():
     )
     await r.record_async("handler_gen_raises", test_handler_generate_message_raises_yields_error)
     await r.record_async("handler_cold_outreach_email", test_handler_cold_outreach_email_path)
+    await r.record_async(
+        "handler_email_delivery_failure_surfaces_provider_error",
+        test_handler_email_delivery_failure_surfaces_provider_error,
+    )
     await r.record_async("handler_user_rejects", test_handler_user_rejects_approval)
     await r.record_async(
         "handler_imessage_success_requires_confirmed_send",

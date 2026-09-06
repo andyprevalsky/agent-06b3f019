@@ -281,6 +281,114 @@ async def _send_agent_sms_real(
 
 
 @activity.defn
+@traced("send_email_activity")
+async def send_email_activity(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    to_email: str,
+    from_email: str,
+    subject: str,
+    body: str,
+    world_model_mode: str | None = None,
+) -> dict[str, Any]:
+    """Send an approved email through the user's connected Gmail account."""
+
+    async def real_executor(
+        _tool_name: str,
+        _tool_args: dict[str, Any],
+        _tool_call_id: str,
+    ) -> dict[str, Any]:
+        return await _send_email_real(
+            user_id,
+            agent_id,
+            tool_call_id,
+            to_email,
+            from_email,
+            subject,
+            body,
+        )
+
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
+        "message_transport_send",
+        {
+            "channel": "email",
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "to_email": to_email,
+            "from_email": from_email,
+            "subject": subject,
+            "message": body,
+        },
+        tool_call_id,
+        real_executor,
+        allow_real_fallback=world_model_mode is None,
+    )
+
+
+async def _send_email_real(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    to_email: str,
+    from_email: str,
+    subject: str,
+    body: str,
+) -> dict[str, Any]:
+    """POST /api/integrations/email/send with Temporal-safe idempotency."""
+    from config import load_config
+
+    activity.heartbeat(f"Sending approved email to {to_email[:40]}")
+    config = load_config()
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/email/send",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "idempotency_key": tool_call_id,
+                "to": to_email,
+                "from_email": from_email,
+                "subject": subject,
+                "body": body,
+            },
+        )
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"error": response.text[:200] or f"Backend error ({response.status_code})"}
+
+    if response.status_code != 200:
+        return {
+            "success": False,
+            "error": result.get("message") or result.get("error") or f"Backend error ({response.status_code})",
+        }
+
+    message_id = result.get("messageId")
+    if result.get("success") is not True or not isinstance(message_id, str) or not message_id:
+        return {"success": False, "error": "Gmail did not return a sent message receipt"}
+
+    return {
+        "success": True,
+        "status": "sent",
+        "channel": "email",
+        "message_id": message_id,
+        "thread_id": result.get("threadId") if isinstance(result.get("threadId"), str) else None,
+        "to": to_email,
+        "from_email": from_email,
+        "subject": subject,
+    }
+
+
+@activity.defn
 @traced("fetch_recent_messages_activity")
 async def fetch_recent_messages_activity(
     user_id: str,

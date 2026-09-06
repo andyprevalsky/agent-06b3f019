@@ -51,6 +51,7 @@ from domains.message_person.repo import (
     generate_message_activity,
     queue_imessage_activity,
     send_agent_sms_activity,
+    send_email_activity,
 )
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
@@ -1076,6 +1077,7 @@ async def main():
         fetch_recent_messages_activity,
         queue_imessage_activity,
         send_agent_sms_activity,
+        send_email_activity,
         call_phone_number_activity,
         poll_new_messages,
         post_agent_message,
