@@ -63,7 +63,6 @@ from .challenge_recovery import (
     live_tab_looks_challenged,
     page_looks_challenged,
     recover_from_challenge,
-    verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
 )
 from .browser_use_patches import apply_browser_use_navigate_timeout_patch
@@ -10066,7 +10065,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     logger.info("\U0001f534 Browser agent cancelled")
                     pause_metadata = {
                         "toolName": "spawn_browser_agent",
-                        "action_type": "session_paused",
+                        "action_type": "task_complete",
                     }
                     if result:
                         if result.get("task_id"):

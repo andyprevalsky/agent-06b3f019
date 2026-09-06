@@ -18,7 +18,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -17319,7 +17319,15 @@ def test_realm_transition_refreshes_active_session_credential_ref():
     assert "nonlocal session_credential_ref" in helper_source
     assert "session_credential_ref = realm_state.auth_credential_ref" in helper_source
 
-async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
+async def test_manager_cancelled_browser_pause_event_is_task_complete():
+    """Workflow-owned cancel must persist the durable browser terminal.
+
+    Production agent 043e4578 (2026-09-06) proved that Temporal TRY_CANCEL can
+    acknowledge cancellation after the activity saved its recording but before
+    the activity's best-effort task_complete write lands. The manager is the
+    authoritative observer of cancellation, so its task-scoped event must carry
+    the publisher's task_complete contract rather than only session_paused.
+    """
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import EventType, MessageStatus
 
@@ -17369,7 +17377,7 @@ async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
     assert pause_event.status == MessageStatus.ERROR
     assert pause_event.metadata == {
         "toolName": "spawn_browser_agent",
-        "action_type": "session_paused",
+        "action_type": "task_complete",
         "task_id": "task-1",
         "browser_url": "https://steel.example/debug",
         "session_id": "session-1",
@@ -20672,8 +20680,8 @@ async def run_all_tests():
         test_realm_transition_refreshes_active_session_credential_ref,
     )
     await r.record_async(
-        "manager_cancelled_pause_metadata",
-        test_manager_cancelled_browser_pause_event_includes_task_metadata,
+        "manager_cancelled_pause_is_task_complete",
+        test_manager_cancelled_browser_pause_event_is_task_complete,
     )
     await r.record_async(
         "manager_passes_fast_mode_cache",
