@@ -357,6 +357,39 @@ test('integration seed discovers account columns before selecting them', async (
   );
 });
 
+test('subscription seed discovers stripeLivemode before selecting it', async () => {
+  const source = readSeedLocalSource();
+  const stableStart = source.indexOf('const PROD_SUBSCRIPTION_COLUMNS = {');
+  const stableEnd = source.indexOf('} as const;', stableStart);
+  const stableProjection = source.slice(stableStart, stableEnd);
+  const helperStart = source.indexOf('async function findProdSubscription(');
+  const helperEnd = source.indexOf('\n}\n', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+
+  assert(stableStart > 0 && stableEnd > stableStart, 'expected the stable Subscription projection');
+  assert(
+    !stableProjection.includes('stripeLivemode: true'),
+    'the pre-migration Subscription projection must not request stripeLivemode'
+  );
+  assert(
+    source.includes("column_name = 'stripeLivemode'"),
+    'expected a schema capability probe for Subscription.stripeLivemode'
+  );
+  assert(
+    helper.includes('select: PROD_SUBSCRIPTION_COLUMNS_WITH_LIVEMODE') &&
+      helper.includes('select: PROD_SUBSCRIPTION_COLUMNS'),
+    'expected post-migration and pre-migration Subscription read paths'
+  );
+  assert(
+    helper.includes('stripeLivemode: false'),
+    'expected legacy Subscription rows to receive the local migration default'
+  );
+  assert(
+    source.includes('findProdSubscription(SEED_USER_ID)'),
+    'Subscription sync must use the capability-aware reader'
+  );
+});
+
 test('integration capability probe retries after a transient rejection and caches success', async () => {
   let attempts = 0;
   const probe = createRetryableProbe(async () => {
