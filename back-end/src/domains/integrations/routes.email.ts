@@ -18,12 +18,16 @@ const router = Router({ mergeParams: true });
 export async function requireFromEmailOrRespond(
   res: Response,
   userId: string,
-  fromEmail: unknown
+  fromEmail: unknown,
+  deps: {
+    getAvailableGmailEmails?: (userId: string) => Promise<string[]>;
+  } = {}
 ): Promise<string | null> {
   if (fromEmail !== undefined && fromEmail !== null && fromEmail !== '') {
     return fromEmail as string;
   }
-  const available = await service.getAvailableGmailEmails(userId);
+  const getAvailable = deps.getAvailableGmailEmails ?? service.getAvailableGmailEmails;
+  const available = await getAvailable(userId);
   if (available.length > 0) {
     res.status(400).json({
       error: 'from_email required',

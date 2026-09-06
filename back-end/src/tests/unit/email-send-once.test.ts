@@ -197,6 +197,35 @@ async function main(): Promise<void> {
       );
     });
 
+    await test('sendEmailOnce claims, sends, and records SUCCEEDED via override', async () => {
+      const idempotencyKey = `${prefix}-success`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+      const { setSendEmailOverrideForTests } = await import(
+        '../../domains/integrations/service.emailSendOnce'
+      );
+      setSendEmailOverrideForTests(async () => ({ id: 'gmail-ok-1', threadId: 'thread-ok-1' }));
+      try {
+        const result = await sendEmailOnce(userId, {
+          to: 'a@b.com',
+          subject: 'Hi',
+          body: 'Body',
+          fromEmail: 'me@x.com',
+          agentId,
+          idempotencyKey,
+          cc: 'cc@x.com',
+        });
+        assert.deepStrictEqual(result, { id: 'gmail-ok-1', threadId: 'thread-ok-1' });
+        const record = await prisma.toolSideEffect.findUniqueOrThrow({
+          where: { operationKey: key },
+        });
+        assert.strictEqual(record.status, 'SUCCEEDED');
+        assert.strictEqual(record.externalId, 'gmail-ok-1');
+      } finally {
+        setSendEmailOverrideForTests(null);
+      }
+    });
+
     await test('sendEmailOnce marks FAILED when Gmail credential is missing', async () => {
       const idempotencyKey = `${prefix}-fail`;
       const key = operationKey(userId, agentId, idempotencyKey);

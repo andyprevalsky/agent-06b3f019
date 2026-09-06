@@ -15,6 +15,25 @@ import {
 
 const GMAIL_SEND_OPERATION_TYPE = 'gmail.message';
 
+type SendEmailFn = (
+  userId: string,
+  params: {
+    to: string;
+    subject: string;
+    body: string;
+    cc?: string;
+    fromEmail: string;
+    agentId?: string;
+  }
+) => Promise<{ id: string; threadId: string }>;
+
+/** Test-only override so unit tests can exercise the claim→send→succeed path. */
+let sendEmailOverride: SendEmailFn | null = null;
+
+export function setSendEmailOverrideForTests(fn: SendEmailFn | null): void {
+  sendEmailOverride = fn;
+}
+
 export class GmailSendIdempotencyConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -90,7 +109,8 @@ export async function sendEmailOnce(
   }
 
   try {
-    const { sendEmail } = await import('./service');
+    const sendEmail =
+      sendEmailOverride ?? (await import('./service')).sendEmail;
     const result = await sendEmail(userId, {
       to: params.to,
       subject: params.subject,

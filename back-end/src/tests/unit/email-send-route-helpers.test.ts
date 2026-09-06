@@ -52,6 +52,16 @@ function mockRes(): Response & { statusCode: number; body: unknown } {
 }
 
 async function main(): Promise<void> {
+  await test('requireFromEmailOrRespond lists available accounts when connected', async () => {
+    const res = mockRes();
+    const value = await requireFromEmailOrRespond(res, 'user-1', null, {
+      getAvailableGmailEmails: async () => ['connected@example.com'],
+    });
+    assert.strictEqual(value, null);
+    assert.strictEqual(res.statusCode, 400);
+    assert.ok(JSON.stringify(res.body).includes('connected@example.com'));
+  });
+
   await test('requireFromEmailOrRespond returns provided from_email', async () => {
     const res = mockRes();
     const value = await requireFromEmailOrRespond(res, 'user-1', 'me@x.com');
