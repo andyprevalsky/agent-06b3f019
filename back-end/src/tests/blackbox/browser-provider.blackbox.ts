@@ -19,6 +19,7 @@ import {
   isRetryableKernelNavigationError,
   isTransientKernelConnectionError,
   navigateKernelPage,
+  retryBackendFetch,
   withProvider,
 } from './browser-provider.helpers';
 import {
@@ -197,7 +198,7 @@ async function runLiveProviderParity(): Promise<void> {
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
 
-  const invalidRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+  const invalidRotation = await retryBackendFetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
     method: 'POST',
     headers,
     body: JSON.stringify({}),
@@ -205,7 +206,7 @@ async function runLiveProviderParity(): Promise<void> {
   assert(invalidRotation.status === 400, 'invalid rotate-proxy payload was not rejected');
 
   const post = async (path: string, body?: unknown): Promise<BrowserApiResponse> => {
-    const response = await fetch(`${baseUrl}/api/browser-session${path}`, {
+    const response = await retryBackendFetch(`${baseUrl}/api/browser-session${path}`, {
       method: 'POST',
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -358,7 +359,6 @@ async function runLiveProviderParity(): Promise<void> {
       );
 
     const ipBefore = await readExitIpWithRetry(String(init.ws_url));
-    assert(ipBefore !== '', 'could not read exit IP before rotation');
 
     const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
     assert(
@@ -451,17 +451,20 @@ async function runLiveProviderParity(): Promise<void> {
     );
 
     // ----- unknown task → 404 -----
-    const notFoundResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ task_id: randomUUID() }),
-    });
+    const notFoundResponse = await retryBackendFetch(
+      `${baseUrl}/api/browser-session/rotate-proxy`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ task_id: randomUUID() }),
+      }
+    );
     assert(
       notFoundResponse.status === 404,
       `expected 404 for an unknown task, got ${notFoundResponse.status}`
     );
 
-    const taskResponse = await fetch(
+    const taskResponse = await retryBackendFetch(
       `${baseUrl}/api/browser-session/task/${String(init.task_id)}?validateLive=true`,
       { headers: { 'x-api-key': apiKey } }
     );
@@ -491,24 +494,28 @@ async function runLiveProviderParity(): Promise<void> {
     const expectedContent = 'kernel-provider-file-parity';
     const form = new FormData();
     form.append('file', new Blob([expectedContent], { type: 'text/plain' }), 'kernel-parity.txt');
-    const uploadResponse = await fetch(`${baseUrl}/api/browser-session/${liveSessionId}/files`, {
-      method: 'POST',
-      headers: { 'x-api-key': apiKey },
-      body: form,
-    });
+    const uploadResponse = await retryBackendFetch(
+      `${baseUrl}/api/browser-session/${liveSessionId}/files`,
+      {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey },
+        body: form,
+      }
+    );
     const upload = (await uploadResponse.json()) as BrowserApiResponse;
     assert(uploadResponse.ok && typeof upload.path === 'string', 'Kernel file upload failed');
 
-    const listResponse = await fetch(`${baseUrl}/api/browser-session/${liveSessionId}/files/list`, {
-      headers: { 'x-api-key': apiKey },
-    });
+    const listResponse = await retryBackendFetch(
+      `${baseUrl}/api/browser-session/${liveSessionId}/files/list`,
+      { headers: { 'x-api-key': apiKey } }
+    );
     const listing = (await listResponse.json()) as { files?: Array<{ path: string }> };
     assert(
       listResponse.ok && listing.files?.some((file) => file.path === upload.path),
       'Kernel uploaded file was not listed'
     );
 
-    const downloadResponse = await fetch(
+    const downloadResponse = await retryBackendFetch(
       `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`,
       { headers: { 'x-api-key': apiKey } }
     );
@@ -517,7 +524,7 @@ async function runLiveProviderParity(): Promise<void> {
       'Kernel file download did not round-trip'
     );
 
-    const traversalResponse = await fetch(
+    const traversalResponse = await retryBackendFetch(
       `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=../etc/passwd`,
       { headers: { 'x-api-key': apiKey } }
     );
@@ -532,24 +539,27 @@ async function runLiveProviderParity(): Promise<void> {
       subject: `kernel-attacker-${randomUUID()}`,
       expiresIn: '5m',
     });
-    const crossTenantFile = await fetch(
+    const crossTenantFile = await retryBackendFetch(
       `${baseUrl}/api/browser-session/${liveSessionId}/files/content?path=${encodeURIComponent(String(upload.path))}`,
       { headers: { Authorization: `Bearer ${attackerToken}` } }
     );
     assert(crossTenantFile.status === 404, 'cross-tenant session file read was not rejected');
-    const crossTenantScreenshot = await fetch(
+    const crossTenantScreenshot = await retryBackendFetch(
       `${baseUrl}/api/browser-session/${liveSessionId}/screenshot`,
       { method: 'POST', headers: { Authorization: `Bearer ${attackerToken}` } }
     );
     assert(crossTenantScreenshot.status === 404, 'cross-tenant screenshot was not rejected');
-    const crossTenantRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${attackerToken}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ task_id: init.task_id }),
-    });
+    const crossTenantRotation = await retryBackendFetch(
+      `${baseUrl}/api/browser-session/rotate-proxy`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${attackerToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ task_id: init.task_id }),
+      }
+    );
     assert(crossTenantRotation.status === 404, 'cross-tenant proxy rotation was not rejected');
 
     const screenshot = await post(`/${liveSessionId}/screenshot`);

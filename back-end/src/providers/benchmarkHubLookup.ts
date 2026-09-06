@@ -3,36 +3,166 @@
  *
  * Official 4w creates a client UUID and reads the row before POST commits.
  * A per-request scan of every hub bundle on that miss starves Prisma.
- * Unknown IDs miss without reading bundles; uploads/deletes keep the maps
- * aligned with the live index so a later GET cannot serve a deleted run.
+ * Unknown IDs miss without reading the run catalog or any full bundle.
+ * Uploads/deletes persist a compact reverse index; a bounded background refresh
+ * and exact run tombstones keep per-process maps aligned across backend replicas.
  */
-import { getRunBundle, listRuns, type HubAgentView, type HubRunSummary } from './benchmarkHubStore';
+import {
+  getRunBundleStrict,
+  listRunsStrict,
+  loadHubAgentRunIndex,
+  persistHubAgentRunBackfill,
+  type HubAgentView,
+  type HubAgentRunIndexSnapshot,
+  type HubRunSummary,
+} from './benchmarkHubStore';
+import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
+import { createLogger } from './logger';
 
+const log = createLogger('BenchmarkHubLookup');
+const AGENT_INDEX_REFRESH_MS = 5_000;
+const LEGACY_BACKFILL_RETRY_BASE_MS = 5_000;
+const LEGACY_BACKFILL_RETRY_MAX_MS = 5 * 60_000;
 const agentRunCache = new Map<string, string>();
 const agentRunMissCache = new Set<string>();
 let childIdToRun: Map<string, string> | null = null;
-let childIdIndexPromise: Promise<Map<string, string>> | null = null;
+let compactIndexLoadPromise: Promise<CompactIndexLoadResult> | null = null;
+let legacyBackfillPromise: Promise<void> | null = null;
+let legacyBackfillFailureCount = 0;
+let legacyBackfillRetryAt = 0;
+let childIdIndexLoadedAt = 0;
+let latestAppliedRevision = 0;
 
-async function buildChildIdIndex(): Promise<Map<string, string>> {
-  const index = await listRuns();
-  const map = new Map<string, string>();
+export type CompactIndexLoadResult =
+  | { kind: 'ready' }
+  | { kind: 'legacy'; seed: Map<string, string> }
+  | { kind: 'stale' }
+  | { kind: 'error' };
+
+export function legacyBackfillRetryDelayMs(failureCount: number): number {
+  const exponent = Math.max(0, Math.min(16, Math.floor(failureCount) - 1));
+  return Math.min(LEGACY_BACKFILL_RETRY_MAX_MS, LEGACY_BACKFILL_RETRY_BASE_MS * 2 ** exponent);
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Build the archived child-agent lookup without starving live HTTP requests. */
+export async function buildHubAgentIdIndex(
+  index: HubRunSummary[],
+  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  seed: Map<string, string> = new Map()
+): Promise<Map<string, string>> {
+  const map = new Map(seed);
   for (const run of index) {
-    const bundle = await getRunBundle(run.run_id);
+    // Local Hub bundles can exceed 50 MB and old workspaces can hold hundreds
+    // of them. Yield before each async read/parse so this background migration
+    // cannot monopolize the backend while a client-created agent UUID is still
+    // racing its POST /api/agents commit.
+    await yieldToEventLoop();
+    const bundle = await loadBundle(run.run_id);
     if (bundle === null) continue;
     for (const id of agentIdsFromHubBundle(bundle)) {
       if (!map.has(id)) map.set(id, run.run_id);
     }
   }
-  childIdToRun = map;
   return map;
 }
 
-function scheduleChildIdIndex(): void {
-  if (childIdIndexPromise !== null || childIdToRun !== null) return;
-  childIdIndexPromise = buildChildIdIndex().catch((error: unknown) => {
-    childIdIndexPromise = null;
-    throw error;
+/** Failed bundle reads reject before the completion callback can publish the migration. */
+export async function backfillHubAgentRunIndex(
+  index: HubRunSummary[],
+  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  seed: Map<string, string>,
+  persist: (agents: Map<string, string>) => Promise<HubAgentRunIndexSnapshot>
+): Promise<HubAgentRunIndexSnapshot> {
+  return persist(await buildHubAgentIdIndex(index, loadBundle, seed));
+}
+
+/** Catalog faults reject before a migration can publish complete=true. */
+export async function backfillHubAgentRunIndexFromCatalog(
+  loadRuns: () => Promise<HubRunSummary[]>,
+  loadBundle: (runId: string) => Promise<Record<string, unknown> | null>,
+  seed: Map<string, string>,
+  persist: (agents: Map<string, string>) => Promise<HubAgentRunIndexSnapshot>
+): Promise<HubAgentRunIndexSnapshot> {
+  return backfillHubAgentRunIndex(await loadRuns(), loadBundle, seed, persist);
+}
+
+/** Install one authoritative persisted revision and invalidate older hit/miss decisions. */
+export function installHubAgentRunIndex(index: HubAgentRunIndexSnapshot): boolean {
+  if (index.revision < latestAppliedRevision) return false;
+  childIdToRun = new Map(index.agents);
+  childIdIndexLoadedAt = Date.now();
+  latestAppliedRevision = index.revision;
+  agentRunCache.clear();
+  agentRunMissCache.clear();
+  return true;
+}
+
+/** The cold path awaits only this compact read; it never awaits full-bundle migration. */
+export async function loadCompactHubAgentIndex(
+  loadIndex: () => Promise<HubAgentRunIndexSnapshot | null> = loadHubAgentRunIndex
+): Promise<CompactIndexLoadResult> {
+  try {
+    const persisted = await loadIndex();
+    if (persisted === null || !persisted.complete) {
+      return { kind: 'legacy', seed: persisted?.agents ?? new Map() };
+    }
+    return installHubAgentRunIndex(persisted) ? { kind: 'ready' } : { kind: 'stale' };
+  } catch (error: unknown) {
+    log.warn('Benchmark Hub compact agent index read failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { kind: 'error' };
+  }
+}
+
+function startCompactIndexLoad(): Promise<CompactIndexLoadResult> {
+  if (compactIndexLoadPromise !== null) return compactIndexLoadPromise;
+  compactIndexLoadPromise = loadCompactHubAgentIndex().finally(() => {
+    compactIndexLoadPromise = null;
+  });
+  return compactIndexLoadPromise;
+}
+
+function scheduleLegacyBackfill(seed: Map<string, string>): void {
+  if (legacyBackfillPromise !== null || Date.now() < legacyBackfillRetryAt) return;
+  // Archives created before agent-run-index.json need exactly one cooperative
+  // backfill. Persisting complete=true makes later process starts independent
+  // of archive size; foreground requests never await this migration.
+  legacyBackfillPromise = (async () => {
+    const stored = await backfillHubAgentRunIndexFromCatalog(
+      listRunsStrict,
+      getRunBundleStrict,
+      seed,
+      persistHubAgentRunBackfill
+    );
+    installHubAgentRunIndex(stored);
+    legacyBackfillFailureCount = 0;
+    legacyBackfillRetryAt = 0;
+  })()
+    .catch((error: unknown) => {
+      legacyBackfillFailureCount += 1;
+      const retryDelayMs = legacyBackfillRetryDelayMs(legacyBackfillFailureCount);
+      legacyBackfillRetryAt = Date.now() + retryDelayMs;
+      log.warn('Benchmark Hub legacy agent index backfill failed', {
+        error: error instanceof Error ? error.message : String(error),
+        retryDelayMs,
+      });
+    })
+    .finally(() => {
+      legacyBackfillPromise = null;
+    });
+}
+
+function scheduleCompactIndexRefresh(): void {
+  const fresh = childIdToRun !== null && Date.now() - childIdIndexLoadedAt < AGENT_INDEX_REFRESH_MS;
+  if (fresh || compactIndexLoadPromise !== null) return;
+  void startCompactIndexLoad().then((result) => {
+    if (result.kind === 'legacy') scheduleLegacyBackfill(result.seed);
   });
 }
 
@@ -56,7 +186,13 @@ export function agentIdsFromHubBundle(bundle: { tasks?: unknown }): string[] {
 }
 
 /** Newest upload wins for a reused bench agent id; miss cache cannot pin a stale 404. */
-export function applyHubRunToResolutionCaches(runId: string, agentIds: string[]): void {
+export function applyHubRunToResolutionCaches(
+  runId: string,
+  agentIds: string[],
+  revision?: number
+): void {
+  if (revision !== undefined && revision < latestAppliedRevision) return;
+  if (revision !== undefined) latestAppliedRevision = revision;
   for (const id of agentIds) {
     if (!id) continue;
     if (childIdToRun !== null) childIdToRun.set(id, runId);
@@ -76,7 +212,12 @@ export function __resetHubResolutionCachesForTest(): void {
   agentRunCache.clear();
   agentRunMissCache.clear();
   childIdToRun = null;
-  childIdIndexPromise = null;
+  compactIndexLoadPromise = null;
+  legacyBackfillPromise = null;
+  legacyBackfillFailureCount = 0;
+  legacyBackfillRetryAt = 0;
+  childIdIndexLoadedAt = 0;
+  latestAppliedRevision = 0;
 }
 
 export function peekHubResolutionForTest(agentId: string): {
@@ -89,7 +230,7 @@ export function peekHubResolutionForTest(agentId: string): {
   };
 }
 
-/** Index-only lookup: roots from listRuns, children from the built id map. */
+/** Legacy pure helper for callers that already hold both old indexes. */
 export function resolveHubRunIdFromIndexes(
   agentId: string,
   runs: HubRunSummary[],
@@ -105,40 +246,51 @@ export function resolveHubRunIdFromIndexes(
   return runId === undefined ? { kind: 'miss' } : { kind: 'hit', runId };
 }
 
+/** Constant-time lookup once the compact persisted index is loaded. */
+export function resolveHubRunIdFromAgentIndex(
+  agentId: string,
+  agentIndex: Map<string, string> | null
+): string | null {
+  return agentIndex?.get(agentId) ?? null;
+}
+
 /**
  * Resolve a benchmark agent (root OR sub-agent) across stored runs.
- * Roots resolve from the index alone. Child IDs use a once-built map so an
- * unknown in-flight UUID is O(1) after the map exists and never scans every
- * bundle on the request path (Pass 2 used to).
+ * Roots and children resolve from one compact map, so an unknown in-flight UUID
+ * is O(1) after the map is loaded and never reads the run catalog or scans full
+ * bundles on the request path (Pass 2 used to).
  */
 export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView | null> {
   if (!agentId) return null;
-  if (agentRunMissCache.has(agentId)) return null;
-  const index = await listRuns();
-  const indexedRunIds = new Set(index.map((run) => run.run_id));
   const cachedRunId = agentRunCache.get(agentId);
   if (cachedRunId !== undefined) {
-    if (indexedRunIds.has(cachedRunId)) {
-      const view = await getRunAgent(cachedRunId, agentId);
-      if (view !== null) return view;
-    }
+    const view = await getRunAgent(cachedRunId, agentId);
+    if (view !== null) return view;
     agentRunCache.delete(agentId);
   }
-  const resolved = resolveHubRunIdFromIndexes(agentId, index, childIdToRun);
-  if (resolved.kind === 'hit') {
-    if (!indexedRunIds.has(resolved.runId)) {
-      forgetHubRunFromResolutionCaches(resolved.runId, [agentId]);
-    } else {
-      const view = await getRunAgent(resolved.runId, agentId);
-      if (view !== null) {
-        rememberHubRun(agentId, resolved.runId);
-        return view;
-      }
+  if (childIdToRun === null) {
+    const load = await startCompactIndexLoad();
+    if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
+    if (load.kind !== 'ready') {
+      throw new BenchmarkHubUnavailableError(
+        load.kind === 'legacy'
+          ? 'Benchmark Hub archive index is warming; retry shortly'
+          : 'Benchmark Hub archive index is temporarily unavailable; retry shortly'
+      );
     }
+  } else {
+    scheduleCompactIndexRefresh();
   }
-  if (resolved.kind === 'pending') {
-    scheduleChildIdIndex();
-    return null;
+  if (agentRunMissCache.has(agentId)) return null;
+  if (childIdToRun === null) return null;
+  const runId = resolveHubRunIdFromAgentIndex(agentId, childIdToRun);
+  if (runId !== null) {
+    const view = await getRunAgent(runId, agentId);
+    if (view !== null) {
+      rememberHubRun(agentId, runId);
+      return view;
+    }
+    forgetHubRunFromResolutionCaches(runId, [agentId]);
   }
   agentRunMissCache.add(agentId);
   return null;

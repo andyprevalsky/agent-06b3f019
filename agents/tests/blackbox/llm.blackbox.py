@@ -1944,6 +1944,67 @@ async def test_set_response_schema_activity_success():
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Goal Summary"
 
 
+async def test_set_response_schema_activity_replaces_cached_task_output_title():
+    """A legacy schema-cache placeholder cannot rename a root task."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "list[object]", "required": True},
+            {"name": "positioning_statement", "type": "str", "required": True},
+        ]
+    }
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-cached-title:generation-1",
+        workflow_run_id="run-cached-title",
+        activity_id="set-response-schema-cached-title",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal")),
+        ),
+        patch(
+            "providers.fast_cache.client.cache_get",
+            AsyncMock(return_value={"schema": schema, "title": "Task Output", "usage": {}}),
+        ),
+        patch("helpers.llm.RoseClient") as rose_client,
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-cached-title",
+            ["goal"],
+            fast_mode_cache_enabled=True,
+            include_title=True,
+        )
+
+    rose_client.assert_not_called()
+    assert result is not None
+    assert result["title"] == "Creator Brand Strategy"
+    schema_save = next(
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-cached-title" in request["url"]
+    )
+    assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
+
+
 async def test_set_response_schema_activity_uses_internal_auth_only():
     """set_response_schema_activity defaults to no direct compute auth."""
     setup_mock(
@@ -7755,6 +7816,10 @@ async def run_all_tests():
     )
     await r.record_async("mark_claude_token_rate_limited_failure", test_mark_claude_token_rate_limited_failure)
     await r.record_async("set_response_schema_activity_success", test_set_response_schema_activity_success)
+    await r.record_async(
+        "set_response_schema_activity_replaces_cached_task_output_title",
+        test_set_response_schema_activity_replaces_cached_task_output_title,
+    )
     await r.record_async(
         "set_response_schema_activity_uses_internal_auth_only",
         test_set_response_schema_activity_uses_internal_auth_only,

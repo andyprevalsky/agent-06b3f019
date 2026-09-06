@@ -14,6 +14,8 @@
  */
 
 import { config } from 'dotenv';
+import { execFileSync } from 'node:child_process';
+import { PrismaClient } from '@prisma/client';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
 import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import { rewriteOaiDemoCacheValue } from '../../domains/fast-cache/oaiDemoCacheCleaner';
@@ -85,6 +87,145 @@ async function main(): Promise<void> {
       (result as typeof result & { deleteEntry?: boolean }).deleteEntry === true,
       'the browser-bearing cache row must be removed from runtime replay'
     );
+  });
+
+  await test('OAI trajectory cleanup deletes nested GP, for-each, and code replay slots', async () => {
+    const nestedCalls = [
+      {
+        label: 'general-purpose',
+        call: {
+          id: 'gp-call',
+          name: 'spawn_agent',
+          arguments: JSON.stringify({ type: 'general_purpose', goal: 'Research one creator.' }),
+        },
+      },
+      {
+        label: 'for-each',
+        call: {
+          id: 'for-each-call',
+          name: 'spawn_agent',
+          arguments: JSON.stringify({ type: 'for_each', goal: 'Research each creator.' }),
+        },
+      },
+      {
+        label: 'code',
+        call: {
+          id: 'code-call',
+          name: 'spawn_agent',
+          arguments: JSON.stringify({ type: 'code', goal: 'Implement the change.' }),
+        },
+      },
+      {
+        label: 'legacy general-purpose',
+        call: {
+          id: 'legacy-gp-call',
+          name: 'spawn_general_purpose_agent',
+          arguments: JSON.stringify({ goal: 'Research one creator.' }),
+        },
+      },
+      {
+        label: 'legacy for-each',
+        call: {
+          id: 'legacy-for-each-call',
+          name: 'spawn_general_purpose_agent_for_each',
+          arguments: JSON.stringify({ goal: 'Research each creator.' }),
+        },
+      },
+      {
+        label: 'legacy code',
+        call: {
+          id: 'legacy-code-call',
+          name: 'spawn_code_agent',
+          arguments: JSON.stringify({ goal: 'Implement the change.' }),
+        },
+      },
+    ];
+
+    for (const { label, call } of nestedCalls) {
+      const result = rewriteOaiDemoCacheValue({
+        content: 'The main creator analysis already contains the evidence.',
+        tool_calls: [call],
+      });
+      assert(
+        result.nestedAgentCallsRemoved === 1,
+        `${label} nested call must be classified for removal`
+      );
+      assert(result.deleteEntry === true, `${label} cache row must leave runtime replay`);
+      assert(
+        (result.value as { tool_calls: unknown[] }).tool_calls.length === 0,
+        `${label} cleanup preview must contain no replacement tool call`
+      );
+    }
+  });
+
+  await test('OAI maintenance archives the complete nested-agent row transactionally', async () => {
+    const maintenanceGoalHash = '5e1731f836723fb1';
+    const maintenanceKey = `fastmode:v42:llm:${maintenanceGoalHash}:execute_loop:p:99:c:${Date.now()}`;
+    const originalValue = {
+      content: 'This stale turn attempted nested work.',
+      reasoning: 'Replay the recorded decision.',
+      usage: { input_tokens: 17, output_tokens: 3 },
+      tool_calls: [
+        {
+          id: 'maintenance-gp-call',
+          name: 'spawn_agent',
+          arguments: JSON.stringify({ type: 'general_purpose', goal: 'Research more.' }),
+        },
+      ],
+    };
+    const set = await post('/api/fast-cache/set', {
+      key: maintenanceKey,
+      kind: 'llm',
+      goalHash: maintenanceGoalHash,
+      value: originalValue,
+    });
+    assert(set.status === 200, `maintenance fixture set status ${set.status}`);
+
+    const databaseUrl = process.env.DATABASE_URL;
+    assert(Boolean(databaseUrl), 'isolated blackbox DATABASE_URL is required');
+    const output = execFileSync(
+      process.execPath,
+      ['--import', 'tsx', 'scripts/clean-oai-demo-browser-cache.ts', '--apply'],
+      {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          // The maintenance script prefers this variable. Pin it to the
+          // runner's disposable local database, never a developer .env value.
+          FAST_MODE_CACHE_DATABASE_URL: databaseUrl,
+        },
+      }
+    );
+    assert(
+      /Archived [1-9][0-9]* disallowed-agent rows/.test(output),
+      'maintenance must archive at least the inserted row'
+    );
+
+    const archiveKey = `maintenance:oai-demo-no-disallowed-agent-v4:${maintenanceKey}`;
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      const runtime = await prisma.fastModeCacheEntry.findUnique({
+        where: { key: maintenanceKey },
+      });
+      assert(runtime === null, 'original runtime key must be absent after archival');
+      const archived = await prisma.fastModeCacheEntry.findUnique({ where: { key: archiveKey } });
+      assert(archived?.kind === 'oai_demo_backup', 'archived row must use the backup kind');
+      assert(archived?.goalHash === maintenanceGoalHash, 'archival must preserve the goal hash');
+      const value = archived?.value as JsonObject;
+      assert(value.content === originalValue.content, 'archival must preserve content');
+      assert(value.reasoning === originalValue.reasoning, 'archival must preserve reasoning');
+      assert(
+        JSON.stringify(value.tool_calls) === JSON.stringify(originalValue.tool_calls),
+        'archival must preserve the original nested call for reversal'
+      );
+      assert(
+        JSON.stringify(value.usage) === JSON.stringify(originalValue.usage),
+        'archival must preserve provider accounting'
+      );
+    } finally {
+      await prisma.$disconnect();
+    }
   });
 
   await test('#10 set→get roundtrip', async () => {

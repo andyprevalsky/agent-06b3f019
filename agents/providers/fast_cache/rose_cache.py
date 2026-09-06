@@ -36,6 +36,22 @@ logger = structlog.get_logger(__name__)
 # live LLM when the store times out. A transport fault is not a semantic miss.
 _LOOKUP_RETRY_ATTEMPTS = 3
 _LOOKUP_RETRY_BACKOFF_S = 0.25
+_GENERIC_RESPONSE_SCHEMA_TITLES = frozenset(
+    {
+        "agent run",
+        "answer",
+        "data",
+        "doing research",
+        "handling it",
+        "output",
+        "response",
+        "result",
+        "task",
+        "task output",
+        "user request",
+        "value",
+    }
+)
 
 
 class FastCacheLookupError(RuntimeError):
@@ -82,6 +98,48 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
     return usage
 
 
+def meaningful_response_schema_title(schema: Dict[str, Any], title: Any = None) -> str:
+    """Return a concise title for generated-schema cache rows.
+
+    Early cache fixtures used generic placeholders such as ``Task Output``.
+    Treat every title forbidden by the schema prompt like a missing title so
+    Fast Mode replay cannot rename a real root task to a generic UI label.
+    """
+    provided = title.strip() if isinstance(title, str) else ""
+    if provided and provided.casefold() not in _GENERIC_RESPONSE_SCHEMA_TITLES:
+        return provided[:48]
+
+    raw_fields = schema.get("fields") if isinstance(schema, dict) else None
+    fields = raw_fields if isinstance(raw_fields, list) else []
+    field_names = {
+        str(field.get("name") or "")
+        for field in fields
+        if isinstance(field, dict)
+    }
+    if "creator_name" in field_names:
+        return "Creator Analysis"
+    if {
+        "positioning_statement",
+        "top_creators_analysis",
+    }.issubset(field_names) or {
+        "positioning_statement",
+        "creator_analyses",
+    }.issubset(field_names):
+        return "Creator Brand Strategy"
+    first_name = next(
+        (
+            str(field.get("name") or "")
+            for field in fields
+            if isinstance(field, dict) and field.get("name")
+        ),
+        "Task",
+    )
+    derived = first_name.replace("_", " ").strip().title()
+    if not derived or derived.casefold() in _GENERIC_RESPONSE_SCHEMA_TITLES:
+        return "Structured Deliverable"
+    return derived[:48]
+
+
 def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
     """Replay activity-shaped ``response_schema`` rows as LLM stream content.
 
@@ -116,13 +174,11 @@ def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
         fields.append(item)
     if not fields:
         return stored
-    title = stored.get("title")
-    if not isinstance(title, str) or not title.strip():
-        title = "Task Output"
+    title = meaningful_response_schema_title({"fields": fields}, stored.get("title"))
     payload = {
         "reasoning": "Cached response schema.",
         "fields": fields,
-        "title": title.strip()[:80],
+        "title": title,
     }
     content = json.dumps(payload)
     out = dict(stored)

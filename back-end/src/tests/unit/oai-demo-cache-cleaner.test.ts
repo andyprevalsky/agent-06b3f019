@@ -3,6 +3,7 @@
 import assert from 'node:assert';
 import {
   containsBrowserToolCall,
+  containsNestedAgentToolCall,
   rewriteOaiDemoCacheValue,
 } from '../../domains/fast-cache/oaiDemoCacheCleaner';
 
@@ -92,6 +93,66 @@ test('removes OpenAI function-shaped browser calls', () => {
   const calls = (result.value as { tool_calls: unknown[] }).tool_calls;
   assert.deepStrictEqual(calls, []);
   assert.strictEqual(containsBrowserToolCall(result.value), false);
+});
+
+test('deletes cached nested general-purpose and code-agent spawns', () => {
+  const original = {
+    content: 'I will delegate the remaining synthesis.',
+    tool_calls: [
+      {
+        id: 'call-general-purpose',
+        name: 'spawn_agent',
+        arguments: JSON.stringify({
+          type: 'general_purpose',
+          goal: 'Synthesize the creator research.',
+        }),
+      },
+      {
+        id: 'call-code',
+        type: 'function',
+        function: {
+          name: 'spawn_agent',
+          arguments: { type: 'code', goal: 'Format the report files.' },
+        },
+      },
+      {
+        id: 'call-for-each',
+        name: 'spawn_agent',
+        arguments: { type: 'for_each', goal: 'Repeat nested work.' },
+      },
+      {
+        id: 'call-explore',
+        name: 'spawn_agent',
+        arguments: { type: 'explore', goal: 'Research the creator.' },
+      },
+    ],
+  };
+
+  assert.strictEqual(containsNestedAgentToolCall(original), true);
+  const result = rewriteOaiDemoCacheValue(original);
+  assert.strictEqual(result.changed, true);
+  assert.strictEqual(result.deleteEntry, true);
+  assert.strictEqual(result.nestedAgentCallsRemoved, 3);
+  assert.strictEqual(containsNestedAgentToolCall(result.value), false);
+  assert.deepStrictEqual(
+    (result.value as typeof original).tool_calls.map((call) => call.id),
+    ['call-explore']
+  );
+});
+
+test('recognizes legacy named general-purpose and code-agent tool calls', () => {
+  for (const name of [
+    'spawn_general_purpose_agent',
+    'spawn_general_purpose_agent_for_each',
+    'spawn_code_agent',
+    'spawn_claude_code_agent',
+  ]) {
+    const value = { tool_calls: [{ name, arguments: { goal: 'Nested work.' } }] };
+    assert.strictEqual(containsNestedAgentToolCall(value), true, name);
+    const result = rewriteOaiDemoCacheValue(value);
+    assert.strictEqual(result.deleteEntry, true, name);
+    assert.strictEqual(result.nestedAgentCallsRemoved, 1, name);
+  }
 });
 
 test('leaves browser-free cache values byte-for-byte equivalent', () => {

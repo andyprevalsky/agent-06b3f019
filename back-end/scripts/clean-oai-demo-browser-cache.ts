@@ -1,5 +1,6 @@
 /**
- * Remove browser-bearing rows from the saved OAI mass-agent demo trajectory.
+ * Remove browser- or nested-agent-bearing rows from the saved OAI mass-agent
+ * demo trajectory. The legacy filename is retained for operator compatibility.
  *
  * Dry-run by default. With --apply, each target row is archived in place under
  * a non-runtime key/kind. This removes the no-longer-valid trajectory slot
@@ -17,20 +18,19 @@ import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import {
   containsBrowserToolCall,
+  containsNestedAgentToolCall,
   rewriteOaiDemoCacheValue,
 } from '../src/domains/fast-cache/oaiDemoCacheCleaner';
+import { OAI_DEMO_JULY_GP_GOAL_HASHES } from '../src/providers/fastCacheNormalizeOaiDemo';
 
-const CLEANUP_VERSION = 'oai-demo-no-browser-v3';
-const PREVIOUS_CLEANUP_VERSIONS = ['oai-demo-no-browser-v1', 'oai-demo-no-browser-v2'] as const;
-const ARCHIVE_KEY_PREFIX = `maintenance:${CLEANUP_VERSION}:`;
-const TARGET_GOAL_HASHES = [
-  '2a5047c41ade580c', // Pieter Levels
-  '5872737e678bfc65', // Ali Abdaal
-  '5e1731f836723fb1', // Andrew Huberman
-  '74732a761f790f81', // Nathaniel Drew
-  '870aa798f805d115', // Max Lugavere
-  'a33288f6c3a3e484', // Eric Topol
+const CLEANUP_VERSION = 'oai-demo-no-disallowed-agent-v4';
+const PREVIOUS_CLEANUP_VERSIONS = [
+  'oai-demo-no-browser-v1',
+  'oai-demo-no-browser-v2',
+  'oai-demo-no-browser-v3',
 ] as const;
+const ARCHIVE_KEY_PREFIX = `maintenance:${CLEANUP_VERSION}:`;
+const TARGET_GOAL_HASHES = [...new Set(Object.values(OAI_DEMO_JULY_GP_GOAL_HASHES))];
 
 type CacheRow = {
   key: string;
@@ -87,9 +87,15 @@ function restoreChangedFields(current: unknown, originalFields: Record<string, u
 function buildArchivePatches(
   rows: CacheRow[],
   priorOriginals: Map<string, Record<string, unknown>>
-): { patches: ArchivePatch[]; browserCallsRemoved: number; restoredRows: number } {
+): {
+  patches: ArchivePatch[];
+  browserCallsRemoved: number;
+  nestedAgentCallsRemoved: number;
+  restoredRows: number;
+} {
   const patches: ArchivePatch[] = [];
   let browserCallsRemoved = 0;
+  let nestedAgentCallsRemoved = 0;
   let restoredRows = 0;
   for (const row of rows) {
     const priorOriginal = priorOriginals.get(row.key);
@@ -97,10 +103,11 @@ function buildArchivePatches(
     if (priorOriginal) restoredRows += 1;
     const result = rewriteOaiDemoCacheValue(sourceValue);
     if (!result.deleteEntry) continue;
-    if (!containsBrowserToolCall(sourceValue)) {
+    if (!containsBrowserToolCall(sourceValue) && !containsNestedAgentToolCall(sourceValue)) {
       throw new Error(`Archive invariant failed for ${row.goalHash}`);
     }
     browserCallsRemoved += result.browserCallsRemoved;
+    nestedAgentCallsRemoved += result.nestedAgentCallsRemoved;
     patches.push({
       original_key: row.key,
       archive_key: `${ARCHIVE_KEY_PREFIX}${row.key}`,
@@ -109,7 +116,7 @@ function buildArchivePatches(
       current_value: row.value,
     });
   }
-  return { patches, browserCallsRemoved, restoredRows };
+  return { patches, browserCallsRemoved, nestedAgentCallsRemoved, restoredRows };
 }
 
 async function main(): Promise<void> {
@@ -149,7 +156,9 @@ async function main(): Promise<void> {
       console.log(`Recovered ${result.restoredRows} original rows from prior cleanup backups.`);
     }
     console.log(
-      `Would archive ${result.patches.length} rows containing ${result.browserCallsRemoved} browser calls.`
+      `Would archive ${result.patches.length} rows containing ` +
+        `${result.browserCallsRemoved} browser calls and ` +
+        `${result.nestedAgentCallsRemoved} nested agent calls.`
     );
     for (const hash of TARGET_GOAL_HASHES) {
       console.log(`  ${hash}: ${counts.get(hash) ?? 0} row(s)`);
@@ -191,7 +200,7 @@ async function main(): Promise<void> {
       return updated;
     });
     console.log(
-      `Archived ${archived} browser-bearing rows outside the runtime namespace; no rows were copied.`
+      `Archived ${archived} disallowed-agent rows outside the runtime namespace; no rows were copied.`
     );
   } finally {
     await prisma.$disconnect();
