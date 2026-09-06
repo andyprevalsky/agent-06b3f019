@@ -3,7 +3,7 @@
 
 /**
  * Unit tests for idempotent Gmail send (message_person email channel).
- * Uses real ToolSideEffect rows; never calls live Gmail.
+ * Uses real ToolSideEffect rows on the local DB; never calls live Gmail.
  */
 
 import assert from 'node:assert';
@@ -40,146 +40,185 @@ async function main(): Promise<void> {
   const prefix = `unit-email-send-${Date.now()}`;
   const userId = `${prefix}-user`;
   const agentId = `${prefix}-agent`;
+  const keys: string[] = [];
 
-  await test('sendEmailOnce returns cached SUCCEEDED response on retry', async () => {
-    const idempotencyKey = `${prefix}-cached`;
-    const key = operationKey(userId, agentId, idempotencyKey);
-    const request = {
-      user_id: userId,
-      agent_id: agentId,
-      idempotency_key: idempotencyKey,
-      to: 'a@b.com',
-      from_email: 'me@x.com',
-      subject: 'Hi',
-      body: 'Body',
-    };
-    await prisma.toolSideEffect.create({
-      data: {
-        operationKey: key,
-        operationType: 'gmail.message',
-        request,
-        status: 'SUCCEEDED',
-        externalId: 'gmail-cached-1',
-        response: { id: 'gmail-cached-1', threadId: 'thread-cached-1' },
-      },
-    });
+  const cleanup = async () => {
+    for (const key of keys) {
+      await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
+    }
+  };
 
-    const result = await sendEmailOnce(userId, {
-      to: 'a@b.com',
-      subject: 'Hi',
-      body: 'Body',
-      fromEmail: 'me@x.com',
-      agentId,
-      idempotencyKey,
-    });
-    assert.deepStrictEqual(result, { id: 'gmail-cached-1', threadId: 'thread-cached-1' });
-  });
-
-  await test('sendEmailOnce rejects idempotency payload conflicts', async () => {
-    const idempotencyKey = `${prefix}-conflict`;
-    const key = operationKey(userId, agentId, idempotencyKey);
-    await prisma.toolSideEffect.create({
-      data: {
-        operationKey: key,
-        operationType: 'gmail.message',
-        request: {
-          user_id: userId,
-          agent_id: agentId,
-          idempotency_key: idempotencyKey,
-          to: 'other@b.com',
-          from_email: 'me@x.com',
-          subject: 'Hi',
-          body: 'Body',
+  try {
+    await test('sendEmailOnce returns cached SUCCEEDED response on retry', async () => {
+      const idempotencyKey = `${prefix}-cached`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+      const request = {
+        user_id: userId,
+        agent_id: agentId,
+        idempotency_key: idempotencyKey,
+        to: 'a@b.com',
+        from_email: 'me@x.com',
+        subject: 'Hi',
+        body: 'Body',
+      };
+      await prisma.toolSideEffect.create({
+        data: {
+          operationKey: key,
+          operationType: 'gmail.message',
+          request,
+          status: 'SUCCEEDED',
+          externalId: 'gmail-cached-1',
+          response: { id: 'gmail-cached-1', threadId: 'thread-cached-1' },
         },
-        status: 'SUCCEEDED',
-        externalId: 'gmail-other',
-        response: { id: 'gmail-other', threadId: 'thread-other' },
-      },
-    });
+      });
 
-    await assert.rejects(
-      () =>
-        sendEmailOnce(userId, {
-          to: 'a@b.com',
-          subject: 'Hi',
-          body: 'Body',
-          fromEmail: 'me@x.com',
-          agentId,
-          idempotencyKey,
-        }),
-      GmailSendIdempotencyConflictError
-    );
-  });
-
-  await test('sendEmailOnce refuses in-flight STARTED claims without external id', async () => {
-    const idempotencyKey = `${prefix}-started`;
-    const key = operationKey(userId, agentId, idempotencyKey);
-    const request = {
-      user_id: userId,
-      agent_id: agentId,
-      idempotency_key: idempotencyKey,
-      to: 'a@b.com',
-      from_email: 'me@x.com',
-      subject: 'Hi',
-      body: 'Body',
-    };
-    await prisma.toolSideEffect.create({
-      data: {
-        operationKey: key,
-        operationType: 'gmail.message',
-        request,
-        status: 'STARTED',
-      },
-    });
-
-    await assert.rejects(
-      () =>
-        sendEmailOnce(userId, {
-          to: 'a@b.com',
-          subject: 'Hi',
-          body: 'Body',
-          fromEmail: 'me@x.com',
-          agentId,
-          idempotencyKey,
-        }),
-      ToolSideEffectAlreadyStartedError
-    );
-  });
-
-  await test('sendEmailOnce marks FAILED when Gmail credential is missing', async () => {
-    const idempotencyKey = `${prefix}-fail`;
-    const key = operationKey(userId, agentId, idempotencyKey);
-
-    await assert.rejects(() =>
-      sendEmailOnce(userId, {
+      const result = await sendEmailOnce(userId, {
         to: 'a@b.com',
         subject: 'Hi',
         body: 'Body',
-        fromEmail: 'missing-sender@example.com',
+        fromEmail: 'me@x.com',
         agentId,
         idempotencyKey,
-      })
-    );
+      });
+      assert.deepStrictEqual(result, { id: 'gmail-cached-1', threadId: 'thread-cached-1' });
+    });
 
-    const record = await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey: key } });
-    assert.strictEqual(record.status, 'FAILED');
-    assert.ok(typeof record.error === 'string' && record.error.length > 0);
-  });
+    await test('sendEmailOnce rejects idempotency payload conflicts', async () => {
+      const idempotencyKey = `${prefix}-conflict`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+      await prisma.toolSideEffect.create({
+        data: {
+          operationKey: key,
+          operationType: 'gmail.message',
+          request: {
+            user_id: userId,
+            agent_id: agentId,
+            idempotency_key: idempotencyKey,
+            to: 'other@b.com',
+            from_email: 'me@x.com',
+            subject: 'Hi',
+            body: 'Body',
+          },
+          status: 'SUCCEEDED',
+          externalId: 'gmail-other',
+          response: { id: 'gmail-other', threadId: 'thread-other' },
+        },
+      });
 
-  await prisma.toolSideEffect.deleteMany({
-    where: { operationKey: { startsWith: 'gmail.message:' }, operationType: 'gmail.message' },
-  }).catch(async () => {
-    // Narrow cleanup to this run's keys only
-    for (const suffix of ['cached', 'conflict', 'started', 'fail']) {
-      const key = operationKey(userId, agentId, `${prefix}-${suffix}`);
-      await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
-    }
-  });
+      await assert.rejects(
+        () =>
+          sendEmailOnce(userId, {
+            to: 'a@b.com',
+            subject: 'Hi',
+            body: 'Body',
+            fromEmail: 'me@x.com',
+            agentId,
+            idempotencyKey,
+          }),
+        GmailSendIdempotencyConflictError
+      );
+    });
 
-  // Precise cleanup for this run
-  for (const suffix of ['cached', 'conflict', 'started', 'fail']) {
-    const key = operationKey(userId, agentId, `${prefix}-${suffix}`);
-    await prisma.toolSideEffect.deleteMany({ where: { operationKey: key } });
+    await test('sendEmailOnce refuses in-flight STARTED claims without external id', async () => {
+      const idempotencyKey = `${prefix}-started`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+      const request = {
+        user_id: userId,
+        agent_id: agentId,
+        idempotency_key: idempotencyKey,
+        to: 'a@b.com',
+        from_email: 'me@x.com',
+        subject: 'Hi',
+        body: 'Body',
+      };
+      await prisma.toolSideEffect.create({
+        data: {
+          operationKey: key,
+          operationType: 'gmail.message',
+          request,
+          status: 'STARTED',
+        },
+      });
+
+      await assert.rejects(
+        () =>
+          sendEmailOnce(userId, {
+            to: 'a@b.com',
+            subject: 'Hi',
+            body: 'Body',
+            fromEmail: 'me@x.com',
+            agentId,
+            idempotencyKey,
+          }),
+        ToolSideEffectAlreadyStartedError
+      );
+    });
+
+    await test('sendEmailOnce refuses SUCCEEDED records with incomplete response payload', async () => {
+      const idempotencyKey = `${prefix}-bad-response`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+      const request = {
+        user_id: userId,
+        agent_id: agentId,
+        idempotency_key: idempotencyKey,
+        to: 'a@b.com',
+        from_email: 'me@x.com',
+        subject: 'Hi',
+        body: 'Body',
+        cc: 'cc@x.com',
+      };
+      await prisma.toolSideEffect.create({
+        data: {
+          operationKey: key,
+          operationType: 'gmail.message',
+          request,
+          status: 'SUCCEEDED',
+          externalId: 'gmail-incomplete',
+          response: { id: 'gmail-incomplete' },
+        },
+      });
+
+      await assert.rejects(
+        () =>
+          sendEmailOnce(userId, {
+            to: 'a@b.com',
+            subject: 'Hi',
+            body: 'Body',
+            fromEmail: 'me@x.com',
+            agentId,
+            idempotencyKey,
+            cc: 'cc@x.com',
+          }),
+        ToolSideEffectAlreadyStartedError
+      );
+    });
+
+    await test('sendEmailOnce marks FAILED when Gmail credential is missing', async () => {
+      const idempotencyKey = `${prefix}-fail`;
+      const key = operationKey(userId, agentId, idempotencyKey);
+      keys.push(key);
+
+      await assert.rejects(() =>
+        sendEmailOnce(userId, {
+          to: 'a@b.com',
+          subject: 'Hi',
+          body: 'Body',
+          fromEmail: 'missing-sender@example.com',
+          agentId,
+          idempotencyKey,
+        })
+      );
+
+      const record = await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey: key } });
+      assert.strictEqual(record.status, 'FAILED');
+      assert.ok(typeof record.error === 'string' && record.error.length > 0);
+    });
+  } finally {
+    await cleanup();
   }
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

@@ -3000,6 +3000,49 @@ async function testEmailSend_idempotencyKeyRequiresAgentId() {
   }
 }
 
+async function testEmailSend_idempotentInternalPathRequiresConnectedGmail() {
+  // Agent path: internal auth + idempotency_key routes through sendEmailOnce.
+  const res = await request(`${BASE_URL}/api/integrations/email/send`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1!),
+    body: JSON.stringify({
+      user_id: ctx.userId1,
+      agent_id: '00000000-0000-4000-8000-000000000001',
+      idempotency_key: `bb-email-once-${Date.now()}`,
+      to: 'office@example.com',
+      from_email: 'missing-sender@example.com',
+      subject: 'Hello',
+      body: 'Body',
+      cc: 'cc@example.com',
+    }),
+  });
+  if (res.status !== 400) {
+    throw new Error(`Expected 400 from sendEmailOnce without Gmail, got ${res.status}`);
+  }
+  const payload = res.data as { error?: string; message?: string };
+  const text = `${payload.error ?? ''} ${payload.message ?? ''}`.toLowerCase();
+  if (!text.includes('gmail') && !text.includes('not connected') && !text.includes('account')) {
+    throw new Error(`Expected Gmail/account error, got ${JSON.stringify(res.data)}`);
+  }
+}
+
+async function testEmailSend_invalidIdempotencyKeyRejected() {
+  const res = await request(`${BASE_URL}/api/integrations/email/send`, {
+    method: 'POST',
+    headers: apiKeyHeaders(ctx.userId1!),
+    body: JSON.stringify({
+      user_id: ctx.userId1,
+      agent_id: '00000000-0000-4000-8000-000000000001',
+      idempotency_key: 'bad key with spaces!',
+      to: 'office@example.com',
+      from_email: 'sender@example.com',
+      subject: 'Hello',
+      body: 'Body',
+    }),
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
 async function testEmailSend_accountNotFound() {
   const res = await request(`${BASE_URL}/api/integrations/email/send`, {
     method: 'POST',
@@ -6765,6 +6808,14 @@ async function runAll() {
     {
       name: 'POST /email/send idempotency_key requires agent_id',
       fn: testEmailSend_idempotencyKeyRequiresAgentId,
+    },
+    {
+      name: 'POST /email/send idempotent internal path requires Gmail',
+      fn: testEmailSend_idempotentInternalPathRequiresConnectedGmail,
+    },
+    {
+      name: 'POST /email/send invalid idempotency_key rejected',
+      fn: testEmailSend_invalidIdempotencyKeyRejected,
     },
     { name: 'POST /email/send account not found', fn: testEmailSend_accountNotFound },
     {

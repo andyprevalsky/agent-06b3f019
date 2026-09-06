@@ -15,7 +15,7 @@ import * as resyncService from './service.emailResync';
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
 
-async function requireFromEmailOrRespond(
+export async function requireFromEmailOrRespond(
   res: Response,
   userId: string,
   fromEmail: unknown
@@ -39,7 +39,7 @@ async function requireFromEmailOrRespond(
   return null;
 }
 
-function validateIdempotencyOrRespond(
+export function validateIdempotencyOrRespond(
   res: Response,
   idempotencyKey: string | undefined,
   agentId: string | undefined
@@ -59,7 +59,7 @@ function validateIdempotencyOrRespond(
   return true;
 }
 
-function mapEmailSendError(res: Response, error: unknown): Response | null {
+export function mapEmailSendError(res: Response, error: unknown): Response | null {
   if (error instanceof service.GmailAccountNotFoundError) {
     return res.status(400).json({ error: 'Gmail not connected', message: error.message });
   }
