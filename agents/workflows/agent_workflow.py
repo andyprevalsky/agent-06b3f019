@@ -1634,7 +1634,11 @@ class AgentWorkflow:
         # DB-row goal once and thread it into all cache keying (the DAG path
         # already resolves it via ensure_position_context; this aligns the
         # explicitly-threaded plan/execute/verifier/summary paths with it).
-        if self.fast_mode_cache_enabled or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS:
+        if (
+            self.provider_fast_mode
+            or self.fast_mode_cache_enabled
+            or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
+        ):
             try:
                 persisted_goal = await workflow.execute_activity(
                     resolve_fast_cache_goal_activity,
