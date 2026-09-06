@@ -5236,6 +5236,45 @@ def _agent_messages_ready_for_browser_hub_archive(
     ) and _agent_messages_have_browser_recording_ready(messages)
 
 
+def _agent_messages_ready_for_durable_browser_evidence(
+    messages: Optional[List[dict]],
+) -> bool:
+    """True when every recorded browser has the publisher's explicit terminal.
+
+    The FE can close a live panel from a workflow-scoped ``session_paused`` row,
+    but ``publish_evidence_links`` deliberately requires task-scoped
+    ``task_complete`` evidence for every recorded browser. Payment-abandonment
+    archives are approval evidence, so use that stricter contract.
+    """
+    browser_task_ids: set[str] = set()
+    completed_task_ids: set[str] = set()
+    for message in messages or []:
+        metadata = message.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent":
+            continue
+        task_id = metadata.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        action_type = metadata.get("action_type")
+        if action_type in {
+            "browser",
+            "session_init",
+            "session_started",
+            "task_started",
+            "recording",
+            "network_recording",
+            "task_complete",
+        }:
+            browser_task_ids.add(task_id)
+        if action_type == "task_complete":
+            completed_task_ids.add(task_id)
+    return browser_task_ids.issubset(completed_task_ids) and (
+        _agent_messages_have_browser_recording_ready(messages)
+    )
+
+
 async def _refresh_agent_after_pause_for_browser_terminal(
     base_url: str,
     agent_id: str,
@@ -5243,6 +5282,9 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     *,
     timeout_seconds: float = 60.0,
     poll_interval_seconds: float = 2.0,
+    readiness_check: Callable[[Optional[List[dict]]], bool] = (
+        _agent_messages_ready_for_browser_hub_archive
+    ),
 ) -> dict:
     """Re-fetch agent messages after pause so hub archives include browser terminals.
 
@@ -5252,7 +5294,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     with an IN_PROGRESS browser chip forever. Archiving as soon as ``session_paused``
     lands (before Kernel replay finalize) leaves the Recording tab empty.
     """
-    if _agent_messages_ready_for_browser_hub_archive(data.get("messages")):
+    if readiness_check(data.get("messages")):
         return data
     deadline = time.time() + timeout_seconds
     latest = data
@@ -5263,7 +5305,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
         except Exception as refresh_error:
             print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
             continue
-        if _agent_messages_ready_for_browser_hub_archive(latest.get("messages")):
+        if readiness_check(latest.get("messages")):
             print(
                 f"    ✓ Browser terminal messages landed after pause "
                 f"({len(latest.get('messages') or [])} messages)"
@@ -5274,6 +5316,55 @@ async def _refresh_agent_after_pause_for_browser_terminal(
         "archiving latest snapshot anyway"
     )
     return latest
+
+
+async def _seal_payment_abandonment_browser_for_archive(
+    base_url: str,
+    agent_id: str,
+    data: dict,
+) -> tuple[dict, Optional[str]]:
+    """Pause an abandoned checkout and retain its terminal browser evidence.
+
+    Payment-abandonment tasks intentionally return while the browser is still
+    waiting at the pre-submission checkout boundary. Deleting the agent later
+    terminates that browser, but the trace archive and run JSON are frozen before
+    deletion. Pause and re-fetch first so the durable Hub bundle contains both
+    the terminal chip row and the finalized recording required by evidence-link
+    validation.
+    """
+    if _agent_messages_ready_for_durable_browser_evidence(data.get("messages")):
+        return data, None
+
+    try:
+        if not await pause_agent(base_url, agent_id):
+            return data, "Failed to pause payment-abandonment agent before Hub archive"
+        print(f"    ⏸ Paused payment-abandonment agent {agent_id[:12]} before Hub archive")
+        refreshed = await _refresh_agent_after_pause_for_browser_terminal(
+            base_url,
+            agent_id,
+            data,
+            readiness_check=_agent_messages_ready_for_durable_browser_evidence,
+        )
+    except Exception as pause_error:
+        return data, f"Failed to seal payment-abandonment browser evidence: {pause_error}"
+
+    # The live agent read does not know about harness-only lifecycle/evaluator
+    # fields. Preserve them while replacing the transcript with the post-pause
+    # terminal snapshot.
+    source_benchmark = data.get("_benchmark")
+    refreshed_benchmark = refreshed.get("_benchmark")
+    refreshed["_benchmark"] = {
+        **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
+        **(source_benchmark if isinstance(source_benchmark, dict) else {}),
+    }
+    if not _agent_messages_ready_for_durable_browser_evidence(
+        refreshed.get("messages")
+    ):
+        return (
+            refreshed,
+            "Payment-abandonment browser did not reach terminal state with a recording before Hub archive",
+        )
+    return refreshed, None
 
 
 def _local_victoria_db_container() -> Optional[str]:
@@ -12246,6 +12337,22 @@ async def run_single_task(
         elif task.payment_card_request_action == "abandon":
             passed = False
             failure_reason = failure_reason or "payment lifecycle cleanup did not complete"
+
+        if task.payment_card_request_action == "abandon":
+            data, browser_archive_error = await _seal_payment_abandonment_browser_for_archive(
+                base_url,
+                agent_id,
+                data,
+            )
+            agent = data.get("agent", {})
+            messages = data.get("messages", [])
+            if browser_archive_error is not None:
+                passed = False
+                failure_reason = (
+                    f"{failure_reason} | {browser_archive_error}"
+                    if failure_reason
+                    else browser_archive_error
+                )
 
         # Final context well-formedness check
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(

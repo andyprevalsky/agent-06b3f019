@@ -1441,6 +1441,123 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
 
 
+async def test_payment_abandonment_seals_browser_before_hub_archive():
+    """A successful abandonment snapshot must include browser terminal evidence.
+
+    Production run 3da38a07 returned as soon as the payment lifecycle reconciled,
+    archived the still-open browser transcript, and only then deleted the live
+    agent. The delete stopped the browser, but its terminal row could no longer
+    reach the immutable Hub bundle, so publish_evidence_links correctly rejected
+    the otherwise-passing AgentCard gate.
+    """
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    task_id = "browser-payment-1"
+    open_data = {
+        "agent": {"status": "ACTIVE"},
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "action_type": "browser",
+                    "toolStatus": "IN_PROGRESS",
+                    "task_id": task_id,
+                }
+            }
+        ],
+        "_benchmark": {"payment_lifecycle": {"purchase": {"status": "VOIDED"}}},
+    }
+    refreshed = {
+        "agent": {"status": "PAUSED"},
+        "messages": open_data["messages"]
+        + [
+            {
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "action_type": "recording",
+                    "toolStatus": "FINISHED",
+                    "task_id": task_id,
+                    "recording_view_url": "https://kernel.example/replay.mp4",
+                }
+            },
+            {
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "action_type": "task_complete",
+                    "toolStatus": "FINISHED",
+                    "task_id": task_id,
+                }
+            },
+        ],
+    }
+    calls = []
+
+    async def fake_pause(base_url, agent_id):
+        calls.append(("pause", base_url, agent_id))
+        return True
+
+    async def fake_refresh(base_url, agent_id, data, **kwargs):
+        calls.append(("refresh", base_url, agent_id, data, kwargs))
+        return refreshed
+
+    with (
+        patch.object(bench, "pause_agent", fake_pause),
+        patch.object(bench, "_refresh_agent_after_pause_for_browser_terminal", fake_refresh),
+    ):
+        sealed, error = await bench._seal_payment_abandonment_browser_for_archive(
+            "https://api.example",
+            "root-agent-1",
+            open_data,
+        )
+
+    assert error is None
+    assert [call[0] for call in calls] == ["pause", "refresh"]
+    assert sealed["agent"]["status"] == "PAUSED"
+    assert sealed["_benchmark"] == open_data["_benchmark"]
+    assert bench._agent_messages_ready_for_browser_hub_archive(sealed["messages"])
+    assert bench._agent_messages_ready_for_durable_browser_evidence(
+        sealed["messages"]
+    )
+    assert calls[1][4]["readiness_check"] is (
+        bench._agent_messages_ready_for_durable_browser_evidence
+    )
+
+    paused_without_task_complete = {
+        "metadata": {
+            "toolName": "spawn_browser_agent",
+            "action_type": "session_paused",
+            "toolStatus": "ERROR",
+            "task_id": task_id,
+        }
+    }
+    assert bench._agent_messages_ready_for_browser_hub_archive(
+        refreshed["messages"][:-1] + [paused_without_task_complete]
+    )
+    assert not bench._agent_messages_ready_for_durable_browser_evidence(
+        refreshed["messages"][:-1] + [paused_without_task_complete]
+    )
+
+    async def rejected_pause(_base_url, _agent_id):
+        return False
+
+    with patch.object(bench, "pause_agent", rejected_pause):
+        unsealed, error = await bench._seal_payment_abandonment_browser_for_archive(
+            "https://api.example",
+            "root-agent-1",
+            open_data,
+        )
+    assert unsealed is open_data
+    assert error == "Failed to pause payment-abandonment agent before Hub archive"
+
+    source = inspect.getsource(bench.run_single_task)
+    cleanup_index = source.index("ensure_payment_lifecycle_cleanup")
+    seal_index = source.index("_seal_payment_abandonment_browser_for_archive", cleanup_index)
+    archive_index = source.index("finalize_archive_and_score_world_model", cleanup_index)
+    assert cleanup_index < seal_index < archive_index
+
+
 def test_agent_messages_have_browser_terminal_requires_explicit_close():
     """FINISHED recording alone must not count as a browser-panel terminal.
 
@@ -18730,6 +18847,10 @@ async def run_all_tests():
     r.record(
         "timeout_early_fail_pauses_before_payment_cleanup",
         test_timeout_early_fail_pauses_agent_before_payment_cleanup,
+    )
+    await r.record_async(
+        "payment_abandonment_seals_browser_before_hub_archive",
+        test_payment_abandonment_seals_browser_before_hub_archive,
     )
     r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",
