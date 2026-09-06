@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Optional
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.wait_for.config import (
     DEFAULT_CHECK_INTERVAL_SECONDS,
     DEFAULT_MAX_CHECKS,
@@ -29,6 +30,21 @@ from domains.wait_for.config import (
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.source_connect_gates import raise_source_connect_gates
+
+
+def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:
+    """True only for allowlisted OAi-demo Fast Mode replay.
+
+    Live agents can enable Fast Mode for LLM record/replay, but wait_for must
+    still honor until_timestamp / check_interval_seconds so external state
+    (email, SMS, web) has wall-clock time to change. Skipping sleeps for every
+    fast_mode_cache_enabled agent burned live wait_for polls in seconds
+    (agent 515c4894: 600s interval → ~6s between explores).
+    """
+    if not bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+        return False
+    return is_oai_demo_mass_agent_task(workflow_instance)
+
 
 # =============================================================================
 # WAIT_FOR MANAGER
@@ -113,12 +129,13 @@ class WaitForManager(ToolManager):
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
-            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            if resume or fast_mode:
+            fast_mode_replay = skip_wait_wall_clock_for_fast_mode_replay(workflow_instance)
+            if resume or fast_mode_replay:
                 # resume=True: deploy migration re-armed a wait whose target
-                # elapsed during downtime. Fast Mode: July demo timestamps
-                # (e.g. 2026-07-17T07:03Z) are already past on replay — treat
-                # them as satisfied so children continue instead of ERROR.
+                # elapsed during downtime. OAi-demo Fast Mode: July demo
+                # timestamps (e.g. 2026-07-17T07:03Z) are already past on
+                # replay — treat them as satisfied so children continue
+                # instead of ERROR. Live Fast Mode must still error.
                 reason = (
                     "target already elapsed during deploy"
                     if resume
@@ -141,11 +158,12 @@ class WaitForManager(ToolManager):
             return
 
         if delta_seconds > MAX_WAIT_SECONDS:
-            fast_mode = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            if resume or fast_mode:
-                # Live path caps waits at 31 days. Fast Mode replay of a July
-                # timestamp that was legal then (e.g. +60d from 2026-07-17) is
-                # now >31d in the future — treat it as already waited.
+            fast_mode_replay = skip_wait_wall_clock_for_fast_mode_replay(workflow_instance)
+            if resume or fast_mode_replay:
+                # Live path caps waits at 31 days. OAi-demo Fast Mode replay of
+                # a July timestamp that was legal then (e.g. +60d from
+                # 2026-07-17) is now >31d in the future — treat it as already
+                # waited. Live Fast Mode must still enforce the cap.
                 reason = (
                     "target already elapsed during deploy"
                     if resume
@@ -180,9 +198,10 @@ class WaitForManager(ToolManager):
             },
         )
 
-        # Fast Mode: a recorded run already waited out the real time, so on replay
-        # the wait is pure dead wall-clock — skip it and resolve instantly.
-        if not getattr(workflow_instance, "fast_mode_cache_enabled", False):
+        # OAi-demo Fast Mode: a recorded run already waited out the real time,
+        # so on replay the wait is pure dead wall-clock — skip it. Live Fast
+        # Mode still sleeps so until_timestamp remains a real wall-clock wait.
+        if not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
             await workflow.sleep(delta_seconds)
 
         yield ToolEvent(
@@ -244,9 +263,11 @@ class WaitForManager(ToolManager):
 
         for check_num in range(1, max_checks_param + 1):
             # Sleep between checks (skip before the first check - check immediately).
-            # Fast Mode skips the inter-check wait entirely on replay — the recorded
-            # condition evaluations already replay from cache, so polling is instant.
-            if check_num > 1 and not getattr(workflow_instance, "fast_mode_cache_enabled", False):
+            # OAi-demo Fast Mode replay may skip the inter-check wait — recorded
+            # condition evaluations already replay from cache. Live Fast Mode
+            # must still sleep so external state (email/SMS) can change between
+            # polls (agent 515c4894 burned max_checks in ~2m with FM skip-sleep).
+            if check_num > 1 and not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
                 await workflow.sleep(check_interval_seconds)
 
             # Check pause / cost limit

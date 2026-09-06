@@ -440,6 +440,58 @@ const PROD_EMAIL_CREDENTIAL_COLUMNS = {
   email: true,
 } as const;
 
+// Subscription.stripeLivemode shipped in migration 20260806000639. Cached seed
+// dumps (and any remote that has not applied that migration yet) still omit the
+// column; an unqualified findUnique() would P2022 the whole seed and block
+// every deploy's seed-memory ratchet. Stable projection + capability probe
+// mirrors Integration account columns / EmailCredential health columns.
+const PROD_SUBSCRIPTION_COLUMNS = {
+  id: true,
+  userId: true,
+  subscriptionTier: true,
+  stripeSubscriptionId: true,
+  stripeCustomerId: true,
+  currentPeriodEnd: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+const PROD_SUBSCRIPTION_COLUMNS_WITH_LIVEMODE = {
+  ...PROD_SUBSCRIPTION_COLUMNS,
+  stripeLivemode: true,
+} as const;
+
+type ProdSubscriptionRow = Prisma.SubscriptionGetPayload<{
+  select: typeof PROD_SUBSCRIPTION_COLUMNS_WITH_LIVEMODE;
+}>;
+
+const remoteHasSubscriptionLivemodeColumn = createRetryableProbe(async () => {
+  const rows = await remote.$queryRaw<Array<{ columnCount: number }>>`
+      SELECT COUNT(*)::int AS "columnCount"
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'Subscription'
+        AND column_name = 'stripeLivemode'
+    `;
+  return (rows[0]?.columnCount ?? 0) === 1;
+});
+
+async function findProdSubscription(userId: string): Promise<ProdSubscriptionRow | null> {
+  if (await remoteHasSubscriptionLivemodeColumn()) {
+    return remote.subscription.findUnique({
+      where: { userId },
+      select: PROD_SUBSCRIPTION_COLUMNS_WITH_LIVEMODE,
+    });
+  }
+  const row = await remote.subscription.findUnique({
+    where: { userId },
+    select: PROD_SUBSCRIPTION_COLUMNS,
+  });
+  if (!row) return null;
+  // Local schema requires the column; sandbox is the pre-migration default.
+  return { ...row, stripeLivemode: false };
+}
+
 async function syncIntegrations(): Promise<number> {
   activeRemotePoolIntegrationIds.clear();
   // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
@@ -1266,13 +1318,13 @@ async function sync() {
 
   // ── Subscription ──
   await syncTable('Subscription', async () => {
-    const sub = await remote.subscription.findUnique({ where: { userId: SEED_USER_ID } });
+    const sub = await findProdSubscription(SEED_USER_ID);
     if (!sub) return 0;
     const { id, ...rest } = sub;
     await local.subscription.upsert({
       where: { userId: SEED_USER_ID },
-      create: sub as any,
-      update: rest as any,
+      create: sub,
+      update: rest,
     });
     return 1;
   });
