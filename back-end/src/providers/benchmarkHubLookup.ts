@@ -16,16 +16,21 @@ import {
   type HubAgentRunIndexSnapshot,
   type HubRunSummary,
 } from './benchmarkHubStore';
+import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
 import { createLogger } from './logger';
 
 const log = createLogger('BenchmarkHubLookup');
 const AGENT_INDEX_REFRESH_MS = 5_000;
+const LEGACY_BACKFILL_RETRY_BASE_MS = 5_000;
+const LEGACY_BACKFILL_RETRY_MAX_MS = 5 * 60_000;
 const agentRunCache = new Map<string, string>();
 const agentRunMissCache = new Set<string>();
 let childIdToRun: Map<string, string> | null = null;
 let compactIndexLoadPromise: Promise<CompactIndexLoadResult> | null = null;
 let legacyBackfillPromise: Promise<void> | null = null;
+let legacyBackfillFailureCount = 0;
+let legacyBackfillRetryAt = 0;
 let childIdIndexLoadedAt = 0;
 let latestAppliedRevision = 0;
 
@@ -34,6 +39,11 @@ export type CompactIndexLoadResult =
   | { kind: 'legacy'; seed: Map<string, string> }
   | { kind: 'stale' }
   | { kind: 'error' };
+
+export function legacyBackfillRetryDelayMs(failureCount: number): number {
+  const exponent = Math.max(0, Math.min(16, Math.floor(failureCount) - 1));
+  return Math.min(LEGACY_BACKFILL_RETRY_MAX_MS, LEGACY_BACKFILL_RETRY_BASE_MS * 2 ** exponent);
+}
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -119,7 +129,7 @@ function startCompactIndexLoad(): Promise<CompactIndexLoadResult> {
 }
 
 function scheduleLegacyBackfill(seed: Map<string, string>): void {
-  if (legacyBackfillPromise !== null) return;
+  if (legacyBackfillPromise !== null || Date.now() < legacyBackfillRetryAt) return;
   // Archives created before agent-run-index.json need exactly one cooperative
   // backfill. Persisting complete=true makes later process starts independent
   // of archive size; foreground requests never await this migration.
@@ -131,10 +141,16 @@ function scheduleLegacyBackfill(seed: Map<string, string>): void {
       persistHubAgentRunBackfill
     );
     installHubAgentRunIndex(stored);
+    legacyBackfillFailureCount = 0;
+    legacyBackfillRetryAt = 0;
   })()
     .catch((error: unknown) => {
+      legacyBackfillFailureCount += 1;
+      const retryDelayMs = legacyBackfillRetryDelayMs(legacyBackfillFailureCount);
+      legacyBackfillRetryAt = Date.now() + retryDelayMs;
       log.warn('Benchmark Hub legacy agent index backfill failed', {
         error: error instanceof Error ? error.message : String(error),
+        retryDelayMs,
       });
     })
     .finally(() => {
@@ -198,6 +214,8 @@ export function __resetHubResolutionCachesForTest(): void {
   childIdToRun = null;
   compactIndexLoadPromise = null;
   legacyBackfillPromise = null;
+  legacyBackfillFailureCount = 0;
+  legacyBackfillRetryAt = 0;
   childIdIndexLoadedAt = 0;
   latestAppliedRevision = 0;
 }
@@ -244,20 +262,26 @@ export function resolveHubRunIdFromAgentIndex(
  */
 export async function findAgentAcrossRuns(agentId: string): Promise<HubAgentView | null> {
   if (!agentId) return null;
-  if (childIdToRun === null) {
-    const load = await startCompactIndexLoad();
-    if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
-    if (load.kind !== 'ready') return null;
-  } else {
-    scheduleCompactIndexRefresh();
-  }
-  if (agentRunMissCache.has(agentId)) return null;
   const cachedRunId = agentRunCache.get(agentId);
   if (cachedRunId !== undefined) {
     const view = await getRunAgent(cachedRunId, agentId);
     if (view !== null) return view;
     agentRunCache.delete(agentId);
   }
+  if (childIdToRun === null) {
+    const load = await startCompactIndexLoad();
+    if (load.kind === 'legacy') scheduleLegacyBackfill(load.seed);
+    if (load.kind !== 'ready') {
+      throw new BenchmarkHubUnavailableError(
+        load.kind === 'legacy'
+          ? 'Benchmark Hub archive index is warming; retry shortly'
+          : 'Benchmark Hub archive index is temporarily unavailable; retry shortly'
+      );
+    }
+  } else {
+    scheduleCompactIndexRefresh();
+  }
+  if (agentRunMissCache.has(agentId)) return null;
   if (childIdToRun === null) return null;
   const runId = resolveHubRunIdFromAgentIndex(agentId, childIdToRun);
   if (runId !== null) {

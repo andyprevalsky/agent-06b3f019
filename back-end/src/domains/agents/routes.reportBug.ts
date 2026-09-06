@@ -3,6 +3,7 @@
 import { Router } from 'express';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
+import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
   ReportBugForbiddenError,
@@ -41,6 +42,11 @@ router.post(
         return;
       }
       if (error instanceof ReportBugNotConfiguredError) {
+        res.status(503).json({ error: error.message });
+        return;
+      }
+      if (error instanceof BenchmarkHubUnavailableError) {
+        res.set('Retry-After', String(error.retryAfterSeconds));
         res.status(503).json({ error: error.message });
         return;
       }

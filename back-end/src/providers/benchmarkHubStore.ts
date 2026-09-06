@@ -25,11 +25,24 @@ import {
   slotHubAncestorSkeletonsFromBundle,
 } from './benchmarkHubAncestors';
 import {
+  completedHubAgentBackfill,
+  hubAgentIndexAfterDelete,
+  hubAgentIndexAfterPut,
+  parseHubAgentRunIndex,
+  parseHubAgentRunIndexRevision,
+  rebuildHubAgentRunIndexWithExtractor,
+  recoverableHubAgentRunRevision,
+  type HubAgentRunIndexDocument,
+  type HubAgentRunIndexRevisionDocument,
+  type HubAgentRunIndexSnapshot,
+} from './benchmarkHubAgentIndex';
+import {
   agentIdsFromHubBundle,
   applyHubRunToResolutionCaches,
   forgetHubRunFromResolutionCaches,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
+import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -44,12 +57,22 @@ export {
   findTreeAcrossRuns,
   forgetHubRunFromResolutionCaches,
   installHubAgentRunIndex,
+  legacyBackfillRetryDelayMs,
   loadCompactHubAgentIndex,
   peekHubResolutionForTest,
   resolveHubRunIdFromIndexes,
   resolveHubRunIdFromAgentIndex,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
+export {
+  completedHubAgentBackfill,
+  hubAgentIndexAfterDelete,
+  hubAgentIndexAfterPut,
+  parseHubAgentRunIndex,
+  parseHubAgentRunIndexRevision,
+  recoverableHubAgentRunRevision,
+  type HubAgentRunIndexSnapshot,
+} from './benchmarkHubAgentIndex';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
 
 const log = createLogger('BenchmarkHubStore');
@@ -57,6 +80,7 @@ const log = createLogger('BenchmarkHubStore');
 const KEY_PREFIX = 'benchmark-hub';
 const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
 const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
+const AGENT_RUN_INDEX_REVISION_KEY = 'agent-run-index-revision.json';
 
 /**
  * Benchmark Hub access allowlist: hub reads/edits/dispatch and the benchmark-
@@ -99,76 +123,6 @@ export interface HubAgentView {
   agent: Record<string, unknown>;
   messages: Array<Record<string, unknown>>;
   tree: Array<Record<string, unknown>>;
-}
-
-interface HubAgentRunIndexDocument {
-  version: 1;
-  revision: number;
-  complete: boolean;
-  agents: Record<string, string>;
-}
-
-export interface HubAgentRunIndexSnapshot {
-  revision: number;
-  complete: boolean;
-  agents: Map<string, string>;
-}
-
-/** Pure index transition used by the locked upload path and regression tests. */
-export function hubAgentIndexAfterPut(
-  current: HubAgentRunIndexSnapshot | null,
-  indexWasEmpty: boolean,
-  runId: string,
-  agentIds: string[]
-): HubAgentRunIndexSnapshot {
-  const agents = new Map(current?.agents ?? []);
-  for (const [agentId, indexedRunId] of agents) {
-    if (indexedRunId === runId) agents.delete(agentId);
-  }
-  for (const agentId of agentIds) {
-    if (agentId) agents.set(agentId, runId);
-  }
-  return {
-    revision: (current?.revision ?? 0) + 1,
-    complete: current?.complete ?? indexWasEmpty,
-    agents,
-  };
-}
-
-/** Pure index transition used by the locked delete path and regression tests. */
-export function hubAgentIndexAfterDelete(
-  current: HubAgentRunIndexSnapshot,
-  runId: string
-): HubAgentRunIndexSnapshot {
-  const agents = new Map(current.agents);
-  for (const [agentId, indexedRunId] of agents) {
-    if (indexedRunId === runId) agents.delete(agentId);
-  }
-  return {
-    revision: current.revision + 1,
-    complete: current.complete,
-    agents,
-  };
-}
-
-/** Current locked uploads win over a legacy scan; deleted runs stay absent. */
-export function completedHubAgentBackfill(
-  current: HubAgentRunIndexSnapshot | null,
-  backfilled: Map<string, string>,
-  validRunIds: Set<string>
-): HubAgentRunIndexSnapshot {
-  const agents = new Map<string, string>();
-  for (const [agentId, runId] of current?.agents ?? []) {
-    if (validRunIds.has(runId)) agents.set(agentId, runId);
-  }
-  for (const [agentId, runId] of backfilled) {
-    if (validRunIds.has(runId) && !agents.has(agentId)) agents.set(agentId, runId);
-  }
-  return {
-    revision: (current?.revision ?? 0) + 1,
-    complete: true,
-    agents,
-  };
 }
 
 export function hubRunVisibleFromMarker(marker: string | null): boolean {
@@ -281,66 +235,114 @@ async function getObject(key: string): Promise<string | null> {
   }
 }
 
-export function parseHubAgentRunIndex(raw: string | null): HubAgentRunIndexSnapshot | null {
-  if (raw === null) return null;
-  const parsed = JSON.parse(raw) as Partial<HubAgentRunIndexDocument>;
-  if (
-    parsed.version !== 1 ||
-    !Number.isSafeInteger(parsed.revision) ||
-    (parsed.revision as number) < 0 ||
-    typeof parsed.complete !== 'boolean' ||
-    typeof parsed.agents !== 'object' ||
-    parsed.agents === null ||
-    Array.isArray(parsed.agents) ||
-    Object.getPrototypeOf(parsed.agents) !== Object.prototype
-  ) {
-    throw new Error('Invalid Benchmark Hub agent-run index');
+async function readAgentRunIndexStrict(): Promise<HubAgentRunIndexSnapshot | null> {
+  const [rawIndex, rawRevision] = await Promise.all([
+    getObjectStrict(AGENT_RUN_INDEX_KEY),
+    getObjectStrict(AGENT_RUN_INDEX_REVISION_KEY),
+  ]);
+  const index = parseHubAgentRunIndex(rawIndex);
+  const durableRevisionFloor = parseHubAgentRunIndexRevision(rawRevision);
+  if (index === null) {
+    if (durableRevisionFloor === 0) return null;
+    throw new Error('Benchmark Hub agent-run index is missing above its revision floor');
   }
-  const agents = new Map<string, string>();
-  for (const [agentId, runId] of Object.entries(parsed.agents)) {
-    if (!agentId || typeof runId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(runId)) {
-      throw new Error('Invalid Benchmark Hub agent-run index entry');
-    }
-    agents.set(agentId, runId);
+  if (index.revision < durableRevisionFloor) {
+    throw new Error('Benchmark Hub agent-run index trails its durable revision floor');
   }
-  return {
-    revision: parsed.revision as number,
-    complete: parsed.complete,
-    agents,
-  };
-}
-
-async function readAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
-  return parseHubAgentRunIndex(await getObjectStrict(AGENT_RUN_INDEX_KEY));
+  return index;
 }
 
 async function writeAgentRunIndex(index: HubAgentRunIndexSnapshot): Promise<void> {
+  const revision: HubAgentRunIndexRevisionDocument = {
+    version: 1,
+    revision: index.revision,
+  };
   const document: HubAgentRunIndexDocument = {
     version: 1,
     revision: index.revision,
     complete: index.complete,
     agents: Object.fromEntries(index.agents),
   };
+  // Advance the separate floor first. If the following index write fails, the
+  // next locked mutation allocates above it rather than publishing a revision
+  // that an already-ahead replica would reject.
+  await putObject(AGENT_RUN_INDEX_REVISION_KEY, JSON.stringify(revision));
   await putObject(AGENT_RUN_INDEX_KEY, JSON.stringify(document));
+}
+
+export async function rebuildHubAgentRunIndex(
+  index: HubRunSummary[],
+  loadBundle: (runId: string) => Promise<Record<string, unknown>>,
+  durableRevisionFloor: number
+): Promise<HubAgentRunIndexSnapshot> {
+  return rebuildHubAgentRunIndexWithExtractor(
+    index,
+    loadBundle,
+    durableRevisionFloor,
+    agentIdsFromHubBundle
+  );
+}
+
+/** Locked mutations repair malformed/partially-written indexes before changing state. */
+async function readAgentRunIndexForMutation(
+  authoritativeRuns: HubRunSummary[]
+): Promise<HubAgentRunIndexSnapshot | null> {
+  const [rawIndex, rawRevision] = await Promise.all([
+    getObjectStrict(AGENT_RUN_INDEX_KEY),
+    getObjectStrict(AGENT_RUN_INDEX_REVISION_KEY),
+  ]);
+  let revisionFloorMalformed = false;
+  let parsedRevisionFloor: number;
+  try {
+    parsedRevisionFloor = parseHubAgentRunIndexRevision(rawRevision);
+  } catch {
+    revisionFloorMalformed = true;
+    parsedRevisionFloor = recoverableHubAgentRunRevision(rawRevision);
+  }
+  const durableRevisionFloor = Math.max(
+    parsedRevisionFloor,
+    recoverableHubAgentRunRevision(rawIndex)
+  );
+  try {
+    if (revisionFloorMalformed) {
+      throw new Error('Benchmark Hub agent-run revision floor is malformed');
+    }
+    const parsed = parseHubAgentRunIndex(rawIndex);
+    if (parsed === null) {
+      if (durableRevisionFloor === 0) return null;
+      throw new Error('Benchmark Hub agent-run index is missing above its revision floor');
+    }
+    if (parsed.revision < durableRevisionFloor) {
+      throw new Error('Benchmark Hub agent-run index trails its durable revision floor');
+    }
+    return parsed;
+  } catch (error: unknown) {
+    log.warn('Rebuilding malformed Benchmark Hub agent-run index during locked mutation', {
+      error: error instanceof Error ? error.message : String(error),
+      durableRevisionFloor,
+      runs: authoritativeRuns.length,
+    });
+    return rebuildHubAgentRunIndex(authoritativeRuns, getRunBundleStrict, durableRevisionFloor);
+  }
 }
 
 /** Load the compact lookup without touching any full run bundle. */
 export async function loadHubAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
-  return readAgentRunIndex();
+  return readAgentRunIndexStrict();
 }
 
 /** A small exact-key tombstone keeps stale per-process maps from serving deleted runs. */
-export async function isHubRunVisible(runId: string): Promise<boolean> {
+export async function isHubRunVisible(runId: string): Promise<boolean | null> {
   if (!/^[A-Za-z0-9._-]+$/.test(runId)) return false;
   try {
     const marker = await getObjectStrict(`visibility/${runId}.json`);
     return hubRunVisibleFromMarker(marker);
   } catch (error: unknown) {
-    log.warn('Benchmark Hub visibility read failed closed', {
+    log.warn('Benchmark Hub visibility read is temporarily unknown', {
       runId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return false;
+    return null;
   }
 }
 
@@ -359,7 +361,10 @@ async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${INDEX_LOCK_KEY}))`;
       return operation();
     },
-    { maxWait: 30_000, timeout: 30_000 }
+    // A corruption-only repair may cooperatively read the entire archive while
+    // holding this cross-process lock. Normal writes remain small, but the rare
+    // repair must finish atomically rather than timing out at the old 30s limit.
+    { maxWait: 30_000, timeout: 5 * 60_000 }
   );
 }
 
@@ -429,7 +434,7 @@ export async function putRun(
       storedSummary = existing;
       return;
     }
-    const persisted = await readAgentRunIndex();
+    const persisted = await readAgentRunIndexForMutation(index);
     const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
     await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
     const next = [summary, ...index.filter((r) => r.run_id !== runId)];
@@ -459,8 +464,9 @@ export async function persistHubAgentRunBackfill(
   backfilled: Map<string, string>
 ): Promise<HubAgentRunIndexSnapshot> {
   return withIndexLock(async () => {
-    const validRunIds = new Set((await listRunsStrict()).map((run) => run.run_id));
-    const current = await readAgentRunIndex();
+    const runs = await listRunsStrict();
+    const validRunIds = new Set(runs.map((run) => run.run_id));
+    const current = await readAgentRunIndexForMutation(runs);
     const snapshot = completedHubAgentBackfill(current, backfilled, validRunIds);
     await writeAgentRunIndex(snapshot);
     return snapshot;
@@ -511,6 +517,35 @@ export async function getRunBundle(runId: string): Promise<Record<string, unknow
   try {
     return parseHubRunBundle(raw);
   } catch {
+    return null;
+  }
+}
+
+/** Agent resolution preserves transport faults so callers do not cache a false miss. */
+export async function getRunBundleForAgentLookup(
+  runId: string
+): Promise<Record<string, unknown> | null> {
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) return null;
+  let raw: string | null;
+  try {
+    raw = await getObjectStrict(`runs/${runId}.json`);
+  } catch (error: unknown) {
+    log.warn('Benchmark Hub run bundle read is temporarily unavailable', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new BenchmarkHubUnavailableError(
+      'Benchmark Hub run bundle is temporarily unavailable; retry shortly'
+    );
+  }
+  if (raw === null) return null;
+  try {
+    return parseHubRunBundle(raw);
+  } catch (error: unknown) {
+    log.warn('Benchmark Hub run bundle is malformed', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -636,20 +671,23 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
  * Returns false when the run id was not present.
  */
 export async function deleteRun(runId: string): Promise<boolean> {
-  const bundle = await getRunBundle(runId);
+  let bundle: Record<string, unknown> | null = null;
   const removed = await withIndexLock(async () => {
     const index = await listRunsStrict();
     const next = index.filter((r) => r.run_id !== runId);
     if (next.length === index.length) return false;
+    // Validate the authoritative bundle before publishing any visibility or
+    // index mutation; otherwise its DB ancestor skeletons cannot be cleaned.
+    bundle = await getRunBundleStrict(runId);
+    const agentIndex = await readAgentRunIndexForMutation(next);
     await putObject(`visibility/${runId}.json`, 'false');
     await putObject('index.json', JSON.stringify(next));
-    const agentIndex = await readAgentRunIndex();
     if (agentIndex !== null) {
       await writeAgentRunIndex(hubAgentIndexAfterDelete(agentIndex, runId));
     }
     return true;
   });
-  if (removed && bundle) {
+  if (removed && bundle !== null) {
     await deleteHubAncestorSkeletonsFromBundle(bundle);
     forgetHubRunFromResolutionCaches(runId, agentIdsFromHubBundle(bundle));
   }

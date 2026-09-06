@@ -68,8 +68,8 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/benchmarkHubStore.ts',
     scope: 'withIndexLock',
-    fingerprint: '50096ee3d1862882',
-    reason: 'explicit 30-second cross-process advisory-lock policy',
+    fingerprint: '5b0a5879f7744822',
+    reason: 'explicit five-minute corruption-repair advisory-lock policy',
   },
   {
     file: 'providers/computeCredentials.ts',

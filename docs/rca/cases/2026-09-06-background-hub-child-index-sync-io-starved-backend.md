@@ -97,6 +97,28 @@ invalid agent mapping rejects the operation. It cannot be reinterpreted as an em
 archive or published as `complete: true`. Behavioral tests cover both catalog and
 bundle read faults before persistence, as well as malformed compact-index fields.
 
+The final review also closed the failure modes around that strictness. A legacy
+index that is still warming now produces a retryable HTTP 503 instead of a false
+404, and a failed compatibility scan remains incomplete with bounded exponential
+backoff before another request can schedule it. Visibility and bundle transport
+faults likewise stay `unknown`/retryable, so the resolver neither evicts a valid
+mapping nor memoizes a miss during an R2 outage.
+
+Locked upload, delete, and backfill mutations recover a malformed or partially
+written compact index from the strict catalog and every authoritative run bundle.
+The rebuild publishes `complete: true` only if every bundle was readable. A
+separate durable revision-floor object is advanced before the rebuilt index, so a
+repair allocates above any revision already observed by another backend replica.
+Cold readers compare the compact document against that floor as well, turning a
+floor-first/index-second partial write into a retryable response rather than a
+false miss. A malformed floor is salvaged only for its safe integer revision and
+forces the same authoritative locked rebuild; none of its mappings are trusted.
+Delete validates its target bundle and completes any index repair before publishing
+the visibility tombstone or catalog removal, preserving the bundle-derived ancestor
+cleanup contract. Focused regressions cover backoff bounds, retryable status,
+revision-floor validation/salvage, full successful repair, failed repair, and delete
+ordering.
+
 This removes unbounded archive work from the steady-state request/startup path and
 keeps the one-time legacy migration cooperative. It deliberately does not claim
 that all Hub serialization is non-blocking: `JSON.stringify` on upload and

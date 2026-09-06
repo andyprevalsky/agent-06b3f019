@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { BenchmarkHubUnavailableError } from '../../providers/benchmarkHubErrors';
 import {
   __resetHubResolutionCachesForTest,
   agentIdsFromHubBundle,
@@ -25,10 +26,14 @@ import {
   hubAgentIndexAfterPut,
   hubRunVisibleFromMarker,
   installHubAgentRunIndex,
+  legacyBackfillRetryDelayMs,
   loadCompactHubAgentIndex,
   parseHubAgentRunIndex,
+  parseHubAgentRunIndexRevision,
   parseHubRunBundle,
   peekHubResolutionForTest,
+  rebuildHubAgentRunIndex,
+  recoverableHubAgentRunRevision,
   resolveHubRunIdFromAgentIndex,
   resolveHubRunIdFromIndexes,
 } from '../../providers/benchmarkHubStore';
@@ -129,6 +134,75 @@ test('10k-agent persistence transitions stay compact and preserve update/delete 
   const deleted = hubAgentIndexAfterDelete(updated, 'run-new');
   assert.equal(deleted.agents.has('agent-9999'), false);
   assert.equal(deleted.agents.has('agent-new'), false);
+});
+
+test('legacy backfill retries use bounded exponential backoff', () => {
+  assert.equal(legacyBackfillRetryDelayMs(1), 5_000);
+  assert.equal(legacyBackfillRetryDelayMs(2), 10_000);
+  assert.equal(legacyBackfillRetryDelayMs(20), 5 * 60_000);
+});
+
+test('retryable Hub failures carry a 503 and retry hint', () => {
+  const error = new BenchmarkHubUnavailableError('warming');
+  assert.equal(error.statusCode, 503);
+  assert.equal(error.retryAfterSeconds, 5);
+});
+
+test('revision floor is strict while malformed-index revision salvage trusts no mappings', () => {
+  assert.equal(parseHubAgentRunIndexRevision('{"version":1,"revision":41}'), 41);
+  assert.throws(
+    () => parseHubAgentRunIndexRevision('{"version":1,"revision":-1}'),
+    /revision floor/
+  );
+  assert.equal(
+    recoverableHubAgentRunRevision('{"version":9,"revision":73,"agents":"corrupt"}'),
+    73
+  );
+  assert.equal(recoverableHubAgentRunRevision('{"version":9,"revision":89}'), 89);
+  assert.equal(recoverableHubAgentRunRevision('not-json'), 0);
+});
+
+asyncTest(
+  'mutation repair rebuilds every authoritative bundle above the durable floor',
+  async () => {
+    const rebuilt = await rebuildHubAgentRunIndex(
+      [
+        { ...runs[0], run_id: 'newer-run' },
+        { ...runs[0], run_id: 'older-run' },
+      ],
+      async (runId) => ({
+        tasks: [
+          {
+            agent_id: `${runId}-root`,
+            logs: {
+              tree: {
+                shared: { parent_agent_id: `${runId}-root` },
+                [`${runId}-child`]: { parent_agent_id: `${runId}-root` },
+              },
+            },
+          },
+        ],
+      }),
+      73
+    );
+    assert.equal(rebuilt.revision, 73);
+    assert.equal(rebuilt.complete, true);
+    assert.equal(rebuilt.agents.get('shared'), 'newer-run');
+    assert.equal(rebuilt.agents.get('older-run-child'), 'older-run');
+  }
+);
+
+asyncTest('mutation repair stays incomplete by rejecting an unreadable bundle', async () => {
+  await assert.rejects(
+    rebuildHubAgentRunIndex(
+      runs,
+      async () => {
+        throw new Error('synthetic unreadable authoritative bundle');
+      },
+      73
+    ),
+    /synthetic unreadable authoritative bundle/
+  );
 });
 
 test('legacy completion merges concurrent uploads and excludes concurrent deletes', () => {
@@ -319,9 +393,16 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
     join(process.cwd(), 'src/providers/benchmarkHubStore.ts'),
     'utf8'
   );
+  const agentIndexSource = readFileSync(
+    join(process.cwd(), 'src/providers/benchmarkHubAgentIndex.ts'),
+    'utf8'
+  );
   assert.match(storeSource, /node:fs\/promises/);
   assert.match(storeSource, /agent-run-index\.json/);
-  assert.match(storeSource, /revision: \(current\?\.revision \?\? 0\) \+ 1/);
+  assert.match(storeSource, /agent-run-index-revision\.json/);
+  assert.match(storeSource, /index\.revision < durableRevisionFloor/);
+  assert.match(storeSource, /revisionFloorMalformed/);
+  assert.match(agentIndexSource, /revision: \(current\?\.revision \?\? 0\) \+ 1/);
   assert.match(storeSource, /await writeAgentRunIndex\(agentIndex\)/);
   assert.match(storeSource, /visibility\/\$\{runId\}\.json/);
   assert.match(storeSource, /getObjectStrict/);
@@ -341,6 +422,12 @@ test('child lookup loads a persisted compact index and legacy backfill yields pe
   const deleteStart = storeSource.indexOf('export async function deleteRun');
   const deleteBody = storeSource.slice(deleteStart);
   assert.match(deleteBody, /await listRunsStrict\(\)/);
+  assert.ok(
+    deleteBody.indexOf('getRunBundleStrict(runId)') <
+      deleteBody.indexOf("putObject(`visibility/${runId}.json`, 'false')"),
+    'delete must validate the bundle before publishing its tombstone'
+  );
+  assert.match(deleteBody, /readAgentRunIndexForMutation\(next\)/);
   assert.ok(
     deleteBody.indexOf("putObject(`visibility/${runId}.json`, 'false')") <
       deleteBody.indexOf("putObject('index.json'"),
@@ -426,6 +513,11 @@ test('findAgentAcrossRuns drops compact-index pointers whose bundle is unavailab
   assert.match(body, /if \(view !== null\)/);
   assert.match(src, /forgetHubRunFromResolutionCaches/);
   assert.match(src, /applyHubRunToResolutionCaches/);
+  assert.match(body, /throw new BenchmarkHubUnavailableError/);
+  const viewSource = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubView.ts'), 'utf8');
+  assert.match(viewSource, /if \(visible === null\)/);
+  assert.match(viewSource, /throw new BenchmarkHubUnavailableError/);
+  assert.match(viewSource, /getRunBundleForAgentLookup\(runId\)/);
 });
 
 async function finish(): Promise<void> {

@@ -6,7 +6,12 @@ import {
   schemaFromCompletionOutputs,
   structuredFromCompletionOutputs,
 } from './benchmarkHubOutputs';
-import { getRunBundle, isHubRunVisible, type HubAgentView } from './benchmarkHubStore';
+import { BenchmarkHubUnavailableError } from './benchmarkHubErrors';
+import {
+  getRunBundleForAgentLookup,
+  isHubRunVisible,
+  type HubAgentView,
+} from './benchmarkHubStore';
 
 const TOOL_USAGE_TREE_KEYS = new Set([
   'root_agent_id',
@@ -172,8 +177,14 @@ export function subtreeAgentsForBus<T extends Record<string, unknown>>(
  * run (root or any sub-agent captured by logs.tree), plus the fan-out tree.
  */
 export async function getRunAgent(runId: string, agentId: string): Promise<HubAgentView | null> {
-  if (!(await isHubRunVisible(runId))) return null;
-  const bundle = await getRunBundle(runId);
+  const visible = await isHubRunVisible(runId);
+  if (visible === null) {
+    throw new BenchmarkHubUnavailableError(
+      'Benchmark Hub run visibility is temporarily unavailable; retry shortly'
+    );
+  }
+  if (!visible) return null;
+  const bundle = await getRunBundleForAgentLookup(runId);
   if (!bundle) return null;
   const runTimestamp = String(bundle.timestamp ?? '');
   const tasks = Array.isArray(bundle.tasks) ? (bundle.tasks as Array<Record<string, unknown>>) : [];
