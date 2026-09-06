@@ -66,8 +66,14 @@ test('demoCacheAllowed is true for DEMO root / child prefixes without a button f
 
 test('agentFastMode source uses demoCacheAllowed not the button column', () => {
   const store = readFileSync(join(process.cwd(), 'src', 'providers', 'fastCacheStore.ts'), 'utf8');
-  assert.ok(store.includes('demoCacheAllowed'), 'agentFastMode must gate enabled via demoCacheAllowed');
-  assert.ok(store.includes('providerFastMode'), 'agentFastMode must expose providerFastMode from button');
+  assert.ok(
+    store.includes('demoCacheAllowed'),
+    'agentFastMode must gate enabled via demoCacheAllowed'
+  );
+  assert.ok(
+    store.includes('providerFastMode'),
+    'agentFastMode must expose providerFastMode from button'
+  );
   assert.ok(
     /const providerFastMode = agent\?\.fastModeCacheEnabled/.test(store),
     'button column maps to providerFastMode'
