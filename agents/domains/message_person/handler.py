@@ -25,6 +25,7 @@ from domains.message_person.service import (
     generate_message_activity,
     queue_imessage_activity,
     send_agent_sms_activity,
+    send_email_activity,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, extract_root_error
 from tools.read_message_history import read_message_history_activity
@@ -200,6 +201,9 @@ class MessagePersonManager(ToolManager):
             tool_call_id=tool_call_id,
             context=workflow_instance.context,
             person_phone=person_phone,
+            person_email=person_email_addr,
+            from_email=from_email,
+            generated_subject=generated_subject,
             generated_message=generated_message,
             person_display=person_display,
             world_model_mode=getattr(workflow_instance, "world_model_mode", "real"),
@@ -531,16 +535,72 @@ class MessagePersonManager(ToolManager):
         generated_message: str,
         person_display: str,
         world_model_mode: str = "real",
+        person_email: str | None = None,
+        from_email: str = "",
+        generated_subject: str | None = None,
     ) -> dict[str, Any] | ToolEvent:
         if channel == "email":
-            return ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title=f"Failed to send Email to {person_display}",
-                message=(
-                    "Email delivery is not available through message_person. The message was approved but was not sent."
-                ),
-                status=MessageStatus.ERROR,
-            )
+            if not person_email:
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Email to {person_display}",
+                    message="An email address is required for the email channel.",
+                    status=MessageStatus.ERROR,
+                )
+            if not from_email:
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Email to {person_display}",
+                    message="from_email is required when channel is 'email'.",
+                    status=MessageStatus.ERROR,
+                )
+            subject = (generated_subject or "").strip() or "Message"
+            try:
+                activity_args = [
+                    user_id,
+                    agent_id,
+                    tool_call_id,
+                    person_email,
+                    from_email,
+                    subject,
+                    generated_message,
+                ]
+                if world_model_mode != "real":
+                    activity_args.append(world_model_mode)
+                result = await workflow.execute_activity(
+                    send_email_activity,
+                    args=activity_args,
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception as exc:
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Email to {person_display}",
+                    message=extract_root_error(exc),
+                    status=MessageStatus.ERROR,
+                )
+            if (
+                result.get("success") is not True
+                or result.get("status") != "sent"
+                or not isinstance(result.get("message_id"), str)
+                or not result.get("message_id")
+            ):
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Email to {person_display}",
+                    message=result.get("error", "Gmail did not confirm that it accepted the message"),
+                    status=MessageStatus.ERROR,
+                )
+            return {
+                "channel": "email",
+                "status": "sent",
+                "message_id": result["message_id"],
+                "thread_id": result.get("thread_id"),
+                "to": result.get("to", person_email),
+                "from_email": result.get("from_email", from_email),
+                "subject": result.get("subject", subject),
+            }
 
         if not person_phone:
             return ToolEvent(

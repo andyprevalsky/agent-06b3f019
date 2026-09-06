@@ -6,12 +6,81 @@
 import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
+import { ToolSideEffectAlreadyStartedError } from '../../providers/toolSideEffects';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
+import { GmailSendIdempotencyConflictError, sendEmailOnce } from './service.emailSendOnce';
 import * as resyncService from './service.emailResync';
 
 const log = createLogger('Integrations');
 const router = Router({ mergeParams: true });
+
+export async function requireFromEmailOrRespond(
+  res: Response,
+  userId: string,
+  fromEmail: unknown,
+  deps: {
+    getAvailableGmailEmails?: (userId: string) => Promise<string[]>;
+  } = {}
+): Promise<string | null> {
+  if (fromEmail !== undefined && fromEmail !== null && fromEmail !== '') {
+    return fromEmail as string;
+  }
+  const getAvailable = deps.getAvailableGmailEmails ?? service.getAvailableGmailEmails;
+  const available = await getAvailable(userId);
+  if (available.length > 0) {
+    res.status(400).json({
+      error: 'from_email required',
+      message: `from_email is required. Available connected accounts: ${available.join(', ')}`,
+    });
+    return null;
+  }
+  res.status(400).json({
+    error: 'Gmail not connected',
+    message:
+      'No Gmail accounts connected. Connect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
+  });
+  return null;
+}
+
+export function validateIdempotencyOrRespond(
+  res: Response,
+  idempotencyKey: string | undefined,
+  agentId: string | undefined
+): boolean {
+  if (idempotencyKey === undefined) return true;
+  if (agentId === undefined) {
+    res.status(400).json({
+      error: 'agent_id required',
+      message: 'agent_id is required when idempotency_key is provided',
+    });
+    return false;
+  }
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(idempotencyKey)) {
+    res.status(400).json({ error: 'Invalid idempotency_key' });
+    return false;
+  }
+  return true;
+}
+
+export function mapEmailSendError(res: Response, error: unknown): Response | null {
+  if (error instanceof service.GmailAccountNotFoundError) {
+    return res.status(400).json({ error: 'Gmail not connected', message: error.message });
+  }
+  if (error instanceof service.GmailTokenExpiredError) {
+    return res.status(400).json({ error: 'Gmail token expired', message: error.message });
+  }
+  if (error instanceof service.GmailAuthFailedError) {
+    return res.status(400).json({ error: 'Gmail authentication failed', message: error.message });
+  }
+  if (error instanceof GmailSendIdempotencyConflictError) {
+    return res.status(409).json({ error: 'Idempotency conflict', message: error.message });
+  }
+  if (error instanceof ToolSideEffectAlreadyStartedError) {
+    return res.status(409).json({ error: 'Send already in progress', message: error.message });
+  }
+  return null;
+}
 
 /** POST /api/integrations/email/:provider/start */
 router.post(
@@ -200,12 +269,14 @@ router.post(
   '/email/send',
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { to, subject, body, cc, user_id, from_email, agent_id } = req.body;
+    const { to, subject, body, cc, user_id, from_email, agent_id, idempotency_key } = req.body;
     const userId = req.isInternal === true ? user_id : req.user!.id;
     const agentId =
       req.isInternal === true && typeof agent_id === 'string' && agent_id !== ''
         ? agent_id
         : undefined;
+    const idempotencyKey =
+      typeof idempotency_key === 'string' && idempotency_key !== '' ? idempotency_key : undefined;
 
     if (userId === undefined || userId === null || userId === '') {
       return res.status(401).json({ error: 'Unauthorized: user_id required for internal auth' });
@@ -221,31 +292,31 @@ router.post(
       return res.status(400).json({ error: 'Missing required field: body' });
     }
 
-    // Always require from_email
-    if (from_email === undefined || from_email === null || from_email === '') {
-      const available = await service.getAvailableGmailEmails(userId);
-      if (available.length > 0) {
-        return res.status(400).json({
-          error: 'from_email required',
-          message: `from_email is required. Available connected accounts: ${available.join(', ')}`,
-        });
-      }
-      return res.status(400).json({
-        error: 'Gmail not connected',
-        message:
-          'No Gmail accounts connected. Connect your Gmail by clicking on the hamburger icon > Integrations > Connect Gmail',
-      });
-    }
+    const fromEmail = await requireFromEmailOrRespond(res, userId, from_email);
+    if (fromEmail === null) return;
+
+    if (!validateIdempotencyOrRespond(res, idempotencyKey, agentId)) return;
 
     try {
-      const result = await service.sendEmail(userId, {
-        to,
-        subject,
-        body,
-        cc,
-        fromEmail: from_email,
-        agentId,
-      });
+      const result =
+        idempotencyKey !== undefined && agentId !== undefined
+          ? await sendEmailOnce(userId, {
+              to,
+              subject,
+              body,
+              cc,
+              fromEmail,
+              agentId,
+              idempotencyKey,
+            })
+          : await service.sendEmail(userId, {
+              to,
+              subject,
+              body,
+              cc,
+              fromEmail,
+              agentId,
+            });
 
       return res.json({
         success: true,
@@ -253,17 +324,8 @@ router.post(
         threadId: result.threadId,
       });
     } catch (error: unknown) {
-      if (error instanceof service.GmailAccountNotFoundError) {
-        return res.status(400).json({ error: 'Gmail not connected', message: error.message });
-      }
-      if (error instanceof service.GmailTokenExpiredError) {
-        return res.status(400).json({ error: 'Gmail token expired', message: error.message });
-      }
-      if (error instanceof service.GmailAuthFailedError) {
-        return res
-          .status(400)
-          .json({ error: 'Gmail authentication failed', message: error.message });
-      }
+      const mapped = mapEmailSendError(res, error);
+      if (mapped !== null) return mapped;
       throw error;
     }
   })

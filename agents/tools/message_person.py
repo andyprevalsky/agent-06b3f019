@@ -14,4 +14,5 @@ from domains.message_person.repo import (  # noqa: F401
     generate_message_activity,
     queue_imessage_activity,
     send_agent_sms_activity,
+    send_email_activity,
 )

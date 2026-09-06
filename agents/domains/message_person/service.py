@@ -18,6 +18,7 @@ from domains.message_person.repo import (
 )
 from domains.message_person.repo import queue_imessage_activity as queue_imessage_activity
 from domains.message_person.repo import send_agent_sms_activity as send_agent_sms_activity
+from domains.message_person.repo import send_email_activity as send_email_activity
 from domains.message_person.types import PersonIdFields
 
 
