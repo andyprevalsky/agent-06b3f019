@@ -28,8 +28,12 @@ sources:
   - PR #1268 production verification
   - fleet run 31b6ab02-5e02-4022-802b-1e7e23528e76 (local post-fix lifecycle)
   - agent 0aaf7e12-d050-46b4-8a35-2be0baa51b93 (durable https://www.roselabs.ai/?agent-id=0aaf7e12-d050-46b4-8a35-2be0baa51b93)
+  - PR #1269 production verification at merge ef22ea81e0cda2780cd4d16d8023083ecc37df6d
+  - hub run 7f9d7018-54c4-4ed6-a29c-91815c8bd380 (production)
+  - agent 10a722c3-a1a3-435d-8c32-0eca142119e9 (durable https://www.roselabs.ai/?agent-id=10a722c3-a1a3-435d-8c32-0eca142119e9)
+  - task production semantic workflow https://github.com/Rose-Ai-Labs/rose/actions/runs/34013583378
 repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py manager_cancelled_pause_is_task_complete
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -160,8 +164,23 @@ passed the fail-closed evidence publisher at the durable FE link recorded in
 this case's sources. This is merge-enabling integration evidence, not closing
 production evidence. The exact production-only benchmark cannot execute
 against localhost by catalog contract; its unchanged pre-fix production run is
-the outcome failure, and this case remains open until the same production gate
-passes on the deployed fix.
+the outcome failure.
+
+Production verification closed the case on merge
+`ef22ea81e0cda2780cd4d16d8023083ecc37df6d`. The exact
+`agent-payment-production-abandonment` gate ran with fast-mode replay disabled
+and passed in 264.9 seconds as Hub run
+`7f9d7018-54c4-4ed6-a29c-91815c8bd380`, agent
+`10a722c3-a1a3-435d-8c32-0eca142119e9`. Its 56-message durable transcript has a
+FINISHED recording and `task_complete` carrying the same deterministic browser
+task ID, `9808a8ba-7a6f-586a-8bc1-a57b6f49b36b`. The lifecycle snapshot was
+VOIDED/RECLAIMED/refunded/CLOSED with a succeeded live $1 Stripe capture, a
+reclaimed live organization transfer, and no open attention request. The
+fail-closed evidence publisher verified the recording, terminal, public FE
+rehydration, and an R2-backed verifier LLM dump; its manifest is archived under
+`/opt/cursor/artifacts/rca_evidence/10a722c3-a1a3-435d-8c32-0eca142119e9/`.
+The exact-merge production semantic workflow also passed both the complete
+frontend flow suite and five-sample chat lifecycle latency ratchet.
 
 ## Human feedback
 
