@@ -533,7 +533,11 @@ FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
 async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
-    return "Persisted DB goal"
+    # DEMO-tagged mass-agent root prompt (stable cache namespace).
+    return (
+        "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+        " — persisted DB goal"
+    )
 
 
 @activity.defn(name="call_llm_activity")
@@ -1114,12 +1118,16 @@ async def _run_all_workflow_tests() -> List[tuple]:
             try:
                 fc_agent_id = "agent-test-fastcache"
                 FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
+                demo_prefix = (
+                    "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+                )
+                persisted_goal = f"{demo_prefix} — persisted DB goal"
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
                         fc_agent_id,
                         "user-test-1",
-                        "Refined chat goal (volatile, differs per run)",
+                        f"{demo_prefix} — refined chat goal (volatile, differs per run)",
                         "rose-labs/rose-1-lite",
                         256,
                         {"type": "FLOAT_LLM_JUDGE"},
@@ -1132,7 +1140,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                         None,  # max_iterations
                         100,  # price_limit_cents
                         None,  # context_gates
-                        True,  # fast_mode_cache_enabled
+                        True,  # fast_mode_cache_enabled (button; cache still DEMO-gated)
                     ],
                     id=_next_wf_id("fast-cache-goal"),
                     task_queue=TASK_QUEUE,
@@ -1145,7 +1153,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
 
                 captured_goals = FAST_MODE_GOAL_CAPTURE.get(fc_agent_id)
                 assert captured_goals, "Workflow never reached an LLM call"
-                assert captured_goals[0] == "Persisted DB goal", (
+                assert captured_goals[0] == persisted_goal, (
                     f"Fast Mode cache goal must be the persisted agent-row goal, got {captured_goals[0]!r}"
                 )
 

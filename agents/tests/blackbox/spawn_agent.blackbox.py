@@ -3064,7 +3064,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX)),
+            new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         pytest.raises(asyncio.CancelledError),
@@ -3187,7 +3187,7 @@ async def test_spawn_explore_agent_activity_unavailable_sources_still_completed(
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -3230,7 +3230,7 @@ async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_source
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -3712,7 +3712,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "parent g", True, None, None)),
+            new=AsyncMock(return_value=(False, "parent g", True, None, None, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),
