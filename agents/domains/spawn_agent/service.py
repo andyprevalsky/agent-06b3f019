@@ -387,6 +387,7 @@ async def spawn_explore_agent_activity(
         _explore_fast_mode_write_enabled,
         _,
         _,
+        _,
     ) = await resolve_agent_fast_mode(agent_id)
     _explore_fast_mode_goal = goal or _explore_fast_mode_goal
     # Classification is the handler's mass-agent flag when provided. Do not

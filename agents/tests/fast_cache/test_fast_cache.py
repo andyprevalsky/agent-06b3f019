@@ -2287,7 +2287,7 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
 
     async def fake_resolve(agent_id: str):
         assert agent_id == "agent-1"
-        return True, "persisted row goal", True, "agent-1", "persisted row goal"
+        return True, "persisted row goal", True, "agent-1", "persisted row goal", True
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
@@ -2302,7 +2302,7 @@ def test_resolve_fast_cache_goal_activity_none_on_unresolved(monkeypatch):
     from helpers.fast_cache_goal import resolve_fast_cache_goal_activity
 
     async def fake_resolve(agent_id: str):
-        return False, None, False, None, None
+        return False, None, False, None, None, True
 
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 

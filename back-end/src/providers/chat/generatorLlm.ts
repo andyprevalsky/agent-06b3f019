@@ -475,7 +475,8 @@ async function callGeneratorLlmCore(
   const fastMode = await agentFastMode(params.agentId);
   const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
-  const providerFastMode = fastModeRead || fastModeWrite;
+  // Button / LLM speed — independent of DEMO cache replay.
+  const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
   let fcCacheWon = false;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {

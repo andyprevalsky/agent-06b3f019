@@ -253,15 +253,16 @@ def test_materialize_oai_demo_report_files_activity_keeps_legacy_three_arg_calls
     assert idempotency_keys[0].startswith("oai-demo-report:")
 
 
-def test_should_skip_oai_demo_browser_spawn_is_demo_fast_mode_only():
+def test_should_skip_oai_demo_browser_spawn_is_demo_only():
     demo = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=True)
-    child = SimpleNamespace(goal=OAI_DEMO_CHILD_GOAL_PREFIX, fast_mode_cache_enabled=True)
+    child = SimpleNamespace(goal=OAI_DEMO_CHILD_GOAL_PREFIX, fast_mode_cache_enabled=False)
     live_fm = SimpleNamespace(goal="Buy socks", fast_mode_cache_enabled=True)
-    demo_live = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=False)
+    demo_button_off = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=False)
     assert should_skip_oai_demo_browser_spawn(demo) is True
     assert should_skip_oai_demo_browser_spawn(child) is True
     assert should_skip_oai_demo_browser_spawn(live_fm) is False
-    assert should_skip_oai_demo_browser_spawn(demo_live) is False
+    # DEMO prompt skips browser even when the Fast Mode button is off.
+    assert should_skip_oai_demo_browser_spawn(demo_button_off) is True
 
 
 def test_get_max_iterations_reads_positive_env(monkeypatch):
@@ -275,10 +276,11 @@ def test_get_max_iterations_reads_positive_env(monkeypatch):
     assert get_max_iterations() == 60
 
 
-def test_resolve_explore_depth_promotes_only_on_demo_fast_mode():
+def test_resolve_explore_depth_promotes_on_demo_prompt_not_button():
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=True) == "deep"
+    assert resolve_explore_depth("quick", fast_mode_cache_enabled=False, oai_demo=True) == "deep"
     assert resolve_explore_depth("quick", fast_mode_cache_enabled=True, oai_demo=False) == "quick"
-    assert resolve_explore_depth(None, fast_mode_cache_enabled=False, oai_demo=True) == "quick"
+    assert resolve_explore_depth(None, fast_mode_cache_enabled=False, oai_demo=False) == "quick"
 
 
 def test_resolve_explore_oai_demo_explicit_flag_wins_over_goal():

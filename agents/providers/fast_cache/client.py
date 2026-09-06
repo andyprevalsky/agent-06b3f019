@@ -653,26 +653,29 @@ async def trajectory_prior_exists(
     return prior is not None
 
 
-# Per-process memo of (read_enabled, goal, write_enabled, root_agent_id, root_goal)
+# Per-process memo of
+# (read_enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode)
 # keyed by agent_id, so auto-resolution costs at most one backend lookup per agent
 # per worker process.
-_AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str], Optional[str]]] = {}
+_AGENT_FASTMODE: dict[
+    str, tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]
+] = {}
 
 
 async def resolve_agent_fast_mode(
     agent_id: str,
-) -> tuple[bool, Optional[str], bool, Optional[str], Optional[str]]:
-    """Look up (read_enabled, goal, write_enabled, root_agent_id, root_goal).
+) -> tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]:
+    """Look up (read_enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode).
 
-    `read_enabled` is the persisted Fast Mode flag. `write_enabled` may be true
-    for allowlisted accounts even when reads are off. `root_goal` is the bus
-    root agent's goal (same as `goal` for roots) — used to gate soft-complete
-    stubs to exact-match `fast_cache:on` bench trees. Returns all-false on any
-    error (degrade to no-cache).
+    `read_enabled` is DEMO-prompt cache replay (independent of the Fast Mode
+    button). `provider_fast_mode` is the button / LLM speed flag persisted on
+    the agent row. `write_enabled` follows demo cache (DEMO trees record+replay).
+    Returns all-false on any error (degrade to no-cache / provider default).
     """
     if agent_id in _AGENT_FASTMODE:
         return _AGENT_FASTMODE[agent_id]
     enabled, goal, write_enabled, root_agent_id, root_goal = False, None, False, None, None
+    provider_fast_mode = True
     try:
         api_url, api_key = _backend()
         # Dedicated internal endpoint (API-key auth, no RLS) — the agent serializer
@@ -691,6 +694,11 @@ async def resolve_agent_fast_mode(
             root_agent_id = data.get("rootAgentId") if isinstance(data.get("rootAgentId"), str) else agent_id
             root_goal_raw = data.get("rootGoal")
             root_goal = root_goal_raw if isinstance(root_goal_raw, str) and root_goal_raw else goal
+            if "providerFastMode" in data:
+                provider_fast_mode = bool(data.get("providerFastMode"))
+            else:
+                # Legacy responses: button lived on the same flag as cache.
+                provider_fast_mode = bool(data.get("enabled", True))
         else:
             logger.warning("fast_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
     except Exception as exc:
@@ -698,8 +706,26 @@ async def resolve_agent_fast_mode(
     # Only memoize a positive resolution — a transient failure shouldn't disable
     # the cache for the rest of the run.
     if goal and (enabled or write_enabled):
-        _AGENT_FASTMODE[agent_id] = (enabled, goal, write_enabled, root_agent_id, root_goal)
-    return enabled, goal, write_enabled, root_agent_id, root_goal
+        _AGENT_FASTMODE[agent_id] = (
+            enabled,
+            goal,
+            write_enabled,
+            root_agent_id,
+            root_goal,
+            provider_fast_mode,
+        )
+    elif goal:
+        # Still memoize provider_fast_mode for non-demo agents so LLM speed
+        # respects the button without re-fetching every call.
+        _AGENT_FASTMODE[agent_id] = (
+            enabled,
+            goal,
+            write_enabled,
+            root_agent_id,
+            root_goal,
+            provider_fast_mode,
+        )
+    return enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode
 
 
 async def soft_complete_allowed_for_agent(
@@ -715,7 +741,9 @@ async def soft_complete_allowed_for_agent(
         return True
     if not agent_id:
         return False
-    _enabled, resolved_goal, _write_enabled, _root_id, root_goal = await resolve_agent_fast_mode(agent_id)
+    _enabled, resolved_goal, _write_enabled, _root_id, root_goal, _pfm = await resolve_agent_fast_mode(
+        agent_id
+    )
     return normalize.soft_complete_allowed(goal or resolved_goal, root_goal=root_goal)
 
 
@@ -727,7 +755,7 @@ async def resolve_soft_complete_root_goal(
     if not agent_id:
         return goal
     try:
-        _e, resolved_goal, _w, _r, root_goal = await resolve_agent_fast_mode(agent_id)
+        _e, resolved_goal, _w, _r, root_goal, _pfm = await resolve_agent_fast_mode(agent_id)
         return root_goal or goal or resolved_goal
     except Exception:
         return goal
@@ -738,7 +766,9 @@ async def resolve_archive_root_agent_id() -> Optional[str]:
     agent_id = structlog.contextvars.get_contextvars().get("agent_id")
     if isinstance(agent_id, str):
         try:
-            _enabled, _goal, _write_enabled, resolved_root, _root_goal = await resolve_agent_fast_mode(agent_id)
+            _enabled, _goal, _write_enabled, resolved_root, _root_goal, _pfm = await resolve_agent_fast_mode(
+                agent_id
+            )
             if resolved_root:
                 return resolved_root
         except Exception as exc:  # archive best-effort path
@@ -758,7 +788,9 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
         return existing
     if not agent_id:
         return existing
-    enabled, resolved_goal, write_enabled, _root_agent_id, root_goal = await resolve_agent_fast_mode(agent_id)
+    enabled, resolved_goal, write_enabled, _root_agent_id, root_goal, provider_fast_mode = (
+        await resolve_agent_fast_mode(agent_id)
+    )
     g = goal or resolved_goal
     if g and (enabled or write_enabled):
         ctx = FastCacheContext(
@@ -766,6 +798,7 @@ async def ensure_context(agent_id: Optional[str], goal: Optional[str] = None):
             goal=g,
             write_enabled=write_enabled,
             root_goal=root_goal or g,
+            provider_fast_mode=provider_fast_mode,
         )
         set_context(ctx)
         return ctx
@@ -783,7 +816,9 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
 
     if not agent_id:
         return None
-    enabled, goal, write_enabled, _root_agent_id, root_goal = await resolve_agent_fast_mode(agent_id)
+    enabled, goal, write_enabled, _root_agent_id, root_goal, provider_fast_mode = (
+        await resolve_agent_fast_mode(agent_id)
+    )
     if goal and (enabled or write_enabled):
         ctx = FastCacheContext(
             enabled=enabled,
@@ -791,10 +826,22 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
             base_step=step,
             write_enabled=write_enabled,
             root_goal=root_goal or goal,
+            provider_fast_mode=provider_fast_mode,
         )
         set_context(ctx)
         return ctx
     return None
+
+
+async def resolve_provider_fast_mode(agent_id: Optional[str]) -> bool:
+    """Resolve the Fast Mode button (LLM speed) for an agent. Defaults True."""
+    if not agent_id:
+        return True
+    try:
+        _e, _g, _w, _r, _rg, provider_fast_mode = await resolve_agent_fast_mode(agent_id)
+        return bool(provider_fast_mode)
+    except Exception:
+        return True
 
 
 async def cache_set(

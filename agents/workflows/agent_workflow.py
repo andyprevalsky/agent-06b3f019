@@ -621,6 +621,9 @@ class AgentWorkflow:
         # goal that varies run to run). All cache keying threads this, never self.goal.
         self.fast_cache_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
+        # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
+        # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
+        self.provider_fast_mode: bool = True
         self.world_model_mode: str = "real"
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
@@ -1443,7 +1446,7 @@ class AgentWorkflow:
         max_iterations: Optional[int] = None,  # Step limit for execute phase (sub-agents use 25)
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
         context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
-        fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
+        fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
         resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
     ) -> Dict:
@@ -1468,13 +1471,16 @@ class AgentWorkflow:
         self.depth = depth
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
-        self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
+        # Arg is the Fast Mode button (LLM provider speed). Cache replay is
+        # DEMO-prompt only and ignores the button.
+        self.provider_fast_mode = bool(fast_mode_cache_enabled)
+        self.fast_mode_cache_enabled = is_oai_demo_mass_agent_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
         self.compute_token_fast_cache_affinity_key = (
-            _fast_cache_compute_affinity_key(user_id, goal) if fast_mode_cache_enabled else None
+            _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
         if isinstance(context, list):
@@ -1641,10 +1647,14 @@ class AgentWorkflow:
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
                     self.fast_cache_goal = persisted_goal
+                    # Recompute DEMO cache gate after the durable goal is known.
+                    self.fast_mode_cache_enabled = is_oai_demo_mass_agent_task(self)
                     # Compute-token cache affinity pins by goal too — keep it on
                     # the same stable namespace.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, persisted_goal) if fast_mode_cache_enabled else None
+                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
+                        if self.fast_mode_cache_enabled
+                        else None
                     )
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")

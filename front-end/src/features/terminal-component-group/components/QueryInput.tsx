@@ -17,7 +17,9 @@
  * COST / PRICE LIMIT:  owned by `CostIndicator` + `usePriceLimit`
  * ATTACHMENTS:         owned by `useAttachments`
  * FAST MODE:           shown for admin operators (id, verified phone, impersonation)
- *                      in create + chat query boxes; labeled "Fast Mode" next to the wrench
+ *                      in create + chat query boxes; Zap icon only (aria-label
+ *                      + tooltip carry "Fast Mode"); controls LLM provider speed,
+ *                      not DEMO cache replay
  * SIMULATOR:           shown for admin users; session-only and default off
  * TEST PROMPTS:        shown only on desktop for dev/admin users; never mounted on mobile
  * SUBMISSION:          canSubmit prop decides send-vs-stop button

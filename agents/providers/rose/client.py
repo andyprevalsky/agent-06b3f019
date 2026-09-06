@@ -590,8 +590,16 @@ class RoseClient:
         if ctx is None or not ctx.active:
             ctx = await _fc.ensure_context(agent_id)
 
-        if ctx is not None and ctx.active and "provider_fast_mode" not in kwargs:
-            kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
+        if "provider_fast_mode" not in kwargs:
+            if ctx is not None and ctx.active:
+                kwargs = {**kwargs, "provider_fast_mode": bool(ctx.provider_fast_mode)}
+            elif agent_id:
+                from providers.fast_cache.client import resolve_provider_fast_mode
+
+                kwargs = {
+                    **kwargs,
+                    "provider_fast_mode": await resolve_provider_fast_mode(agent_id),
+                }
 
         if ctx is None or not ctx.active or messages is None:
             async for chunk in self._complete_impl(**kwargs):

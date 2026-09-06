@@ -49,13 +49,13 @@ def resolve_explore_depth(
 ) -> str:
     """Pick explore thoroughness for a spawn.
 
-    Under Fast Mode on test-mass-agent-run-0 only, use EXPLORE_FAST_MODE_DEPTH:
+    Under DEMO cache replay (test-mass-agent-run-0), use EXPLORE_FAST_MODE_DEPTH:
     July OAi-demo explore caches often reach attempt_completion at turn ~26–36,
     so both the live default (quick=5) and an explicit medium=20 abort mid-replay.
-    Other Fast Mode trees keep the requested/live depth. Outside Fast Mode,
-    explicit medium/deep win; otherwise the live default applies.
+    Other trees keep the requested/live depth. The Fast Mode button does not
+    affect depth — only DEMO prompt match does (via oai_demo / cache flag).
     """
-    if fast_mode_cache_enabled and oai_demo:
+    if oai_demo:
         return EXPLORE_FAST_MODE_DEPTH
     if requested_depth in EXPLORE_DEPTH_LIMITS:
         return requested_depth
@@ -111,10 +111,8 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
 
 
 def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
-    """Fast Mode test-mass-agent-run-0 must not open browser-agent sessions."""
-    return bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(
-        workflow_instance
-    )
+    """DEMO mass-agent trees must not open browser-agent sessions."""
+    return is_oai_demo_mass_agent_task(workflow_instance)
 
 
 def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:

@@ -716,13 +716,18 @@ OAI_DEMO_ROOT_GOAL_PREFIX = (
     "I'm building a personal brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
 )
 OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist secret
+OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
 OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
 OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
 
 
-def is_oai_demo_goal_text(text: str) -> bool:
-    blob = text or ""
-    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob
+def is_oai_demo_goal_text(text: str | None) -> bool:
+    blob = str(text or "")
+    return (
+        OAI_DEMO_ROOT_GOAL_PREFIX in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+    )
 
 
 def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:
@@ -979,28 +984,37 @@ def position_request_fingerprint(request: Any) -> str:
 OAI_DEMO_ROOT_GOAL_HASH = "4ae3193053ac1d8f"
 
 # ---------------------------------------------------------------------------
-# Soft-complete allowlist (exact-match benchmark tasks with fast_cache: "on")
+# DEMO cache allowlist (exact-match benchmark tasks tagged DEMO)
 #
-# Soft Mode stubs (cold/trajectory passthrough, tool soft-complete, browser
-# soft-complete, verifier soft-pass) are ONLY for agents whose goal — or their
-# tree root's goal — exactly matches a catalog task with fast_cache: "on".
-# Today that is test-mass-agent-run-0 (OAi demo). Fast Mode cache HIT replay
-# remains available for any FM-enabled agent; only synthetic miss stubs are gated.
+# Cache replay + soft-complete stubs are ONLY for agents whose goal — or their
+# tree root's goal — matches a catalog task tagged ``DEMO`` (today:
+# test-mass-agent-run-0). The Fast Mode *button* no longer gates cache reads;
+# it only controls LLM provider_fast_mode. Soft-complete miss stubs share this
+# same DEMO gate (they are demo-cache behavior, not live-FM behavior).
 #
-#   tasks.json (fast_cache:on) ──goal_hash──► soft_complete_goal_hashes()
+#   tasks.json (tag:DEMO) ──goal_hash──► demo_cache_goal_hashes()
 #        │
 #        ▼
-#   agent.goal / root.goal ──soft_complete_allowed()──► stub | live LLM
+#   agent.goal / root.goal ──demo_cache_allowed()──► cache replay | live
 # ---------------------------------------------------------------------------
+
+_DEMO_TAG = "DEMO"
+
+
+def _task_has_demo_tag(task: dict) -> bool:
+    tags = task.get("tags")
+    if not isinstance(tags, list):
+        return False
+    return any(str(tag).strip().upper() == _DEMO_TAG for tag in tags)
 
 
 @functools.lru_cache(maxsize=1)
-def soft_complete_goal_hashes() -> frozenset[str]:
-    """Goal hashes of benchmark tasks that opt into soft-complete stubs.
+def demo_cache_goal_hashes() -> frozenset[str]:
+    """Goal hashes of benchmark tasks tagged DEMO (cache-replay allowlist).
 
-    Sourced from ``agents/benchmarks/tasks.json`` entries with
-    ``fast_cache: "on"``. Always includes ``OAI_DEMO_ROOT_GOAL_HASH`` so the
-    Jul 2026 warm namespace cannot drift if the catalog load fails in workers.
+    Always includes ``OAI_DEMO_ROOT_GOAL_HASH`` so the Jul 2026 warm namespace
+    cannot drift if the catalog load fails in workers. Also accepts legacy
+    ``fast_cache: "on"`` so older catalog rows keep working until retagged.
     """
     hashes: set[str] = {OAI_DEMO_ROOT_GOAL_HASH}
     try:
@@ -1011,7 +1025,8 @@ def soft_complete_goal_hashes() -> frozenset[str]:
             for task in tasks:
                 if not isinstance(task, dict):
                     continue
-                if str(task.get("fast_cache") or "").strip().lower() != "on":
+                fast_cache_on = str(task.get("fast_cache") or "").strip().lower() == "on"
+                if not (_task_has_demo_tag(task) or fast_cache_on):
                     continue
                 prompt = task.get("prompt")
                 if isinstance(prompt, str) and prompt.strip():
@@ -1022,23 +1037,41 @@ def soft_complete_goal_hashes() -> frozenset[str]:
     return frozenset(hashes)
 
 
+def soft_complete_goal_hashes() -> frozenset[str]:
+    """Alias: soft-complete stubs share the DEMO cache allowlist."""
+    return demo_cache_goal_hashes()
+
+
+def demo_cache_allowed(
+    goal: str | None = None,
+    *,
+    root_goal: str | None = None,
+) -> bool:
+    """True when Fast Mode cache replay may run for this agent namespace.
+
+    Exact match: ``goal_hash(goal)`` or ``goal_hash(root_goal)`` must equal a
+    DEMO-tagged (or legacy fast_cache:on) benchmark prompt hash. Child agents
+    under that root inherit via ``root_goal``. OAi child/window prefixes also
+    qualify so truncated for_each goals still replay under the demo tree.
+    """
+    allowed = demo_cache_goal_hashes()
+    if goal and goal_hash(goal) in allowed:
+        return True
+    if root_goal and goal_hash(root_goal) in allowed:
+        return True
+    # Prefix fallback for truncated child goals / resolver failures.
+    if is_oai_demo_goal_text(goal) or is_oai_demo_goal_text(root_goal):
+        return True
+    return False
+
+
 def soft_complete_allowed(
     goal: str | None = None,
     *,
     root_goal: str | None = None,
 ) -> bool:
-    """True when soft-complete stubs may fire for this agent namespace.
-
-    Exact match: ``goal_hash(goal)`` or ``goal_hash(root_goal)`` must equal a
-    ``fast_cache: "on"`` benchmark prompt hash (mass-agent OAi demo today).
-    Child agents under that root inherit via ``root_goal``.
-    """
-    allowed = soft_complete_goal_hashes()
-    if goal and goal_hash(goal) in allowed:
-        return True
-    if root_goal and goal_hash(root_goal) in allowed:
-        return True
-    return False
+    """True when soft-complete stubs may fire (same gate as DEMO cache replay)."""
+    return demo_cache_allowed(goal, root_goal=root_goal)
 # Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm
 # cache (no user_messages, no exclude_anthropic_family).
 _OAI_DEMO_CACHE_KEY_VERSIONS = ("v42", "v43")

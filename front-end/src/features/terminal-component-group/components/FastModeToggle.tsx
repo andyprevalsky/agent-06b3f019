@@ -1,11 +1,11 @@
 /**
  * STATE MACHINE: FastModeToggle
  *
- * [ON] <-- enabled: true (default for allowlisted accounts — label says Fast Mode On)
+ * [ON] <-- enabled: true (default for allowlisted accounts)
  *     |
  *     | (click)
  *     v
- * [OFF] <-- enabled: false (label says Fast Mode Off; cache inert)
+ * [OFF] <-- enabled: false
  *     |
  *     | (click)
  *     v
@@ -14,14 +14,14 @@
  * State:
  * - enabled: boolean (controlled by parent; query-box scoped, session-only, never persisted client-side)
  *
- * UI: Zap + "Fast Mode" label (same pattern as Safe Writes) so the control is
- * findable on the query box and on the account-info settings tab.
- * Hover shows an explanatory tooltip for the current state.
+ * UI: Zap icon only on the query box (label lives in aria-label + tooltip). The
+ * Fast Mode *button* enables LLM provider speed (Anthropic speed=fast / OpenAI
+ * priority). DEMO-prompt cache replay is independent of this control.
  *
  * Gating: only rendered when canUseFastMode(operator) is true (admin id, admin
  * phone, or live impersonation — see fastModeAccounts.ts).
- * The value is threaded into the create-agent payload as `fastMode`; default on means
- * Rose complete calls use provider fast mode and the aggressive cache is active.
+ * The value is threaded into the create-agent payload as fast_mode_cache_enabled
+ * (historical field name; server maps it to provider_fast_mode / LLM speed).
  */
 
 import { Zap } from 'lucide-react';
@@ -51,14 +51,13 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
           data-state={enabled ? 'on' : 'off'}
           data-testid="fast-mode-toggle"
           className={cn(
-            'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors',
+            'inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors',
             enabled
               ? 'border-amber-500/70 bg-amber-400/20 text-amber-700 shadow-sm ring-1 ring-amber-400/40 dark:text-amber-200'
               : 'border-border bg-muted/50 text-muted-foreground',
           )}
         >
           <Zap className={cn('h-3.5 w-3.5', enabled && 'fill-current')} />
-          <span className="font-medium">Fast Mode</span>
         </button>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-[280px] z-[100]">
@@ -66,11 +65,12 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
           <p>
             <span className="font-semibold">Fast Mode {enabled ? 'on' : 'off'}.</span>{' '}
             {enabled
-              ? 'This run records and replays cached third-party responses, so repeated runs of the same goal skip slow external calls.'
-              : 'Turn on to record and replay cached third-party responses for faster repeated runs of the same goal.'}
+              ? 'LLM calls that support it use provider fast mode (Anthropic speed / OpenAI priority).'
+              : 'Turn on to use provider fast mode on LLM calls that support it.'}
           </p>
           <p className="text-muted-foreground">
-            Session-only; applies to the next agent you create.
+            Session-only; applies to the next agent you create. Demo prompt cache
+            replay is separate and does not use this button.
           </p>
         </div>
       </TooltipContent>

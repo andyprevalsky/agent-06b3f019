@@ -240,25 +240,27 @@ test('chat escalation preserves Fast Mode on the root Temporal workflow', () => 
   assert.strictEqual(params.model, 'rose-labs/rose-1-ultra');
 });
 
-test('Claude Code session service forwards persisted Fast Mode flag to E2B provider', () => {
+test('Claude Code session service gates proxy on DEMO cache, not the Fast Mode button', () => {
   const service = readFileSync(
     join(process.cwd(), 'src', 'domains', 'claude-code', 'service.ts'),
     'utf8'
   );
   const createSession = extractFunction(service, 'createSession');
   assert.ok(
-    createSession.includes(
-      'const fastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id)'
-    ),
-    'Claude Code createSession must read the persisted agent Fast Mode flag'
+    createSession.includes('agentFastMode'),
+    'Claude Code createSession must resolve DEMO cache via agentFastMode'
+  );
+  assert.ok(
+    createSession.includes('const fastModeCacheEnabled = fastMode.enabled'),
+    'Claude Code createSession must use demo cache enabled for the proxy'
   );
   assert.ok(
     /createClaudeCodeSession\([\s\S]*fastModeCacheEnabled[\s\S]*\)/.test(createSession),
-    'Claude Code createSession must pass the persisted flag into E2B env construction'
+    'Claude Code createSession must pass the demo cache flag into E2B env construction'
   );
 });
 
-test('Codex Code session service forwards persisted Fast Mode flag to E2B provider', () => {
+test('Codex Code session service gates proxy on DEMO cache, not the Fast Mode button', () => {
   const service = readFileSync(
     // Domain folder name coincides with E2B template id env; allowlist for path join.
     join(process.cwd(), 'src', 'domains', 'codex-code', 'service.ts'), // pragma: allowlist secret
@@ -266,24 +268,16 @@ test('Codex Code session service forwards persisted Fast Mode flag to E2B provid
   );
   const createSession = extractFunction(service, 'createSession');
   assert.ok(
-    createSession.includes(
-      'const persistedFastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id)'
-    ),
-    'Codex Code createSession must read the persisted agent Fast Mode flag'
+    createSession.includes('agentFastMode'),
+    'Codex Code createSession must resolve DEMO cache via agentFastMode'
   );
   assert.ok(
-    createSession.includes(
-      'const fastModeCacheEnabled = params.fast_mode_cache_enabled ?? persistedFastModeCacheEnabled'
-    ),
-    'Codex Code createSession must prefer the explicit request flag when present'
-  );
-  assert.ok(
-    createSession.includes('Codex Code session Fast Mode flag mismatch'),
-    'Codex Code createSession must log explicit-vs-persisted Fast Mode mismatches'
+    createSession.includes('const fastModeCacheEnabled = fastMode.enabled'),
+    'Codex Code createSession must use demo cache enabled for the proxy'
   );
   assert.ok(
     /createCodexCodeSession\([\s\S]*fastModeCacheEnabled[\s\S]*\)/.test(createSession),
-    'Codex Code createSession must pass the persisted flag into E2B env construction'
+    'Codex Code createSession must pass the demo cache flag into E2B env construction'
   );
 });
 

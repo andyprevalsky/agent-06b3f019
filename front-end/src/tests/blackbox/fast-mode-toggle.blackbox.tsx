@@ -176,7 +176,8 @@ describe('Fast Mode account gating', () => {
       0,
     );
     expect(container.textContent).toContain('Safe Writes');
-    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode Off');
+    expect(screen.getByTestId('fast-mode-toggle')).not.toHaveTextContent('Fast Mode');
     expect(screen.getByTestId('simulator-toggle')).toHaveTextContent('');
     expect(screen.getByTitle('View Rose system tools')).toHaveTextContent('');
   });
@@ -220,7 +221,8 @@ describe('Fast Mode account gating', () => {
     );
 
     expect(screen.getByTestId('fast-mode-toggle')).toBeInTheDocument();
-    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
+    expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode Off');
+    expect(screen.getByTestId('fast-mode-toggle')).not.toHaveTextContent('Fast Mode');
     expect(canUseFastMode({ id: 'not-an-allowlisted-admin-id', phone: '+19729777432' })).toBe(
       true,
     );
@@ -338,7 +340,7 @@ describe('FastModeToggle behavior', () => {
     const btn = screen.getByTestId('fast-mode-toggle');
     expect(btn.getAttribute('aria-pressed')).toBe('false');
     expect(btn).toHaveAccessibleName('Fast Mode Off');
-    expect(btn).toHaveTextContent('Fast Mode');
+    expect(btn).not.toHaveTextContent('Fast Mode');
   });
 
   it('#3 toggling fires onChange with the flipped value', () => {
@@ -374,7 +376,7 @@ describe('FastModeToggle behavior', () => {
     );
     expect(screen.getByTestId('fast-mode-toggle').getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode On');
-    expect(screen.getByTestId('fast-mode-toggle')).toHaveTextContent('Fast Mode');
+    expect(screen.getByTestId('fast-mode-toggle')).not.toHaveTextContent('Fast Mode');
   });
 
   it('updates the visible state after a click in the controlled querybox path', () => {
@@ -390,7 +392,7 @@ describe('FastModeToggle behavior', () => {
 
     const btn = screen.getByTestId('fast-mode-toggle');
     expect(btn).toHaveAccessibleName('Fast Mode Off');
-    expect(btn).toHaveTextContent('Fast Mode');
+    expect(btn).not.toHaveTextContent('Fast Mode');
 
     act(() => {
       btn.click();
@@ -404,7 +406,19 @@ describe('FastModeToggle behavior', () => {
     );
     expect(btn).toHaveAttribute('aria-pressed', 'true');
     expect(btn).toHaveAccessibleName('Fast Mode On');
-    expect(btn).toHaveTextContent('Fast Mode');
+    expect(btn).not.toHaveTextContent('Fast Mode');
+  });
+
+  it('query-box Fast Mode toggle is icon-only (no visible Fast Mode label)', () => {
+    render(
+      <TooltipProvider>
+        <FastModeToggle enabled={true} onChange={vi.fn()} />
+      </TooltipProvider>,
+    );
+    const btn = screen.getByTestId('fast-mode-toggle');
+    expect(btn).toHaveAccessibleName('Fast Mode On');
+    expect(btn).not.toHaveTextContent('Fast Mode');
+    expect(btn.querySelector('svg')).not.toBeNull();
   });
 });
 
