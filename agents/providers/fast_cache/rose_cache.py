@@ -583,6 +583,49 @@ def _payload_tool_name(stored: Any) -> str:
     return ""
 
 
+def _explore_spawn_tool_call_id(stored: Any) -> str:
+    """Return the call id only for a cached ``spawn_agent(type=explore)``."""
+    if _payload_tool_name(stored) != "spawn_agent":
+        return ""
+    tool_call = (stored.get("tool_calls") or [None])[0]
+    if not isinstance(tool_call, dict):
+        return ""
+    raw = tool_call.get("arguments") or ""
+    if isinstance(raw, dict):
+        parsed = raw
+    else:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+    if not isinstance(parsed, dict) or str(parsed.get("type") or "").strip() != "explore":
+        return ""
+    return str(tool_call.get("id") or "").strip()
+
+
+def _prior_tool_call_ids(key_material: Any) -> set[str]:
+    """Collect tool-use ids already present in the current LLM conversation."""
+    if isinstance(key_material, dict):
+        messages = key_material.get("messages") or []
+    elif isinstance(key_material, list):
+        messages = key_material
+    else:
+        messages = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip().lower() != "assistant":
+            continue
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = str(tool_call.get("id") or "").strip()
+            if call_id:
+                seen.add(call_id)
+    return seen
+
+
 def _july_explore_completion_result(stored: Any) -> str:
     """Return the user-facing attempt_completion result text, if any."""
     if not isinstance(stored, dict):
@@ -619,13 +662,16 @@ async def july_gp_resolve_execute(
     call_site: str,
     stored: Any = None,
     hit_key: Any = None,
+    *,
+    key_material: Any = None,
 ) -> tuple[Any, Any]:
-    """Walk July GP execute steps, skipping early attempt_completion stubs."""
+    """Walk July GP execute steps, skipping stubs and replayed explore calls."""
     if not is_july_gp_execute_site(ctx, call_site):
         return stored, hit_key
     step = getattr(ctx, "base_step", None)
     start = 1 if step is None or int(step) < 1 else int(step)
     prior_tool = ""
+    prior_tool_call_ids = _prior_tool_call_ids(key_material)
     for current in range(start, start + 16):
         if stored is not None and current == start:
             cand, key = stored, hit_key
@@ -634,6 +680,9 @@ async def july_gp_resolve_execute(
                 ctx.goal_hash, call_site, current
             )
         if cand is None:
+            continue
+        explore_call_id = _explore_spawn_tool_call_id(cand)
+        if explore_call_id and explore_call_id in prior_tool_call_ids:
             continue
         if _july_gp_accept_payload(cand, prior_tool):
             return cand, key
@@ -752,7 +801,13 @@ async def lookup_llm_cache(
                     call_site,
                     ctx.base_step,
                 )
-            stored, hit_key = await july_gp_resolve_execute(ctx, call_site, stored, hit_key)
+            stored, hit_key = await july_gp_resolve_execute(
+                ctx,
+                call_site,
+                stored,
+                hit_key,
+                key_material=key_material,
+            )
             stored, hit_key = await july_explore_resolve(ctx, call_site, stored, hit_key)
             return stored, hit_key
         except FastCacheLookupError:

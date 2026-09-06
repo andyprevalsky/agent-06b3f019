@@ -6953,6 +6953,80 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
     assert raised
 
 
+async def test_july_gp_execute_dedupes_replayed_explore_tool_call_ids():
+    """Cached GP replay emits each distinct explore once without changing its payload."""
+    from providers.fast_cache.context import FastCacheContext
+    from providers.fast_cache import rose_cache
+
+    goal = (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
+        "building a personal brand at the intersection of health, longevity, "
+        "technology, and founder journey. Last 90 days: 2026-04-04 through "
+        "2026-07-03. Creator: Dr. Eric Topol."
+    )
+
+    def explore_payload(call_id, marker):
+        return {
+            "actual_model": "fast-mode-replay",
+            "content": marker,
+            "reasoning": f"reasoning-{marker}",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {"type": "explore", "goal": f"research-{marker}"}
+                    ),
+                }
+            ],
+            "usage": {"from_fast_cache": True, "marker": marker},
+        }
+
+    first = explore_payload("call-explore-a", "first")
+    second = explore_payload("call-explore-b", "second")
+    third = explore_payload("call-explore-c", "third")
+    positions = {1: first, 2: second, 12: third}
+    positions.update({step: first for step in range(3, 12)})
+
+    async def by_position(_goal_hash, _call_site, step=None):
+        value = positions.get(int(step or 0))
+        return value, f"position-{step}" if value is not None else None
+
+    messages = [{"role": "user", "content": goal}]
+    selected = []
+    with (
+        patch.object(rose_cache.cache_client, "cache_get_first", AsyncMock(return_value=(None, None))),
+        patch.object(rose_cache.cache_client, "cache_get_position_fallback", by_position),
+    ):
+        for base_step in range(1, 5):
+            ctx = FastCacheContext(enabled=True, goal=goal, base_step=base_step)
+            stored, _ = await rose_cache.lookup_llm_cache(
+                ctx, "execute_loop", {"messages": messages}
+            )
+            if stored is None:
+                break
+            selected.append(stored)
+            tool_call = stored["tool_calls"][0]
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": stored.get("content", ""),
+                    "tool_calls": [
+                        {
+                            "id": tool_call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_call["name"],
+                                "arguments": tool_call["arguments"],
+                            },
+                        }
+                    ],
+                }
+            )
+
+    assert selected == [first, second, third]
+
+
 async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
     """Structured LLM responses are cached only after AgentAction validation succeeds."""
     import httpx
@@ -8130,6 +8204,10 @@ async def run_all_tests():
     await r.record_async("stream_single_call_dedup", test_call_llm_structured_streaming_single_call_dedup)
     await r.record_async(
         "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
+    )
+    await r.record_async(
+        "july_gp_execute_dedupes_replayed_explore_tool_call_ids",
+        test_july_gp_execute_dedupes_replayed_explore_tool_call_ids,
     )
     await r.record_async(
         "stream_fast_cache_writes_only_after_validation",

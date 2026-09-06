@@ -10,9 +10,9 @@ first_bad_boundary: back-end/scripts/clean-oai-demo-browser-cache.ts buildArchiv
 symptoms:
   - Declared evaluator t5-zero-live-spend failed
   - No JSON content received in response (chunks=3, model=fast-cache)
-  - cost_cents is 16
-  - cache_creation_input_tokens is 163201
+  - cost_cents is 16; cache_creation_input_tokens is 163201
   - Visible spawn_agent complete cards claimed nested research was skipped
+  - Eric Topol creator child emitted 13 explore spawns from 3 cached tool-call IDs
 tags:
   - fast-cache
   - saved-trajectory
@@ -20,6 +20,7 @@ tags:
   - cache-replay
   - oai-demo
   - nested-agent
+  - duplicate-tool-call
 sources:
   - agent 149f16bd-58e1-471e-90b3-d3e9a0cefd8f
   - fleet run a19002d6-005e-47c3-abc8-23aa969f28f9
@@ -34,6 +35,11 @@ sources:
   - fleet run 062084fe-9d2a-4576-9caf-7f145084ec52
   - agent 2e15fec3-fe6e-449f-838c-a0a00cfec081
   - fleet run 5df83f8e-3705-4b9a-b746-1884026759a9
+  - agent 654288b5-6d9c-4bcc-be8c-ea17204ee868
+  - fleet run 0934ddb3-9ea4-4dc3-a36b-07a22b4ecff5
+  - agent 2b46193f-fc8d-4191-a83c-0740b9934369
+  - fleet run 1456cbae-2537-4602-86c1-bf44433b0167
+  - agent 8668c79f-f12f-4e6a-8afe-28feda8722bd
 repro: back-end/src/tests/blackbox/fast-cache.blackbox.ts
 status: fixed
 ---
@@ -149,8 +155,63 @@ first-level fan-out to 50 creator children; the declared evaluator fails closed
 if any root or child source renders a nested GP, for-each, or code replay as a
 synthetic success card.
 
+## 2026-09-06 recurrence: repeated explore replay slots
+
+Creator child `654288b5-6d9c-4bcc-be8c-ea17204ee868` completed successfully but
+rendered 13 `spawn_agent(type=explore)` actions before one passing
+`attempt_completion`. The runtime cache rows contained only three distinct
+explore tool-call IDs. Positions 7 through 15 repeated the first ID, and the
+scan past an early completion replayed the next accepted position once during
+the scan and again at its own base step. The saved action data was valid; the
+same actions were being executed more than once.
+
+The first bad boundary was
+`agents/providers/fast_cache/rose_cache.py:july_gp_resolve_execute`. It walked
+forward through positional entries and skipped an early completion stub, but
+it did not compare a candidate explore ID with tool calls already present in
+the active assistant-message history. The deepest owned cause was again
+treating saved trajectory positions as independent responses rather than a
+stateful series of tool actions.
+
+The resolver now reads the current request's assistant tool-call IDs and skips
+only a cached `spawn_agent(type=explore)` candidate whose exact ID was already
+executed. It neither mutates nor caps the cached action payloads: three unique
+explore calls remain in their original order with their original arguments and
+results. Other tool types, non-July goals, and genuinely distinct explores are
+unchanged. The permanent LLM-boundary blackbox in
+`agents/tests/blackbox/llm.blackbox.py` failed before the fix after selecting a
+repeated payload and passed afterward with the exact three input payload
+objects preserved.
+
+The unchanged canonical command reproduced the issue on run
+`0934ddb3-9ea4-4dc3-a36b-07a22b4ecff5` (root
+`2245ba16-ca22-4cbc-b94b-00adbac4f2d6`, Eric child
+`2b46193f-fc8d-4191-a83c-0740b9934369`): the benchmark passed overall, but the
+child emitted 13 explores and one completion. Post-fix run
+`1456cbae-2537-4602-86c1-bf44433b0167` (root
+`72f4245e-23ed-401d-9212-7a3906e72dde`, Eric child
+`8668c79f-f12f-4e6a-8afe-28feda8722bd`) passed with exactly three explores,
+one `attempt_completion`, status `COMPLETED`, zero agent cost, and 100% Fast
+Mode cache hits.
+
+```bash
+FAST_MODE_CACHE_DATABASE_URL="$DATABASE_URL" \
+  scripts/run-bench --local test-mass-agent-run-0
+```
+
+Both runs' Eric structured outputs have normalized SHA-256
+`6418e0896ffdbd35035d84942ecfd673bbeffec2065f209c5107d5b5cac00ff1`.
+Normalization replaces only the per-run `@ref:message:<uuid>` pointer; no
+semantic output field differs. The human explicitly required at most three
+explores followed by a passing completion and required that the creator data
+returned to the root agent not change.
+
+At 10k-agent scale, deduplication is local to one child request: it scans that
+request's existing messages once and retains the resolver's fixed 16-position
+lookahead. It creates no cross-agent state, performs no tree-wide scan, and is
+not entered for ordinary non-July agent traffic.
+
 ## Reusable lesson
 
-When removing a tool action from a recorded trajectory, archive its entire
-replay slot; never mutate that slot into replacement work, an empty response,
-or a synthetic success card.
+Treat recorded trajectory slots as stateful: archive invalidated actions and
+never replay a tool-call ID already present in the conversation.
