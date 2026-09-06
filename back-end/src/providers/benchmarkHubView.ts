@@ -6,7 +6,7 @@ import {
   schemaFromCompletionOutputs,
   structuredFromCompletionOutputs,
 } from './benchmarkHubOutputs';
-import { getRunBundle, type HubAgentView } from './benchmarkHubStore';
+import { getRunBundle, isHubRunVisible, type HubAgentView } from './benchmarkHubStore';
 
 const TOOL_USAGE_TREE_KEYS = new Set([
   'root_agent_id',
@@ -172,6 +172,7 @@ export function subtreeAgentsForBus<T extends Record<string, unknown>>(
  * run (root or any sub-agent captured by logs.tree), plus the fan-out tree.
  */
 export async function getRunAgent(runId: string, agentId: string): Promise<HubAgentView | null> {
+  if (!(await isHubRunVisible(runId))) return null;
   const bundle = await getRunBundle(runId);
   if (!bundle) return null;
   const runTimestamp = String(bundle.timestamp ?? '');

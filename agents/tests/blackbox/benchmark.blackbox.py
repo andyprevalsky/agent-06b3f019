@@ -3554,7 +3554,7 @@ def test_mass_agent_static_rejects_synthetic_spawn_skips_and_generic_title():
             {
                 "type": "agent_task_title",
                 "value": "Creator Brand Strategy",
-                "forbidden_titles": ["Task Output"],
+                "forbidden_titles": ["Task", "Task Output", "Agent Run", "Result", "Output"],
             },
         ]
     }
@@ -3641,11 +3641,12 @@ def test_mass_agent_static_rejects_synthetic_spawn_skips_and_generic_title():
     assert passed is False
     assert "skipping nested spawn" in reason.lower()
 
-    generic_title = deepcopy(good)
-    generic_title["agent"]["title"] = "Task Output"
-    passed, reason = _run_declared_static_check(evaluator, generic_title)
-    assert passed is False
-    assert "title" in reason.lower()
+    for title in ("Task", "Task Output", "Agent Run", "Result", "Output"):
+        generic_title = deepcopy(good)
+        generic_title["agent"]["title"] = title
+        passed, reason = _run_declared_static_check(evaluator, generic_title)
+        assert passed is False
+        assert "title" in reason.lower()
 
 
 def test_principal_user_andy_static_ignores_schema_key_leftovers():

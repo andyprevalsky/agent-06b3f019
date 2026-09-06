@@ -17,13 +17,25 @@ import {
   __resetHubResolutionCachesForTest,
   agentIdsFromHubBundle,
   applyHubRunToResolutionCaches,
+  backfillHubAgentRunIndex,
+  backfillHubAgentRunIndexFromCatalog,
+  completedHubAgentBackfill,
   forgetHubRunFromResolutionCaches,
+  hubAgentIndexAfterDelete,
+  hubAgentIndexAfterPut,
+  hubRunVisibleFromMarker,
+  installHubAgentRunIndex,
+  loadCompactHubAgentIndex,
+  parseHubAgentRunIndex,
+  parseHubRunBundle,
   peekHubResolutionForTest,
+  resolveHubRunIdFromAgentIndex,
   resolveHubRunIdFromIndexes,
 } from '../../providers/benchmarkHubStore';
 
 let passed = 0;
 const failures: string[] = [];
+const asyncCases: Array<{ name: string; fn: () => Promise<void> }> = [];
 
 function test(name: string, fn: () => void): void {
   try {
@@ -34,6 +46,10 @@ function test(name: string, fn: () => void): void {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
     process.stdout.write(`  fail ${name}\n`);
   }
+}
+
+function asyncTest(name: string, fn: () => Promise<void>): void {
+  asyncCases.push({ name, fn });
 }
 
 const runs = [
@@ -81,6 +97,196 @@ test('child ids resolve from the child index after it is built', () => {
   assert.deepEqual(resolved, { kind: 'hit', runId: 'run-root' });
 });
 
+test('compact agent index resolves directly at 10k-agent scale', () => {
+  const agentIndex = new Map(
+    Array.from({ length: 10_000 }, (_, index) => [`agent-${index}`, `run-${index}`])
+  );
+  assert.equal(resolveHubRunIdFromAgentIndex('agent-9999', agentIndex), 'run-9999');
+  assert.equal(resolveHubRunIdFromAgentIndex('provisional-uuid', agentIndex), null);
+  const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'), 'utf8');
+  const start = src.indexOf('export function resolveHubRunIdFromAgentIndex');
+  const body = src.slice(start, src.indexOf('/**', start + 4));
+  assert.match(body, /agentIndex\?\.get\(agentId\)/);
+  assert.doesNotMatch(body, /for \(|\.find\(|\.some\(/);
+});
+
+test('10k-agent persistence transitions stay compact and preserve update/delete semantics', () => {
+  const agents = new Map(
+    Array.from({ length: 10_000 }, (_, index) => [`agent-${index}`, `run-${index}`])
+  );
+  const startedAt = performance.now();
+  const updated = hubAgentIndexAfterPut({ revision: 7, complete: true, agents }, false, 'run-new', [
+    'agent-9999',
+    'agent-new',
+  ]);
+  const serializedBytes = Buffer.byteLength(JSON.stringify(Object.fromEntries(updated.agents)));
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(updated.revision, 8);
+  assert.equal(updated.agents.get('agent-9999'), 'run-new');
+  assert.equal(agents.get('agent-9999'), 'run-9999');
+  assert.ok(serializedBytes < 500_000, `10k compact index grew to ${serializedBytes} bytes`);
+  assert.ok(elapsedMs < 1_000, `10k compact index transition took ${elapsedMs.toFixed(1)}ms`);
+  const deleted = hubAgentIndexAfterDelete(updated, 'run-new');
+  assert.equal(deleted.agents.has('agent-9999'), false);
+  assert.equal(deleted.agents.has('agent-new'), false);
+});
+
+test('legacy completion merges concurrent uploads and excludes concurrent deletes', () => {
+  const merged = completedHubAgentBackfill(
+    {
+      revision: 4,
+      complete: false,
+      agents: new Map([
+        ['reused-agent', 'run-new'],
+        ['current-agent', 'run-current'],
+      ]),
+    },
+    new Map([
+      ['reused-agent', 'run-old'],
+      ['legacy-agent', 'run-legacy'],
+      ['deleted-agent', 'run-deleted'],
+    ]),
+    new Set(['run-new', 'run-current', 'run-legacy'])
+  );
+  assert.equal(merged.complete, true);
+  assert.equal(merged.agents.get('reused-agent'), 'run-new');
+  assert.equal(merged.agents.get('legacy-agent'), 'run-legacy');
+  assert.equal(merged.agents.has('deleted-agent'), false);
+});
+
+test('visibility markers preserve legacy runs and fail closed on malformed values', () => {
+  assert.equal(hubRunVisibleFromMarker(null), true);
+  assert.equal(hubRunVisibleFromMarker('true'), true);
+  assert.equal(hubRunVisibleFromMarker('false'), false);
+  assert.equal(hubRunVisibleFromMarker('malformed'), false);
+});
+
+test('compact index schema rejects malformed metadata and entries', () => {
+  assert.throws(
+    () => parseHubAgentRunIndex('{"version":1,"complete":true,"agents":{}}'),
+    /Invalid Benchmark Hub agent-run index/
+  );
+  assert.throws(
+    () => parseHubAgentRunIndex('{"version":1,"revision":0,"agents":{}}'),
+    /Invalid Benchmark Hub agent-run index/
+  );
+  assert.throws(
+    () => parseHubAgentRunIndex('{"version":1,"revision":-1,"complete":true,"agents":{}}'),
+    /Invalid Benchmark Hub agent-run index/
+  );
+  assert.throws(
+    () =>
+      parseHubAgentRunIndex(
+        '{"version":1,"revision":1,"complete":true,"agents":{"agent":"../run"}}'
+      ),
+    /Invalid Benchmark Hub agent-run index entry/
+  );
+  assert.deepEqual(
+    parseHubAgentRunIndex('{"version":1,"revision":1,"complete":true,"agents":{"agent":"run-1"}}'),
+    { revision: 1, complete: true, agents: new Map([['agent', 'run-1']]) }
+  );
+});
+
+test('strict run bundle schema rejects valid JSON that cannot contain agent ids', () => {
+  assert.throws(() => parseHubRunBundle('[]'), /Invalid Benchmark Hub run bundle/);
+  assert.throws(() => parseHubRunBundle('{}'), /Invalid Benchmark Hub run bundle/);
+  assert.throws(() => parseHubRunBundle('{"tasks":"corrupt"}'), /Invalid Benchmark Hub run bundle/);
+  assert.deepEqual(parseHubRunBundle('{"tasks":[]}'), { tasks: [] });
+});
+
+test('authoritative refresh clears stale hit cache and rejects an older revision', () => {
+  __resetHubResolutionCachesForTest();
+  applyHubRunToResolutionCaches('run-old', ['reused-agent'], 1);
+  assert.equal(
+    installHubAgentRunIndex({
+      revision: 2,
+      complete: true,
+      agents: new Map([['reused-agent', 'run-new']]),
+    }),
+    true
+  );
+  assert.deepEqual(peekHubResolutionForTest('reused-agent'), {
+    cachedRunId: undefined,
+    childRunId: 'run-new',
+  });
+  applyHubRunToResolutionCaches('run-local', ['reused-agent'], 3);
+  assert.equal(
+    installHubAgentRunIndex({
+      revision: 2,
+      complete: true,
+      agents: new Map([['reused-agent', 'run-new']]),
+    }),
+    false
+  );
+  assert.deepEqual(peekHubResolutionForTest('reused-agent'), {
+    cachedRunId: 'run-local',
+    childRunId: 'run-local',
+  });
+  __resetHubResolutionCachesForTest();
+});
+
+asyncTest('cold complete-index load is awaited and transient failure is not legacy', async () => {
+  __resetHubResolutionCachesForTest();
+  let loaded = false;
+  const complete = await loadCompactHubAgentIndex(async () => {
+    await Promise.resolve();
+    loaded = true;
+    return {
+      revision: 1,
+      complete: true,
+      agents: new Map([['archived-agent', 'archived-run']]),
+    };
+  });
+  assert.equal(loaded, true);
+  assert.deepEqual(complete, { kind: 'ready' });
+  assert.equal(peekHubResolutionForTest('archived-agent').childRunId, 'archived-run');
+
+  __resetHubResolutionCachesForTest();
+  const failed = await loadCompactHubAgentIndex(async () => {
+    throw new Error('synthetic R2 transport failure');
+  });
+  assert.deepEqual(failed, { kind: 'error' });
+  assert.equal(peekHubResolutionForTest('archived-agent').childRunId, undefined);
+});
+
+asyncTest('failed legacy bundle read cannot publish complete=true', async () => {
+  let persisted = false;
+  await assert.rejects(
+    backfillHubAgentRunIndex(
+      runs,
+      async () => {
+        throw new Error('synthetic bundle read failure');
+      },
+      new Map(),
+      async (agents) => {
+        persisted = true;
+        return { revision: 1, complete: true, agents };
+      }
+    ),
+    /synthetic bundle read failure/
+  );
+  assert.equal(persisted, false);
+});
+
+asyncTest('failed legacy catalog read cannot publish complete=true', async () => {
+  let persisted = false;
+  await assert.rejects(
+    backfillHubAgentRunIndexFromCatalog(
+      async () => {
+        throw new Error('synthetic catalog transport failure');
+      },
+      async () => ({}),
+      new Map(),
+      async (agents) => {
+        persisted = true;
+        return { revision: 1, complete: true, agents };
+      }
+    ),
+    /synthetic catalog transport failure/
+  );
+  assert.equal(persisted, false);
+});
+
 test('findAgentAcrossRuns does not scan every bundle on the request path', () => {
   const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'), 'utf8');
   const start = src.indexOf('export async function findAgentAcrossRuns');
@@ -90,6 +296,55 @@ test('findAgentAcrossRuns does not scan every bundle on the request path', () =>
     /for \(const run of index\) \{\s*const view = await getRunAgent/.test(body),
     false,
     'Pass-2 per-request bundle scan must not return'
+  );
+  assert.doesNotMatch(body, /listRuns\(\)|indexedRunIds|for \(const run of index\)/);
+  assert.match(body, /const load = await startCompactIndexLoad\(\)/);
+  assert.match(body, /resolveHubRunIdFromAgentIndex\(agentId, childIdToRun\)/);
+});
+
+test('child lookup loads a persisted compact index and legacy backfill yields per bundle', () => {
+  const lookupSource = readFileSync(
+    join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'),
+    'utf8'
+  );
+  const buildStart = lookupSource.indexOf('export async function buildHubAgentIdIndex');
+  const buildEnd = lookupSource.indexOf('export async function backfillHubAgentRunIndex');
+  const buildBody = lookupSource.slice(buildStart, buildEnd);
+  assert.match(buildBody, /await yieldToEventLoop\(\)/);
+  assert.match(lookupSource, /loadHubAgentRunIndex/);
+  assert.match(lookupSource, /persistHubAgentRunBackfill/);
+  assert.match(lookupSource, /AGENT_INDEX_REFRESH_MS/);
+
+  const storeSource = readFileSync(
+    join(process.cwd(), 'src/providers/benchmarkHubStore.ts'),
+    'utf8'
+  );
+  assert.match(storeSource, /node:fs\/promises/);
+  assert.match(storeSource, /agent-run-index\.json/);
+  assert.match(storeSource, /revision: \(current\?\.revision \?\? 0\) \+ 1/);
+  assert.match(storeSource, /await writeAgentRunIndex\(agentIndex\)/);
+  assert.match(storeSource, /visibility\/\$\{runId\}\.json/);
+  assert.match(storeSource, /getObjectStrict/);
+  assert.match(storeSource, /getRunBundleStrict/);
+  assert.match(storeSource, /export async function listRunsStrict/);
+  assert.doesNotMatch(storeSource, /fs\.(?:readFile|writeFile|mkdir|rename)Sync/);
+
+  const putStart = storeSource.indexOf('export async function putRun');
+  const putEnd = storeSource.indexOf('export async function persistHubAgentRunBackfill');
+  const putBody = storeSource.slice(putStart, putEnd);
+  assert.match(putBody, /await listRunsStrict\(\)/);
+  assert.ok(
+    putBody.lastIndexOf("putObject(`visibility/${runId}.json`, 'true')") >
+      putBody.indexOf('writeAgentRunIndex(agentIndex)'),
+    'upload visibility must publish after bundle/catalog/reverse-index writes'
+  );
+  const deleteStart = storeSource.indexOf('export async function deleteRun');
+  const deleteBody = storeSource.slice(deleteStart);
+  assert.match(deleteBody, /await listRunsStrict\(\)/);
+  assert.ok(
+    deleteBody.indexOf("putObject(`visibility/${runId}.json`, 'false')") <
+      deleteBody.indexOf("putObject('index.json'"),
+    'delete tombstone must publish before catalog removal'
   );
 });
 
@@ -163,17 +418,32 @@ test('hub resolution caches prefer the newest upload and drop deleted runs', () 
   __resetHubResolutionCachesForTest();
 });
 
-test('findAgentAcrossRuns ignores resolution hits whose run left the index', () => {
+test('findAgentAcrossRuns drops compact-index pointers whose bundle is unavailable', () => {
   const src = readFileSync(join(process.cwd(), 'src/providers/benchmarkHubLookup.ts'), 'utf8');
   const start = src.indexOf('export async function findAgentAcrossRuns');
   const body = src.slice(start, src.indexOf('export function ancestorsFromHubTree'));
-  assert.match(body, /indexedRunIds\.has/);
+  assert.match(body, /await getRunAgent\(runId, agentId\)/);
+  assert.match(body, /if \(view !== null\)/);
   assert.match(src, /forgetHubRunFromResolutionCaches/);
   assert.match(src, /applyHubRunToResolutionCaches/);
 });
 
-if (failures.length > 0) {
-  for (const failure of failures) process.stderr.write(`  - ${failure}\n`);
-  process.exit(1);
+async function finish(): Promise<void> {
+  for (const { name, fn } of asyncCases) {
+    try {
+      await fn();
+      passed += 1;
+      process.stdout.write(`  ok ${name}\n`);
+    } catch (err: unknown) {
+      failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
+      process.stdout.write(`  fail ${name}\n`);
+    }
+  }
+  if (failures.length > 0) {
+    for (const failure of failures) process.stderr.write(`  - ${failure}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(`\nhub resolve run id: ${passed} passed\n`);
 }
-process.stdout.write(`\nhub resolve run id: ${passed} passed\n`);
+
+void finish();

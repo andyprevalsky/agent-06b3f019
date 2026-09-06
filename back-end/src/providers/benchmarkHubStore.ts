@@ -6,6 +6,7 @@
  * configured, e.g. dev workspaces):
  *
  *   benchmark-hub/index.json          — array of run summaries (newest first)
+ *   benchmark-hub/agent-run-index.json — compact agent-id → run-id lookup
  *   benchmark-hub/runs/<run_id>.json  — full run bundle (cloudbench-run.json
  *                                       shape: tasks[] with logs.messages and
  *                                       logs.tree from the full-tree copy-down)
@@ -16,7 +17,7 @@
  */
 
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import fs from 'fs';
+import * as fs from 'node:fs/promises';
 import path from 'path';
 import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import {
@@ -36,12 +37,17 @@ export {
   agentIdsFromHubBundle,
   ancestorsFromHubTree,
   applyHubRunToResolutionCaches,
+  backfillHubAgentRunIndex,
+  backfillHubAgentRunIndexFromCatalog,
   findAgentAcrossRuns,
   findAncestorsAcrossRuns,
   findTreeAcrossRuns,
   forgetHubRunFromResolutionCaches,
+  installHubAgentRunIndex,
+  loadCompactHubAgentIndex,
   peekHubResolutionForTest,
   resolveHubRunIdFromIndexes,
+  resolveHubRunIdFromAgentIndex,
   __resetHubResolutionCachesForTest,
 } from './benchmarkHubLookup';
 export { canonicalAgentTree, getRunAgent, subtreeAgentsForBus } from './benchmarkHubView';
@@ -50,6 +56,7 @@ const log = createLogger('BenchmarkHubStore');
 
 const KEY_PREFIX = 'benchmark-hub';
 const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-hub');
+const AGENT_RUN_INDEX_KEY = 'agent-run-index.json';
 
 /**
  * Benchmark Hub access allowlist: hub reads/edits/dispatch and the benchmark-
@@ -92,6 +99,80 @@ export interface HubAgentView {
   agent: Record<string, unknown>;
   messages: Array<Record<string, unknown>>;
   tree: Array<Record<string, unknown>>;
+}
+
+interface HubAgentRunIndexDocument {
+  version: 1;
+  revision: number;
+  complete: boolean;
+  agents: Record<string, string>;
+}
+
+export interface HubAgentRunIndexSnapshot {
+  revision: number;
+  complete: boolean;
+  agents: Map<string, string>;
+}
+
+/** Pure index transition used by the locked upload path and regression tests. */
+export function hubAgentIndexAfterPut(
+  current: HubAgentRunIndexSnapshot | null,
+  indexWasEmpty: boolean,
+  runId: string,
+  agentIds: string[]
+): HubAgentRunIndexSnapshot {
+  const agents = new Map(current?.agents ?? []);
+  for (const [agentId, indexedRunId] of agents) {
+    if (indexedRunId === runId) agents.delete(agentId);
+  }
+  for (const agentId of agentIds) {
+    if (agentId) agents.set(agentId, runId);
+  }
+  return {
+    revision: (current?.revision ?? 0) + 1,
+    complete: current?.complete ?? indexWasEmpty,
+    agents,
+  };
+}
+
+/** Pure index transition used by the locked delete path and regression tests. */
+export function hubAgentIndexAfterDelete(
+  current: HubAgentRunIndexSnapshot,
+  runId: string
+): HubAgentRunIndexSnapshot {
+  const agents = new Map(current.agents);
+  for (const [agentId, indexedRunId] of agents) {
+    if (indexedRunId === runId) agents.delete(agentId);
+  }
+  return {
+    revision: current.revision + 1,
+    complete: current.complete,
+    agents,
+  };
+}
+
+/** Current locked uploads win over a legacy scan; deleted runs stay absent. */
+export function completedHubAgentBackfill(
+  current: HubAgentRunIndexSnapshot | null,
+  backfilled: Map<string, string>,
+  validRunIds: Set<string>
+): HubAgentRunIndexSnapshot {
+  const agents = new Map<string, string>();
+  for (const [agentId, runId] of current?.agents ?? []) {
+    if (validRunIds.has(runId)) agents.set(agentId, runId);
+  }
+  for (const [agentId, runId] of backfilled) {
+    if (validRunIds.has(runId) && !agents.has(agentId)) agents.set(agentId, runId);
+  }
+  return {
+    revision: (current?.revision ?? 0) + 1,
+    complete: true,
+    agents,
+  };
+}
+
+export function hubRunVisibleFromMarker(marker: string | null): boolean {
+  return marker === null || marker === 'true';
 }
 
 let s3Client: S3Client | null = null;
@@ -147,13 +228,29 @@ async function putObject(key: string, data: string): Promise<void> {
     return;
   }
   const target = path.join(LOCAL_DIR, key);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
+  await fs.mkdir(path.dirname(target), { recursive: true });
   const tmp = `${target}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, data);
-  fs.renameSync(tmp, target);
+  await fs.writeFile(tmp, data);
+  await fs.rename(tmp, target);
 }
 
-async function getObject(key: string): Promise<string | null> {
+function isObjectNotFound(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const record = error as {
+    code?: unknown;
+    name?: unknown;
+    $metadata?: { httpStatusCode?: unknown };
+  };
+  return (
+    record.code === 'ENOENT' ||
+    record.name === 'NoSuchKey' ||
+    record.name === 'NotFound' ||
+    record.$metadata?.httpStatusCode === 404
+  );
+}
+
+/** Null means a confirmed missing object; transport/permission faults throw. */
+async function getObjectStrict(key: string): Promise<string | null> {
   if (r2Configured()) {
     try {
       const response = await getS3Client().send(
@@ -163,14 +260,87 @@ async function getObject(key: string): Promise<string | null> {
         })
       );
       return (await streamToBuffer(response.Body)).toString('utf-8');
-    } catch {
-      return null;
+    } catch (error: unknown) {
+      if (isObjectNotFound(error)) return null;
+      throw error;
     }
   }
   try {
-    return fs.readFileSync(path.join(LOCAL_DIR, key), 'utf-8');
+    return await fs.readFile(path.join(LOCAL_DIR, key), 'utf-8');
+  } catch (error: unknown) {
+    if (isObjectNotFound(error)) return null;
+    throw error;
+  }
+}
+
+async function getObject(key: string): Promise<string | null> {
+  try {
+    return await getObjectStrict(key);
   } catch {
     return null;
+  }
+}
+
+export function parseHubAgentRunIndex(raw: string | null): HubAgentRunIndexSnapshot | null {
+  if (raw === null) return null;
+  const parsed = JSON.parse(raw) as Partial<HubAgentRunIndexDocument>;
+  if (
+    parsed.version !== 1 ||
+    !Number.isSafeInteger(parsed.revision) ||
+    (parsed.revision as number) < 0 ||
+    typeof parsed.complete !== 'boolean' ||
+    typeof parsed.agents !== 'object' ||
+    parsed.agents === null ||
+    Array.isArray(parsed.agents) ||
+    Object.getPrototypeOf(parsed.agents) !== Object.prototype
+  ) {
+    throw new Error('Invalid Benchmark Hub agent-run index');
+  }
+  const agents = new Map<string, string>();
+  for (const [agentId, runId] of Object.entries(parsed.agents)) {
+    if (!agentId || typeof runId !== 'string' || !/^[A-Za-z0-9._-]+$/.test(runId)) {
+      throw new Error('Invalid Benchmark Hub agent-run index entry');
+    }
+    agents.set(agentId, runId);
+  }
+  return {
+    revision: parsed.revision as number,
+    complete: parsed.complete,
+    agents,
+  };
+}
+
+async function readAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
+  return parseHubAgentRunIndex(await getObjectStrict(AGENT_RUN_INDEX_KEY));
+}
+
+async function writeAgentRunIndex(index: HubAgentRunIndexSnapshot): Promise<void> {
+  const document: HubAgentRunIndexDocument = {
+    version: 1,
+    revision: index.revision,
+    complete: index.complete,
+    agents: Object.fromEntries(index.agents),
+  };
+  await putObject(AGENT_RUN_INDEX_KEY, JSON.stringify(document));
+}
+
+/** Load the compact lookup without touching any full run bundle. */
+export async function loadHubAgentRunIndex(): Promise<HubAgentRunIndexSnapshot | null> {
+  return readAgentRunIndex();
+}
+
+/** A small exact-key tombstone keeps stale per-process maps from serving deleted runs. */
+export async function isHubRunVisible(runId: string): Promise<boolean> {
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) return false;
+  try {
+    const marker = await getObjectStrict(`visibility/${runId}.json`);
+    return hubRunVisibleFromMarker(marker);
+  } catch (error: unknown) {
+    log.warn('Benchmark Hub visibility read failed closed', {
+      runId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
   }
 }
 
@@ -245,10 +415,12 @@ export async function putRun(
     uploaded_at: new Date().toISOString(),
     tasks: tasks.map(taskSummary),
   };
+  const agentIds = agentIdsFromHubBundle(bundle);
 
   let storedSummary = summary;
+  let storedAgentIndexRevision: number | null = null;
   await withIndexLock(async () => {
-    const index = await listRuns();
+    const index = await listRunsStrict();
     const existing = index.find((run) => run.run_id === runId);
     // Final is an absorbing state. A snapshot loop already in flight may
     // arrive after completion; it must not regress either the bundle or index
@@ -257,36 +429,79 @@ export async function putRun(
       storedSummary = existing;
       return;
     }
+    const persisted = await readAgentRunIndex();
+    const agentIndex = hubAgentIndexAfterPut(persisted, index.length === 0, runId, agentIds);
     await putObject(`runs/${runId}.json`, JSON.stringify(bundle));
     const next = [summary, ...index.filter((r) => r.run_id !== runId)];
     next.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
     await putObject('index.json', JSON.stringify(next));
+    await writeAgentRunIndex(agentIndex);
+    await putObject(`visibility/${runId}.json`, 'true');
+    storedAgentIndexRevision = agentIndex.revision;
   });
   log.info('Stored benchmark run bundle', {
     runId,
     live: storedSummary.live,
     tasks: storedSummary.tasks.length,
   });
-  await slotHubAncestorSkeletonsFromBundle(bundle);
-  applyHubRunToResolutionCaches(runId, agentIdsFromHubBundle(bundle));
+  if (storedAgentIndexRevision !== null) {
+    await slotHubAncestorSkeletonsFromBundle(bundle);
+    applyHubRunToResolutionCaches(runId, agentIds, storedAgentIndexRevision);
+  }
   return storedSummary;
+}
+
+/**
+ * Persist the one-time legacy backfill. Concurrent uploads win for reused ids,
+ * and pointers to runs deleted during the scan are discarded.
+ */
+export async function persistHubAgentRunBackfill(
+  backfilled: Map<string, string>
+): Promise<HubAgentRunIndexSnapshot> {
+  return withIndexLock(async () => {
+    const validRunIds = new Set((await listRunsStrict()).map((run) => run.run_id));
+    const current = await readAgentRunIndex();
+    const snapshot = completedHubAgentBackfill(current, backfilled, validRunIds);
+    await writeAgentRunIndex(snapshot);
+    return snapshot;
+  });
 }
 
 export async function listRuns(): Promise<HubRunSummary[]> {
   const raw = await getObject('index.json');
   if (!raw) return [];
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return (parsed as HubRunSummary[]).map((run) => ({
-      ...run,
-      tasks: Array.isArray(run.tasks)
-        ? run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) }))
-        : [],
-    }));
+    return parseRunCatalog(raw);
   } catch {
     return [];
   }
+}
+
+function parseRunCatalog(raw: string): HubRunSummary[] {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) throw new Error('Invalid Benchmark Hub run catalog');
+  return parsed.map((value) => {
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      typeof (value as Partial<HubRunSummary>).run_id !== 'string' ||
+      !/^[A-Za-z0-9._-]+$/.test((value as Partial<HubRunSummary>).run_id as string) ||
+      !Array.isArray((value as Partial<HubRunSummary>).tasks)
+    ) {
+      throw new Error('Invalid Benchmark Hub run catalog entry');
+    }
+    const run = value as HubRunSummary;
+    return {
+      ...run,
+      tasks: run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) })),
+    };
+  });
+}
+
+/** Mutations and migrations must distinguish a missing catalog from read/corruption faults. */
+export async function listRunsStrict(): Promise<HubRunSummary[]> {
+  const raw = await getObjectStrict('index.json');
+  return raw === null ? [] : parseRunCatalog(raw);
 }
 
 export async function getRunBundle(runId: string): Promise<Record<string, unknown> | null> {
@@ -294,10 +509,31 @@ export async function getRunBundle(runId: string): Promise<Record<string, unknow
   const raw = await getObject(`runs/${runId}.json`);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as Record<string, unknown>;
+    return parseHubRunBundle(raw);
   } catch {
     return null;
   }
+}
+
+export function parseHubRunBundle(raw: string): Record<string, unknown> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !Array.isArray((parsed as Record<string, unknown>).tasks)
+  ) {
+    throw new Error('Invalid Benchmark Hub run bundle');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Legacy-index migration must distinguish an absent/corrupt bundle from success. */
+export async function getRunBundleStrict(runId: string): Promise<Record<string, unknown>> {
+  if (!/^[A-Za-z0-9._-]+$/.test(runId)) throw new Error(`Invalid Hub run id: ${runId}`);
+  const raw = await getObjectStrict(`runs/${runId}.json`);
+  if (raw === null) throw new Error(`Missing Hub run bundle: ${runId}`);
+  return parseHubRunBundle(raw);
 }
 
 export interface HubRunTaskDetail extends HubRunTaskSummary {
@@ -402,10 +638,15 @@ export async function getRunDetail(runId: string): Promise<HubRunDetail | null> 
 export async function deleteRun(runId: string): Promise<boolean> {
   const bundle = await getRunBundle(runId);
   const removed = await withIndexLock(async () => {
-    const index = await listRuns();
+    const index = await listRunsStrict();
     const next = index.filter((r) => r.run_id !== runId);
     if (next.length === index.length) return false;
+    await putObject(`visibility/${runId}.json`, 'false');
     await putObject('index.json', JSON.stringify(next));
+    const agentIndex = await readAgentRunIndex();
+    if (agentIndex !== null) {
+      await writeAgentRunIndex(hubAgentIndexAfterDelete(agentIndex, runId));
+    }
     return true;
   });
   if (removed && bundle) {

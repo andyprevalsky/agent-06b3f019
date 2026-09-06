@@ -2919,6 +2919,15 @@ def test_coerce_activity_shaped_creator_schema_uses_meaningful_title():
     assert parsed["title"] != "Task Output"
 
 
+def test_response_schema_title_rejects_all_generic_explicit_and_derived_titles():
+    schema = {"fields": [{"name": "result", "type": "str", "required": True}]}
+
+    for title in ("Task", "Task Output", "Agent Run", "Result", "Output"):
+        assert rose_cache.meaningful_response_schema_title(schema, title) == "Structured Deliverable"
+
+    assert rose_cache.meaningful_response_schema_title(schema, "Revenue Forecast") == "Revenue Forecast"
+
+
 def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
     """summarize_web_fetch miss returns page text passthrough, not soft stub."""
 

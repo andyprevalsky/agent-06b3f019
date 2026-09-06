@@ -223,7 +223,20 @@
           {
             "type": "agent_task_title",
             "value": "Creator Brand Strategy",
-            "forbidden_titles": ["Task Output"]
+            "forbidden_titles": [
+              "Task",
+              "Task Output",
+              "Agent Run",
+              "User Request",
+              "Doing Research",
+              "Handling It",
+              "Result",
+              "Output",
+              "Answer",
+              "Data",
+              "Value",
+              "Response"
+            ]
           }
         ]
       },

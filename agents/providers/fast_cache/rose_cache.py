@@ -36,6 +36,22 @@ logger = structlog.get_logger(__name__)
 # live LLM when the store times out. A transport fault is not a semantic miss.
 _LOOKUP_RETRY_ATTEMPTS = 3
 _LOOKUP_RETRY_BACKOFF_S = 0.25
+_GENERIC_RESPONSE_SCHEMA_TITLES = frozenset(
+    {
+        "agent run",
+        "answer",
+        "data",
+        "doing research",
+        "handling it",
+        "output",
+        "response",
+        "result",
+        "task",
+        "task output",
+        "user request",
+        "value",
+    }
+)
 
 
 class FastCacheLookupError(RuntimeError):
@@ -85,13 +101,13 @@ def _cache_replay_usage(original: Dict[str, Any]) -> Dict[str, Any]:
 def meaningful_response_schema_title(schema: Dict[str, Any], title: Any = None) -> str:
     """Return a concise title for generated-schema cache rows.
 
-    Early cache fixtures used ``Task Output`` as a placeholder. Treat that value
-    like a missing title so Fast Mode replay cannot rename a real root task to a
-    generic UI label.
+    Early cache fixtures used generic placeholders such as ``Task Output``.
+    Treat every title forbidden by the schema prompt like a missing title so
+    Fast Mode replay cannot rename a real root task to a generic UI label.
     """
     provided = title.strip() if isinstance(title, str) else ""
-    if provided and provided.casefold() != "task output":
-        return provided[:80]
+    if provided and provided.casefold() not in _GENERIC_RESPONSE_SCHEMA_TITLES:
+        return provided[:48]
 
     raw_fields = schema.get("fields") if isinstance(schema, dict) else None
     fields = raw_fields if isinstance(raw_fields, list) else []
@@ -118,7 +134,10 @@ def meaningful_response_schema_title(schema: Dict[str, Any], title: Any = None) 
         ),
         "Task",
     )
-    return first_name.replace("_", " ").strip().title()[:80]
+    derived = first_name.replace("_", " ").strip().title()
+    if not derived or derived.casefold() in _GENERIC_RESPONSE_SCHEMA_TITLES:
+        return "Structured Deliverable"
+    return derived[:48]
 
 
 def coerce_cached_llm_payload(stored: Dict[str, Any] | None) -> Dict[str, Any]:
