@@ -541,6 +541,7 @@ _JULY_GP_RESEARCH_TOOLS = frozenset(
         "spawn_browser_agent",
     }
 )
+_JULY_GP_MAX_EXPLORE_SPAWNS = 3
 
 
 def is_july_explore_site(ctx: Any, call_site: str) -> bool:
@@ -583,16 +584,19 @@ def _payload_tool_name(stored: Any) -> str:
     return ""
 
 
-def _explore_spawn_tool_call_id(stored: Any) -> str:
-    """Return the call id only for a cached ``spawn_agent(type=explore)``."""
-    if _payload_tool_name(stored) != "spawn_agent":
-        return ""
-    tool_call = (stored.get("tool_calls") or [None])[0]
+def _explore_spawn_call_id(tool_call: Any) -> str:
+    """Return the id only for a ``spawn_agent(type=explore)`` tool call."""
     if not isinstance(tool_call, dict):
         return ""
-    raw = tool_call.get("arguments") or ""
+    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    name = tool_call.get("name") or function.get("name") or tool_call.get("tool")
+    if str(name or "").strip() != "spawn_agent":
+        return ""
+    raw = tool_call.get("arguments") or function.get("arguments")
     if isinstance(raw, dict):
         parsed = raw
+    elif raw is None:
+        parsed = tool_call
     else:
         try:
             parsed = json.loads(raw) if isinstance(raw, str) else {}
@@ -600,11 +604,43 @@ def _explore_spawn_tool_call_id(stored: Any) -> str:
             return ""
     if not isinstance(parsed, dict) or str(parsed.get("type") or "").strip() != "explore":
         return ""
-    return str(tool_call.get("id") or "").strip()
+    return str(tool_call.get("id") or tool_call.get("tool_call_id") or "").strip()
 
 
-def _prior_tool_call_ids(key_material: Any) -> set[str]:
-    """Collect tool-use ids already present in the current LLM conversation."""
+def _limit_july_gp_explore_calls(stored: Any, prior_call_ids: set[str]) -> Any:
+    """Trim a cached parallel spawn batch to the GP's remaining explore slots."""
+    if not isinstance(stored, dict):
+        return stored
+    tool_calls = stored.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return stored
+
+    remaining = max(0, _JULY_GP_MAX_EXPLORE_SPAWNS - len(prior_call_ids))
+    selected_ids: set[str] = set()
+    kept: list[Any] = []
+    changed = False
+    for tool_call in tool_calls:
+        call_id = _explore_spawn_call_id(tool_call)
+        if not call_id:
+            kept.append(tool_call)
+            continue
+        if call_id in prior_call_ids or call_id in selected_ids or remaining <= 0:
+            changed = True
+            continue
+        selected_ids.add(call_id)
+        remaining -= 1
+        kept.append(tool_call)
+    if not changed:
+        return stored
+    if not kept:
+        return None
+    limited = dict(stored)
+    limited["tool_calls"] = kept
+    return limited
+
+
+def _prior_explore_spawn_tool_call_ids(key_material: Any) -> set[str]:
+    """Collect distinct explore-spawn ids already present in the conversation."""
     if isinstance(key_material, dict):
         messages = key_material.get("messages") or []
     elif isinstance(key_material, list):
@@ -617,10 +653,10 @@ def _prior_tool_call_ids(key_material: Any) -> set[str]:
             continue
         if str(message.get("role") or "").strip().lower() != "assistant":
             continue
-        for tool_call in message.get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            call_id = str(tool_call.get("id") or "").strip()
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_calls = message.get("tool_calls") or metadata.get("tool_calls") or []
+        for tool_call in tool_calls:
+            call_id = _explore_spawn_call_id(tool_call)
             if call_id:
                 seen.add(call_id)
     return seen
@@ -665,13 +701,13 @@ async def july_gp_resolve_execute(
     *,
     key_material: Any = None,
 ) -> tuple[Any, Any]:
-    """Walk July GP execute steps, skipping stubs and replayed explore calls."""
+    """Walk July GP steps, replaying at most three distinct explore calls."""
     if not is_july_gp_execute_site(ctx, call_site):
         return stored, hit_key
     step = getattr(ctx, "base_step", None)
     start = 1 if step is None or int(step) < 1 else int(step)
     prior_tool = ""
-    prior_tool_call_ids = _prior_tool_call_ids(key_material)
+    prior_explore_call_ids = _prior_explore_spawn_tool_call_ids(key_material)
     for current in range(start, start + 16):
         if stored is not None and current == start:
             cand, key = stored, hit_key
@@ -681,9 +717,14 @@ async def july_gp_resolve_execute(
             )
         if cand is None:
             continue
-        explore_call_id = _explore_spawn_tool_call_id(cand)
-        if explore_call_id and explore_call_id in prior_tool_call_ids:
+        cand = _limit_july_gp_explore_calls(cand, prior_explore_call_ids)
+        if cand is None:
             continue
+        if (
+            _payload_tool_name(cand) == "attempt_completion"
+            and len(prior_explore_call_ids) >= _JULY_GP_MAX_EXPLORE_SPAWNS
+        ):
+            return cand, key
         if _july_gp_accept_payload(cand, prior_tool):
             return cand, key
         prior_tool = _payload_tool_name(cand)

@@ -3573,13 +3573,14 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
 
 
 def test_general_purpose_explore_spawn_limit_is_per_agent():
-    """T3 permits three explore children per GP and fails on a fourth."""
+    """T3 counts logical children once, permits three per GP, and fails on four."""
     from copy import deepcopy
 
     from benchmarks.run_benchmark import _run_declared_static_check
 
     root = "root-mass"
     gp = "gp-huberman"
+    peer_gp = "gp-patrick"
     evaluator = {
         "checks": [
             {
@@ -3588,19 +3589,45 @@ def test_general_purpose_explore_spawn_limit_is_per_agent():
             }
         ]
     }
-    spawn_messages = [
-        {
-            "role": "TOOL",
-            "message": f"explore {index} complete",
-            "metadata": {
-                "toolName": "spawn_agent",
-                "toolStatus": "FINISHED",
-                "agentType": "explore",
-                "subAgentId": f"explore-{index}",
+
+    def spawn_messages(owner, index):
+        call_id = f"call-{owner}-explore-{index}"
+        child_id = f"{owner}-explore-{index}"
+        common = {"toolName": "spawn_agent", "agentType": "explore"}
+        return [
+            {
+                "role": "TOOL",
+                "message": "starting",
+                "metadata": {**common, "toolStatus": "IN_PROGRESS", "toolCallId": call_id},
             },
-        }
-        for index in range(4)
-    ]
+            *[
+                {
+                    "role": "TOOL",
+                    "message": f"explore {index} progress {update}",
+                    "metadata": {
+                        **common,
+                        "toolStatus": "FINISHED",
+                        "toolCallId": f"progress-{index}-{update}",
+                        "subAgentId": child_id,
+                    },
+                }
+                for update in range(5)
+            ],
+            {
+                "role": "TOOL",
+                "message": f"explore {index} complete",
+                "metadata": {
+                    **common,
+                    "toolStatus": "FINISHED",
+                    "toolCallId": call_id,
+                    "subAgentId": child_id,
+                },
+            },
+        ]
+
+    spawn_rows = [rows for index in range(4) for rows in spawn_messages(gp, index)]
+    peer_rows = [rows for index in range(3) for rows in spawn_messages(peer_gp, index)]
+    rows_per_child = len(spawn_messages(gp, 0))
     data = {
         "agent": {"agent_id": root, "status": "COMPLETED"},
         "_benchmark": {
@@ -3615,7 +3642,13 @@ def test_general_purpose_explore_spawn_limit_is_per_agent():
                     "parent_agent_id": root,
                     "status": "COMPLETED",
                     "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
-                    "messages": spawn_messages[:3],
+                    "messages": spawn_rows[: 3 * rows_per_child],
+                },
+                peer_gp: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Patrick.",
+                    "messages": peer_rows,
                 },
             }
         },
@@ -3627,7 +3660,7 @@ def test_general_purpose_explore_spawn_limit_is_per_agent():
     )
 
     over_limit = deepcopy(data)
-    over_limit["_benchmark"]["tree"][gp]["messages"] = spawn_messages
+    over_limit["_benchmark"]["tree"][gp]["messages"] = spawn_rows
     passed, reason = _run_declared_static_check(evaluator, over_limit)
     assert passed is False
     assert "spawned 4 explore agents" in reason

@@ -9019,13 +9019,46 @@ def _compact_messages_for_judge(messages: list, *, limit: int = 80, text_chars: 
     return compacted
 
 
+def _logical_explore_spawn_count(messages: list) -> int:
+    """Count spawned explore children, not their repeated lifecycle/progress rows."""
+    matching: list[tuple[int, str, str]] = []
+    child_by_call_id: dict[str, str] = {}
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if metadata.get("toolName") != "spawn_agent" or metadata.get("agentType") != "explore":
+            continue
+        call_id = str(metadata.get("toolCallId") or "").strip()
+        child_id = str(
+            metadata.get("subAgentId")
+            or metadata.get("sub_agent_id")
+            or metadata.get("taskId")
+            or metadata.get("task_id")
+            or ""
+        ).strip()
+        matching.append((index, call_id, child_id))
+        if call_id and child_id:
+            child_by_call_id[call_id] = child_id
+
+    logical_ids: set[tuple[str, str]] = set()
+    for index, call_id, child_id in matching:
+        canonical_child = child_id or child_by_call_id.get(call_id, "")
+        if canonical_child:
+            logical_ids.add(("child", canonical_child))
+        elif call_id:
+            logical_ids.add(("tool", call_id))
+        else:
+            logical_ids.add(("row", str(index)))
+    return len(logical_ids)
+
+
 def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
     messages = node.get("messages") if isinstance(node.get("messages"), list) else []
     collected_count = len(messages)
     tool_counts: dict[str, int] = {}
     error_tool_count = 0
     research_tool_count = 0
-    explore_spawn_count = 0
     has_traj_end_marker = False
     blob_parts = [str(node.get("goal") or ""), str(node.get("title") or "")]
     for message in messages:
@@ -9044,8 +9077,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
             error_tool_count += 1
         if tool_name in _JUDGE_RESEARCH_TOOLS:
             research_tool_count += 1
-        if tool_name == "spawn_agent" and metadata.get("agentType") == "explore":
-            explore_spawn_count += 1
+    explore_spawn_count = _logical_explore_spawn_count(messages)
     blob = " ".join(blob_parts).lower()
     mentions_andy = "andy prevalsky" in blob or "andy's" in blob
     mentions_aman = "aman gottumukkala" in blob or "aman's" in blob

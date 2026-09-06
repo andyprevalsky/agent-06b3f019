@@ -10,9 +10,9 @@ first_bad_boundary: back-end/scripts/clean-oai-demo-browser-cache.ts buildArchiv
 symptoms:
   - Declared evaluator t5-zero-live-spend failed
   - No JSON content received in response (chunks=3, model=fast-cache)
-  - cost_cents is 16; cache_creation_input_tokens is 163201
-  - Visible spawn_agent complete cards claimed nested research was skipped
   - Eric Topol creator child emitted 13 explore spawns from 3 cached tool-call IDs
+  - Max-three validator initially counted 88 lifecycle rows as 88 explore children
+  - One creator child emitted 4 logical explores from a 1-call turn plus a 3-call parallel turn
 tags:
   - fast-cache
   - saved-trajectory
@@ -21,6 +21,8 @@ tags:
   - oai-demo
   - nested-agent
   - duplicate-tool-call
+  - parallel-tool-call
+  - benchmark-validation
 sources:
   - agent 149f16bd-58e1-471e-90b3-d3e9a0cefd8f
   - fleet run a19002d6-005e-47c3-abc8-23aa969f28f9
@@ -40,6 +42,12 @@ sources:
   - agent 2b46193f-fc8d-4191-a83c-0740b9934369
   - fleet run 1456cbae-2537-4602-86c1-bf44433b0167
   - agent 8668c79f-f12f-4e6a-8afe-28feda8722bd
+  - agent 79b72329-26ca-4087-9a42-2f5b10b961a2
+  - fleet run 95097543-05ad-4433-83b6-dc0222ed138f
+  - agent c9380d2f-6181-43d1-b259-8067bb11552b
+  - fleet run 7b139f39-cd4a-4d7d-a38f-86598f976ab7
+  - agent 48d2bb86-a800-400d-b351-289e6e9e90bd
+  - fleet run 340c86da-4902-4b9f-ad5f-d7b5525e069d
 repro: back-end/src/tests/blackbox/fast-cache.blackbox.ts
 status: fixed
 ---
@@ -107,6 +115,10 @@ no synthetic `spawn_agent complete` cards saying that research or code work was
 skipped and required that behavior to be enforced by the benchmark's declared
 validation criteria.
 
+On 2026-09-06, the human required the declared validation to enforce at most
+three explore children per general-purpose agent, while preserving the creator
+data returned to the root agent.
+
 ## 2026-09-05 recurrence: nested-agent replay slots
 
 A run that passed the older benchmark contract still exposed six first-level
@@ -173,9 +185,10 @@ the active assistant-message history. The deepest owned cause was again
 treating saved trajectory positions as independent responses rather than a
 stateful series of tool actions.
 
-The resolver now reads the current request's assistant tool-call IDs and skips
+The initial recurrence fix made the resolver read the current request's
+assistant tool-call IDs and skip
 only a cached `spawn_agent(type=explore)` candidate whose exact ID was already
-executed. It neither mutates nor caps the cached action payloads: three unique
+executed. It neither mutated nor capped the cached action payloads: three unique
 explore calls remain in their original order with their original arguments and
 results. Other tool types, non-July goals, and genuinely distinct explores are
 unchanged. The permanent LLM-boundary blackbox in
@@ -211,7 +224,49 @@ request's existing messages once and retains the resolver's fixed 16-position
 lookahead. It creates no cross-agent state, performs no tree-wide scan, and is
 not entered for ordinary non-July agent traffic.
 
+## 2026-09-06 recurrence: parallel explore batches and max-three validation
+
+The new declared evaluator first failed run
+`95097543-05ad-4433-83b6-dc0222ed138f` (root
+`79b72329-26ca-4087-9a42-2f5b10b961a2`) by reporting 88 explores for one GP.
+That count was the number of raw `spawn_agent` lifecycle and progress rows, not
+logical children: the same run contained 2,536 such rows for 124 distinct
+children. Canonicalizing each row by `subAgentId`/`taskId`, with the declared
+tool-call ID as a fallback, showed that 9 of 50 GPs genuinely exceeded three.
+The benchmark compactor now computes that logical count while leaving its raw
+tool-count diagnostics unchanged. Its blackbox repeats progress rows for every
+child, proves that three pass, proves that four fail, and uses two GP parents to
+pin the per-parent scope.
+
+The first runtime cap reduced the population to one failure on local run
+`7b139f39-cd4a-4d7d-a38f-86598f976ab7` (root
+`c9380d2f-6181-43d1-b259-8067bb11552b`). GP `144b815d...` replayed one explore
+in its first response and a single cached assistant response containing three
+parallel explores in its second. The guard inspected only the first call in a
+candidate and admitted the whole batch because the prior count was one, yielding
+`1 + 3 = 4`. This was the first bad boundary for the remaining failure.
+
+The resolver now examines every tool call in a candidate, copies a parallel
+response when necessary, and retains only the first
+`3 - distinct_prior_explores` calls. It recognizes both OpenAI function-call
+messages and persisted `metadata.tool_calls` rows, skips duplicate IDs, never
+mutates the cached object, and returns the original cached
+`attempt_completion` on the following turn. The captured `1 + 3` permanent
+blackbox fails with the prior single-call guard and passes with the batch-aware
+guard; the full LLM blackbox domain passes 207 of 207 tests.
+
+The identical mass benchmark then passed on run
+`340c86da-4902-4b9f-ad5f-d7b5525e069d` (root
+`48d2bb86-a800-400d-b351-289e6e9e90bd`) at zero cost and 100% Fast Mode cache
+hits. Across its 50 GPs, 11 spawned one logical explore, 21 spawned two, and 18
+spawned three; none exceeded the new limit. After removing only per-run pointer
+IDs, timestamps, and storage paths, the root structured-output envelope has the
+same SHA-256 (`49347becec58f6a105f175ad0340db371161ae340016aadbd6511f820b5c152b`)
+in the original, dedupe-only, and max-three runs, so the data contract returned
+to the root is unchanged.
+
 ## Reusable lesson
 
-Treat recorded trajectory slots as stateful: archive invalidated actions and
-never replay a tool-call ID already present in the conversation.
+Treat recorded trajectory slots as stateful: archive invalidated actions,
+never replay a tool-call ID already present in the conversation, and enforce
+lifetime limits across every call in a parallel cached response.
