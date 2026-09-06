@@ -14,6 +14,7 @@ export const initSessionSchema = z.object({
   user_id: z.string(),
   agent_id: z.string().uuid(),
   start_url: z.string().min(1),
+  task_id: z.string().uuid().optional(),
 });
 
 export const closeSessionSchema = z.object({

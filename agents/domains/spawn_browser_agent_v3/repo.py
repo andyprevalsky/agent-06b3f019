@@ -476,6 +476,8 @@ async def init_browser_session(
     user_id: str,
     agent_id: str,
     start_url: str,
+    *,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Initialize a browser session via backend. Returns session data dict."""
     async with httpx.AsyncClient(timeout=180.0) as client:
@@ -486,7 +488,12 @@ async def init_browser_session(
                     "Content-Type": "application/json",
                     **workflow_generation_headers(),
                 },
-            json={"user_id": user_id, "agent_id": agent_id, "start_url": start_url},
+            json={
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "start_url": start_url,
+                **({"task_id": task_id} if task_id else {}),
+            },
         )
     if response.status_code in [200, 201]:
         return response.json()

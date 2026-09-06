@@ -1,16 +1,18 @@
 ---
 id: 2026-09-06-payment-abandonment-archived-before-browser-terminal
 date: 2026-09-06
-title: Payment-abandonment benchmarks froze Hub evidence before the browser terminal landed
-surface: harness
-component: benchmark-runner
-classification: test-bug
+title: Payment-abandonment benchmarks froze Hub evidence without a durable browser terminal
+surface: cross
+component: spawn-browser-agent-v3-and-benchmark-runner
+classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/benchmarks/run_benchmark.py run_single_task archived a successful payment-abandonment snapshot before deleting the still-active agent
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py SpawnBrowserAgentManagerV3 started the cancellable activity before allocating its stable browser task ID, then persisted session_paused after TRY_CANCEL while the activity's task_complete write was only best effort
 symptoms:
   - 'FE link browser validation failed: browser task 5955d7c7-281f-43fe-9552-3b6abf64fcd3 has not terminated (missing action_type=task_complete)'
   - agent-payment-production-abandonment passed with status ACTIVE
   - durable Hub bundle ended at action_type=payment_card_ready
+  - Payment-abandonment browser did not reach terminal state with a recording before Hub archive
+  - root pause produced action_type=session_paused and a FINISHED recording but no task_complete
 tags:
   - agentcard
   - benchmark-hub
@@ -21,8 +23,13 @@ sources:
   - fleet run 3da38a07-8732-412b-a479-f674e88eeeaf
   - agent 83e9b442-612e-467c-8e9b-8fe56435a401
   - PR #1267 production verification
-repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive
-status: fixed
+  - fleet run e9bbf8a2-9090-49c9-bed9-85ecac8cf9bd
+  - agent 043e4578-ef91-46d6-9ec1-37520d7cebd3
+  - PR #1268 production verification
+  - fleet run 31b6ab02-5e02-4022-802b-1e7e23528e76 (local post-fix lifecycle)
+  - agent 0aaf7e12-d050-46b4-8a35-2be0baa51b93 (durable https://www.roselabs.ai/?agent-id=0aaf7e12-d050-46b4-8a35-2be0baa51b93)
+repro: agents/tests/blackbox/benchmark.blackbox.py payment_abandonment_seals_browser_before_hub_archive and agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py manager_cancelled_pause_is_task_complete
+status: open
 ---
 
 ## Problem
@@ -58,6 +65,16 @@ appear in the run JSON or the Hub archive. A later pause request returned 404,
 confirming that the runner had already deleted the live root and that the missing
 row could not be recovered honestly from production.
 
+The first production verification of that ordering fix exposed a recurrence at
+the deeper producer boundary. Hub run
+`e9bbf8a2-9090-49c9-bed9-85ecac8cf9bd` and agent
+`043e4578-ef91-46d6-9ec1-37520d7cebd3` reached a fully reconciled monetary
+lifecycle. The harness paused the root before archive and the transcript then
+contained a task-scoped `session_paused` plus a playable FINISHED Kernel
+recording, but no `task_complete`; after 60 seconds the new seal correctly failed
+with `Payment-abandonment browser did not reach terminal state with a recording
+before Hub archive`.
+
 Archive searches for `browser terminal archive payment abandonment`, `payment
 benchmark archive before delete`, and `refresh after pause browser recording hub
 archive` found the related
@@ -66,6 +83,24 @@ pause-refresh helper. This is not a recurrence of that verifier bug: the verifie
 still fails closed correctly. It is the producer-side relative that allowed a
 successful early-terminal payment path to bypass the existing timeout/stall
 pause-and-refresh ordering.
+
+The recurrence is the same durable-terminal contract class, not a verifier
+regression: the publisher and new seal both rejected the bad archive. The
+critical path was `root pause -> workflow manager TRY_CANCEL -> browser activity
+CancelledError cleanup -> manager ToolEvent -> transcript -> harness seal`. The
+cancelled activity attempts to save `task_complete`, but Temporal `TRY_CANCEL`
+can acknowledge cancellation before that activity-side best-effort write lands.
+The manager is the deterministic cancellation observer, yet its own event used
+the divergent `session_paused` action type. This made the earlier wait depend on
+a terminal producer that was not guaranteed.
+
+Archive searches for the literal seal error and for `browser pause cancel
+task_complete session_paused recording durable FE` found this case plus
+`2026-08-31-fe-link-browser-terminate-recording-validation` and
+`2026-08-31-claude-code-chip-stuck-spinning-up-on-pause`. Runtime evidence
+confirmed a recurrence/relative: browser cancellation had the same split terminal
+producer already fixed for Claude Code, while the fail-closed browser publisher
+continued to work correctly.
 
 ## Solution
 
@@ -90,6 +125,44 @@ at most 60 seconds of two-second polling only to payment-abandonment benchmark
 runs; it adds no production request path, shared scan, background task, or
 per-agent state and therefore does not change 10,000-agent production behavior.
 
+The recurrence fix unifies the browser cancellation producer and moves browser
+task identity to the deterministic owner. `SpawnBrowserAgentManagerV3` derives a
+replay-stable UUID from the agent and tool-call IDs before starting the activity;
+the backend accepts that ID at session initialization and both Kernel and Steel
+(including local CDP) persist it as `BrowserSession.id`. Once the manager has
+observed an activity cancellation and returns from that tool invocation, its
+task-scoped ToolEvent uses the preallocated ID and
+`action_type=task_complete`, matching the activity cleanup and publisher
+contract even when Temporal discards the cancelled activity result. The event
+remains an ERROR titled `Browser Session Paused`; pause, resume, cancellation,
+session handling, and LLM-visible output are unchanged. This removes the
+dependency on an activity-side write after Temporal has already acknowledged
+cancellation and prevents the same missing terminal for manual root pause,
+benchmark timeout cleanup, and payment-abandonment sealing.
+
+The permanent owning-boundary regression
+`manager_cancelled_pause_is_task_complete` replays a cancelled activity result
+with task/session/browser metadata. On the buggy code it failed in 0.71 seconds
+because the manager emitted `session_paused`; the identical assertion passed
+after the producer fix. `manager_cancelled_pause_preserves_task_id` drives the
+actual paused/not-done `TRY_CANCEL` branch, makes the activity raise before
+returning any metadata, and requires the manager's terminal to retain the same
+preallocated task ID passed into the activity. The repository HTTP regression
+and backend provider-selection regression pin that ID through the init request
+and provider boundary.
+
+The post-fix local AgentCard lifecycle run
+`31b6ab02-5e02-4022-802b-1e7e23528e76` passed 4/4. Its abandonment agent
+`0aaf7e12-d050-46b4-8a35-2be0baa51b93` persisted a task-scoped
+`task_complete` after pause, retained a FINISHED Kernel recording, reconciled
+the payment as VOIDED/RECLAIMED/refunded/CLOSED, mirrored the Hub bundle, and
+passed the fail-closed evidence publisher at the durable FE link recorded in
+this case's sources. This is merge-enabling integration evidence, not closing
+production evidence. The exact production-only benchmark cannot execute
+against localhost by catalog contract; its unchanged pre-fix production run is
+the outcome failure, and this case remains open until the same production gate
+passes on the deployed fix.
+
 ## Human feedback
 
 The user required `/deploy when finished`; the deploy and repository evidence
@@ -98,4 +171,4 @@ terminal with a recording attached.
 
 ## Reusable lesson
 
-Freeze durable browser evidence only after the same terminal cleanup event that closes the live child is visible in the transcript.
+Make the deterministic cancellation observer emit the same scoped terminal contract as best-effort activity cleanup before freezing durable evidence.

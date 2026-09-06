@@ -18,7 +18,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -5965,8 +5965,21 @@ async def test_init_browser_session_success():
         }
     )
     cfg = _fake_config()
-    out = await init_browser_session(cfg, "u", "a", "https://x.com")
+    requested_task_id = "00000000-0000-4000-8000-000000000123"
+    out = await init_browser_session(
+        cfg,
+        "u",
+        "a",
+        "https://x.com",
+        task_id=requested_task_id,
+    )
     assert out["session_id"] == "s"
+    assert_captured_call(
+        0,
+        url_contains="/api/browser-session/init",
+        method="POST",
+        body_contains={"task_id": requested_task_id},
+    )
 
 async def test_init_browser_session_rate_limited():
     from domains.spawn_browser_agent_v3.repo import init_browser_session
@@ -17319,7 +17332,15 @@ def test_realm_transition_refreshes_active_session_credential_ref():
     assert "nonlocal session_credential_ref" in helper_source
     assert "session_credential_ref = realm_state.auth_credential_ref" in helper_source
 
-async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
+async def test_manager_cancelled_browser_pause_event_is_task_complete():
+    """Workflow-owned cancel must persist the durable browser terminal.
+
+    Production agent 043e4578 (2026-09-06) proved that Temporal TRY_CANCEL can
+    acknowledge cancellation after the activity saved its recording but before
+    the activity's best-effort task_complete write lands. The manager is the
+    authoritative observer of cancellation, so its task-scoped event must carry
+    the publisher's task_complete contract rather than only session_paused.
+    """
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
     from tools.base import EventType, MessageStatus
 
@@ -17369,10 +17390,73 @@ async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
     assert pause_event.status == MessageStatus.ERROR
     assert pause_event.metadata == {
         "toolName": "spawn_browser_agent",
-        "action_type": "session_paused",
+        "action_type": "task_complete",
         "task_id": "task-1",
         "browser_url": "https://steel.example/debug",
         "session_id": "session-1",
+    }
+
+
+async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
+    """TRY_CANCEL must not erase the browser task ownership key."""
+    from domains.spawn_browser_agent_v3.handler import (
+        SpawnBrowserAgentManagerV3,
+        _stable_browser_task_id,
+    )
+    from tools.base import MessageStatus
+
+    class _CancellingActivityHandle:
+        cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def __await__(self):
+            async def _cancelled():
+                raise asyncio.CancelledError
+
+            return _cancelled().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="11111111-1111-4111-8111-111111111111",
+        is_paused=True,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    handle = _CancellingActivityHandle()
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return handle
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        events = []
+        manager = SpawnBrowserAgentManagerV3()
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
+            events.append(event)
+
+    expected_task_id = _stable_browser_task_id(workflow_instance.agent_id, "tool-1")
+    assert handle.cancelled is True
+    assert start_calls[0][1]["args"][4] == expected_task_id
+    assert events[-1].status == MessageStatus.ERROR
+    assert events[-1].metadata == {
+        "toolName": "spawn_browser_agent",
+        "action_type": "task_complete",
+        "task_id": expected_task_id,
     }
 
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
@@ -20672,8 +20756,12 @@ async def run_all_tests():
         test_realm_transition_refreshes_active_session_credential_ref,
     )
     await r.record_async(
-        "manager_cancelled_pause_metadata",
-        test_manager_cancelled_browser_pause_event_includes_task_metadata,
+        "manager_cancelled_pause_is_task_complete",
+        test_manager_cancelled_browser_pause_event_is_task_complete,
+    )
+    await r.record_async(
+        "manager_cancelled_pause_preserves_task_id",
+        test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
     )
     await r.record_async(
         "manager_passes_fast_mode_cache",

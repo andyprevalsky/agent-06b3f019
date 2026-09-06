@@ -72,14 +72,14 @@ router.post(
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     try {
-      const { user_id, agent_id, start_url } = initSessionSchema.parse(req.body);
+      const { user_id, agent_id, start_url, task_id } = initSessionSchema.parse(req.body);
       const userId = req.isInternal === true ? user_id : req.userId;
       if (userId === undefined || userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
 
-      const result = await initSession(userId, agent_id, start_url);
+      const result = await initSession(userId, agent_id, start_url, task_id);
 
       res.json({ success: true, ...result });
     } catch (error) {

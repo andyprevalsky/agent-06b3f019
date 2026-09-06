@@ -63,7 +63,6 @@ from .challenge_recovery import (
     live_tab_looks_challenged,
     page_looks_challenged,
     recover_from_challenge,
-    verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
 )
 from .browser_use_patches import apply_browser_use_navigate_timeout_patch
@@ -179,6 +178,18 @@ from .types import ClaudeTokenState
 
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
+
+
+def _stable_browser_task_id(agent_id: str, tool_call_id: str) -> str:
+    """Allocate the browser ownership ID before its cancellable activity starts."""
+    return str(
+        uuid_module.uuid5(
+            uuid_module.NAMESPACE_URL,
+            f"rose-browser-task:{agent_id}:{tool_call_id}",
+        )
+    )
+
+
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
@@ -5912,7 +5923,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             _transient_init_attempts = 0
 
             while True:
-                session_data = await init_browser_session(config, user_id, agent_id, start_url)
+                session_data = await init_browser_session(
+                    config,
+                    user_id,
+                    agent_id,
+                    start_url,
+                    task_id=task_id,
+                )
 
                 # Transient provider infra failure (e.g. Kernel allocated an
                 # unhealthy proxy: "400 Proxy is marked unavailable"). A fresh init
@@ -9983,12 +10000,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             result = None
 
             while True:
+                known_task_id = (
+                    write_lock_resume_state.get("task_id")
+                    if isinstance(write_lock_resume_state, dict)
+                    else None
+                ) or _stable_browser_task_id(agent_id, tool_call_id)
                 activity_args = [
                     user_id,
                     agent_id,
                     goal,
                     tool_call_id,
-                    (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
+                    known_task_id,
                     (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
                     (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
                     write_lock_resume_state is not None,
@@ -10033,14 +10055,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     was_cancelled = False
-                    # Prefer resume-state task_id when ActivityError wipes the
-                    # activity return value on cancel — otherwise session_paused
-                    # is posted without task_id and hub archives keep an open chip.
-                    known_task_id = (
-                        write_lock_resume_state.get("task_id")
-                        if isinstance(write_lock_resume_state, dict)
-                        else None
-                    )
+                    # The workflow allocates task_id before starting the activity,
+                    # so TRY_CANCEL cannot erase the ownership key along with the
+                    # activity return value.
                     await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -10066,7 +10083,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     logger.info("\U0001f534 Browser agent cancelled")
                     pause_metadata = {
                         "toolName": "spawn_browser_agent",
-                        "action_type": "session_paused",
+                        "action_type": "task_complete",
                     }
                     if result:
                         if result.get("task_id"):

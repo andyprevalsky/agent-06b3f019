@@ -67,6 +67,7 @@ export interface BrowserSessionCreationDependencies {
 export interface BrowserSessionCreationOptions {
   keepValidationConnection?: boolean;
   requiredSteelProfileId?: string;
+  taskId?: string;
 }
 
 const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {

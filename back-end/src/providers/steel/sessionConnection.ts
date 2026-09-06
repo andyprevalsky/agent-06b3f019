@@ -69,7 +69,8 @@ export async function validateSessionConnection(wsUrl: string): Promise<boolean>
 export async function createLocalBrowserSession(
   dbContextId: string,
   agentId: string,
-  startUrl?: string
+  startUrl?: string,
+  taskId?: string
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -93,6 +94,7 @@ export async function createLocalBrowserSession(
   const debugUrl = process.env.LOCAL_BROWSER_DEBUG_URL?.trim() ?? wsUrl;
   const dbSession = await prisma.browserSession.create({
     data: {
+      id: taskId,
       contextId: dbContextId,
       agentId,
       sessionId,
