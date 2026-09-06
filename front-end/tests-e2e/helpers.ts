@@ -297,7 +297,7 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
   // Each poll gets its own short timeout so a single stalled socket (the
   // concurrent Playwright browser is streaming a live cloud agent and can
   // saturate the shared origin / event loop) can't consume the whole budget.
-  // A stall or transient 404 is retried — the backend persists
+  // A stall or transient visibility response is retried — the backend persists
   // temporal_workflow_id within a few seconds, so any healthy poll in the
   // window resolves it.
   // Production edge stalls have reached ~2.5s while the persisted workflow was
@@ -342,7 +342,11 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
       status: agent?.status ?? null,
       status_message: agent?.status_message ?? null,
     })}`;
-    if (!res.ok && res.status !== 404) {
+    // A newly-created agent can briefly miss the live row. The archive fallback
+    // reports that race as either 404 (absent) or 503 (its compact index is
+    // warming). Both are retryable reads; other HTTP failures remain fatal.
+    const isRetryableVisibilityResponse = res.status === 404 || res.status === 503;
+    if (!res.ok && !isRetryableVisibilityResponse) {
       throw new Error(`Agent ${agentId} Temporal-start check failed: ${lastState}`);
     }
     if (agent?.status === 'FAILED' || agent?.status === 'CANCELLED') {

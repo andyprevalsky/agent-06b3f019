@@ -87,6 +87,7 @@ require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow
 # that assertion lives on FULL_LIFECYCLE_RATCHET_MS; starving the poll recreates
 # the July 18 false-negative (RCA 2026-07-18, recurred 2026-08-31 after 500ms).
 require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 2_500;" "temporal-workflow poll per-request timeout must stay at 2500ms to cover prod edge stalls"
+require_text "$HELPERS" "res.status === 404 || res.status === 503" "temporal-workflow poll must retry transient live-row misses and archive-index warming responses"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet
