@@ -874,6 +874,94 @@ async def test_handler_timestamp_resume_nonbool_still_errors_in_past():
     assert MessageStatus.FINISHED not in statuses
 
 
+_OAI_DEMO_CHILD_GOAL = (
+    "You are analyzing ONE creator for Andy Prevalsky. "
+    "Research the last 90 days (approximately 2026-04-04 through 2026-07-03)."  # pragma: allowlist secret
+)
+
+
+async def test_handler_timestamp_live_fast_mode_past_still_errors():
+    """Live Fast Mode must still reject past timestamps (demo-only bypass)."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal="call Top Rent A Car and wait for their reply",
+                ),
+                tool_call={"until_timestamp": "2026-07-17T07:03:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.ERROR in statuses
+    assert MessageStatus.FINISHED not in statuses
+    assert "past" in events[0].message.lower()
+
+
+async def test_handler_timestamp_live_fast_mode_far_future_still_errors():
+    """Live Fast Mode must still enforce the 31-day wait cap."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal="call Top Rent A Car and wait for their reply",
+                ),
+                tool_call={"until_timestamp": "2026-10-01T00:00:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.ERROR in statuses
+    assert MessageStatus.FINISHED not in statuses
+    assert "31 days" in events[0].message.lower()
+
+
+async def test_handler_timestamp_live_fast_mode_still_sleeps_until_target():
+    """Live Fast Mode must sleep until a legal future timestamp."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 27, 2, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal="call Top Rent A Car and wait for their reply",
+                ),
+                tool_call={"until_timestamp": "2026-08-27T02:05:00+00:00"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert 300 in fake.sleep_records, (
+        f"live Fast Mode skipped timestamp sleep; sleep_records={fake.sleep_records!r}"
+    )
+
+
 async def test_handler_timestamp_fast_mode_past_completes_not_errors():
     """Fast Mode replay of a July wait_for must FINISH, not ERROR, once the target is past.
 
@@ -888,7 +976,10 @@ async def test_handler_timestamp_fast_mode_past_completes_not_errors():
     try:
         events = await _collect(
             WaitForManager().execute_tool(
-                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=_OAI_DEMO_CHILD_GOAL,
+                ),
                 tool_call={"until_timestamp": "2026-07-17T07:03:00+00:00"},
                 tool_call_id="tc",
             )
@@ -917,7 +1008,10 @@ async def test_handler_timestamp_fast_mode_far_future_completes_not_errors():
     try:
         events = await _collect(
             WaitForManager().execute_tool(
-                workflow_instance=_WFInstance(fast_mode_cache_enabled=True),
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=_OAI_DEMO_CHILD_GOAL,
+                ),
                 tool_call={"until_timestamp": "2026-10-01T00:00:00+00:00"},
                 tool_call_id="tc",
             )
@@ -930,6 +1024,154 @@ async def test_handler_timestamp_fast_mode_far_future_completes_not_errors():
     assert MessageStatus.ERROR not in statuses
     assert fake.sleep_records == []
     assert "31 days" not in events[0].message.lower()
+
+
+async def test_handler_condition_live_fast_mode_honors_check_interval_sleep():
+    """Live Fast Mode must sleep between wait_for condition checks.
+
+    Agent 515c4894 (Top Rent email wait, interval=600s, max_checks=18) had
+    fast_mode_cache_enabled=True. The handler skipped every inter-check sleep,
+    so 15+ explores fired ~every 6s instead of every 10 minutes — burning the
+    poll budget before any inbound reply could arrive. OAi-demo replay may skip
+    wall-clock waits; live FM must not.
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    evals = {"n": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        if capture_tool_results is not None:
+            capture_tool_results.append("[grep] outbound only; no inbound reply yet")
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="no inbound reply",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    def _eval(*_a, **_k):
+        evals["n"] += 1
+        # Fail check 1, pass check 2 — forces one inter-check sleep.
+        if evals["n"] == 1:
+            return {"satisfied": False, "reasoning": "no inbound reply"}
+        return {"satisfied": True, "reasoning": "inbound reply arrived"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=(
+                        "call and do the following\n\nCALL BRIEF — Top Rent A Car "
+                        "(Bulgaria)\n\nWHO TO CALL\n  Top Rent A Car"
+                    ),
+                ),
+                tool_call={
+                    "description": "Top Rent written booking confirmation",
+                    "condition": (
+                        "Check the connected mailbox for a new inbound email "
+                        "from office@toprentacar.bg referencing reservation 060926801"
+                    ),
+                    "check_interval_seconds": 600,
+                    "max_checks": 3,
+                },
+                tool_call_id="tc-live-fm-wait",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert evals["n"] == 2
+    assert 600 in fake.sleep_records, (
+        f"live Fast Mode skipped inter-check sleep; sleep_records={fake.sleep_records!r}"
+    )
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert (finished[-1].data or {}).get("condition_met") is True
+
+
+async def test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep():
+    """OAi-demo Fast Mode replay may skip wait_for inter-check wall-clock sleeps."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    evals = {"n": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        if capture_tool_results is not None:
+            capture_tool_results.append("[web_search] partial then enough")
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="evidence",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    def _eval(*_a, **_k):
+        evals["n"] += 1
+        if evals["n"] == 1:
+            return {"satisfied": False, "reasoning": "not yet"}
+        return {"satisfied": True, "reasoning": "enough"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=_OAI_DEMO_CHILD_GOAL,
+                ),
+                tool_call={
+                    "description": "the research to finish",
+                    "condition": "enough evidence gathered",
+                    "check_interval_seconds": 600,
+                    "max_checks": 3,
+                },
+                tool_call_id="tc-oai-skip-sleep",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert evals["n"] == 2
+    assert fake.sleep_records == []
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert (finished[-1].data or {}).get("condition_met") is True
 
 
 async def test_handler_condition_oai_demo_fast_mode_awaits_explore():
@@ -975,10 +1217,7 @@ async def test_handler_condition_oai_demo_fast_mode_awaits_explore():
             WaitForManager().execute_tool(
                 workflow_instance=_WFInstance(
                     fast_mode_cache_enabled=True,
-                    goal=(
-                        "You are analyzing ONE creator for Andy Prevalsky. "
-                        "Research the last 90 days (approximately 2026-04-04 through 2026-07-03)."  # pragma: allowlist secret
-                    ),
+                    goal=_OAI_DEMO_CHILD_GOAL,
                 ),
                 tool_call={
                     "description": "the research to finish",
@@ -1059,6 +1298,18 @@ async def run_all_tests():
     await r.record_async("handler_ts_resume_past", test_handler_timestamp_resume_past_completes_not_errors)
     await r.record_async("handler_ts_resume_nonbool", test_handler_timestamp_resume_nonbool_still_errors_in_past)
     await r.record_async(
+        "handler_ts_live_fm_past_errors",
+        test_handler_timestamp_live_fast_mode_past_still_errors,
+    )
+    await r.record_async(
+        "handler_ts_live_fm_far_future_errors",
+        test_handler_timestamp_live_fast_mode_far_future_still_errors,
+    )
+    await r.record_async(
+        "handler_ts_live_fm_sleeps_until_target",
+        test_handler_timestamp_live_fast_mode_still_sleeps_until_target,
+    )
+    await r.record_async(
         "handler_ts_fast_mode_past",
         test_handler_timestamp_fast_mode_past_completes_not_errors,
     )
@@ -1069,6 +1320,14 @@ async def run_all_tests():
     await r.record_async(
         "handler_cond_oai_demo_fast_mode_awaits",
         test_handler_condition_oai_demo_fast_mode_awaits_explore,
+    )
+    await r.record_async(
+        "handler_cond_live_fm_honors_interval",
+        test_handler_condition_live_fast_mode_honors_check_interval_sleep,
+    )
+    await r.record_async(
+        "handler_cond_oai_demo_fm_skips_interval",
+        test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep,
     )
     teardown_mock()
     return r.all_passed
