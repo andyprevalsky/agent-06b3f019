@@ -138,6 +138,19 @@
         ]
       },
       {
+        "id": "t3-max-three-explore-spawns-per-gp",
+        "method": "static_check",
+        "criteria": [
+          "T3: Every general-purpose agent spawns at most three explore children"
+        ],
+        "checks": [
+          {
+            "type": "general_purpose_explore_spawn_limit",
+            "max": 3
+          }
+        ]
+      },
+      {
         "id": "t4-full-july-gp-trajectories",
         "method": "static_check",
         "criteria": [

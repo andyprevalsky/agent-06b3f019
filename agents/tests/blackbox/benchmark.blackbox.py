@@ -3572,6 +3572,68 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_general_purpose_explore_spawn_limit_is_per_agent():
+    """T3 permits three explore children per GP and fails on a fourth."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    root = "root-mass"
+    gp = "gp-huberman"
+    evaluator = {
+        "checks": [
+            {
+                "type": "general_purpose_explore_spawn_limit",
+                "max": 3,
+            }
+        ]
+    }
+    spawn_messages = [
+        {
+            "role": "TOOL",
+            "message": f"explore {index} complete",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+                "subAgentId": f"explore-{index}",
+            },
+        }
+        for index in range(4)
+    ]
+    data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [],
+                },
+                gp: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": spawn_messages[:3],
+                },
+            }
+        },
+    }
+
+    assert _run_declared_static_check(evaluator, data) == (
+        True,
+        "All declared static checks passed",
+    )
+
+    over_limit = deepcopy(data)
+    over_limit["_benchmark"]["tree"][gp]["messages"] = spawn_messages
+    passed, reason = _run_declared_static_check(evaluator, over_limit)
+    assert passed is False
+    assert "spawned 4 explore agents" in reason
+    assert "maximum is 3 per general-purpose agent" in reason
+
+
 def test_no_nested_general_purpose_static_uses_typed_parentage():
     """T6 is a named static row: nested GP under GP/explore fails; first-level GPs pass."""
     from benchmarks.run_benchmark import (
@@ -15388,6 +15450,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t1-andy-only",
         "t2-fifty-first-level-gps",
         "t3-full-explore-trajectories",
+        "t3-max-three-explore-spawns-per-gp",
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
         "t6-no-nested-gps",
@@ -15415,6 +15478,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t3-full-explore-trajectories": ["first_level_gp_explore_research"],
+        "t3-max-three-explore-spawns-per-gp": ["general_purpose_explore_spawn_limit"],
         "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
         "t5-zero-live-spend": ["zero_live_spend"],
         "t6-no-nested-gps": ["no_nested_general_purpose"],
@@ -15447,6 +15511,11 @@ def test_unified_catalog_delineates_bench_axes():
         if check.get("type") == "explore_completion_summary"
     )
     assert summary_check.get("min_chars") == 200
+    gp_explore_limit = evaluators["t3-max-three-explore-spawns-per-gp"]["checks"][0]
+    assert gp_explore_limit == {
+        "type": "general_purpose_explore_spawn_limit",
+        "max": 3,
+    }
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
         for types in static_by_id.values()
@@ -18424,6 +18493,10 @@ async def run_all_tests():
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
         test_first_level_gp_count_static_uses_collected_transcripts,
+    )
+    r.record(
+        "general_purpose_explore_spawn_limit_is_per_agent",
+        test_general_purpose_explore_spawn_limit_is_per_agent,
     )
     r.record(
         "no_nested_general_purpose_static_uses_typed_parentage",

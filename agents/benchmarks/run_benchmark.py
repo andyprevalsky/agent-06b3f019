@@ -11477,6 +11477,36 @@ def _run_declared_static_check(
                     f"{len(failures)}/{len(gps)} failing)",
                 )
             continue
+        if check_type == "general_purpose_explore_spawn_limit":
+            compact_tree = _compact_benchmark_state_for_judge(data).get("tree") or {}
+            maximum = int(check.get("max", 3))
+            gps = [
+                node
+                for node in compact_tree.values()
+                if isinstance(node, dict)
+                and (
+                    node.get("agent_type") == "general_purpose"
+                    or str(node.get("goal") or "").startswith("You are analyzing ONE creator")
+                )
+            ]
+            if not gps:
+                return False, "T3: general-purpose agent tree was empty"
+            over_limit = [
+                gp
+                for gp in gps
+                if int(gp.get("explore_spawn_count") or 0) > maximum
+            ]
+            if over_limit:
+                sample = over_limit[0]
+                return (
+                    False,
+                    "T3: general-purpose agent "
+                    f"{str(sample.get('agent_id') or '')[:8]} spawned "
+                    f"{int(sample.get('explore_spawn_count') or 0)} explore agents; "
+                    f"maximum is {maximum} per general-purpose agent "
+                    f"({len(over_limit)}/{len(gps)} over limit)",
+                )
+            continue
         if check_type == "first_level_gp_july_trajectories":
             gps = _first_level_gps_from_data(data)
             if not gps:
