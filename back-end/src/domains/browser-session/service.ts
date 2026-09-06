@@ -165,13 +165,11 @@ export async function prepareSessionCredentials(
 }
 
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
-export async function initSession(userId: string, agentId: string, startUrl: string) {
+export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
   log.info('Initializing browser session', {
-    userId,
     agentId,
     startUrl: startUrl !== '' ? startUrl : 'none',
   });
-
   // Phase 1: Fetch session-independent data in parallel. Realm-scoped
   // credentials are collected by the same preparation boundary used for JIT
   // navigation after the provider session exists.
@@ -203,14 +201,13 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     country: proxyGeo.country,
   });
 
-  // Phase 2: Create session (needs agent proxy + context). Keep the validation
-  // CDP connection open so injection can reuse it (a fresh handshake is 3-5s).
+  // Phase 2: Create the session while retaining its validation CDP connection.
   const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {
     keepValidationConnection: true,
+    taskId: id,
     ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
-  // Phase 3: Resolve and inject every credential/state type for the start realm.
   let credentials: Awaited<ReturnType<typeof prepareSessionCredentials>>;
   try {
     credentials = await prepareSessionCredentials(session.sessionId, userId, startUrl, {

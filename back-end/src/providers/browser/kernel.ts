@@ -404,6 +404,7 @@ export async function createKernelSessionWithContext(
   _startUrl?: string,
   options?: {
     keepValidationConnection?: boolean;
+    taskId?: string;
     forceManagedProxyType?: KernelProxyType;
     exactManagedProxy?: {
       type: KernelProxyType;
@@ -419,6 +420,7 @@ export async function createKernelSessionWithContext(
   try {
     dbSession = await prisma.browserSession.create({
       data: {
+        id: options?.taskId,
         contextId,
         agentId,
         sessionId: remote.sessionId,

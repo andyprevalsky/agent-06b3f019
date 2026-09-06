@@ -130,6 +130,7 @@ export async function createSessionWithContext(
     keepValidationConnection?: boolean;
     proxyMode?: 'managed' | 'fixed';
     requiredSteelProfileId?: string;
+    taskId?: string;
   }
 ): Promise<{
   sessionId: string;
@@ -174,7 +175,7 @@ export async function createSessionWithContext(
 
   const localSession =
     options?.requiredSteelProfileId === undefined
-      ? await createLocalBrowserSession(dbContextId, agentId, startUrl)
+      ? await createLocalBrowserSession(dbContextId, agentId, startUrl, options?.taskId)
       : null;
   if (localSession) return { ...localSession, validationBrowser: null };
 
@@ -332,6 +333,7 @@ export async function createSessionWithContext(
       // Save to DB
       const dbSession = await prisma.browserSession.create({
         data: {
+          id: options?.taskId,
           contextId: dbContextId,
           agentId,
           sessionId: session.id,

@@ -5965,8 +5965,21 @@ async def test_init_browser_session_success():
         }
     )
     cfg = _fake_config()
-    out = await init_browser_session(cfg, "u", "a", "https://x.com")
+    requested_task_id = "00000000-0000-4000-8000-000000000123"
+    out = await init_browser_session(
+        cfg,
+        "u",
+        "a",
+        "https://x.com",
+        task_id=requested_task_id,
+    )
     assert out["session_id"] == "s"
+    assert_captured_call(
+        0,
+        url_contains="/api/browser-session/init",
+        method="POST",
+        body_contains={"task_id": requested_task_id},
+    )
 
 async def test_init_browser_session_rate_limited():
     from domains.spawn_browser_agent_v3.repo import init_browser_session
@@ -17383,6 +17396,69 @@ async def test_manager_cancelled_browser_pause_event_is_task_complete():
         "session_id": "session-1",
     }
 
+
+async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
+    """TRY_CANCEL must not erase the browser task ownership key."""
+    from domains.spawn_browser_agent_v3.handler import (
+        SpawnBrowserAgentManagerV3,
+        _stable_browser_task_id,
+    )
+    from tools.base import MessageStatus
+
+    class _CancellingActivityHandle:
+        cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def __await__(self):
+            async def _cancelled():
+                raise asyncio.CancelledError
+
+            return _cancelled().__await__()
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="11111111-1111-4111-8111-111111111111",
+        is_paused=True,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+    handle = _CancellingActivityHandle()
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return handle
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
+            side_effect=fake_start_activity,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        events = []
+        manager = SpawnBrowserAgentManagerV3()
+        async for event in manager.execute_tool(workflow_instance, {"goal": "Buy socks"}, "tool-1"):
+            events.append(event)
+
+    expected_task_id = _stable_browser_task_id(workflow_instance.agent_id, "tool-1")
+    assert handle.cancelled is True
+    assert start_calls[0][1]["args"][4] == expected_task_id
+    assert events[-1].status == MessageStatus.ERROR
+    assert events[-1].metadata == {
+        "toolName": "spawn_browser_agent",
+        "action_type": "task_complete",
+        "task_id": expected_task_id,
+    }
+
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
     """Browser activities must receive the workflow Fast Mode flag (re-enabled).
 
@@ -20682,6 +20758,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_cancelled_pause_is_task_complete",
         test_manager_cancelled_browser_pause_event_is_task_complete,
+    )
+    await r.record_async(
+        "manager_cancelled_pause_preserves_task_id",
+        test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
     )
     await r.record_async(
         "manager_passes_fast_mode_cache",

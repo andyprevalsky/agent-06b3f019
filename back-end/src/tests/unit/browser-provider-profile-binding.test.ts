@@ -12,6 +12,7 @@ import {
   recordedProviderProfileBinding,
 } from '../../providers/browser/profileBinding';
 import { reusableSteelRecordedProfileId } from '../../providers/steel/sessionResume';
+import { initSessionSchema } from '../../domains/browser-session/types';
 
 const location = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
 
@@ -129,6 +130,49 @@ async function concurrentSavedSteelSessionsRemainDistinct(): Promise<void> {
     { agentId: 'agent-1', requiredProfileId: 'steel-auth-profile' },
     { agentId: 'agent-2', requiredProfileId: 'steel-auth-profile' },
   ]);
+}
+
+async function preallocatedTaskIdReachesSelectedProvider(): Promise<void> {
+  const taskId = '00000000-0000-4000-8000-000000000123';
+  const receivedTaskIds: Array<string | undefined> = [];
+  const dependencies: BrowserSessionCreationDependencies = {
+    readPreferredConfig: async () => null,
+    defaultProvider: () => 'kernel',
+    createKernel: async (_contextId, _agentId, _location, _url, options) => {
+      receivedTaskIds.push(options?.taskId);
+      return providerSession('kernel');
+    },
+    createSteel: async () => steelSession(),
+  };
+
+  await createSessionWithContextUsingDependencies(
+    'context-1',
+    'agent-1',
+    location,
+    'https://example.com/',
+    { taskId },
+    dependencies
+  );
+
+  assert.deepStrictEqual(receivedTaskIds, [taskId]);
+  assert.strictEqual(
+    initSessionSchema.parse({
+      user_id: 'user-1',
+      agent_id: '11111111-1111-4111-8111-111111111111',
+      start_url: 'https://example.com/',
+      task_id: taskId,
+    }).task_id,
+    taskId
+  );
+  assert.strictEqual(
+    initSessionSchema.safeParse({
+      user_id: 'user-1',
+      agent_id: '11111111-1111-4111-8111-111111111111',
+      start_url: 'https://example.com/',
+      task_id: 'not-a-uuid',
+    }).success,
+    false
+  );
 }
 
 function requiredSteelAuthProfileFailsClosedOnMismatch(): void {
@@ -260,6 +304,7 @@ function invalidatedSteelProfileIsCompletionOnly(): void {
 async function main(): Promise<void> {
   await requiredProfileOverridesProviderPreference();
   await concurrentSavedSteelSessionsRemainDistinct();
+  await preallocatedTaskIdReachesSelectedProvider();
   requiredSteelAuthProfileFailsClosedOnMismatch();
   kernelManagedProfileDoesNotFailClosed();
   steelReplacementNeverReusesForeignProviderProfile();
