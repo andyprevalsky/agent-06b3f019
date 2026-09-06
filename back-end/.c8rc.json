@@ -4,6 +4,7 @@
   "exclude": [
     "src/tests/**",
     "src/scripts/**",
+    "scripts/**",
     "src/benchmarks/**",
     "src/providers/steel/**",
     "src/providers/browserbase.ts",
