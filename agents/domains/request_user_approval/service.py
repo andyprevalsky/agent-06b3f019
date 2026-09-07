@@ -221,38 +221,38 @@ async def request_user_approval_direct(
             "requestUserApproval": metadata_payload,
         }
 
-        # Send SMS write_lock notification to every ROOT agent regardless of
-        # source so payment approvals reach the user (with the enriched
-        # merchant/reviews/cost breakdown + agent link) whether the run started
-        # from SMS, web, or mac-app. Sub-agents are excluded (scale); benchmark
-        # runs are suppressed centrally on the backend (Agent.isBenchmark).
-        if getattr(workflow_instance, "parent_workflow_id", None) is None:
-            try:
-                from helpers.sms_activities import notify_sms_event_activity
+        # Send SMS write_lock notification for EVERY agent that blocks on
+        # approval — root or sub-agent, any source. agent_started stays
+        # root-only (per-spawn firehose at 10k agents); a write_lock/payment
+        # approval is O(approvals) and must reach the user or the child hangs
+        # silently. Benchmarks are suppressed centrally on the backend
+        # (Agent.isBenchmark).
+        try:
+            from helpers.sms_activities import notify_sms_event_activity
 
-                notification_args = [
-                    user_id,
-                    "write_lock",
-                    agent_id,
-                    {
-                        "question": question,
-                        "attention_request_id": request_id,
-                        "workflow_id": workflow_id,
-                        "metadata": metadata or None,
-                    },
-                ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    notification_args.append(world_model_mode)
-                await workflow.execute_activity(
-                    notify_sms_event_activity,
-                    args=notification_args,
-                    start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
-                    retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
-                )
-                logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
-            except Exception as sms_err:
-                logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
+            notification_args = [
+                user_id,
+                "write_lock",
+                agent_id,
+                {
+                    "question": question,
+                    "attention_request_id": request_id,
+                    "workflow_id": workflow_id,
+                    "metadata": metadata or None,
+                },
+            ]
+            world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+            if world_model_mode != "real":
+                notification_args.append(world_model_mode)
+            await workflow.execute_activity(
+                notify_sms_event_activity,
+                args=notification_args,
+                start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+                retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
+            )
+            logger.info("Sent write_lock SMS notification", request_id=request_id, agent_id=agent_id)
+        except Exception as sms_err:
+            logger.warning(f"Failed to send write_lock SMS notification: {sms_err}")
 
     except Exception as e:
         error_event = ToolEvent(
@@ -380,9 +380,10 @@ async def request_user_attention_direct(
         "attentionMessage": question,
     }
 
-    # Root agents of any source get the handoff SMS (login/card-setup). Benchmark
-    # runs are suppressed centrally on the backend (Agent.isBenchmark).
-    if sms_event_type and getattr(workflow_instance, "parent_workflow_id", None) is None:
+    # Setup handoffs (login/card) SMS for every agent that requests them —
+    # root or sub-agent. Same rationale as write_lock: the user must learn a
+    # child is waiting. Benchmarks suppressed centrally (Agent.isBenchmark).
+    if sms_event_type:
         try:
             from helpers.sms_activities import notify_sms_event_activity
 

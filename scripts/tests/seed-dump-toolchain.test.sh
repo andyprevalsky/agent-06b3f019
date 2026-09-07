@@ -32,9 +32,11 @@ echo "PASS: Docker databases are dumped with their matching container pg_dump"
 
 : > "$SEED_DUMP_TEST_LOG"
 bash "$SAVE" "$TMP/out/system.dump" localhost 55432 postgres victoria
-grep -qx -- '-h localhost -p 55432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"
+# localhost is remapped to 127.0.0.1 so Cloud VMs with scram-on-::1 still
+# authenticate with the md5 postgres/postgres password on IPv4.
+grep -qx -- '-h 127.0.0.1 -p 55432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"
 grep -qx 'system-compatible-archive' "$TMP/out/system.dump"
-echo "PASS: system databases are dumped with the colocated host pg_dump"
+echo "PASS: system databases are dumped with the colocated host pg_dump (localhost→127.0.0.1)"
 
 cat > "$TMP/bin/docker" <<'EOF'
 #!/usr/bin/env bash

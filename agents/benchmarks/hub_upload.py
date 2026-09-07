@@ -42,6 +42,18 @@ class HubVisibilityError(RuntimeError):
     """A benchmark could not prove its run is visible in the in-app Hub."""
 
 
+def upload_timeout_for_payload(payload_bytes: int, *, base_timeout: float = 30.0) -> float:
+    """Derive a Hub POST timeout that scales with payload size.
+
+    Mass-agent smoke bundles can exceed 40MB; a flat 30s deadline times out on
+    upload after the task already passed (seen on test-mass-agent-run-0). Floor
+    at ``base_timeout``, grow ~2s per MB, and cap at 300s.
+    """
+    size = max(0, int(payload_bytes))
+    derived = float(base_timeout) + (size / (512 * 1024))
+    return min(300.0, max(float(base_timeout), derived))
+
+
 def hub_upload_enabled() -> bool:
     return bool(os.getenv("BENCHMARK_HUB_UPLOAD_URL"))
 
@@ -225,10 +237,12 @@ def _post_run_bundle(
         return False
     body = prepare_run_bundle_for_upload(bundle, live=live, required=required)
     body.setdefault("source", "manual-run")
+    payload = json.dumps(body, default=str).encode("utf-8")
+    effective_timeout = upload_timeout_for_payload(len(payload), base_timeout=timeout)
     suffix = "?live=1" if live else ""
     request = urllib.request.Request(
         f"{base.rstrip('/')}/api/benchmarks/runs{suffix}",
-        data=json.dumps(body, default=str).encode("utf-8"),
+        data=payload,
         headers=headers,
         method="POST",
     )
@@ -238,7 +252,7 @@ def _post_run_bundle(
     max_attempts = 4 if required else 1
     for attempt in range(1, max_attempts + 1):
         try:
-            with opener.open(request, timeout=timeout) as response:
+            with opener.open(request, timeout=effective_timeout) as response:
                 ok = 200 <= response.status < 300
                 if ok:
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")

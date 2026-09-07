@@ -515,13 +515,18 @@ async def test_direct_web_source_also_fires_sms_notify():
     assert notify_call["args"][1] == "write_lock"
 
 
-async def test_direct_subagent_does_not_fire_sms_notify():
-    """Sub-agents (parent_workflow_id set) never fire the write_lock SMS — at 10k
-    agents a per-spawn SMS would firehose the user's phone."""
+async def test_direct_subagent_fires_sms_notify():
+    """Sub-agents that block on approval must fire write_lock SMS.
+
+    agent_started stays root-only (per-spawn firehose at 10k agents), but a
+    payment/write-lock approval is O(approvals) and the user otherwise never
+    learns a child agent is waiting. Regression: Nopa Fish sub-agent
+    cd03d03a… requested $28.51 approval with no SMS (root ef7e8089…).
+    """
     from domains.request_user_approval.service import request_user_approval_direct
 
     wf = _WFInstance()
-    wf.agent_source = "WEB"
+    wf.agent_source = "SMS"
     wf.parent_workflow_id = "parent-wf-1"
     wf._signal_responses["req-sub"] = "ok"
     wf.context.append({"role": "USER", "text": "Yes"})
@@ -538,14 +543,16 @@ async def test_direct_subagent_does_not_fire_sms_notify():
     try:
         await request_user_approval_direct(
             workflow_instance=wf,
-            question="Approve?",
+            question="Approve a $28.51 purchase from Nopa Fish?",
             metadata={"requestPaymentCard": {"merchant": "Nopa Fish"}},
         )
     finally:
         restore()
 
-    assert "notify" not in activity_calls
-    assert not any(c["name"] == "notify_sms_event_activity" for c in fake.activity_calls)
+    assert "notify" in activity_calls
+    notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
+    assert notify_call["args"][1] == "write_lock"
+    assert notify_call["args"][2] == wf.agent_id
 
 
 async def test_direct_attention_returns_without_waiting_and_emits_attention_metadata():
@@ -618,6 +625,39 @@ async def test_direct_attention_sms_source_sends_agentcard_setup_notify():
     assert payload["setup_url"] == "https://rose.test/setup"
 
 
+async def test_direct_subagent_attention_sms_sends_notify():
+    """Sub-agent setup handoffs (login/card) must also SMS — same class as approval."""
+    from domains.request_user_approval.service import request_user_attention_direct
+
+    wf = _WFInstance()
+    wf.agent_source = "SMS"
+    wf.parent_workflow_id = "parent-wf-1"
+    activity_calls = []
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-setup-sub",
+            "notify_sms_event_activity": lambda: activity_calls.append("notify") or None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        await request_user_attention_direct(
+            workflow_instance=wf,
+            question="One Time Agent Payment Setup is required.",
+            title="One Time Agent Payment Setup",
+            metadata={"attentionKind": "agentcard_user_connect_required"},
+            sms_event_type="agentcard_setup",
+            sms_payload={"setup_url": "https://rose.test/setup"},
+        )
+    finally:
+        restore()
+
+    assert "notify" in activity_calls
+    notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
+    assert notify_call["args"][1] == "agentcard_setup"
+
+
 async def run_all_tests():
     print("request-user-approval blackbox tests:")
     r = BlackboxResult()
@@ -641,9 +681,13 @@ async def run_all_tests():
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
     await r.record_async("direct_web_notify", test_direct_web_source_also_fires_sms_notify)
-    await r.record_async("direct_subagent_no_notify", test_direct_subagent_does_not_fire_sms_notify)
+    await r.record_async("direct_subagent_notify", test_direct_subagent_fires_sms_notify)
     await r.record_async("direct_attention", test_direct_attention_returns_without_waiting_and_emits_attention_metadata)
     await r.record_async("direct_attention_sms", test_direct_attention_sms_source_sends_agentcard_setup_notify)
+    await r.record_async(
+        "direct_subagent_attention_sms",
+        test_direct_subagent_attention_sms_sends_notify,
+    )
     teardown_mock()
     return r.all_passed
 
