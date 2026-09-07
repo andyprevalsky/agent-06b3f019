@@ -18,6 +18,14 @@ DB_NAME="$5"
 DB_CONTAINER="${6:-}"
 DUMP_TMP="${DUMP_PATH}.tmp.$$"
 
+# Prefer IPv4 for "localhost": many Cloud VMs auth ::1 with scram-sha-256
+# while 127.0.0.1 stays md5 with the postgres/postgres password that
+# scripts/cloud-init.sh configures. Resolving localhost to ::1 then fails
+# materialize with password authentication failed for user postgres.
+if [ "$DB_HOST" = "localhost" ]; then
+    DB_HOST="127.0.0.1"
+fi
+
 cleanup() {
     rm -f "$DUMP_TMP"
 }
