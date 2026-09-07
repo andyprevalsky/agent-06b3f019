@@ -6350,7 +6350,7 @@ async def set_response_schema_activity(
     if not write_through_enabled and agent_id:
         from providers.fast_cache import client as _fc_client
 
-        _, _, write_through_enabled, _, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
+        _, _, write_through_enabled, _, _, _ = await _fc_client.resolve_agent_fast_mode(agent_id)
     if goal and (fast_mode_cache_enabled or write_through_enabled):
         from providers.fast_cache import client as _fc_client
         from providers.fast_cache import normalize as _fc_norm

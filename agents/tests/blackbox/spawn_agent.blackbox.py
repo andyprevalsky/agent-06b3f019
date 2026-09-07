@@ -759,7 +759,7 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
     assert params[-1] == "oai_demo"
     assert inspect.signature(fn).parameters["oai_demo"].default is None
 
-    demo_wf = _FakeWFInstance(goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman")
+    demo_wf = _FakeWFInstance(goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman")
     demo_wf.fast_mode_cache_enabled = True
     live_wf = _FakeWFInstance(goal="Order a Vanilla Bean Shakerato from Blue Bottle")
     live_wf.fast_mode_cache_enabled = True
@@ -2872,7 +2872,7 @@ async def test_spawn_explore_agent_activity_reraises_cancel_on_demo():
         await spawn_explore_agent_activity(
             agent_id="a-attia",
             user_id="u-7",
-            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX}: Peter Attia. Do 3 quick web searches.",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky: Peter Attia. Do 3 quick web searches.",
             model="rose-1-lite",
             task_id="44c81111-1238-43f0-8b06-a1a20cc902b7",
             init_tool_call_id="tc-oai-timeout-44c81111",
@@ -2975,7 +2975,7 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
         await spawn_explore_agent_activity(
             agent_id="a",
             user_id="u",
-            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman",
             model="m",
         )
 
@@ -3037,7 +3037,7 @@ async def test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_dem
         await spawn_explore_agent_activity(
             agent_id="a-demo-flag",
             user_id="u-7",
-            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman",
+            goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman",
             model="rose-1-lite",
             task_id="explicit-live-cancel",
             init_tool_call_id="tc-explicit-live",
@@ -3064,7 +3064,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX)),
+            new=AsyncMock(return_value=(True, "Order socks", True, None, OAI_DEMO_ROOT_GOAL_PREFIX, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         pytest.raises(asyncio.CancelledError),
@@ -3187,7 +3187,7 @@ async def test_spawn_explore_agent_activity_unavailable_sources_still_completed(
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -3230,7 +3230,7 @@ async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_source
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "g", True, None, None)),
+            new=AsyncMock(return_value=(False, "g", True, None, None, True)),
         ),
         patch("tools.grep.GrepManager", return_value=fake_grep),
     ):
@@ -3712,7 +3712,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
         patch("loop.run_agent.run_agent", new=fake_run_agent),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            new=AsyncMock(return_value=(False, "parent g", True, None, None)),
+            new=AsyncMock(return_value=(False, "parent g", True, None, None, True)),
         ),
         patch("tools.web_search.WebSearchManager", return_value=fake_ws),
         patch("tools.web_fetch.WebFetchManager", return_value=fake_wf),

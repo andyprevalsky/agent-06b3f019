@@ -1209,21 +1209,28 @@ async def run_agent(
                 from providers.fast_cache.context import (
                     FastCacheContext,
                     set_context,
-                    write_through_enabled_for_user,
                 )
 
-                write_through_enabled = write_through_enabled_for_user(user_id)
-                if goal_text and (fast_mode_cache_enabled or write_through_enabled):
-                    from providers.fast_cache.client import resolve_soft_complete_root_goal
+                if goal_text and fast_mode_cache_enabled:
+                    from providers.fast_cache.client import (
+                        resolve_agent_fast_mode,
+                        resolve_soft_complete_root_goal,
+                    )
 
                     root_goal = await resolve_soft_complete_root_goal(agent_id, goal_text)
+                    _e, _g, _w, _r, _rg, provider_fast_mode = (
+                        await resolve_agent_fast_mode(agent_id)
+                        if agent_id
+                        else (False, None, False, None, None, True)
+                    )
                     set_context(
                         FastCacheContext(
-                            enabled=fast_mode_cache_enabled,
+                            enabled=True,
                             goal=goal_text,
                             base_step=fast_cache_step,
-                            write_enabled=fast_mode_cache_enabled or write_through_enabled,
+                            write_enabled=True,
                             root_goal=root_goal,
+                            provider_fast_mode=provider_fast_mode,
                         )
                     )
                 else:

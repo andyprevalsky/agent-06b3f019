@@ -18,9 +18,10 @@ export function assertWorldModelModeAccess(body: CreateAgentBody, userId: string
 }
 
 /**
- * Apply Fast Mode defaults for root agents only.
- * Every root agent defaults Fast Mode on unless the caller opts out or Simulator
- * mode forces provider-cache reads off.
+ * Apply Fast Mode button defaults for root agents only.
+ * Every root agent defaults the Fast Mode *button* on (LLM provider speed)
+ * unless the caller opts out or Simulator mode forces it off. DEMO-prompt
+ * cache replay is independent of this flag.
  */
 export function applyFastModeDefault(body: CreateAgentBody, _userId: string): void {
   if (isNonRealWorldModelMode(body.world_model_mode)) {
@@ -32,7 +33,7 @@ export function applyFastModeDefault(body: CreateAgentBody, _userId: string): vo
   }
 }
 
-/** A sub-agent inherits Fast Mode from its parent unless explicitly set. */
+/** A sub-agent inherits the Fast Mode button from its parent unless explicitly set. */
 export function applyFastModeInheritance(
   body: CreateAgentBody,
   parentFastModeCacheEnabled: boolean | null | undefined

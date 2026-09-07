@@ -353,7 +353,7 @@ export async function callRouterLlm(params: {
   const fastMode = await agentFastMode(params.agentId);
   const fastModeRead = fastMode.enabled === true && fastMode.goal !== null;
   const fastModeWrite = fastMode.writeEnabled === true && fastMode.goal !== null;
-  const providerFastMode = fastModeRead || fastModeWrite;
+  const providerFastMode = fastMode.providerFastMode !== false;
   let fcKey: string | null = null;
   let fcCacheWon = false;
   if ((fastModeRead || fastModeWrite) && fastMode.goal) {

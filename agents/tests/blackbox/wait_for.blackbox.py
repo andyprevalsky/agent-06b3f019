@@ -1109,7 +1109,10 @@ async def test_handler_condition_live_fast_mode_honors_check_interval_sleep():
 
 
 async def test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep():
-    """OAi-demo Fast Mode replay may skip wait_for inter-check wall-clock sleeps."""
+    """DEMO prompt cache replay may skip wait_for inter-check wall-clock sleeps.
+
+    The Fast Mode *button* is irrelevant — only the DEMO prompt match gates this.
+    """
     from domains.wait_for.handler import WaitForManager
     from tools.base import EventType, MessageStatus, ToolEvent
     from tools.spawn_agent import SpawnAgentManager
@@ -1151,7 +1154,8 @@ async def test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep():
         events = await _collect(
             WaitForManager().execute_tool(
                 workflow_instance=_WFInstance(
-                    fast_mode_cache_enabled=True,
+                    # Button OFF — DEMO prompt alone must still skip sleeps.
+                    fast_mode_cache_enabled=False,
                     goal=_OAI_DEMO_CHILD_GOAL,
                 ),
                 tool_call={

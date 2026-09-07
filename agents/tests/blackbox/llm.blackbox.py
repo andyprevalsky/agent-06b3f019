@@ -1977,7 +1977,7 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
         patch("temporalio.activity.info", return_value=activity_info),
         patch(
             "providers.fast_cache.client.resolve_agent_fast_mode",
-            AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal")),
+            AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal", True)),
         ),
         patch(
             "providers.fast_cache.client.cache_get",

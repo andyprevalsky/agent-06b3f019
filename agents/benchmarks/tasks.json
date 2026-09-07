@@ -6,7 +6,7 @@
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["mass-agent", "load-test", "research", "smoke"],
+    "tags": ["DEMO", "mass-agent", "load-test", "research", "smoke"],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,

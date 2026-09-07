@@ -533,7 +533,11 @@ FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
 async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
-    return "Persisted DB goal"
+    # DEMO-tagged mass-agent root prompt (stable cache namespace).
+    return (
+        "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+        " — persisted DB goal"
+    )
 
 
 @activity.defn(name="call_llm_activity")
@@ -1114,12 +1118,16 @@ async def _run_all_workflow_tests() -> List[tuple]:
             try:
                 fc_agent_id = "agent-test-fastcache"
                 FAST_MODE_GOAL_CAPTURE.pop(fc_agent_id, None)
+                demo_prefix = (
+                    "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
+                )
+                persisted_goal = f"{demo_prefix} — persisted DB goal"
                 handle = await env.client.start_workflow(
                     AgentWorkflow.run,
                     args=[
                         fc_agent_id,
                         "user-test-1",
-                        "Refined chat goal (volatile, differs per run)",
+                        f"{demo_prefix} — refined chat goal (volatile, differs per run)",
                         "rose-labs/rose-1-lite",
                         256,
                         {"type": "FLOAT_LLM_JUDGE"},
@@ -1132,7 +1140,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                         None,  # max_iterations
                         100,  # price_limit_cents
                         None,  # context_gates
-                        True,  # fast_mode_cache_enabled
+                        True,  # fast_mode_cache_enabled (button; cache still DEMO-gated)
                     ],
                     id=_next_wf_id("fast-cache-goal"),
                     task_queue=TASK_QUEUE,
@@ -1145,7 +1153,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
 
                 captured_goals = FAST_MODE_GOAL_CAPTURE.get(fc_agent_id)
                 assert captured_goals, "Workflow never reached an LLM call"
-                assert captured_goals[0] == "Persisted DB goal", (
+                assert captured_goals[0] == persisted_goal, (
                     f"Fast Mode cache goal must be the persisted agent-row goal, got {captured_goals[0]!r}"
                 )
 
@@ -1365,6 +1373,14 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
     assert restored._continuation_resume_state(context) == state
+    # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
+    wf.provider_fast_mode = True
+    wf.fast_mode_cache_enabled = False
+    button_args = wf._continuation_args(context)
+    assert button_args[15] is True
+    wf.provider_fast_mode = False
+    button_off_args = wf._continuation_args(context)
+    assert button_off_args[15] is False
     wf.world_model_mode = "simulate"
     simulated_args = wf._continuation_args(context)
     assert len(simulated_args) == 18
@@ -4001,7 +4017,7 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     wf.parent_workflow_id = None
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
@@ -5788,7 +5804,7 @@ async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-child"
     wf.user_id = "u-demo"
-    wf.goal = OAI_DEMO_CHILD_GOAL_PREFIX
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"
     wf.parent_workflow_id = "oai-demo-root"
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -7205,7 +7221,7 @@ async def test_workflow_fast_mode_post_message_does_not_block_loop():
 
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
     blocker = asyncio.Event()
@@ -7237,7 +7253,7 @@ async def test_workflow_post_message_throttles_tree_updates():
     wf.agent_id = "child-1"
     wf.bus_id = "bus-1"
     wf.parent_agent_id = "root-1"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:

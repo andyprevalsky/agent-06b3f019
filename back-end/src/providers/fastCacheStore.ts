@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { FAST_CACHE_POOL_LIMIT, prisma } from './database';
-import { shouldWriteFastModeCacheForUser } from './fastCacheAccountPolicy';
+import { demoCacheAllowed } from './demoCachePolicy';
 import { type CacheKind } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
 import { withSpan } from './tracing';
@@ -474,16 +474,20 @@ export async function agentFastMode(agentId: string): Promise<{
   writeEnabled: boolean;
   rootAgentId: string | null;
   rootGoal: string | null;
+  /** Fast Mode button — LLM provider speed (independent of DEMO cache replay). */
+  providerFastMode: boolean;
 }> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     select: { fastModeCacheEnabled: true, goal: true, userId: true, busId: true },
   });
-  const enabled = agent?.fastModeCacheEnabled ?? false;
+  // Persisted flag is the Fast Mode *button* (LLM provider_fast_mode). Cache
+  // replay is DEMO-prompt only and ignores the button.
+  const providerFastMode = agent?.fastModeCacheEnabled ?? true;
   const rootAgentId = agent?.busId ?? agentId;
   let rootGoal = agent?.goal ?? null;
-  // Soft-complete stubs gate on the tree root's exact bench prompt match; child
-  // agents keep their own goal for cache keys but inherit stub eligibility via rootGoal.
+  // Soft-complete / DEMO cache gates on the tree root's exact bench prompt;
+  // child agents keep their own goal for cache keys but inherit via rootGoal.
   if (agent?.busId && agent.busId !== agentId) {
     const root = await prisma.agent.findUnique({
       where: { id: agent.busId },
@@ -491,11 +495,14 @@ export async function agentFastMode(agentId: string): Promise<{
     });
     rootGoal = root?.goal ?? null;
   }
+  const goal = agent?.goal ?? null;
+  const enabled = demoCacheAllowed(goal, rootGoal);
   return {
     enabled,
-    goal: agent?.goal ?? null,
-    writeEnabled: enabled || shouldWriteFastModeCacheForUser(agent?.userId),
+    goal,
+    writeEnabled: enabled,
     rootAgentId,
     rootGoal,
+    providerFastMode,
   };
 }

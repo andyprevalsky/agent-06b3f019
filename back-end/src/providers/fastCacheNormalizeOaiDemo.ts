@@ -10,15 +10,27 @@ export const OAI_DEMO_ROOT_GOAL_PREFIX =
   "I'm building a personal brand for health, longevity, technology, founder journey"; // pragma: allowlist secret
 export const OAI_DEMO_CHILD_WINDOW = '2026-04-04 through 2026-07-03'; // pragma: allowlist secret
 export const OAI_DEMO_CHILD_GOAL_PREFIX = 'You are analyzing ONE creator';
-const OAI_DEMO_CACHE_SOURCE_NAME = 'Aman Gottumukkala';
-const OAI_DEMO_CACHE_DISPLAY_NAME = 'Andy Prevalsky';
+export const OAI_DEMO_CACHE_SOURCE_NAME = 'Aman Gottumukkala';
+export const OAI_DEMO_CACHE_DISPLAY_NAME = 'Andy Prevalsky';
+
+function isOaiDemoBoundChildGoal(text: string): boolean {
+  // Child prefix alone is not enough — require a DEMO identity binding so
+  // unrelated goals containing the prefix cannot enter cache replay.
+  if (!text.includes(OAI_DEMO_CHILD_GOAL_PREFIX)) return false;
+  return (
+    text.includes(OAI_DEMO_CACHE_DISPLAY_NAME) ||
+    text.includes(OAI_DEMO_CACHE_SOURCE_NAME) ||
+    text.includes(OAI_DEMO_CHILD_WINDOW) ||
+    text.includes(OAI_DEMO_ROOT_GOAL_PREFIX)
+  );
+}
 
 export function isOaiDemoGoal(goal: string | null | undefined): boolean {
   const text = goal ?? '';
   return (
     text.includes(OAI_DEMO_ROOT_GOAL_PREFIX) ||
     text.includes(OAI_DEMO_CHILD_WINDOW) ||
-    text.includes(OAI_DEMO_CHILD_GOAL_PREFIX)
+    isOaiDemoBoundChildGoal(text)
   );
 }
 

@@ -33,16 +33,13 @@ from utils.source_connect_gates import raise_source_connect_gates
 
 
 def skip_wait_wall_clock_for_fast_mode_replay(workflow_instance: Any) -> bool:
-    """True only for allowlisted OAi-demo Fast Mode replay.
+    """True only for DEMO-prompt cache replay (test-mass-agent-run-0).
 
-    Live agents can enable Fast Mode for LLM record/replay, but wait_for must
-    still honor until_timestamp / check_interval_seconds so external state
-    (email, SMS, web) has wall-clock time to change. Skipping sleeps for every
-    fast_mode_cache_enabled agent burned live wait_for polls in seconds
-    (agent 515c4894: 600s interval → ~6s between explores).
+    Live agents may enable the Fast Mode *button* for LLM speed, but wait_for
+    must still honor until_timestamp / check_interval_seconds so external state
+    (email, SMS, web) has wall-clock time to change. Skipping sleeps is only
+    for DEMO cache replay trees where the prompt matches a DEMO-tagged task.
     """
-    if not bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
-        return False
     return is_oai_demo_mass_agent_task(workflow_instance)
 
 

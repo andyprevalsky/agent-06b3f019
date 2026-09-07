@@ -19,6 +19,7 @@ export const KNOWN_TAGS = [
   'outreach',
   'job-applications',
   'cache',
+  'DEMO',
   'load-test',
   'mass-agent',
   'research',

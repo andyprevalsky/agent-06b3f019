@@ -267,7 +267,7 @@ test('Rose provider Fast Mode maps to supported downstream request shapes', () =
   );
 });
 
-test('backend chat passes provider Fast Mode to Rose live calls and cache keys', () => {
+test('backend chat passes provider Fast Mode from the button, not DEMO cache', () => {
   const router = readFileSync(
     join(process.cwd(), 'src', 'providers', 'chat', 'routerLlm.ts'),
     'utf8'
@@ -277,20 +277,20 @@ test('backend chat passes provider Fast Mode to Rose live calls and cache keys',
     'utf8'
   );
   assert.ok(
-    router.includes('const providerFastMode = fastModeRead || fastModeWrite'),
-    'router must use the same provider mode for write-only and read-enabled cache runs'
+    router.includes('const providerFastMode = fastMode.providerFastMode !== false'),
+    'router must take provider Fast Mode from the button field'
   );
   assert.ok(
-    generator.includes('const providerFastMode = fastModeRead || fastModeWrite'),
-    'generator must use the same provider mode for write-only and read-enabled cache runs'
+    generator.includes('const providerFastMode = fastMode.providerFastMode !== false'),
+    'generator must take provider Fast Mode from the button field'
   );
   assert.ok(
     router.includes('provider_fast_mode: providerFastMode'),
-    'router live call and cache key must request provider fast mode when cache-active'
+    'router live call and cache key must request provider fast mode from the button'
   );
   assert.ok(
     generator.includes('provider_fast_mode: providerFastMode'),
-    'generator live call and cache key must request provider fast mode when cache-active'
+    'generator live call and cache key must request provider fast mode from the button'
   );
 });
 

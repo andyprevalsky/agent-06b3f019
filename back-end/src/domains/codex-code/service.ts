@@ -108,19 +108,10 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
-  const persistedFastModeCacheEnabled = await repo.findAgentFastModeCache(agent_id);
-  const fastModeCacheEnabled = params.fast_mode_cache_enabled ?? persistedFastModeCacheEnabled;
-  if (
-    params.fast_mode_cache_enabled !== undefined &&
-    params.fast_mode_cache_enabled !== persistedFastModeCacheEnabled
-  ) {
-    log.warn('Codex Code session Fast Mode flag mismatch', {
-      agentId: agent_id,
-      requestFastModeCacheEnabled: params.fast_mode_cache_enabled,
-      persistedFastModeCacheEnabled,
-      effectiveFastModeCacheEnabled: fastModeCacheEnabled,
-    });
-  }
+  const { agentFastMode } = await import('../../providers/fastCacheStore');
+  const fastMode = await agentFastMode(agent_id);
+  // Codex proxy is DEMO cache replay — independent of the Fast Mode button.
+  const fastModeCacheEnabled = fastMode.enabled;
   const session = await createCodexCodeSession(
     agent_id,
     goal,

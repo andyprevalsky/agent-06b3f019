@@ -49,13 +49,13 @@ def resolve_explore_depth(
 ) -> str:
     """Pick explore thoroughness for a spawn.
 
-    Under Fast Mode on test-mass-agent-run-0 only, use EXPLORE_FAST_MODE_DEPTH:
+    Under DEMO cache replay (test-mass-agent-run-0), use EXPLORE_FAST_MODE_DEPTH:
     July OAi-demo explore caches often reach attempt_completion at turn ~26–36,
     so both the live default (quick=5) and an explicit medium=20 abort mid-replay.
-    Other Fast Mode trees keep the requested/live depth. Outside Fast Mode,
-    explicit medium/deep win; otherwise the live default applies.
+    Other trees keep the requested/live depth. The Fast Mode button does not
+    affect depth — only DEMO prompt match does (via oai_demo / cache flag).
     """
-    if fast_mode_cache_enabled and oai_demo:
+    if oai_demo:
         return EXPLORE_FAST_MODE_DEPTH
     if requested_depth in EXPLORE_DEPTH_LIMITS:
         return requested_depth
@@ -89,15 +89,34 @@ OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist sec
 # truncated before the date window. Keep hashing on window/root only so a
 # truncated goal cannot alias all 50 children onto one namespace.
 OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
+OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
+OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
+
+
+def _is_oai_demo_bound_child_goal(blob: str) -> bool:
+    """Child prefix alone is not enough — require a DEMO identity binding.
+
+    Real for_each children always include Andy/Aman (or the date window / root
+    brand). Rejecting a bare prefix stops unrelated goals that merely contain
+    "You are analyzing ONE creator" from entering demo cache replay.
+    """
+    if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
+        return False
+    return (
+        OAI_DEMO_CACHE_DISPLAY_NAME in blob
+        or OAI_DEMO_CACHE_SOURCE_NAME in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_ROOT_GOAL_PREFIX in blob
+    )
 
 
 def is_oai_demo_goal(text: str | None) -> bool:
-    """True only for test-mass-agent-run-0 root, child-window, or for_each prefix."""
+    """True only for test-mass-agent-run-0 root, child-window, or bound child."""
     blob = str(text or "")
     return (
         OAI_DEMO_ROOT_GOAL_PREFIX in blob
         or OAI_DEMO_CHILD_WINDOW in blob
-        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+        or _is_oai_demo_bound_child_goal(blob)
     )
 
 
@@ -111,10 +130,8 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
 
 
 def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
-    """Fast Mode test-mass-agent-run-0 must not open browser-agent sessions."""
-    return bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)) and is_oai_demo_mass_agent_task(
-        workflow_instance
-    )
+    """DEMO mass-agent trees must not open browser-agent sessions."""
+    return is_oai_demo_mass_agent_task(workflow_instance)
 
 
 def resolve_explore_oai_demo(goal: str | None, *, oai_demo: bool | None = None) -> bool:

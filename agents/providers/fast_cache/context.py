@@ -24,8 +24,8 @@ WRITE_THROUGH_USER_IDS = {
 
 @dataclass
 class FastCacheContext:
-    # `enabled` is the read/replay switch. Some allowlisted accounts write cache
-    # entries even with Fast Mode off, but must not replay unless this is true.
+    # `enabled` is the DEMO-prompt cache read/replay switch. Independent of the
+    # Fast Mode button (which only controls provider_fast_mode / LLM speed).
     enabled: bool
     goal: str
     # Durable trajectory position for run loops/verifiers/summaries. When present,
@@ -34,8 +34,10 @@ class FastCacheContext:
     base_step: Optional[int] = None
     write_enabled: Optional[bool] = None
     # Root agent's goal (busId row). Soft-complete stubs require exact match of
-    # this agent's goal OR the tree root against a fast_cache:on bench prompt.
+    # this agent's goal OR the tree root against a DEMO-tagged bench prompt.
     root_goal: Optional[str] = None
+    # Fast Mode button: Anthropic speed=fast / OpenAI priority tier.
+    provider_fast_mode: bool = True
 
     @property
     def read_enabled(self) -> bool:
@@ -47,12 +49,6 @@ class FastCacheContext:
 
     @property
     def active(self) -> bool:
-        return self.read_enabled or self.should_write
-
-    @property
-    def provider_fast_mode(self) -> bool:
-        # Write-through runs must record the same provider request envelope that
-        # a later read-enabled Fast Mode run will replay.
         return self.read_enabled or self.should_write
 
     @property
