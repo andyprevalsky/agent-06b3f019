@@ -185,10 +185,15 @@ AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
 _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
-# Tasks whose fixtures destructively mutate shared benchmark DB state. The
-# parallel scheduler runs these serially before starting any ordinary task so a
-# retained failed agent tree cannot mutate their fixtures. Each fixture must
-# also restore its state.
+# Tasks the parallel scheduler must finish (serially) before ordinary work:
+# - Destructive shared-DB fixtures: a retained failed agent tree must not mutate
+#   rows underneath a sibling. Each fixture must also restore its state.
+# - browser-biometrics-webdecoy: FCaptcha PoW + pointer trajectory are timing-
+#   sensitive. Overlapping it with another LLM-heavy smoke task (concurrency=2)
+#   stalls browser turns for tens of seconds, ages/mismatches the PoW challenge,
+#   and the agent burns the 420s cap retrying a rejected checkbox instead of
+#   completing. Isolated browser profiles protect cookie/DB state but not this
+#   CPU/LLM contention class — keep webdecoy exclusive even then.
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
@@ -13613,41 +13618,20 @@ def _parallel_task_runners(
 def _parallel_task_phases(
     tasks: list[BenchmarkTask],
 ) -> list[tuple[str, list[BenchmarkTask]]]:
-    """Order destructive fixture tasks ahead of agent trees that may outlive a root.
+    """Order exclusive tasks ahead of agent trees that may outlive a root.
 
     A timed-out task can be intentionally retained for diagnostics while one of
     its descendants continues working. Running a destructive fixture after the
     root future settles therefore is not isolated: the descendant can recreate
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
+
+    ``browser-biometrics-webdecoy`` stays exclusive even when
+    ``BENCHMARK_ISOLATED_BROWSER_PROFILES`` is on: isolation protects saved
+    browser state, but concurrent LLM-heavy siblings still stall FCaptcha PoW /
+    pointer timing and produce the timeout-on-retry class.
     """
-    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-    def uses_shared_browser_auth(task: BenchmarkTask) -> bool:
-        if not getattr(task, "requires_browser_agent", False):
-            return False
-        if getattr(task, "browser_profile_mode", "persistent") == "fresh":
-            return False
-        environment = getattr(task, "environment", None) or {}
-        return bool(
-            getattr(task, "browser_auth_realm", None)
-            or environment.get("live_cookie_domains")
-            or resolve_live_fixtures(environment)
-        )
-
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
-    if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
-        auth_reading_siblings = [
-            task for task in tasks if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
-        ]
-        if not auth_reading_siblings:
-            exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)
-
     exclusive = [task for task in tasks if task.name in exclusive_names]
     parallel = [task for task in tasks if task.name not in exclusive_names]
     return [("exclusive", exclusive), ("parallel", parallel)]
