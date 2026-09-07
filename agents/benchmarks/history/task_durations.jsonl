@@ -3232,3 +3232,13 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 180.9, "cost_cents": 1.0, "timestamp": "2026-09-06T22:59:54.193493+00:00", "agent_id": "e71f18cc-d05d-427e-bf57-fca47d116ed0"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 439.0, "cost_cents": 2.0, "timestamp": "2026-09-06T22:59:54.193493+00:00", "agent_id": "82052e19-7a6c-42c7-87a8-c0acd4a63dff"}
 {"task": "agent-payment-abandonment", "duration_seconds": 218.9, "cost_cents": 0.0, "timestamp": "2026-09-06T22:59:54.193493+00:00", "agent_id": "969b2248-cba5-4f27-ae34-20413c827bb6"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 168.8, "cost_cents": 4.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "ef03079b-b979-4f95-8e65-9f42d1cdbc99"}
+{"task": "parallel-tool-calls", "duration_seconds": 220.4, "cost_cents": 15.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "ce219c04-29c5-4776-ad56-3e5b2bbb86c0"}
+{"task": "browser-smoke", "duration_seconds": 59.4, "cost_cents": 0.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "0ea133cf-e331-4c2e-b703-663f3128c2bf"}
+{"task": "spawn-sub-agents", "duration_seconds": 132.1, "cost_cents": 2.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "509d7d56-2d5b-4634-8c09-96b9b07ea71b"}
+{"task": "chat-mode", "duration_seconds": 14.3, "cost_cents": 0.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "8958f3c5-f4fd-459f-bc2b-c098801df643"}
+{"task": "claude-code-agent", "duration_seconds": 75.9, "cost_cents": 2.0, "timestamp": "2026-09-06T23:51:46.000555+00:00", "agent_id": "233f879f-fbd1-476d-95ba-394223528e49"}
+{"task": "agent-payment-test-shop", "duration_seconds": 181.2, "cost_cents": 1.0, "timestamp": "2026-09-06T23:51:43.552936+00:00", "agent_id": "9c2c6c3c-550b-4fc0-a91b-ca802782c77a"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 200.8, "cost_cents": 1.0, "timestamp": "2026-09-06T23:51:43.552936+00:00", "agent_id": "fee55211-e490-4435-9972-c10e58c244c9"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 333.3, "cost_cents": 17.0, "timestamp": "2026-09-06T23:51:43.552936+00:00", "agent_id": "7d03f4a0-9eaa-4882-91b1-2d91d145802a"}
+{"task": "agent-payment-abandonment", "duration_seconds": 231.3, "cost_cents": 2.0, "timestamp": "2026-09-06T23:51:43.552936+00:00", "agent_id": "471d2e55-9a52-4912-99ed-88ae0b2ac43e"}
