@@ -589,14 +589,19 @@ test('worldModelCacheScope partitions simulated runs, real/shadow keys unchanged
   delete process.env.WMH_MODEL_NAME;
 });
 
-test('isOaiDemoGoal matches only the mass-agent demo prefixes', () => {
+test('isOaiDemoGoal matches only identity-bound mass-agent demo goals', () => {
   assert.strictEqual(
     isOaiDemoGoal(
       "I'm building a personal brand for health, longevity, technology, founder journey [x]"
     ),
     true
   );
-  assert.strictEqual(isOaiDemoGoal('You are analyzing ONE creator for Andy'), true);
+  assert.strictEqual(
+    isOaiDemoGoal('You are analyzing ONE creator for Andy Prevalsky — Huberman'),
+    true
+  );
+  assert.strictEqual(isOaiDemoGoal('You are analyzing ONE creator for Andy'), false);
+  assert.strictEqual(isOaiDemoGoal('You are analyzing ONE creator'), false);
   assert.strictEqual(
     isOaiDemoGoal('Order a Vanilla Bean Shakerato and waffle from Blue Bottle'),
     false
