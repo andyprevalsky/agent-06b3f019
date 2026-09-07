@@ -45,7 +45,8 @@ from utils.source_connect_gates import raise_source_connect_gates
 def test_is_oai_demo_goal_matches_all_three_prefixes():
     assert is_oai_demo_goal(OAI_DEMO_ROOT_GOAL_PREFIX + " extra")
     assert is_oai_demo_goal(f"window {OAI_DEMO_CHILD_WINDOW} here")
-    assert is_oai_demo_goal(f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman")
+    assert is_oai_demo_goal(f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman")
+    assert not is_oai_demo_goal(f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman")
     assert not is_oai_demo_goal("Order a Vanilla Bean Shakerato from Blue Bottle")
     assert not is_oai_demo_goal(None)
     assert not is_oai_demo_goal("")
@@ -53,7 +54,7 @@ def test_is_oai_demo_goal_matches_all_three_prefixes():
 
 def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
-    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=OAI_DEMO_CHILD_GOAL_PREFIX))
+    assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"))
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
 
 
@@ -61,7 +62,7 @@ def test_browser_timeout_and_recording_are_demo_only():
     demo_wf = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX)
     live_wf = SimpleNamespace(goal="Buy socks")
     assert (
-        browser_start_to_close_timeout_minutes(fast_mode=True, goal=OAI_DEMO_CHILD_GOAL_PREFIX)
+        browser_start_to_close_timeout_minutes(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
         == ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE
     )
     assert (
@@ -76,7 +77,7 @@ def test_browser_timeout_and_recording_are_demo_only():
         browser_start_to_close_timeout_minutes(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX)
         == ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES
     )
-    assert skip_browser_network_recording(fast_mode=True, goal=OAI_DEMO_CHILD_GOAL_PREFIX) is True
+    assert skip_browser_network_recording(fast_mode=True, goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky") is True
     assert skip_browser_network_recording(fast_mode=True, goal="Buy socks") is False
     assert skip_browser_network_recording(fast_mode=False, goal=OAI_DEMO_ROOT_GOAL_PREFIX) is False
 
@@ -255,7 +256,7 @@ def test_materialize_oai_demo_report_files_activity_keeps_legacy_three_arg_calls
 
 def test_should_skip_oai_demo_browser_spawn_is_demo_only():
     demo = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=True)
-    child = SimpleNamespace(goal=OAI_DEMO_CHILD_GOAL_PREFIX, fast_mode_cache_enabled=False)
+    child = SimpleNamespace(goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky", fast_mode_cache_enabled=False)
     live_fm = SimpleNamespace(goal="Buy socks", fast_mode_cache_enabled=True)
     demo_button_off = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_mode_cache_enabled=False)
     assert should_skip_oai_demo_browser_spawn(demo) is True
@@ -285,7 +286,7 @@ def test_resolve_explore_depth_promotes_on_demo_prompt_not_button():
 
 def test_resolve_explore_oai_demo_explicit_flag_wins_over_goal():
     live_goal = "Order a Vanilla Bean Shakerato from Blue Bottle"
-    demo_goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    demo_goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     assert resolve_explore_oai_demo(live_goal, oai_demo=True) is True
     assert resolve_explore_oai_demo(demo_goal, oai_demo=False) is False
     assert resolve_explore_oai_demo(demo_goal) is True

@@ -1373,6 +1373,14 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
     assert restored._continuation_resume_state(context) == state
+    # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
+    wf.provider_fast_mode = True
+    wf.fast_mode_cache_enabled = False
+    button_args = wf._continuation_args(context)
+    assert button_args[15] is True
+    wf.provider_fast_mode = False
+    button_off_args = wf._continuation_args(context)
+    assert button_off_args[15] is False
     wf.world_model_mode = "simulate"
     simulated_args = wf._continuation_args(context)
     assert len(simulated_args) == 18

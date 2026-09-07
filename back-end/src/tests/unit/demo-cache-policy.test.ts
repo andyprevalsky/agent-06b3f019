@@ -57,9 +57,13 @@ test('DEMO catalog prompt hashes into the allowlist', () => {
   assert.ok(hashes.has(demoGoalHash(mass!.prompt!)));
 });
 
-test('demoCacheAllowed is true for DEMO root / child prefixes without a button flag', () => {
+test('demoCacheAllowed is true for DEMO root / bound child without a button flag', () => {
   assert.equal(demoCacheAllowed(`${OAI_DEMO_ROOT_GOAL_PREFIX} rest of prompt`), true);
-  assert.equal(demoCacheAllowed(`${OAI_DEMO_CHILD_GOAL_PREFIX} Huberman`), true);
+  assert.equal(
+    demoCacheAllowed(`${OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman`),
+    true
+  );
+  assert.equal(demoCacheAllowed(`${OAI_DEMO_CHILD_GOAL_PREFIX} Huberman`), false);
   assert.equal(demoCacheAllowed('Buy socks'), false);
   assert.equal(demoCacheAllowed('Buy socks', `${OAI_DEMO_ROOT_GOAL_PREFIX} x`), true);
 });

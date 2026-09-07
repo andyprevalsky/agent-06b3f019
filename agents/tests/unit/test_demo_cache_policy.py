@@ -7,6 +7,7 @@ from pathlib import Path
 
 from domains.spawn_agent.config import (
     OAI_DEMO_CHILD_GOAL_PREFIX,
+    OAI_DEMO_CHILD_WINDOW,
     OAI_DEMO_ROOT_GOAL_PREFIX,
     is_oai_demo_goal,
 )
@@ -39,7 +40,12 @@ def test_demo_cache_goal_hashes_include_mass_agent_prompt():
 
 def test_demo_cache_allowed_matches_demo_prompts_not_live():
     assert demo_cache_allowed(f"{OAI_DEMO_ROOT_GOAL_PREFIX} extra") is True
-    assert demo_cache_allowed(f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman") is True
+    # Bound child (prefix + Andy) is allowed; bare prefix is not.
+    assert (
+        demo_cache_allowed(f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman")
+        is True
+    )
+    assert demo_cache_allowed(f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman") is False
     assert demo_cache_allowed("Buy socks") is False
     assert demo_cache_allowed("Buy socks", root_goal=f"{OAI_DEMO_ROOT_GOAL_PREFIX} x") is True
 
@@ -51,4 +57,6 @@ def test_soft_complete_shares_demo_gate():
 
 def test_is_oai_demo_goal_still_covers_prefixes():
     assert is_oai_demo_goal(OAI_DEMO_ROOT_GOAL_PREFIX)
-    assert is_oai_demo_goal(OAI_DEMO_CHILD_GOAL_PREFIX)
+    assert not is_oai_demo_goal(OAI_DEMO_CHILD_GOAL_PREFIX)
+    assert is_oai_demo_goal(f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky")
+    assert is_oai_demo_goal(f"window {OAI_DEMO_CHILD_WINDOW} only")

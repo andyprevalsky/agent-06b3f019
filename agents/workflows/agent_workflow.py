@@ -1130,7 +1130,11 @@ class AgentWorkflow:
             self.max_iterations,
             self.price_limit_cents,
             self.context_gates or None,
-            self.fast_mode_cache_enabled,
+            # Temporal slot is the Fast Mode *button* (LLM speed). DEMO cache
+            # classification is recomputed in run() from the goal — do not pass
+            # self.fast_mode_cache_enabled here or a button-on non-DEMO segment
+            # loses provider_fast_mode across continue_as_new.
+            self.provider_fast_mode,
             self._continuation_resume_state(context),
         ]
         if self.world_model_mode != "real":

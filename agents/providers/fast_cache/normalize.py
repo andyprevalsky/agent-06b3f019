@@ -721,12 +721,25 @@ OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
 OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
 
 
+def _is_oai_demo_bound_child_goal(blob: str) -> bool:
+    """Child prefix alone is not enough — require a DEMO identity binding."""
+    if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
+        return False
+    return (
+        OAI_DEMO_CACHE_DISPLAY_NAME in blob
+        or OAI_DEMO_CACHE_SOURCE_NAME in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_ROOT_GOAL_PREFIX in blob
+    )
+
+
 def is_oai_demo_goal_text(text: str | None) -> bool:
+    """True for mass-agent DEMO root, window, or identity-bound child goals."""
     blob = str(text or "")
     return (
         OAI_DEMO_ROOT_GOAL_PREFIX in blob
         or OAI_DEMO_CHILD_WINDOW in blob
-        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+        or _is_oai_demo_bound_child_goal(blob)
     )
 
 
@@ -1059,7 +1072,8 @@ def demo_cache_allowed(
         return True
     if root_goal and goal_hash(root_goal) in allowed:
         return True
-    # Prefix fallback for truncated child goals / resolver failures.
+    # Identity-bound prefix fallback for truncated child goals / resolver
+    # failures (bare OAI_DEMO_CHILD_GOAL_PREFIX is rejected — see is_oai_demo_goal_text).
     if is_oai_demo_goal_text(goal) or is_oai_demo_goal_text(root_goal):
         return True
     return False

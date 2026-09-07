@@ -89,15 +89,34 @@ OAI_DEMO_CHILD_WINDOW = "2026-04-04 through 2026-07-03"  # pragma: allowlist sec
 # truncated before the date window. Keep hashing on window/root only so a
 # truncated goal cannot alias all 50 children onto one namespace.
 OAI_DEMO_CHILD_GOAL_PREFIX = "You are analyzing ONE creator"
+OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
+OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
+
+
+def _is_oai_demo_bound_child_goal(blob: str) -> bool:
+    """Child prefix alone is not enough — require a DEMO identity binding.
+
+    Real for_each children always include Andy/Aman (or the date window / root
+    brand). Rejecting a bare prefix stops unrelated goals that merely contain
+    "You are analyzing ONE creator" from entering demo cache replay.
+    """
+    if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
+        return False
+    return (
+        OAI_DEMO_CACHE_DISPLAY_NAME in blob
+        or OAI_DEMO_CACHE_SOURCE_NAME in blob
+        or OAI_DEMO_CHILD_WINDOW in blob
+        or OAI_DEMO_ROOT_GOAL_PREFIX in blob
+    )
 
 
 def is_oai_demo_goal(text: str | None) -> bool:
-    """True only for test-mass-agent-run-0 root, child-window, or for_each prefix."""
+    """True only for test-mass-agent-run-0 root, child-window, or bound child."""
     blob = str(text or "")
     return (
         OAI_DEMO_ROOT_GOAL_PREFIX in blob
         or OAI_DEMO_CHILD_WINDOW in blob
-        or OAI_DEMO_CHILD_GOAL_PREFIX in blob
+        or _is_oai_demo_bound_child_goal(blob)
     )
 
 
