@@ -4017,7 +4017,7 @@ async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     wf.parent_workflow_id = None
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
@@ -5804,7 +5804,7 @@ async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-child"
     wf.user_id = "u-demo"
-    wf.goal = OAI_DEMO_CHILD_GOAL_PREFIX
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"
     wf.parent_workflow_id = "oai-demo-root"
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -7221,7 +7221,7 @@ async def test_workflow_fast_mode_post_message_does_not_block_loop():
 
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     wf.fast_mode_cache_enabled = True
     fake = _FakeWorkflowModule()
     blocker = asyncio.Event()
@@ -7253,7 +7253,7 @@ async def test_workflow_post_message_throttles_tree_updates():
     wf.agent_id = "child-1"
     wf.bus_id = "bus-1"
     wf.parent_agent_id = "root-1"
-    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} Huberman"
+    wf.goal = f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman"
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
