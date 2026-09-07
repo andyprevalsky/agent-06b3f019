@@ -17,6 +17,7 @@ from benchmarks.hub_upload import (
     prepare_run_bundle_for_upload,
     resolve_hub_upload_url,
     upload_run_bundle,
+    upload_timeout_for_payload,
 )
 
 
@@ -45,6 +46,18 @@ def _serve(record: list):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def test_upload_timeout_scales_with_payload_size():
+    """Mass-agent bundles (~40MB+) must not keep a flat 30s Hub POST deadline."""
+    assert upload_timeout_for_payload(0) == 30.0
+    assert upload_timeout_for_payload(1024) == 30.0
+    # ~47MB mass-agent smoke bundle needs well above 30s.
+    forty_seven_mb = 47 * 1024 * 1024
+    timeout = upload_timeout_for_payload(forty_seven_mb)
+    assert timeout >= 120.0
+    assert timeout <= 300.0
+    assert upload_timeout_for_payload(512 * 1024 * 1024) == 300.0
 
 
 def test_disabled_without_env(monkeypatch):
