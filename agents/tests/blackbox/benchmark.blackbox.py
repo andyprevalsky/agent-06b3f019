@@ -3572,6 +3572,101 @@ def test_first_level_gp_count_static_uses_collected_transcripts():
     assert "T2:" in reason
 
 
+def test_general_purpose_explore_spawn_limit_is_per_agent():
+    """T3 counts logical children once, permits three per GP, and fails on four."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    root = "root-mass"
+    gp = "gp-huberman"
+    peer_gp = "gp-patrick"
+    evaluator = {
+        "checks": [
+            {
+                "type": "general_purpose_explore_spawn_limit",
+                "max": 3,
+            }
+        ]
+    }
+
+    def spawn_messages(owner, index):
+        call_id = f"call-{owner}-explore-{index}"
+        child_id = f"{owner}-explore-{index}"
+        common = {"toolName": "spawn_agent", "agentType": "explore"}
+        return [
+            {
+                "role": "TOOL",
+                "message": "starting",
+                "metadata": {**common, "toolStatus": "IN_PROGRESS", "toolCallId": call_id},
+            },
+            *[
+                {
+                    "role": "TOOL",
+                    "message": f"explore {index} progress {update}",
+                    "metadata": {
+                        **common,
+                        "toolStatus": "FINISHED",
+                        "toolCallId": f"progress-{index}-{update}",
+                        "subAgentId": child_id,
+                    },
+                }
+                for update in range(5)
+            ],
+            {
+                "role": "TOOL",
+                "message": f"explore {index} complete",
+                "metadata": {
+                    **common,
+                    "toolStatus": "FINISHED",
+                    "toolCallId": call_id,
+                    "subAgentId": child_id,
+                },
+            },
+        ]
+
+    spawn_rows = [rows for index in range(4) for rows in spawn_messages(gp, index)]
+    peer_rows = [rows for index in range(3) for rows in spawn_messages(peer_gp, index)]
+    rows_per_child = len(spawn_messages(gp, 0))
+    data = {
+        "agent": {"agent_id": root, "status": "COMPLETED"},
+        "_benchmark": {
+            "tree": {
+                root: {
+                    "parent_agent_id": None,
+                    "status": "COMPLETED",
+                    "goal": "Analyze the top 50 creators for Andy Prevalsky",
+                    "messages": [],
+                },
+                gp: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Huberman.",
+                    "messages": spawn_rows[: 3 * rows_per_child],
+                },
+                peer_gp: {
+                    "parent_agent_id": root,
+                    "status": "COMPLETED",
+                    "goal": "You are analyzing ONE creator for Andy Prevalsky. Research Patrick.",
+                    "messages": peer_rows,
+                },
+            }
+        },
+    }
+
+    assert _run_declared_static_check(evaluator, data) == (
+        True,
+        "All declared static checks passed",
+    )
+
+    over_limit = deepcopy(data)
+    over_limit["_benchmark"]["tree"][gp]["messages"] = spawn_rows
+    passed, reason = _run_declared_static_check(evaluator, over_limit)
+    assert passed is False
+    assert "spawned 4 explore agents" in reason
+    assert "maximum is 3 per general-purpose agent" in reason
+
+
 def test_no_nested_general_purpose_static_uses_typed_parentage():
     """T6 is a named static row: nested GP under GP/explore fails; first-level GPs pass."""
     from benchmarks.run_benchmark import (
@@ -15388,6 +15483,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t1-andy-only",
         "t2-fifty-first-level-gps",
         "t3-full-explore-trajectories",
+        "t3-max-three-explore-spawns-per-gp",
         "t4-full-july-gp-trajectories",
         "t5-zero-live-spend",
         "t6-no-nested-gps",
@@ -15415,6 +15511,7 @@ def test_unified_catalog_delineates_bench_axes():
         "t1-andy-only": ["principal_user_andy"],
         "t2-fifty-first-level-gps": ["first_level_gp_count"],
         "t3-full-explore-trajectories": ["first_level_gp_explore_research"],
+        "t3-max-three-explore-spawns-per-gp": ["general_purpose_explore_spawn_limit"],
         "t4-full-july-gp-trajectories": ["first_level_gp_july_trajectories"],
         "t5-zero-live-spend": ["zero_live_spend"],
         "t6-no-nested-gps": ["no_nested_general_purpose"],
@@ -15447,6 +15544,11 @@ def test_unified_catalog_delineates_bench_axes():
         if check.get("type") == "explore_completion_summary"
     )
     assert summary_check.get("min_chars") == 200
+    gp_explore_limit = evaluators["t3-max-three-explore-spawns-per-gp"]["checks"][0]
+    assert gp_explore_limit == {
+        "type": "general_purpose_explore_spawn_limit",
+        "max": 3,
+    }
     assert all(
         check_type in RUNTIME_STATIC_CHECK_TYPES
         for types in static_by_id.values()
@@ -18424,6 +18526,10 @@ async def run_all_tests():
     r.record(
         "first_level_gp_count_static_uses_collected_transcripts",
         test_first_level_gp_count_static_uses_collected_transcripts,
+    )
+    r.record(
+        "general_purpose_explore_spawn_limit_is_per_agent",
+        test_general_purpose_explore_spawn_limit_is_per_agent,
     )
     r.record(
         "no_nested_general_purpose_static_uses_typed_parentage",

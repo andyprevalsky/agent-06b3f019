@@ -6953,6 +6953,129 @@ async def test_call_llm_structured_streaming_json_parse_failure_raises():
     assert raised
 
 
+async def test_july_gp_execute_caps_distinct_explores_then_completes():
+    """Cached GP replay emits at most three distinct explores, then its completion."""
+    from providers.fast_cache.context import FastCacheContext
+    from providers.fast_cache import rose_cache
+
+    goal = (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
+        "building a personal brand at the intersection of health, longevity, "
+        "technology, and founder journey. Last 90 days: 2026-04-04 through "
+        "2026-07-03. Creator: Dr. Eric Topol."
+    )
+
+    def explore_payload(call_id, marker):
+        return {
+            "actual_model": "fast-mode-replay",
+            "content": marker,
+            "reasoning": f"reasoning-{marker}",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "name": "spawn_agent",
+                    "arguments": json.dumps(
+                        {"type": "explore", "goal": f"research-{marker}"}
+                    ),
+                }
+            ],
+            "usage": {"from_fast_cache": True, "marker": marker},
+        }
+
+    first = explore_payload("call-explore-a", "first")
+    second = explore_payload("call-explore-b", "second")
+    third = explore_payload("call-explore-c", "third")
+    fourth = explore_payload("call-explore-d", "fourth")
+    fifth = explore_payload("call-explore-e", "fifth")
+    parallel = {
+        "actual_model": "fast-mode-replay",
+        "content": "parallel",
+        "reasoning": "reasoning-parallel",
+        "tool_calls": [
+            second["tool_calls"][0],
+            third["tool_calls"][0],
+            fourth["tool_calls"][0],
+        ],
+        "usage": {"from_fast_cache": True, "marker": "parallel"},
+    }
+    limited_parallel = {**parallel, "tool_calls": parallel["tool_calls"][:2]}
+    completion = {
+        "actual_model": "fast-mode-replay",
+        "content": "final",
+        "reasoning": "reasoning-final",
+        "tool_calls": [
+            {
+                "id": "call-complete",
+                "name": "attempt_completion",
+                "arguments": json.dumps({"summary": "done"}),
+            }
+        ],
+        "usage": {"from_fast_cache": True, "marker": "final"},
+    }
+    positions = {1: first, 2: first, 3: parallel, 4: fifth, 5: completion}
+
+    async def by_position(_goal_hash, _call_site, step=None):
+        value = positions.get(int(step or 0))
+        return value, f"position-{step}" if value is not None else None
+
+    messages = [{"role": "user", "content": goal}]
+    selected = []
+    with (
+        patch.object(rose_cache.cache_client, "cache_get_first", AsyncMock(return_value=(None, None))),
+        patch.object(rose_cache.cache_client, "cache_get_position_fallback", by_position),
+    ):
+        for base_step in range(1, 4):
+            ctx = FastCacheContext(enabled=True, goal=goal, base_step=base_step)
+            stored, _ = await rose_cache.lookup_llm_cache(
+                ctx, "execute_loop", {"messages": messages}
+            )
+            if stored is None:
+                break
+            selected.append(stored)
+            if len(selected) == 1:
+                tool_call = stored["tool_calls"][0]
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": stored.get("content", ""),
+                        "tool_calls": [
+                            {
+                                "id": tool_call["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call["name"],
+                                    "arguments": tool_call["arguments"],
+                                },
+                            }
+                        ],
+                    }
+                )
+            elif len(selected) == 2:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": stored.get("content", ""),
+                        "metadata": {
+                            "tool_calls": [
+                                {
+                                    "tool": tool_call["name"],
+                                    "type": json.loads(tool_call["arguments"])["type"],
+                                    "tool_call_id": tool_call["id"],
+                                }
+                                for tool_call in stored["tool_calls"]
+                            ]
+                        },
+                    }
+                )
+
+    assert selected == [first, limited_parallel, completion]
+    assert parallel["tool_calls"] == [
+        second["tool_calls"][0],
+        third["tool_calls"][0],
+        fourth["tool_calls"][0],
+    ]
+
+
 async def test_call_llm_structured_streaming_fast_cache_writes_only_after_validation():
     """Structured LLM responses are cached only after AgentAction validation succeeds."""
     import httpx
@@ -8130,6 +8253,10 @@ async def run_all_tests():
     await r.record_async("stream_single_call_dedup", test_call_llm_structured_streaming_single_call_dedup)
     await r.record_async(
         "stream_json_parse_failure_raises", test_call_llm_structured_streaming_json_parse_failure_raises
+    )
+    await r.record_async(
+        "july_gp_execute_caps_distinct_explores_then_completes",
+        test_july_gp_execute_caps_distinct_explores_then_completes,
     )
     await r.record_async(
         "stream_fast_cache_writes_only_after_validation",

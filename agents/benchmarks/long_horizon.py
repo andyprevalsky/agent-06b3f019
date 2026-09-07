@@ -49,6 +49,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "first_level_gp_count",
     "first_level_gp_explore_research",
     "first_level_gp_july_trajectories",
+    "general_purpose_explore_spawn_limit",
     "zero_live_spend",
     "no_nested_general_purpose",
     "no_synthetic_agent_skip_messages",
