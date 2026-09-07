@@ -24,9 +24,7 @@ async function withContext<T>(fn: (contextId: string) => Promise<T>): Promise<T>
   }
 }
 
-async function reclaimFromStatus(
-  previousStatus: 'CLOSED' | 'ACTIVE'
-): Promise<void> {
+async function reclaimFromStatus(previousStatus: 'CLOSED' | 'ACTIVE'): Promise<void> {
   await withContext(async (contextId) => {
     const taskId = randomUUID();
     const agentId = randomUUID();
@@ -139,12 +137,14 @@ async function main(): Promise<void> {
   await nonIdempotentCreateTwiceFailsWithProdError();
   await preallocatedTaskIdReclaimFromClosed();
   await preallocatedTaskIdReclaimFromActive();
-  console.log('browser-session-persist: ok');
+  process.stdout.write('browser-session-persist: ok\n');
 }
 
 main()
   .catch((error) => {
-    console.error(error);
+    process.stderr.write(
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+    );
     process.exitCode = 1;
   })
   .finally(async () => {

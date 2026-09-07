@@ -104,8 +104,7 @@ export async function persistBrowserSessionRow(
     }
   }
 
-  const previous =
-    existing ?? (await prisma.browserSession.findUnique({ where: { id: taskId } }));
+  const previous = existing ?? (await prisma.browserSession.findUnique({ where: { id: taskId } }));
   if (previous === null) {
     return prisma.browserSession.create({ data: { id: taskId, ...shared } });
   }
