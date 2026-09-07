@@ -24,7 +24,6 @@ tags:
 sources:
   - agent 43b3a83b-646e-4656-a785-55c5f1a62041
   - commit 9cbd50a5f
-  - relative case 2026-07-20-transient-proxy-init-failure-classified-fatal
 repro: back-end/src/tests/unit/browser-session-persist.test.ts + agents init_browser_session_unique_constraint_not_transient
 status: fixed
 ---
@@ -54,7 +53,7 @@ cancellation retains task-scoped terminal events. Create remained non-idempotent
 On Temporal activity retry, or on a transient-init retry after a prior create
 left the row (close marks CLOSED/ERROR and does not delete), the second create
 with the same `task_id` raises P2002. The backend returns HTTP 500. The agent
-classifier treats all 5xx as transient (over-broad relative of
+classifier treats all 5xx as transient (over-broad relative of case
 `2026-07-20-transient-proxy-init-failure-classified-fatal`), so the same doomed
 create is retried five times and surfaced as a "transient-proxy" failure.
 
