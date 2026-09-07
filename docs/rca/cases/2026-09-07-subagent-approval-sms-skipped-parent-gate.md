@@ -9,13 +9,10 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/domains/request_user_approval/service.py request_user_approval_direct — parent_workflow_id is None guard before notify_sms_event_activity
 symptoms:
   - I didn’t get a text from the sub agent who got an approval request
-  - Requesting payment card for Nopa Fish
   - Approve a $28.51 purchase from Nopa Fish
-  - request_user_approval
-  - write_lock
-  - Sent write_lock SMS notification
-  - parent_workflow_id
   - Sub-agents are excluded (scale)
+  - parent_workflow_id
+  - Sent write_lock SMS notification
 tags:
   - sms
   - write-lock
