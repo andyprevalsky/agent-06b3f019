@@ -11,6 +11,7 @@ import { browserProviderEnabled } from './config';
 import { kernelCaptchaTelemetryConfig } from './captchaTelemetry';
 import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
+import { persistBrowserSessionRow } from './sessionPersist';
 import {
   getOrCreateKernelProxy,
   isKernelProxyAvailabilityError,
@@ -418,19 +419,17 @@ export async function createKernelSessionWithContext(
   });
   let dbSession;
   try {
-    dbSession = await prisma.browserSession.create({
-      data: {
-        id: options?.taskId,
-        contextId,
-        agentId,
-        sessionId: remote.sessionId,
-        debugUrl: remote.debugUrl,
-        wsUrl: remote.wsUrl,
-        status: 'ACTIVE',
-        startUrl: _startUrl || undefined,
-        provider: 'kernel',
-        ...providerProfileData(remote.profileId, remote.profileSource, true),
-      },
+    dbSession = await persistBrowserSessionRow({
+      taskId: options?.taskId,
+      contextId,
+      agentId,
+      sessionId: remote.sessionId,
+      debugUrl: remote.debugUrl,
+      wsUrl: remote.wsUrl,
+      startUrl: _startUrl || undefined,
+      provider: 'kernel',
+      ...providerProfileData(remote.profileId, remote.profileSource, true),
+      releaseRemoteSession: releaseKernelRemoteSession,
     });
   } catch (error) {
     await Promise.allSettled([
