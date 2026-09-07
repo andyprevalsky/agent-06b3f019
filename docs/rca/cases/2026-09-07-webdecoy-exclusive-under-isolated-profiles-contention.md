@@ -104,6 +104,15 @@ exclusive for a smoke-like set; post-fix: webdecoy is the sole exclusive task.
 smoke task in multi-task batches; no per-agent fan-in, no shared lock growth
 with agent count.
 
+
+Post-fix solo outcome (`bash scripts/run-bench --local browser-biometrics-webdecoy`,
+agent `956ae08f-8e09-4f89-a97e-471bb2b0a0af`): checkbox `/api/verify` succeeded
+(`success:true`, score 0) — the original contention→checkbox-poison class did not
+recur. The run still timed out after invisible-mode `form_submit` returned
+`pow_not_satisfied` and the agent burned remaining budget on network/log/evaluate
+waits. That residual is a separate first-bad boundary from the exclusive-phase
+discard fixed here.
+
 ## Human feedback
 
 None recorded. Deploy RCA requested investigation of the timeout and preferred
