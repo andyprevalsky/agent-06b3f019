@@ -21,9 +21,7 @@
     "expected_tool_counts": {
       "spawn_general_purpose_agent_for_each": 1
     },
-    "forbidden_tools": [
-      "spawn_browser_agent"
-    ],
+    "forbidden_tools": ["spawn_browser_agent"],
     "status": "ready",
     "runner": "agent",
     "bench": "rose-bench",
@@ -270,23 +268,14 @@
         "checks": [
           {
             "type": "completion_summary_file_outputs",
-            "extensions": [
-              ".html",
-              ".htm"
-            ],
-            "mime_contains": [
-              "html"
-            ],
+            "extensions": [".html", ".htm"],
+            "mime_contains": ["html"],
             "min_files": 3
           },
           {
             "type": "completion_summary_file_outputs",
-            "extensions": [
-              ".csv"
-            ],
-            "mime_contains": [
-              "csv"
-            ],
+            "extensions": [".csv"],
+            "mime_contains": ["csv"],
             "min_files": 2
           }
         ]
@@ -317,6 +306,174 @@
     ],
     "source": ["oai-demo:july-mass-agent-0"],
     "deploy_category": "harness"
+  },
+  {
+    "name": "demo-fleet-alpha",
+    "title": "DEMO Fleet Concurrency Alpha",
+    "prompt": "DEMO fleet concurrency probe alpha: call attempt_completion with result READY and stop. Do not use other tools.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["attempt_completion"],
+    "tags": ["DEMO", "fleet-concurrency"],
+    "price_limit_cents": 10,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "fast_cache": "on",
+    "enforce_declared_evaluators": true,
+    "deploy_category": "harness",
+    "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
+    "source": ["fleet-concurrency-e2e"],
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Cloud fleet concurrency probe. Requires DEMO cache gate (is_demo_cache_task) so cold soft-complete can COMPLETE at $0."
+    },
+    "evaluators": [
+      {
+        "id": "completed",
+        "method": "static_check",
+        "criteria": ["Root agent reaches COMPLETED"],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "zero-live-spend",
+        "method": "static_check",
+        "criteria": ["$0 live LLM spend"],
+        "checks": [
+          {
+            "type": "zero_live_spend"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "demo-fleet-beta",
+    "title": "DEMO Fleet Concurrency Beta",
+    "prompt": "DEMO fleet concurrency probe beta: call attempt_completion with result READY and stop. Do not use other tools.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["attempt_completion"],
+    "tags": ["DEMO", "fleet-concurrency"],
+    "price_limit_cents": 10,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "fast_cache": "on",
+    "enforce_declared_evaluators": true,
+    "deploy_category": "harness",
+    "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
+    "source": ["fleet-concurrency-e2e"],
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Cloud fleet concurrency probe. Requires DEMO cache gate (is_demo_cache_task) so cold soft-complete can COMPLETE at $0."
+    },
+    "evaluators": [
+      {
+        "id": "completed",
+        "method": "static_check",
+        "criteria": ["Root agent reaches COMPLETED"],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "zero-live-spend",
+        "method": "static_check",
+        "criteria": ["$0 live LLM spend"],
+        "checks": [
+          {
+            "type": "zero_live_spend"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "demo-fleet-gamma",
+    "title": "DEMO Fleet Concurrency Gamma",
+    "prompt": "DEMO fleet concurrency probe gamma: call attempt_completion with result READY and stop. Do not use other tools.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["attempt_completion"],
+    "tags": ["DEMO", "fleet-concurrency"],
+    "price_limit_cents": 10,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "fast_cache": "on",
+    "enforce_declared_evaluators": true,
+    "deploy_category": "harness",
+    "description": "Small DEMO task for cloud fleet concurrency e2e (sequential / lane max-concurrency / fully parallel). Execute-phase + DEMO cache cold passthrough soft-completes attempt_completion ($0). Not a predeploy smoke.",
+    "source": ["fleet-concurrency-e2e"],
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Cloud fleet concurrency probe. Requires DEMO cache gate (is_demo_cache_task) so cold soft-complete can COMPLETE at $0."
+    },
+    "evaluators": [
+      {
+        "id": "completed",
+        "method": "static_check",
+        "criteria": ["Root agent reaches COMPLETED"],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "zero-live-spend",
+        "method": "static_check",
+        "criteria": ["$0 live LLM spend"],
+        "checks": [
+          {
+            "type": "zero_live_spend"
+          }
+        ]
+      }
+    ]
   },
   {
     "name": "single-creator-arm",
@@ -1778,9 +1935,7 @@
     "prompt": "Use exactly one browser agent on DoorDash to build the complete weekly food-plan grocery cart at Safeway (2811 Middlefield Rd, Palo Alto) for guest checkout without using any saved login. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before hitting auth \u2014 a single-item or partial cart is incorrect. When DoorDash requires login or reauthentication, stop and request auth assistance. do NOT try to login. do NOT place the order. do NOT continue past the auth/reauth wall.",
     "timeout_seconds": 2700,
     "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
+    "expected_tools": ["spawn_agent"],
     "tags": [
       "browser",
       "auth",
@@ -1821,9 +1976,7 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": [
-        "doordash.com"
-      ],
+      "services": ["doordash.com"],
       "secrets": [],
       "live_targets": [
         "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
@@ -1880,9 +2033,7 @@
     "prompt": "Use exactly one browser agent on DoorDash to execute the complete weekly food-plan grocery purchase at Safeway (2811 Middlefield Rd, Palo Alto) using your authenticated session and the prod-derived checkout manifest seeded for this benchmark. Deliver to your saved Palo Alto address. Add every required Safeway manifest line item (and 99 Ranch pantry lines only when Safeway lacks them) with manifest-allowed quantities and substitutions before checkout \u2014 a single-item or partial cart is incorrect. Complete checkout and stop at the write-lock approval when the harness requires it. do NOT try to login.",
     "timeout_seconds": 2700,
     "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
+    "expected_tools": ["spawn_agent"],
     "tags": [
       "browser",
       "auth",
@@ -1923,24 +2074,15 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": [
-        "doordash.com",
-        "write_lock"
-      ],
+      "services": ["doordash.com", "write_lock"],
       "secrets": [],
       "live_targets": [
         "https://www.doordash.com/convenience/store/2811-middlefield-rd-palo-alto-961427"
       ],
       "context_notes": "Live DoorDash Safeway grocery repro of prod agent c27b4f28 (2026-08-22): Rose harness historically reached checkout with only one Kodiak item while the manifest required the full weekly food-plan basket. Evaluators fail premature single-item checkout. Codex harness can be run with --harness codex. needs_auth: injectable CookieBundles are not enough \u2014 the fixture identity must hold a live signed-in DoorDash session (valid auth token). Sibling browser-doordash-food-plan-grocery-cart-reauth covers cookie-sync-off cart + auth_assistance.",
-      "live_fixtures": [
-        "live-aman-food-plan-identity"
-      ],
-      "live_cookie_domains": [
-        "doordash.com"
-      ],
-      "required_injectable_cookie_domains": [
-        "doordash.com"
-      ],
+      "live_fixtures": ["live-aman-food-plan-identity"],
+      "live_cookie_domains": ["doordash.com"],
+      "required_injectable_cookie_domains": ["doordash.com"],
       "needs_auth": true
     },
     "evaluators": [

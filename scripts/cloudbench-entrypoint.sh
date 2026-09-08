@@ -198,6 +198,10 @@ STACK_ENV=(
     "HOME=/home/$APP_USER"
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
+    # Canonical seed restores share a BrowserProviderProfile ID across boxes;
+    # isolate the external provider profile too, then let backend shutdown
+    # delete the run-local profile.
+    "BENCHMARK_ISOLATED_BROWSER_PROFILES=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
     "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
@@ -322,6 +326,7 @@ gosu "$APP_USER" env \
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR" \
     "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json" \
     "BENCHMARK_ISOLATED_RUN=true" \
+    "BENCHMARK_ISOLATED_BROWSER_PROFILES=true" \
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1" \
     bash -c "cd '$APP_DIR/agents' && exec venv/bin/python -u benchmarks/run_benchmark.py \"\$@\"" _ "${BENCH_ARGS[@]}"
 BENCH_RC=$?

@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# run-fleet-concurrency-modes — e2e-prove the three Cloud Fleet interfaces
+# that /descend (PR #1285 rolling lanes) and /deploy must share:
+#
+#   sequential  == campaign_cap=1
+#                 one active one-task `run-bench-fleet` at a time
+#   lane        == campaign_cap=N (default 2 for this e2e)
+#                 waves of at most N concurrent one-task fleets
+#                 (same concurrency bound as PR #1285 rolling lanes)
+#   parallel    == fully parallel multi-task `run-bench-fleet`
+#                 one machine per task in a single controller
+#
+# Uses the small DEMO catalog tasks (demo-fleet-alpha|beta|gamma), NOT the
+# 50-wide mass-agent DEMO. See docs/plans/active/fleet-demo-concurrency-e2e.md.
+#
+# Usage:
+#   bash scripts/run-fleet-concurrency-modes --dry-contract   # no Fly
+#   bash scripts/run-fleet-concurrency-modes                 # live cloud
+#   bash scripts/run-fleet-concurrency-modes --mode lane --cap 2
+#   FLEET_CONCURRENCY_LANE_CAP=2 bash scripts/run-fleet-concurrency-modes
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+DEMO_TASKS=(demo-fleet-alpha demo-fleet-beta demo-fleet-gamma)
+DRY_CONTRACT=0
+MODE="all"   # all | sequential | lane | parallel
+LANE_CAP="${FLEET_CONCURRENCY_LANE_CAP:-2}"
+EXTRA_FLEET_ARGS=()
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/run-fleet-concurrency-modes [options]
+
+Options:
+  --dry-contract     Validate catalog + print mode command shapes; no Fly.
+  --mode <name>      all (default) | sequential | lane | parallel
+  --cap <n>          Lane max-concurrency (campaign_cap) for --mode lane (default 2)
+  --                 Pass remaining args through to each run-bench-fleet invocation
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-contract) DRY_CONTRACT=1; shift ;;
+    --mode)
+      MODE="${2:-}"
+      shift 2
+      case "$MODE" in all|sequential|lane|parallel) ;; *)
+        echo "❌ unknown --mode: $MODE" >&2; usage >&2; exit 2 ;;
+      esac
+      ;;
+    --cap)
+      LANE_CAP="${2:-}"
+      shift 2
+      case "$LANE_CAP" in ''|*[!0-9]*|0)
+        echo "❌ --cap must be a positive integer" >&2; exit 2 ;;
+      esac
+      ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; EXTRA_FLEET_ARGS+=("$@"); break ;;
+    *)
+      echo "❌ unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "$LANE_CAP" -gt "${#DEMO_TASKS[@]}" ]; then
+  echo "❌ --cap ($LANE_CAP) cannot exceed DEMO task count (${#DEMO_TASKS[@]})" >&2
+  exit 2
+fi
+
+require_demo_catalog() {
+  python3 - "$ROOT_DIR" "${DEMO_TASKS[@]}" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+wanted = sys.argv[2:]
+tasks_path = root / "agents" / "benchmarks" / "tasks.json"
+tasks = json.loads(tasks_path.read_text())
+by_name = {t["name"]: t for t in tasks if isinstance(t, dict)}
+missing = [n for n in wanted if n not in by_name]
+if missing:
+    print(f"❌ missing DEMO fleet tasks: {missing}", file=sys.stderr)
+    sys.exit(2)
+for name in wanted:
+    t = by_name[name]
+    tags = [str(x) for x in (t.get("tags") or [])]
+    if "DEMO" not in tags:
+        print(f"❌ {name} must be tagged DEMO", file=sys.stderr)
+        sys.exit(2)
+    if "smoke" in tags:
+        print(f"❌ {name} must NOT be smoke-tagged (keeps predeploy floor lean)", file=sys.stderr)
+        sys.exit(2)
+    if "fleet-concurrency" not in tags:
+        print(f"❌ {name} must be tagged fleet-concurrency", file=sys.stderr)
+        sys.exit(2)
+    if str(t.get("fast_cache") or "").lower() != "on":
+        print(f"❌ {name} must set fast_cache:on", file=sys.stderr)
+        sys.exit(2)
+    if int(t.get("min_agent_count") or 0) >= 50:
+        print(f"❌ {name} is too heavy for concurrency e2e", file=sys.stderr)
+        sys.exit(2)
+    if t.get("requires_browser_agent") is True:
+        print(f"❌ {name} must not require browser agents ($0 cache DEMO)", file=sys.stderr)
+        sys.exit(2)
+    if t.get("requires_claude_code") is True:
+        print(f"❌ {name} must not require claude-code agents ($0 cache DEMO)", file=sys.stderr)
+        sys.exit(2)
+    tags_l = {x.lower() for x in tags}
+    if tags_l & {"browser", "browser_stateful", "claude-code", "mass-agent"}:
+        print(f"❌ {name} has forbidden heavy tags: {sorted(tags_l)}", file=sys.stderr)
+        sys.exit(2)
+    checks = []
+    for ev in t.get("evaluators") or []:
+        for ch in ev.get("checks") or []:
+            if isinstance(ch, dict):
+                checks.append(ch.get("type"))
+    if "zero_live_spend" not in checks:
+        print(f"❌ {name} must declare zero_live_spend evaluator", file=sys.stderr)
+        sys.exit(2)
+    prompt = str(t.get("prompt") or "")
+    if "DEMO fleet concurrency probe" not in prompt:
+        print(f"❌ {name} prompt must use DEMO fleet concurrency probe prefix", file=sys.stderr)
+        sys.exit(2)
+print("OK catalog:", ", ".join(wanted))
+PY
+}
+
+print_mode_contract() {
+  local tasks_joined="${DEMO_TASKS[*]}"
+  cat <<EOF
+════════════════════════════════════════════════════════════
+Fleet concurrency interfaces (/descend campaign_cap mapping)
+════════════════════════════════════════════════════════════
+tasks: ${tasks_joined}
+
+[sequential]  campaign_cap=1
+  for t in ${tasks_joined}; do
+    bash scripts/run-bench-fleet "\$t" --wait
+  done
+
+[lane]        campaign_cap=${LANE_CAP}  (≤N concurrent one-task fleets)
+  # waves of size ${LANE_CAP}; same concurrency bound as PR #1285 rolling lanes
+  # each sibling sets CLOUDBENCH_CONTROLLER_LOCK_NAME=cloudbench-controller-lane-<task>.lock
+
+[parallel]    fully parallel multi-task fleet
+  bash scripts/run-bench-fleet ${tasks_joined} --wait
+
+All three modes must pass for the /deploy DEMO cloud e2e gate.
+════════════════════════════════════════════════════════════
+EOF
+}
+
+run_fleet() {
+  # DEMO $0 probes soft-complete and tear down /metrics within seconds.
+  # Mandatory per-bench worker autoscalers race that teardown into CHILDFAIL
+  # (late scale-up + empty worker-ready after guest shutdown). Skip them —
+  # concurrency modes prove fleet shapes, not autoscaler actuation.
+  bash scripts/run-bench-fleet "$@" --wait --skip-autoscaler "${EXTRA_FLEET_ARGS[@]}"
+}
+
+run_sequential() {
+  echo "▶ sequential (campaign_cap=1)"
+  local t
+  for t in "${DEMO_TASKS[@]}"; do
+    echo "  → one-task fleet: $t"
+    run_fleet "$t"
+  done
+}
+
+run_lane() {
+  echo "▶ lane max-concurrency (campaign_cap=${LANE_CAP})"
+  # Wave scheduling: at most LANE_CAP one-task fleets in flight. Proves the
+  # campaign_cap bound; true mid-wave refill lives in PR #1285's supervisor.
+  #
+  # Each concurrent one-task fleet gets a distinct workspace controller lock.
+  # Without that, siblings serialize on .context/cloudbench-controller.lock
+  # (CLOUDBENCH_RETRYABLE_CAPACITY=local_lock_busy) and lane collapses to
+  # sequential — which is exactly the false-pass we must not ship.
+  local -a wave=()
+  local -a pids=()
+  local t pid ec=0 status lock_name
+
+  flush_wave() {
+    pids=()
+    for t in "${wave[@]}"; do
+      echo "  → lane launch: $t"
+      lock_name="cloudbench-controller-lane-${t}.lock"
+      echo "    controller lock: .context/${lock_name}"
+      (
+        export CLOUDBENCH_CONTROLLER_LOCK_NAME="$lock_name"
+        run_fleet "$t"
+      ) &
+      pids+=("$!")
+    done
+    for pid in "${pids[@]}"; do
+      status=0
+      wait "$pid" || status=$?
+      if [ "$status" -ne 0 ]; then
+        echo "❌ lane child pid=$pid failed (exit $status)" >&2
+        ec=1
+      fi
+    done
+    wave=()
+  }
+
+  for t in "${DEMO_TASKS[@]}"; do
+    wave+=("$t")
+    if [ "${#wave[@]}" -ge "$LANE_CAP" ]; then
+      flush_wave
+      if [ "$ec" -ne 0 ]; then
+        return "$ec"
+      fi
+    fi
+  done
+  if [ "${#wave[@]}" -gt 0 ]; then
+    flush_wave
+  fi
+  return "$ec"
+}
+
+run_parallel() {
+  echo "▶ fully parallel (multi-task run-bench-fleet)"
+  run_fleet "${DEMO_TASKS[@]}"
+}
+
+require_demo_catalog
+print_mode_contract
+
+if [ "$DRY_CONTRACT" -eq 1 ]; then
+  echo "✅ dry-contract OK (no Fly invoked)"
+  exit 0
+fi
+
+case "$MODE" in
+  sequential) run_sequential ;;
+  lane)       run_lane ;;
+  parallel)   run_parallel ;;
+  all)
+    run_sequential
+    run_lane
+    run_parallel
+    ;;
+esac
+
+echo "✅ fleet concurrency modes OK (mode=$MODE)"

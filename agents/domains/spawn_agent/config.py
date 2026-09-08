@@ -129,6 +129,51 @@ def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
 
+# Small fleet-concurrency DEMO probes (demo-fleet-alpha|beta|gamma). Prefix is
+# workflow-sandbox safe (no catalog I/O). Keep in sync with tasks.json prompts.
+DEMO_FLEET_CONCURRENCY_GOAL_PREFIX = "DEMO fleet concurrency probe"
+
+# Eager catalog allowlist for workflow gating. Must load at import time (worker /
+# pass-through), never lazily inside a Temporal workflow step — file I/O and
+# deferred imports there leave agents stuck in STARTING_UP.
+_DEMO_CACHE_GOAL_HASHES: frozenset[str]
+_demo_cache_goal_hash = None
+try:
+    from providers.fast_cache.normalize import (
+        demo_cache_goal_hashes as _load_demo_cache_goal_hashes,
+        goal_hash as _load_demo_cache_goal_hash,
+    )
+
+    _DEMO_CACHE_GOAL_HASHES = _load_demo_cache_goal_hashes()
+    _demo_cache_goal_hash = _load_demo_cache_goal_hash
+except Exception:  # pragma: no cover - slim images / import-order unit tests
+    _DEMO_CACHE_GOAL_HASHES = frozenset()
+    _demo_cache_goal_hash = None
+
+
+def is_demo_cache_task(workflow_instance) -> bool:
+    """True when Fast Mode DEMO cache replay / cold soft-complete may run.
+
+    Broader than ``is_oai_demo_mass_agent_task``: catalog DEMO / ``fast_cache:on``
+    goal hashes (eagerly loaded) plus the fleet-concurrency DEMO prefix.
+    Used only to gate ``workflow.fast_mode_cache_enabled`` — mass-agent-only
+    spawn rules keep ``is_oai_demo_mass_agent_task``.
+    """
+    if is_oai_demo_mass_agent_task(workflow_instance):
+        return True
+    goal = str(getattr(workflow_instance, "goal", None) or "")
+    root = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
+    if DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in goal or DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in root:
+        return True
+    if _demo_cache_goal_hash is None or not _DEMO_CACHE_GOAL_HASHES:
+        return False
+    if goal and _demo_cache_goal_hash(goal) in _DEMO_CACHE_GOAL_HASHES:
+        return True
+    if root and _demo_cache_goal_hash(root) in _DEMO_CACHE_GOAL_HASHES:
+        return True
+    return False
+
+
 def should_skip_oai_demo_browser_spawn(workflow_instance) -> bool:
     """DEMO mass-agent trees must not open browser-agent sessions."""
     return is_oai_demo_mass_agent_task(workflow_instance)
