@@ -304,10 +304,14 @@ printf '0\n' > "$identity_ps_count"
     count=$((count + 1))
     printf '%s\n' "$count" > "$identity_ps_count"
     if [ "$count" -eq 1 ]; then
-      printf 'Mon Jan  1 00:00:00 2001\n'
+      printf 'Mon Jan  1 00:00:00 2001'
     else
-      printf 'Tue Jan  2 00:00:00 2001\n'
+      printf 'Tue Jan  2 00:00:00 2001'
     fi
+    case " $* " in
+      *' stat='*) printf ' S\n' ;;
+      *) printf '\n' ;;
+    esac
   }
   kill() {
     printf '%s\n' "$*" >> "$identity_signal_log"
