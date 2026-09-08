@@ -36,6 +36,9 @@ require_text "Andy sees a deeper" "/descend must show a deeper bench only when e
 require_text "not a prod deploy" "/descend must apply approved fixes on a local snapshot, not a prod deploy"
 require_text "original frozen rank" "/descend must reinsert a failed local rerun at its original frozen rank"
 require_text "Immediately fire a sub-agent" "/descend must start the local snapshot rerun immediately on approve"
+require_text "Default substrate: cloud fleet" "/descend must default benchmark runs to the cloud fleet"
+require_text "scripts/run-bench <task>" "/descend outcome-proof must use cloud fleet run-bench (not --local by default)"
+require_text "fail-closes on a stale/missing infra-canary stamp" "/descend must document infra-canary fail-closed preflight"
 require_text "RANK_HEAP" "/descend must rank failing tasks before pipelined fix approval"
 require_text "PIPELINE_HEAP" "/descend must pipeline approve, local rerun, and the next ask"
 # Soft until command-wiring PR lands: runtime preflight in run-bench-fleet is the

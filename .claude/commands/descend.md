@@ -356,7 +356,13 @@ but the agent deliberately yields for input only in the two states above.
 
 ## Benchmark and infra-clean loop
 
-Run only through the isolated entrypoint:
+**Default substrate: cloud fleet.** Every `/descend` benchmark run — the initial
+slice, every infra-epoch rerun, every post-approval outcome-proof, and the final
+full-slice acceptance — goes through `scripts/run-bench` (defaults to
+`run-bench-fleet`, which fail-closes on a stale/missing infra-canary stamp).
+Use `scripts/run-bench --local …` only when Andy explicitly directs a local run.
+
+Run only through the isolated entrypoint (cloud fleet by default):
 
 ~~~bash
 scripts/run-bench <resolved task names...>
@@ -473,13 +479,15 @@ responds to the current HARNESS row with approve, edit, or reject. Infra rows
 use Not required.
 
 - **approve:** set Approval to Fix approved. Immediately fire a sub-agent to
-  apply the approved fix on a local snapshot — not a prod deploy — and rerun
-  that exact bench via `scripts/run-bench --local <task>`. Immediately ask
-  about the next idle heap item. If the local rerun fails, the sub-agent
-  reruns `/rca` and reinserts the task at its original frozen rank.
+  apply the approved fix on a local code snapshot — not a prod deploy — and
+  rerun that exact bench on the **cloud fleet** via `scripts/run-bench <task>`
+  (no `--local` unless Andy explicitly directed local for this rerun).
+  Immediately ask about the next idle heap item. If the outcome-proof rerun
+  fails, the sub-agent reruns `/rca` and reinserts the task at its original
+  frozen rank.
 - **edit:** set Approval to Edit requested, apply the instruction, return the
-  row through the identical local verification gate, and ask again at the
-  same frozen rank.
+  row through the identical owning-boundary verification gate, and ask again at
+  the same frozen rank.
 - **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
   fix. The task stays at its original rank and needs a new RCA for a
   different approach.
