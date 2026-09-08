@@ -1768,7 +1768,7 @@ describe('BrowserStatusBar (blackbox)', () => {
         controlModes.push(body.mode ?? '');
         controlRequested = body.mode === 'user';
         return HttpResponse.json({
-          state: controlRequested ? 'requested' : 'agent',
+          state: controlRequested ? 'user' : 'agent',
           agentPaused: false,
         });
       }),

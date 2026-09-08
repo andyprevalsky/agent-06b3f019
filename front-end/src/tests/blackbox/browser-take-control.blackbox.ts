@@ -23,17 +23,16 @@ describe('takeBrowserControl same-session handover', () => {
     vi.useRealTimers();
   });
 
-  it('enables the same live session without polling for a worker ack', async () => {
+  it('rejects a leftover requested snapshot so the iframe stays disabled', async () => {
     const calls: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         calls.push(`${init?.method ?? 'GET'} ${url}`);
-        const body = init?.body ? (JSON.parse(String(init.body)) as { mode?: string }) : {};
         return new Response(
           JSON.stringify({
-            state: body.mode === 'user' ? 'requested' : 'agent',
+            state: 'requested',
             agentPaused: false,
             debugUrl: 'https://connect.steel.dev/v1/sessions/second/player?interactive=false',
           }),
@@ -43,11 +42,11 @@ describe('takeBrowserControl same-session handover', () => {
     );
 
     const started = Date.now();
-    const snapshot = await takeBrowserControl('task-second');
+    await expect(takeBrowserControl('task-second')).rejects.toThrow(
+      'Browser agent did not hand control over in time',
+    );
     const elapsedMs = Date.now() - started;
 
-    expect(snapshot.state).toBe('requested');
-    expect(snapshot.debugUrl).toContain('sessions/second');
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatch(/^POST /);
     expect(calls[0]).toContain('/browser-session/task/task-second/control');

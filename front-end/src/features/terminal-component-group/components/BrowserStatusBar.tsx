@@ -45,8 +45,9 @@
  * TAKE CONTROL (same live session, no reinjection):
  * [AGENT] --Take control--> POST /control {mode:user} --> USER immediately
  *     |                        (same debugUrl / sessionId)
+ *     |                        leftover requested / agent is NOT interactive
  *     v
- * [USER_CONTROLLING] iframe flips interactive=true on that URL
+ * [USER_CONTROLLING] iframe flips interactive=true only when state === user
  *     |
  *     | Hand back
  *     v

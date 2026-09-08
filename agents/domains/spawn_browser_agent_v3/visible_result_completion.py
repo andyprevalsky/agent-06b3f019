@@ -36,7 +36,10 @@ _LABELED_BOUND_SCORE_RE = re.compile(
     r"|(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b.{0,40}\brisk\s+score\b",
     re.IGNORECASE | re.DOTALL,
 )
-_JSON_SCORE_RE = re.compile(r"""['"]score['"]\s*:\s*\d*\.?\d+""", re.IGNORECASE)
+_JSON_SCORE_RE = re.compile(
+    r"""['"]score['"]\s*:\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+)""",
+    re.IGNORECASE,
+)
 
 
 def _normalize_history_blob(blob: str) -> str:

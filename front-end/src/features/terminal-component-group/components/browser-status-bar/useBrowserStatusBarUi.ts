@@ -125,7 +125,7 @@ function useBrowserControlRecovery(
       try {
         let snapshot = await readBrowserControlState(taskId);
         if (snapshot.state === 'requested') snapshot = await takeBrowserControl(taskId);
-        if (!cancelled && snapshot.state !== 'agent') {
+        if (!cancelled && snapshot.state === 'user') {
           const liveBrowserUrl = snapshot.debugUrl;
           if (liveBrowserUrl === null || liveBrowserUrl === '') return;
           const recoveredControl = {

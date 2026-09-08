@@ -39,7 +39,7 @@ async function setBrowserControlMode(
 
 export async function takeBrowserControl(taskId: string): Promise<BrowserControlSnapshot> {
   const snapshot = await setBrowserControlMode(taskId, 'user');
-  if (snapshot.state === 'agent') {
+  if (snapshot.state !== 'user') {
     throw new Error('Browser agent did not hand control over in time');
   }
   return snapshot;
