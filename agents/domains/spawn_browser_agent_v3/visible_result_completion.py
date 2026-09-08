@@ -29,6 +29,10 @@ from typing import Any, Iterable
 _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
 _FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
 _NUMERIC_SCORE_RE = re.compile(r"\b\d+\.\d+\b")
+# FCaptcha risk scores are unit-interval (0.07, 0.15). Do not treat product
+# versions like v1.34.1 as a score — `\b\d+\.\d+\b` matches 34.1 there.
+_UNIT_INTERVAL_SCORE_RE = re.compile(r"\b0\.\d+\b")
+_JSON_SCORE_RE = re.compile(r"""['"]score['"]\s*:\s*\d*\.?\d+""", re.IGNORECASE)
 _VERDICT_MARKERS = (
     "bot detected",
     "form blocked",
@@ -106,7 +110,8 @@ def observation_states_visible_fcaptcha_result(text: str) -> bool:
 
     Evaluate/read results dump the whole page, so a static "Risk Score" label
     plus a version number (v1.34.1) must not count. Require an explicit
-    form-result verdict plus a score marker.
+    form-result verdict plus an actual unit-interval / JSON score value —
+    not any decimal (CodeRabbit: Bot detected + v1.34.1 must not complete).
     """
     blob = str(text or "")
     if not blob.strip():
@@ -114,10 +119,7 @@ def observation_states_visible_fcaptcha_result(text: str) -> bool:
     lowered = blob.lower()
     if not any(marker in lowered for marker in _FORM_RESULT_VERDICTS):
         return False
-    has_score = bool(
-        _RISK_SCORE_RE.search(blob) or _FCAPTCHA_SCORE_RE.search(blob) or _NUMERIC_SCORE_RE.search(blob)
-    )
-    return has_score
+    return bool(_UNIT_INTERVAL_SCORE_RE.search(blob) or _JSON_SCORE_RE.search(blob))
 
 
 def _entry_blob(entry: Any) -> str:

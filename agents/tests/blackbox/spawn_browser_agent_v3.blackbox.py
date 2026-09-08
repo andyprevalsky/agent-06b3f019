@@ -635,6 +635,27 @@ def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
     )
 
 
+def test_visible_result_completion_ignores_post_submit_version_decimal_without_score():
+    """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        observation_states_visible_fcaptcha_result,
+        should_force_visible_result_completion,
+    )
+
+    version_only = (
+        "Running v1.34.1\nRisk Score (lower = human)\nBot detected - form blocked"
+    )
+    assert not observation_states_visible_fcaptcha_result(version_only)
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": version_only}},
+        ],
+    )
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -19286,6 +19307,10 @@ async def run_all_tests():
         "visible_result_completion_rewrites_wait_when_evaluate_already_has_score",
         test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
     )
+    r.record(
+        "visible_result_completion_ignores_post_submit_version_decimal_without_score",
+        test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -19303,7 +19328,6 @@ async def run_all_tests():
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
-    
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
     await r.record_async(
         "action_history_resume_monotonic_steps",
