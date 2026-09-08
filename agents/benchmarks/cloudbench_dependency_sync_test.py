@@ -5119,7 +5119,7 @@ runtime_log="$(printf '%s\n' \
   'clone name=cloudbench-ff94c207ec984ab8922dfc65 source=871535c0322758 status=1 attempt=1/5' \
   'Cloning Machine 871535c0322758 into region iad' \
   'Creating new volume from snapshot: vs_JO5KLvjwP8XuQG4X927' \
-  'Provisioning a new Machine with image registry.fly.io/fixture-bench-app-bench:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
+  'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
   \"Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vp2q8xeydwjm79w4' (Request ID: 01M1XBMTXS1C4PWJAXJ66YHV08-iad)\")"
 runtime_transcript="${{runtime_log#*$'\n'}}"
 [ \"$(clone_failure_owned_volume_id 1 "$runtime_transcript")\" = vol_vp2q8xeydwjm79w4 ] || exit 11
@@ -5197,7 +5197,7 @@ FLY() {{
       printf "%s\n" \
         'Cloning Machine 871535c0322758 into region iad' \
         'Creating new volume from snapshot: vs_JO5KLvjwP8XuQG4X927' \
-        'Provisioning a new Machine with image registry.fly.io/fixture-bench-app-bench:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
+        'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
         "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vp2q8xeydwjm79w4' (Request ID: 01M1XBMTXS1C4PWJAXJ66YHV08-iad)" >&2
       return 1 ;;
     "volumes destroy")
@@ -5237,7 +5237,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
         "clone name=cloudbench-ff94c207ec984ab8922dfc65 source=871535c0322758 status=1 attempt=1/1",
         "Cloning Machine 871535c0322758 into region iad",
         "Creating new volume from snapshot: vs_JO5KLvjwP8XuQG4X927",
-        "Provisioning a new Machine with image registry.fly.io/fixture-bench-app-bench:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...",
+        "Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...",
         "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vp2q8xeydwjm79w4' (Request ID: 01M1XBMTXS1C4PWJAXJ66YHV08-iad)",
     ]
     assert not any((registry / "clones").iterdir()), (
@@ -12556,7 +12556,7 @@ warm_json={shlex.quote(json.dumps(machines))}
 BENCHES=({benches})
 PROVISION_POOL=""
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 RUN_ID=test-replacement-boundary
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -12619,7 +12619,7 @@ warm_json={shlex.quote(json.dumps(machines))}
 BENCHES=({benches})
 PROVISION_POOL=""
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 RUN_ID="test-$1"
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -12703,7 +12703,7 @@ warm_json={shlex.quote(json.dumps(machines))}
 BENCHES=({benches})
 PROVISION_POOL=""
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 RUN_ID=test-pool-boundary
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -12770,7 +12770,7 @@ FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
 FLEET_PRIMARY_VM_MEMORY=4096
 FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 RUN_ID=test-bundled-primary-capacity
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -12829,7 +12829,7 @@ warm_json={shlex.quote(json.dumps(machines))}
 BENCHES=(a b c d)
 PROVISION_POOL=""
 FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 RUN_ID=test-invalid-pool
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
@@ -12866,7 +12866,7 @@ CLOUDBENCH_CAPACITY_START_ACCOUNTING_SECONDS=1
 BENCHES=(first second)
 CHILD_MACHINE=(abc123)
 CHILD_OUT=({shlex.quote(str(output))})
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 FLY() {{ printf '%s\n' '[{{"id":"abc123","state":"started"}}]'; }}
 capacity_release_reservation() {{ touch {shlex.quote(str(released))}; }}
 {release}
@@ -12935,7 +12935,7 @@ def test_worker_capacity_reservation_streams_full_provider_inventory_without_exe
     fleet = FLEET_SCRIPT.read_text()
     reserve_worker = _extract_fleet_function(fleet, "reserve_worker_machine_slot() {")
     script = f"""set -u
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 CLOUDBENCH_APP_MACHINE_CEILING=56
 FLY() {{
   python3 -c '
@@ -13038,7 +13038,7 @@ CLOUDBENCH_CAPACITY_START_ACCOUNTING_SECONDS=1
 BENCHES=({benches})
 CHILD_MACHINE=({machine_ids})
 CHILD_OUT=({child_outputs})
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
     python3 -c '
@@ -13085,7 +13085,7 @@ def test_capacity_reservation_recovers_a_proven_dead_owner(tmp_path: Path) -> No
     live_token = "f" * 32 + "-primary"
     (records / dead_token).write_text(
         "version=1\n"
-        "app=fixture-bench-app-bench\n"
+        "app=fixture-bench-app\n"
         f"host={socket.gethostname()}\n"
         "pid=999999\n"
         "pid_start=Mon Jan  1 00:00:00 2001\n"
@@ -13097,7 +13097,7 @@ def test_capacity_reservation_recovers_a_proven_dead_owner(tmp_path: Path) -> No
     )
     script = f"""set -eu
 CAPACITY_RESERVATION_ROOT={shlex.quote(str(root))}
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 RUN_ID=successor
@@ -13131,7 +13131,7 @@ def test_capacity_reservation_retains_cleanup_unconfirmed_dead_owner(
     (registry / "guest-cleanup-unconfirmed").touch()
     (records / dead_token).write_text(
         "version=1\n"
-        "app=fixture-bench-app-bench\n"
+        "app=fixture-bench-app\n"
         f"host={socket.gethostname()}\n"
         "pid=999999\n"
         "pid_start=Mon Jan  1 00:00:00 2001\n"
@@ -13145,7 +13145,7 @@ def test_capacity_reservation_retains_cleanup_unconfirmed_dead_owner(
     script = f"""set -u
 CAPACITY_RESERVATION_ROOT={shlex.quote(str(root))}
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
-APP=fixture-bench-app-bench
+APP=fixture-bench-app
 FLEET_OWNER_HOST="$(hostname)"
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 FLEET_OWNER_TOKEN={live_owner_token}
