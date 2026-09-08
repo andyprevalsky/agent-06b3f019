@@ -28,18 +28,38 @@ from typing import Any, Iterable
 
 _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
 _FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
-_NUMERIC_SCORE_RE = re.compile(r"\b\d+\.\d+\b")
-# FCaptcha risk scores are unit-interval (0.07, 0.15). Reject version
-# fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after another dotted token).
+# FCaptcha risk scores are unit-interval (0.07, 0.15) plus labeled bounds 0/1/1.0.
+# Reject version fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after a dot).
 _UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b")
-_JSON_SCORE_RE = re.compile(r"""['"]score['"]\s*:\s*\d*\.?\d+""", re.IGNORECASE)
-_VERDICT_MARKERS = (
-    "bot detected",
-    "form blocked",
-    "pow_not_satisfied",
-    "human detected",
-    "verified!",
+_LABELED_BOUND_SCORE_RE = re.compile(
+    r"\brisk\s+score\b.{0,40}(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b"
+    r"|(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b.{0,40}\brisk\s+score\b",
+    re.IGNORECASE | re.DOTALL,
 )
+_JSON_SCORE_RE = re.compile(r"""['"]score['"]\s*:\s*\d*\.?\d+""", re.IGNORECASE)
+
+
+def _normalize_history_blob(blob: str) -> str:
+    """Undo json.dumps escaping so labels/newlines remain grep-able."""
+    return blob.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+
+
+def _blob_has_fcaptcha_score_value(blob: str) -> bool:
+    """True when a numeric FCaptcha score is labeled or structured.
+
+    A bare `0.15` next to `Bot detected` is not enough — `threshold 0.15`
+    and `v1.0.15` must not force completion (CodeRabbit). History blobs are
+    json.dumps of action entries, so unescape before matching labels.
+    """
+    text = _normalize_history_blob(blob)
+    if _JSON_SCORE_RE.search(text):
+        return True
+    if _LABELED_BOUND_SCORE_RE.search(text):
+        return True
+    has_label = bool(_RISK_SCORE_RE.search(text) or _FCAPTCHA_SCORE_RE.search(text))
+    return has_label and bool(_UNIT_INTERVAL_SCORE_RE.search(text))
+
+
 # Idle / exploratory actions that cannot change a result already on the page.
 # Do NOT include click/type/submit — those may still be required before the
 # first submit, and the submit-history gate already blocks pre-submit rewrites.
@@ -96,12 +116,7 @@ def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
     blob = str(text or "")
     if not blob.strip():
         return False
-    has_score = bool(_RISK_SCORE_RE.search(blob) or _FCAPTCHA_SCORE_RE.search(blob))
-    has_unit = bool(_UNIT_INTERVAL_SCORE_RE.search(blob) or _JSON_SCORE_RE.search(blob))
-    if has_score and has_unit:
-        return True
-    # JSON `"score": 0.15` is an explicit FCaptcha field even without the label.
-    return bool(_JSON_SCORE_RE.search(blob) and any(marker in blob.lower() for marker in _VERDICT_MARKERS))
+    return _blob_has_fcaptcha_score_value(blob)
 
 
 def observation_states_visible_fcaptcha_result(text: str) -> bool:
@@ -118,7 +133,7 @@ def observation_states_visible_fcaptcha_result(text: str) -> bool:
     lowered = blob.lower()
     if not any(marker in lowered for marker in _FORM_RESULT_VERDICTS):
         return False
-    return bool(_UNIT_INTERVAL_SCORE_RE.search(blob) or _JSON_SCORE_RE.search(blob))
+    return _blob_has_fcaptcha_score_value(blob)
 
 
 def _entry_blob(entry: Any) -> str:

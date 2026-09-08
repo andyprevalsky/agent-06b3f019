@@ -639,6 +639,7 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
     from domains.spawn_browser_agent_v3.visible_result_completion import (
         observation_states_visible_fcaptcha_result,
+        reasoning_states_visible_fcaptcha_result,
         should_force_visible_result_completion,
     )
 
@@ -665,6 +666,10 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
             {"action": "evaluate", "result": {"message": version_unit_fragment}},
         ],
     )
+    assert not observation_states_visible_fcaptcha_result("Bot detected; threshold 0.15")
+    assert reasoning_states_visible_fcaptcha_result("Risk Score: 0")
+    assert reasoning_states_visible_fcaptcha_result("Risk Score: 1.0")
+    assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():
