@@ -83,9 +83,12 @@ function testServiceHasNoSmsSideEffect(): void {
   assert.equal(source.includes('sendSms'), false, 'report-bug must not send SMS');
   assert.equal(source.includes('notifyBugReportSms'), false, 'report-bug must not notify via SMS');
   assert.equal(source.includes('getUserPhone'), false, 'report-bug must not look up a phone');
-  assert.equal(source.includes('buildBugReportSms'), false, 'report-bug must not build an SMS body');
+  assert.equal(
+    source.includes('buildBugReportSms'),
+    false,
+    'report-bug must not build an SMS body'
+  );
 }
-
 
 function testParseCursorAgentFromComment(): void {
   const body =

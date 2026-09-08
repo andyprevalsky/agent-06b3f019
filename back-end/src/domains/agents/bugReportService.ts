@@ -240,10 +240,7 @@ export async function reportAgentBug(
   };
 }
 
-async function defaultLaunch(args: {
-  name: string;
-  promptText: string;
-}): Promise<ReportBugLaunch> {
+async function defaultLaunch(args: { name: string; promptText: string }): Promise<ReportBugLaunch> {
   const canScm = hasGithubIssueLaunchToken();
   const apiKey = getCursorApiKey();
   if (canScm) {
