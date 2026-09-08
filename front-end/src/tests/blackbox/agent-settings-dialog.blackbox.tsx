@@ -306,6 +306,7 @@ describe('AgentSettingsDialog', () => {
     await u.click(await screen.findByTestId('report-bug-open'));
 
     const textarea = await screen.findByTestId('report-bug-description');
+    expect(screen.queryByText(/SMS/i)).toBeNull();
     await u.type(textarea, 'Checkout never finished');
     await u.click(screen.getByTestId('report-bug-submit'));
 
@@ -314,8 +315,8 @@ describe('AgentSettingsDialog', () => {
         capturedRequests.some((r) => r.method === 'POST' && r.url.includes('/report-bug')),
       ).toBe(true);
     });
-    // Sticky launched panel — required because post-await window.open is blocked on iOS
-    // and API agents (source:api) often skip the native mobile rose inbox.
+    // Sticky launched panel with an explicit Open button. Submit must not
+    // auto-open Cursor — that is a user gesture, not a side effect of report.
     expect(await screen.findByTestId('report-bug-launched')).toBeInTheDocument();
     expect(screen.getByTestId('report-bug-url')).toHaveAttribute(
       'href',
@@ -325,14 +326,16 @@ describe('AgentSettingsDialog', () => {
     expect(screen.queryByText(/Bug \|/)).toBeNull();
     expect(screen.getByText(/Launched via GitHub/)).toBeInTheDocument();
     expect(screen.queryByText(/Cursor API/)).toBeNull();
+    expect(screen.queryByText(/SMS/i)).toBeNull();
+    expect(openSpy).not.toHaveBeenCalled();
+
+    await u.click(screen.getByTestId('report-bug-open-link'));
+    expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy).toHaveBeenCalledWith(
       'https://cursor.com/agents/bc-bug-1',
       '_blank',
       'noopener,noreferrer',
     );
-
-    await u.click(screen.getByTestId('report-bug-open-link'));
-    expect(openSpy).toHaveBeenCalledTimes(2);
 
     openSpy.mockRestore();
   });

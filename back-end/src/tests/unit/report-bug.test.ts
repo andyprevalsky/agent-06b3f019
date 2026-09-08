@@ -5,11 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildBugReportChatName,
   buildBugReportPrompt,
-  buildBugReportSms,
   buildBugReportTitle,
+  reportAgentBug,
 } from '../../domains/agents/bugReportService';
 import { launchCursorCloudAgent } from '../../providers/cursorCloudAgents';
 import {
@@ -51,16 +54,40 @@ function testPromptIncludesRcaAndAgentId(): void {
   assert.equal(prompt.startsWith('Bug |'), false);
 }
 
-function testSmsScmMentionsInbox(): void {
-  const sms = buildBugReportSms('stalled checkout', 'https://cursor.com/agents/bc-abc', 'scm');
-  assert.ok(sms.includes('stalled checkout'));
-  assert.ok(sms.includes('https://cursor.com/agents/bc-abc'));
-  assert.ok(sms.includes('source:scm'));
+async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
+  const result = await reportAgentBug(
+    '1f85ff25-6e29-4c1b-8739-f917bd101a30',
+    'agent-xyz',
+    'Checkout never finished',
+    {
+      findAgentById: async () => ({ agent_id: 'agent-xyz' }) as never,
+      launch: async () => ({
+        id: 'bc-no-sms',
+        name: 'Checkout never finished',
+        url: 'https://cursor.com/agents/bc-no-sms',
+        launch_source: 'scm',
+      }),
+    }
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.cursor_agent_id, 'bc-no-sms');
+  assert.equal(result.url, 'https://cursor.com/agents/bc-no-sms');
 }
 
-function testSmsApiMentionsFilter(): void {
-  const sms = buildBugReportSms('x', 'https://cursor.com/agents/bc-x', 'api');
-  assert.ok(sms.toLowerCase().includes('filter'));
+function testServiceHasNoSmsSideEffect(): void {
+  const sourcePath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../domains/agents/bugReportService.ts'
+  );
+  const source = readFileSync(sourcePath, 'utf8');
+  assert.equal(source.includes('sendSms'), false, 'report-bug must not send SMS');
+  assert.equal(source.includes('notifyBugReportSms'), false, 'report-bug must not notify via SMS');
+  assert.equal(source.includes('getUserPhone'), false, 'report-bug must not look up a phone');
+  assert.equal(
+    source.includes('buildBugReportSms'),
+    false,
+    'report-bug must not build an SMS body'
+  );
 }
 
 function testParseCursorAgentFromComment(): void {
@@ -393,8 +420,8 @@ async function main(): Promise<void> {
     ['title truncates long descriptions at a word', testTitleTruncatesAtWord],
     ['chat name is plain title without prefix', testChatNamePrefix],
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
-    ['SMS scm mentions mobile inbox', testSmsScmMentionsInbox],
-    ['SMS api mentions Source filter', testSmsApiMentionsFilter],
+    ['reportAgentBug launches without sending SMS', testReportAgentBugDoesNotTextOrRequireSms],
+    ['report-bug service has no SMS side effect', testServiceHasNoSmsSideEffect],
     ['parse cursor agent url from bot comment', testParseCursorAgentFromComment],
     ['github issue body starts with @cursor', testGithubIssueBodyMentionsCursor],
     ['launch posts named-env Cursor payload', testLaunchPostsNamedEnvPayload],
