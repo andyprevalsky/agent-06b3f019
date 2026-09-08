@@ -31,17 +31,39 @@ export type BrowserSessionPersistInput = {
   releaseRemoteSession?: (sessionId: string) => Promise<void>;
 };
 
-function isIdUniqueConstraint(error: unknown): boolean {
+/** Thrown when a concurrent reclaim wins the CAS and this caller's remote must not be returned. */
+export class BrowserSessionReclaimConflictError extends Error {
+  readonly taskId: string;
+  readonly attemptedSessionId: string;
+  readonly winningSessionId: string;
+
+  constructor(taskId: string, attemptedSessionId: string, winningSessionId: string) {
+    super(
+      `Browser session ${taskId} was reclaimed concurrently: ${attemptedSessionId} lost to ${winningSessionId}`
+    );
+    this.name = 'BrowserSessionReclaimConflictError';
+    this.taskId = taskId;
+    this.attemptedSessionId = attemptedSessionId;
+    this.winningSessionId = winningSessionId;
+  }
+}
+
+function matchesIdTarget(name: string): boolean {
+  return name === 'id' || /(^|_)id$/i.test(name) || name.toLowerCase().includes('_pkey');
+}
+
+/** Exported for unit coverage of Prisma P2002 meta.target shape variants. */
+export function isIdUniqueConstraint(error: unknown): boolean {
   if (!(error instanceof PrismaRuntime.PrismaClientKnownRequestError) || error.code !== 'P2002') {
     return false;
   }
   const target = error.meta?.target;
   if (Array.isArray(target)) {
-    return target.map(String).includes('id');
+    // Prisma may report `['id']` or a PK constraint name like `['BrowserSession_pkey']`.
+    return target.map(String).some(matchesIdTarget);
   }
   if (typeof target === 'string') {
-    // Prisma may report `id` or a primary-key name containing id.
-    return target === 'id' || /(^|_)id$/i.test(target) || target.toLowerCase().includes('_pkey');
+    return matchesIdTarget(target);
   }
   // Some drivers omit meta.target for PK collisions; the call site only uses a
   // preallocated `id`, so a bare P2002 after create({ id }) is the id collision.
@@ -120,7 +142,6 @@ export async function persistBrowserSessionRow(
   }
 
   const previousSessionId = previous.sessionId;
-  await releaseRemote(release, previousSessionId, 'idempotent session reclaim');
 
   log.info('Reclaiming preallocated browser session row', {
     taskId,
@@ -130,7 +151,8 @@ export async function persistBrowserSessionRow(
   });
 
   // CAS on (id, previousSessionId) matches resume/recreate — concurrent reclaim
-  // cannot silently overwrite a newer binding.
+  // cannot silently overwrite a newer binding. Release the previous remote only
+  // after the row successfully points at the new sessionId.
   const replaced = await prisma.browserSession.updateMany({
     where: { id: taskId, sessionId: previousSessionId },
     data: {
@@ -146,8 +168,9 @@ export async function persistBrowserSessionRow(
     }
     // Lost the race to another reclaim — drop the orphaned remote we just created.
     await releaseRemote(release, input.sessionId, 'lost concurrent reclaim race');
-    return current;
+    throw new BrowserSessionReclaimConflictError(taskId, input.sessionId, current.sessionId);
   }
 
+  await releaseRemote(release, previousSessionId, 'idempotent session reclaim');
   return prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
 }

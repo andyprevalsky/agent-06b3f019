@@ -7,8 +7,13 @@
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { Prisma as PrismaRuntime } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { persistBrowserSessionRow } from '../../providers/browser/sessionPersist';
+import {
+  BrowserSessionReclaimConflictError,
+  isIdUniqueConstraint,
+  persistBrowserSessionRow,
+} from '../../providers/browser/sessionPersist';
 
 async function withContext<T>(fn: (contextId: string) => Promise<T>): Promise<T> {
   const context = await prisma.browserContext.create({
@@ -133,10 +138,95 @@ async function nonIdempotentCreateTwiceFailsWithProdError(): Promise<void> {
   });
 }
 
+async function idUniqueConstraintAcceptsPkeyArrayTarget(): Promise<void> {
+  const error = new PrismaRuntime.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'test',
+    meta: { target: ['BrowserSession_pkey'] },
+  });
+  assert.equal(isIdUniqueConstraint(error), true);
+  assert.equal(
+    isIdUniqueConstraint(
+      new PrismaRuntime.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['id'] },
+      })
+    ),
+    true
+  );
+}
+
+async function concurrentReclaimConflictThrows(): Promise<void> {
+  await withContext(async (contextId) => {
+    const taskId = randomUUID();
+    const agentId = randomUUID();
+    const firstSessionId = `remote-first-${randomUUID()}`;
+    const winnerSessionId = `remote-winner-${randomUUID()}`;
+    const loserSessionId = `remote-loser-${randomUUID()}`;
+    const released: string[] = [];
+
+    await persistBrowserSessionRow({
+      taskId,
+      contextId,
+      agentId,
+      sessionId: firstSessionId,
+      provider: 'kernel',
+    });
+
+    // Force the CAS to observe a lost race: another reclaim already swapped
+    // sessionId away from `firstSessionId` between our findUnique and updateMany.
+    const originalUpdateMany = prisma.browserSession.updateMany.bind(prisma.browserSession);
+    prisma.browserSession.updateMany = (async (_args) => {
+      await prisma.browserSession.update({
+        where: { id: taskId },
+        data: {
+          sessionId: winnerSessionId,
+          wsUrl: 'ws://example/winner',
+          status: 'ACTIVE',
+          closedAt: null,
+        },
+      });
+      return { count: 0 };
+    }) as typeof prisma.browserSession.updateMany;
+
+    try {
+      await assert.rejects(
+        () =>
+          persistBrowserSessionRow({
+            taskId,
+            contextId,
+            agentId,
+            sessionId: loserSessionId,
+            provider: 'kernel',
+            releaseRemoteSession: async (sessionId) => {
+              released.push(sessionId);
+            },
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof BrowserSessionReclaimConflictError);
+          assert.equal(error.taskId, taskId);
+          assert.equal(error.attemptedSessionId, loserSessionId);
+          assert.equal(error.winningSessionId, winnerSessionId);
+          return true;
+        }
+      );
+    } finally {
+      prisma.browserSession.updateMany = originalUpdateMany;
+    }
+
+    assert.deepEqual(released, [loserSessionId], 'loser remote must be released');
+    const row = await prisma.browserSession.findUniqueOrThrow({ where: { id: taskId } });
+    assert.equal(row.sessionId, winnerSessionId, 'winner binding must remain');
+  });
+}
+
 async function main(): Promise<void> {
+  await idUniqueConstraintAcceptsPkeyArrayTarget();
   await nonIdempotentCreateTwiceFailsWithProdError();
   await preallocatedTaskIdReclaimFromClosed();
   await preallocatedTaskIdReclaimFromActive();
+  await concurrentReclaimConflictThrows();
   process.stdout.write('browser-session-persist: ok\n');
 }
 
