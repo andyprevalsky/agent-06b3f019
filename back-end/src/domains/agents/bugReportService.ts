@@ -8,6 +8,9 @@
  *     → fallback: Cursor Cloud Agents API (source:api, hidden by default)
  *     → dashboard chat titled from the description (no forced prefix)
  *
+ * No SMS and no auto-open: the FE keeps an explicit Open / Copy link after
+ * launch. Texts and window.open were user-visible side effects of reporting.
+ *
  * Why GitHub: Cursor staff document that source:api is hidden by default under
  * Filter → Source on web/Agents Window/mobile. GitHub mentions stamp source:scm
  * and show in the interactive inbox.
@@ -29,7 +32,6 @@ import {
   ScmDispatchUnknownError,
 } from '../../providers/cursorGithubLaunch';
 import { createLogger } from '../../providers/logger';
-import { getUserPhone, sendSms } from '../../providers/smsQueue';
 import {
   getCursorApiBaseUrl,
   getCursorApiKey,
@@ -80,6 +82,19 @@ export interface ReportBugResult {
   launch_source: 'scm' | 'api';
 }
 
+export interface ReportBugLaunch {
+  id: string;
+  name: string;
+  url: string;
+  launch_source: 'scm' | 'api';
+}
+
+export interface ReportBugDeps {
+  findAgentById?: typeof repo.findAgentById;
+  findAgentAcrossRuns?: typeof benchmarkHubLookup.findAgentAcrossRuns;
+  launch?: (args: { name: string; promptText: string }) => Promise<ReportBugLaunch>;
+}
+
 /** Collapse whitespace and truncate at a word boundary for the chat title. */
 export function buildBugReportTitle(description: string): string {
   const cleaned = description.replace(/\s+/g, ' ').trim();
@@ -119,50 +134,6 @@ export async function agentExistsForBugReport(
 export function buildBugReportChatName(description: string): string {
   // No Bug | / P0 prefix — Cursor scm auto-naming strips those; plain title only.
   return buildBugReportTitle(description);
-}
-
-/** SMS body with the Cursor deep link. */
-export function buildBugReportSms(name: string, url: string, launchSource: 'scm' | 'api'): string {
-  if (launchSource === 'scm') {
-    return `Rose bug report launched: ${name}\n\nShould appear in your Cursor mobile inbox (source:scm):\n${url}`;
-  }
-  return `Rose bug report launched: ${name}\n\nOpen in Cursor (API source — enable Filter → Source → API if missing):\n${url}`;
-}
-
-/**
- * Best-effort SMS so the admin can tap the deep link on phone.
- * Never fails the report if SMS is unavailable.
- */
-export async function notifyBugReportSms(
-  userId: string,
-  name: string,
-  url: string,
-  roseAgentId: string,
-  launchSource: 'scm' | 'api'
-): Promise<boolean> {
-  try {
-    const phone = await getUserPhone(userId);
-    if (phone === null || phone === '') {
-      log.warn('No phone for bug-report SMS', { userId });
-      return false;
-    }
-    const result = await sendSms(phone, buildBugReportSms(name, url, launchSource), {
-      archiveRootAgentId: roseAgentId,
-      archiveContext: { kind: 'report_bug_cursor_link', launch_source: launchSource },
-    });
-    if (!result.success) {
-      log.warn('Bug-report SMS failed', { error: result.error, userId });
-      return false;
-    }
-    log.info('Bug-report SMS sent', { userId, messageSid: result.messageSid, launchSource });
-    return true;
-  } catch (error) {
-    log.warn('Bug-report SMS threw', {
-      userId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
-  }
 }
 
 function validateBugDescription(description: unknown): string {
@@ -229,26 +200,25 @@ async function launchViaScmOrApiFallback(
 export async function reportAgentBug(
   userId: string | undefined,
   agentId: string,
-  description: unknown
+  description: unknown,
+  deps: ReportBugDeps = {}
 ): Promise<ReportBugResult> {
   if (!isAdminUser(userId)) {
     throw new ReportBugForbiddenError();
   }
 
   const trimmed = validateBugDescription(description);
-  const exists = await agentExistsForBugReport(agentId);
+  const exists = await agentExistsForBugReport(agentId, {
+    findAgentById: deps.findAgentById,
+    findAgentAcrossRuns: deps.findAgentAcrossRuns,
+  });
   if (!exists) {
     throw new ReportBugNotFoundError();
   }
 
-  const canScm = hasGithubIssueLaunchToken();
-  const apiKey = getCursorApiKey();
-  if (!canScm && apiKey === undefined) {
-    throw new ReportBugNotConfiguredError();
-  }
-
   const name = buildBugReportChatName(trimmed);
   const promptText = buildBugReportPrompt(agentId, trimmed);
+  const launch = deps.launch ?? defaultLaunch;
 
   // Prefer GitHub @cursor (source:scm) so the chat shows in the default mobile
   // inbox. Cloud Agents API can set an exact name, but source:api is hidden
@@ -257,20 +227,9 @@ export async function reportAgentBug(
   log.info('Submitting bug report to Cursor cloud agent', {
     rose_agent_id: agentId,
     description_chars: trimmed.length,
-    prefer_scm: canScm,
   });
 
-  const launched = canScm
-    ? await launchViaScmOrApiFallback(name, promptText, apiKey)
-    : apiKey === undefined
-      ? (() => {
-          throw new ReportBugNotConfiguredError();
-        })()
-      : await launchViaApi(apiKey, name, promptText);
-
-  if (userId !== undefined) {
-    await notifyBugReportSms(userId, launched.name, launched.url, agentId, launched.launch_source);
-  }
+  const launched = await launch({ name, promptText });
 
   return {
     success: true,
@@ -279,4 +238,19 @@ export async function reportAgentBug(
     cursor_agent_id: launched.id,
     launch_source: launched.launch_source,
   };
+}
+
+async function defaultLaunch(args: {
+  name: string;
+  promptText: string;
+}): Promise<ReportBugLaunch> {
+  const canScm = hasGithubIssueLaunchToken();
+  const apiKey = getCursorApiKey();
+  if (canScm) {
+    return launchViaScmOrApiFallback(args.name, args.promptText, apiKey);
+  }
+  if (apiKey === undefined) {
+    throw new ReportBugNotConfiguredError();
+  }
+  return launchViaApi(apiKey, args.name, args.promptText);
 }

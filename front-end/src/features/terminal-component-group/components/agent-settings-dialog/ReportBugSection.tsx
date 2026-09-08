@@ -6,8 +6,7 @@
  *
  * After launch, keep Open + Copy on screen. Preferred path is GitHub @cursor
  * (source:scm) for the Cursor mobile inbox; API fallback may be used when
- * SCM cannot dispatch. Post-await window.open is still blocked on iOS so the
- * buttons stay required.
+ * SCM cannot dispatch. Submit never auto-opens Cursor and never sends SMS.
  */
 
 import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
@@ -108,8 +107,8 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
               className="resize-y min-h-[100px]"
             />
             <p className="text-xs text-muted-foreground">
-              Prefers GitHub (@cursor) so the chat can show in your phone&apos;s Cursor inbox.
-              You&apos;ll also get an Open link and SMS.
+              Launches a Cursor agent to investigate. After it launches you can copy or open the
+              link.
             </p>
           </div>
           <div className="flex gap-2">
