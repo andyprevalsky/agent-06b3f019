@@ -120,6 +120,10 @@ Threshold stripping also covers `threshold: 0.15` and `threshold of 0.15`
 so `_LABELED_BOUND_SCORE_RE` cannot treat those as the visible score
 (CodeRabbit 3962184379).
 
+Submit/navigation indexes now read structured `action` /
+`element_description` fields only, so a later evaluate dump that mentions
+"click Submit" cannot hide the FCaptcha observation (CodeRabbit 3962336479).
+
 ## Reusable lesson
 
 Once the visible score and form verdict are already on the page — in

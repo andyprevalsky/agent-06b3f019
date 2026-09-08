@@ -635,6 +635,33 @@ def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
     )
 
 
+def test_visible_result_completion_ignores_submit_words_inside_observation_dumps():
+    """Page chrome saying 'click Submit' must not look like a later submit action."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    evaluate_with_chrome = {
+        "action": "evaluate",
+        "result": {
+            "message": (
+                "click the Submit button\n"
+                "0.15\n"
+                "Risk Score (lower = human)\n"
+                "Bot detected - form blocked"
+            )
+        },
+    }
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            evaluate_with_chrome,
+        ],
+    )
+
+
 def test_visible_result_completion_ignores_post_submit_version_decimal_without_score():
     """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
     from domains.spawn_browser_agent_v3.visible_result_completion import (

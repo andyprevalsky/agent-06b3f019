@@ -172,15 +172,46 @@ def _entry_blob(entry: Any) -> str:
         return str(entry)
 
 
+def _raw_history_entries(
+    action_summaries: Iterable[Any] | None = None,
+    action_entries: Iterable[Any] | None = None,
+) -> list[Any]:
+    # Prefer structured action_entries when present — they are the chronological
+    # source of truth. Concatenating summaries+entries doubles the timeline and
+    # breaks submit/navigation index comparisons (CodeRabbit).
+    return list(action_entries or []) or list(action_summaries or [])
+
+
 def _history_entries(
     action_summaries: Iterable[Any] | None = None,
     action_entries: Iterable[Any] | None = None,
 ) -> list[str]:
-    # Prefer structured action_entries when present — they are the chronological
-    # source of truth. Concatenating summaries+entries doubles the timeline and
-    # breaks submit/navigation index comparisons (CodeRabbit).
-    source = list(action_entries or []) or list(action_summaries or [])
-    return [_entry_blob(entry).lower() for entry in source]
+    return [_entry_blob(entry).lower() for entry in _raw_history_entries(action_summaries, action_entries)]
+
+
+def _entry_action_name(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("action") or "").strip().lower()
+    return ""
+
+
+def _is_submit_click_entry(entry: Any) -> bool:
+    """True for a click on Submit, ignoring observation/DOM text."""
+    if isinstance(entry, dict):
+        action = _entry_action_name(entry)
+        desc = str(entry.get("element_description") or entry.get("element") or "").lower()
+        return action == "click" and "submit" in desc
+    blob = _entry_blob(entry).lower()
+    return "submit" in blob and "click" in blob
+
+
+def _is_navigation_entry(entry: Any) -> bool:
+    """True for a page-changing action, ignoring observation/DOM text."""
+    action = _entry_action_name(entry)
+    if action:
+        return action in _NAVIGATION_MARKERS
+    blob = _entry_blob(entry).lower()
+    return any(marker in blob for marker in _NAVIGATION_MARKERS)
 
 
 def history_has_submit_click(
@@ -188,23 +219,19 @@ def history_has_submit_click(
     action_entries: Iterable[Any] | None = None,
 ) -> bool:
     """True when a prior click already targeted a Submit control."""
-    return any("submit" in blob and "click" in blob for blob in _history_entries(action_summaries, action_entries))
+    return any(_is_submit_click_entry(entry) for entry in _raw_history_entries(action_summaries, action_entries))
 
 
-def _last_submit_index(entries: list[str]) -> int:
+def _last_submit_index(entries: list[Any]) -> int:
     return max(
-        (idx for idx, blob in enumerate(entries) if "submit" in blob and "click" in blob),
+        (idx for idx, entry in enumerate(entries) if _is_submit_click_entry(entry)),
         default=-1,
     )
 
 
-def _last_navigation_index(entries: list[str]) -> int:
+def _last_navigation_index(entries: list[Any]) -> int:
     return max(
-        (
-            idx
-            for idx, blob in enumerate(entries)
-            if any(marker in blob for marker in _NAVIGATION_MARKERS)
-        ),
+        (idx for idx, entry in enumerate(entries) if _is_navigation_entry(entry)),
         default=-1,
     )
 
@@ -214,7 +241,7 @@ def history_has_navigation_after_submit(
     action_entries: Iterable[Any] | None = None,
 ) -> bool:
     """True when a page-changing action follows the latest submit click."""
-    entries = _history_entries(action_summaries, action_entries)
+    entries = _raw_history_entries(action_summaries, action_entries)
     last_submit_idx = _last_submit_index(entries)
     if last_submit_idx < 0:
         return False
@@ -231,7 +258,7 @@ def history_has_navigation_before_latest_submit(
     in prior reasoning while the latest submit has no following navigation.
     Callers must not treat that pre-navigation evidence as belonging to page B.
     """
-    entries = _history_entries(action_summaries, action_entries)
+    entries = _raw_history_entries(action_summaries, action_entries)
     last_submit_idx = _last_submit_index(entries)
     if last_submit_idx < 0:
         return False
@@ -239,11 +266,11 @@ def history_has_navigation_before_latest_submit(
     return 0 <= last_nav_idx < last_submit_idx
 
 
-def _post_submit_observation_blobs(entries: list[str]) -> list[str]:
+def _post_submit_observation_blobs(entries: list[Any]) -> list[str]:
     last_submit_idx = _last_submit_index(entries)
     if last_submit_idx < 0:
         return []
-    return entries[last_submit_idx + 1 :]
+    return [_entry_blob(entry).lower() for entry in entries[last_submit_idx + 1 :]]
 
 
 def should_force_visible_result_completion(
@@ -276,10 +303,10 @@ def should_force_visible_result_completion(
     # 15a85ea0: evaluate already returned 0.15 + "Bot detected" while
     # reasoning only named pow_not_satisfied and kept waiting. Tool-result
     # text after the latest submit is the same visible result.
-    history_blobs = _history_entries(summaries, entries)
+    raw_entries = _raw_history_entries(summaries, entries)
     return any(
         observation_states_visible_fcaptcha_result(blob)
-        for blob in _post_submit_observation_blobs(history_blobs)
+        for blob in _post_submit_observation_blobs(raw_entries)
     )
 
 
