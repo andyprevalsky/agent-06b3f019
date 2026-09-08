@@ -66,6 +66,8 @@ function expectSteelContentClip(stream: HTMLElement, iframe: HTMLElement) {
     height: crop.height,
     left: crop.left,
     top: crop.top,
+    transformOrigin: crop.transformOrigin,
+    transform: crop.transform,
   });
 }
 

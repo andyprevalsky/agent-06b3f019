@@ -4,20 +4,24 @@
  * FRAME STATE:
  * [PANE] leftover FE space (flex-1, 60vh, 8:5 reservation, …)
  *   --letterbox--> [STREAM] content viewport 1280/800
- *     --overflow-hidden--> clip Steel window chrome
- *       --cropped iframe--> Steel 1288x891 translated by (-4, -91)
- *                           Kernel 1280x800 inset-0 (no chrome)
+ *     --measure clip width-->
+ *       --overflow-hidden--> clip Steel window chrome
+ *         --cropped iframe--> native 1288x891 canvas,
+ *                             translate(-4*s, -91*s) scale(s)
+ *                             s = clipWidth/1280 so Amazon cart stays in frame
+ *                             Kernel 1280x800 inset-0 (no chrome)
  *
  * The remote browser is never resized from here (antibot / fingerprint-stable
  * session size). Steel session create stays 1288x891.
  */
 
-import type { CSSProperties, ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import {
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   steelLiveViewIframeCropStyle,
+  steelLiveViewScaledCropStyle,
 } from './liveViewFrame';
 
 interface LiveViewFrameProps {
@@ -39,7 +43,25 @@ export function LiveViewFrame({
 }: LiveViewFrameProps) {
   const display = resolveLiveViewDisplaySize(url);
   const crop = resolveLiveViewChromeCrop(url);
-  const iframeStyle = crop ? steelLiveViewIframeCropStyle() : undefined;
+  const streamRef = useRef<HTMLDivElement>(null);
+  const [clipWidth, setClipWidth] = useState(0);
+  useLayoutEffect(() => {
+    const el = streamRef.current;
+    if (!el || !crop) return;
+    const update = () => {
+      const width = el.getBoundingClientRect().width;
+      if (width > 0) setClipWidth(width);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [crop]);
+  const iframeStyle = crop
+    ? clipWidth > 0
+      ? steelLiveViewScaledCropStyle(clipWidth)
+      : steelLiveViewIframeCropStyle()
+    : undefined;
   return (
     <div
       data-testid="live-view-pane"
@@ -50,8 +72,9 @@ export function LiveViewFrame({
       style={style}
     >
       <div
+        ref={streamRef}
         data-testid="live-view-stream"
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden"
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden [container-type:size]"
         style={{
           aspectRatio: `${display.width} / ${display.height}`,
           width: `min(100cqw, calc(100cqh * ${display.width} / ${display.height}))`,

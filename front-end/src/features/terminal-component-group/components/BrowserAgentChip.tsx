@@ -531,7 +531,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                   recordingState === 'ready' &&
                   recordingSource?.kind === 'pointer' &&
                   recordingUrl && (
-                    <div className="relative aspect-[1280/800] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black">
+                    <div className="relative aspect-[1280/800] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black [container-type:size]">
                       <iframe
                         title="Browser recording"
                         src={recordingUrl}

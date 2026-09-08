@@ -4,8 +4,10 @@
  * User FE pane (arbitrary leftover size)
  *   -> letterbox the CONTENT viewport (1280x800)
  *     -> clip box (overflow hidden)
- *       -> iframe (Steel: oversized + translated to hide window chrome)
- *         -> Steel/Kernel player (contain-fits to the iframe window)
+ *       -> iframe (Steel: native 1288x891 canvas, CSS-scaled so the
+ *          1280x800 page including the right-edge cart fits, then
+ *          translated by (-4, -91) * scale)
+ *         -> Steel/Kernel player
  *           -> remote browser (UNCHANGED session size — antibot)
  *
  * Steel headful debug streams the full computer window (1288x891):
@@ -104,6 +106,15 @@ export function visibleSteelStreamRect(): LiveViewVisibleStreamRect {
   };
 }
 
+/**
+ * Steel's player paints a native 1288x891 computer window. Percentage-sizing
+ * the iframe does not shrink that canvas, so a leftover FE pane (~1100px)
+ * clips the right of the page (Amazon cart). Match the thumbnail: keep the
+ * iframe at native window pixels and CSS-scale it so the 1280 content box
+ * fills the clip, then translate by the chrome origin.
+ *
+ * 100cqw/cqh are the clip box (`live-view-stream` is a size container).
+ */
 export function steelLiveViewIframeCropStyle(): {
   position: 'absolute';
   width: string;
@@ -111,16 +122,44 @@ export function steelLiveViewIframeCropStyle(): {
   left: string;
   top: string;
   border: string;
+  transformOrigin: 'top left';
+  transform: string;
 } {
   const windowSize = STEEL_LIVE_VIEW_WINDOW;
   const content = LIVE_VIEW_CONTENT_VIEWPORT;
   return {
     position: 'absolute',
-    width: `${(windowSize.width / content.width) * 100}%`,
-    height: `${(windowSize.height / content.height) * 100}%`,
-    left: `${(-STEEL_CHROME_CROP.x / content.width) * 100}%`,
-    top: `${(-STEEL_CHROME_CROP.y / content.height) * 100}%`,
+    width: `${windowSize.width}px`,
+    height: `${windowSize.height}px`,
+    left: '0',
+    top: '0',
     border: '0',
+    transformOrigin: 'top left',
+    transform: `translate(calc(${-STEEL_CHROME_CROP.x} * 100cqw / ${content.width}), calc(${-STEEL_CHROME_CROP.y} * 100cqh / ${content.height})) scale(calc(100cqw / ${content.width}))`,
+  };
+}
+
+/** Pixel crop once the clip box is measured. Prefer this over cqw — Steel's native canvas ignores percentage iframe sizing. */
+export function steelLiveViewScaledCropStyle(clipWidth: number): {
+  position: 'absolute';
+  width: string;
+  height: string;
+  left: string;
+  top: string;
+  border: string;
+  transformOrigin: 'top left';
+  transform: string;
+} {
+  const scale = clipWidth / LIVE_VIEW_CONTENT_VIEWPORT.width;
+  return {
+    position: 'absolute',
+    width: `${STEEL_LIVE_VIEW_WINDOW.width}px`,
+    height: `${STEEL_LIVE_VIEW_WINDOW.height}px`,
+    left: '0',
+    top: '0',
+    border: '0',
+    transformOrigin: 'top left',
+    transform: `translate(${-STEEL_CHROME_CROP.x * scale}px, ${-STEEL_CHROME_CROP.y * scale}px) scale(${scale})`,
   };
 }
 

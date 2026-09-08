@@ -19,6 +19,7 @@ import {
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
   steelLiveViewIframeCropStyle,
+  steelLiveViewScaledCropStyle,
   visibleSteelStreamRect,
 } from '@/features/terminal-component-group/components/browser-status-bar/liveViewFrame';
 
@@ -65,14 +66,39 @@ describe('Steel chrome crop (display-only)', () => {
     expect(visible.y).toBeGreaterThan(0);
   });
 
-  it('sizes the Steel iframe larger than the clip and translates it by the chrome origin', () => {
+  it('CSS-scales the native 1288x891 canvas so a right-edge control stays in a leftover pane', () => {
     const style = steelLiveViewIframeCropStyle();
-    expect(parseFloat(style.width)).toBeCloseTo((1288 / 1280) * 100);
-    expect(parseFloat(style.height)).toBeCloseTo((891 / 800) * 100);
-    expect(parseFloat(style.left)).toBeCloseTo((-4 / 1280) * 100);
-    expect(parseFloat(style.top)).toBeCloseTo((-91 / 800) * 100);
-    expect(parseFloat(style.top)).toBeLessThan(0);
-    expect(parseFloat(style.left)).toBeLessThan(0);
+    expect(style.width).toBe('1288px');
+    expect(style.height).toBe('891px');
+    expect(style.transformOrigin).toBe('top left');
+    expect(style.transform).toContain('scale(calc(100cqw / 1280))');
+    expect(style.transform).toContain('-4');
+    expect(style.transform).toContain('-91');
+
+    const paneWidth = 1100;
+    const paneHeight = 700;
+    const cartInPageX = 1200;
+    const cartStreamX = STEEL_CHROME_CROP.x + cartInPageX;
+    expect(cartStreamX).toBeGreaterThan(paneWidth);
+
+    const clip = computeLiveViewLetterbox(
+      paneWidth,
+      paneHeight,
+      LIVE_VIEW_CONTENT_VIEWPORT.width,
+      LIVE_VIEW_CONTENT_VIEWPORT.height,
+    );
+    const crop = resolveLiveViewChromeCrop(STEEL_PLAYER);
+    expect(crop).not.toBeNull();
+    const iframe = computeCroppedLiveViewIframe(clip, crop!);
+    const cartPaneX = iframe.x + cartStreamX * iframe.scale;
+    expect(cartPaneX).toBeGreaterThanOrEqual(clip.offsetX);
+    expect(cartPaneX).toBeLessThanOrEqual(clip.offsetX + clip.width);
+
+    const scaled = steelLiveViewScaledCropStyle(clip.width);
+    expect(scaled.width).toBe('1288px');
+    expect(scaled.transform).toBe(
+      `translate(${-STEEL_CHROME_CROP.x * iframe.scale}px, ${-STEEL_CHROME_CROP.y * iframe.scale}px) scale(${iframe.scale})`,
+    );
   });
 
   it('keeps the cropped content box inside a leftover 16:9 pane', () => {
