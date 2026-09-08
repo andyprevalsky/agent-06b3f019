@@ -261,6 +261,9 @@ LIVE_AMPLITUDE_OUTPUT=$(
 LIVE_AMPLITUDE_RC=$?
 set -e
 [ "$LIVE_AMPLITUDE_RC" -ne 0 ] || fail "/deploy live Amplitude probe must reject missing credentials"
+if printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq 'Cannot find module'; then
+  fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
+fi
 printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
   'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || \
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
