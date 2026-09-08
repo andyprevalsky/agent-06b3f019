@@ -197,6 +197,36 @@ describe('BrowserCursorOverlay realtime stream', () => {
     expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '640px', top: '400px' });
   });
 
+  it('maps page-viewport coordinates onto the content clip without adding Steel chrome', () => {
+    render(
+      <BrowserCursorOverlay
+        agentId={null}
+        taskId="task-1"
+        messages={[makeMessageWithCoords(0, 0)]}
+      />,
+    );
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '0px', top: '0px' });
+  });
+
+  it('scales content-space cursor coords onto a leftover clip so the pointer stays on the page', () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get: () => 960,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => 600,
+    });
+    render(
+      <BrowserCursorOverlay
+        agentId={null}
+        taskId="task-1"
+        messages={[makeMessageWithCoords(640, 400)]}
+      />,
+    );
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '480px', top: '300px' });
+  });
+
   it('rejects a cursor payload whose agent identity differs from its channel', async () => {
     render(<BrowserCursorOverlay agentId="agent-1" taskId="task-1" messages={[]} />);
     await waitFor(() => expect(realtimeMocks.subscribeToChannel).toHaveBeenCalled());
