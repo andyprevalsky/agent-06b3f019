@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# run-fleet-infra-canary — prove the Fly fleet can run N benches in parallel
+# with zero INFRA failures, without spending LLM credits.
+#
+# Boots N isolated machines (catalog-sampled task names), requires a STRICT
+# synchronized start barrier (ready == N, exclusions == 0), releases, then each
+# guest emits DONE via CLOUDBENCH_INFRA_PROBE (skips run_benchmark.py).
+#
+# Task names MUST exist in the unified catalog (tasks.json + polar_tasks.json)
+# because run-bench-fleet always runs catalog preflight before provisioning.
+# Fake infra-canary-$i names fail closed; we sample real names instead. The
+# probe path never executes the task, so browser/polar names are safe here.
+#
+# Usage:
+#   bash scripts/run-fleet-infra-canary           # N=4
+#   bash scripts/run-fleet-infra-canary 8
+#   FLEET_INFRA_CANARY_N=8 bash scripts/run-fleet-infra-canary
+#
+# Exit 0 only when the fleet controller exits 0 under --infra-probe.
+# Do NOT use 50 DEMO mass-agent tasks for this — see
+# docs/plans/active/fleet-demo-concurrency-e2e.md.
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+N="${1:-${FLEET_INFRA_CANARY_N:-4}}"
+case "$N" in
+  ''|*[!0-9]*|0)
+    echo "❌ N must be a positive integer (got: ${N:-empty})" >&2
+    exit 2
+    ;;
+esac
+if [ "$N" -gt 32 ]; then
+  echo "❌ refusing N>32 (hard cap 32 for infra canaries; ratchet deliberately)" >&2
+  exit 2
+fi
+
+# Live canaries must never inherit a hermetic multi-workstream fake PATH /
+# CLOUDBENCH_FAKE_DIR from a prior agent shell. Observed 2026-09-08: PATH
+# started with /tmp/tmp.*/fake-bin so "flyctl" resolved to the fixture and
+# dep-refresh wrote under fake-fly/machines/... then failed closed.
+if [ -n "${CLOUDBENCH_FAKE_DIR:-}" ] && [ "${CLOUDBENCH_ALLOW_FAKE:-0}" != "1" ]; then
+  echo "❌ refusing live infra canary with CLOUDBENCH_FAKE_DIR set (${CLOUDBENCH_FAKE_DIR})" >&2
+  echo "   unset it (or set CLOUDBENCH_ALLOW_FAKE=1 only for hermetic fixtures)" >&2
+  exit 2
+fi
+scrubbed_path=""
+IFS=':' read -r -a _path_parts <<< "${PATH:-}"
+for _part in "${_path_parts[@]}"; do
+  case "$_part" in
+    */fake-bin|*/fake-bin/*) continue ;;
+  esac
+  if [ -z "$scrubbed_path" ]; then
+    scrubbed_path="$_part"
+  else
+    scrubbed_path="$scrubbed_path:$_part"
+  fi
+done
+PATH="$scrubbed_path"
+export PATH
+unset CLOUDBENCH_FAKE_CONTROLLER_WS \
+  CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT CLOUDBENCH_FAKE_BREAK_POOL_LEDGER 2>/dev/null || true
+_flyctl_bin="$(command -v flyctl 2>/dev/null || true)"
+case "${_flyctl_bin}" in
+  */fake-bin/*)
+    echo "❌ refusing live infra canary: flyctl resolves to fixture ${_flyctl_bin}" >&2
+    exit 2
+    ;;
+esac
+
+SEED="${FLEET_INFRA_CANARY_SEED:-20260908}"
+mapfile -t BENCHES < <(
+  python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" sample \
+    --repo "$ROOT_DIR" \
+    --width "$N" \
+    --seed "$SEED" \
+    --slice 0
+)
+if [ "${#BENCHES[@]}" -ne "$N" ]; then
+  echo "❌ catalog sample returned ${#BENCHES[@]}/$N names" >&2
+  exit 2
+fi
+
+echo "🛡  fleet infra canary: N=$N benches (${BENCHES[*]})"
+echo "   mode: --infra-probe (strict barrier, no LLM / run_benchmark)"
+echo "   sample: seed=$SEED slice=0 (unified catalog)"
+
+# Prefer foreground for canaries so the caller gets a synchronous exit code
+# without needing detach-status plumbing. Override with --detach via env if
+# a supervisor wants lifecycle isolation.
+EXTRA=()
+if [ "${FLEET_INFRA_CANARY_DETACH:-0}" = "1" ]; then
+  EXTRA+=(--detach --wait)
+else
+  EXTRA+=(--foreground)
+fi
+
+exec bash "$ROOT_DIR/scripts/run-bench-fleet" \
+  "${BENCHES[@]}" \
+  --infra-probe \
+  --timeout "${FLEET_INFRA_CANARY_TIMEOUT:-1800}" \
+  "${EXTRA[@]}"

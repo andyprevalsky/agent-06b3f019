@@ -237,7 +237,7 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
 
     assert "CURRENT_RUN_ARTIFACT_SCRIPT" in driver
     assert "RUN_OUTPUT_MARKER" in driver
-    assert 'git -C "$REPO_DIR" clean -fd' in driver
+    assert 'git -C "$REPO_DIR" clean -ffd' in driver
     assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index("applying uploaded local workspace patch")
     assert "cloudbench-sync-prisma-client.sh" in driver
     assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
@@ -256,7 +256,7 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert 'RUN_PASS_OK" = "1' in controller
     # Claude Code credential SKIPs must not count as fleet/cloud PASS.
     cloud_validation = controller.split(
-        '"$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT"', 1
+        '"$CLOUDBENCH_RESULT_SCRIPT" "$RUN_OUT"', 1
     )[1].split("then", 1)[0]
     assert "--require-pass" in cloud_validation
     assert "--allow-claude-code-credential-skip" not in cloud_validation
@@ -324,9 +324,10 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases plus
-    # controller-token / private-repo auth cementing raised this to 17.
-    assert "17 passed" in result.stdout
+    # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
+    # controller-token/private-repo auth, bounded dependency-refresh ownership,
+    # and isolated-backend queue alignment keep this at 18 focused cases.
+    assert "18 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():

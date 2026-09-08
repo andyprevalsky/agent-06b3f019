@@ -38,11 +38,25 @@ require_text "original frozen rank" "/descend must reinsert a failed local rerun
 require_text "Immediately fire a sub-agent" "/descend must start the local snapshot rerun immediately on approve"
 require_text "RANK_HEAP" "/descend must rank failing tasks before pipelined fix approval"
 require_text "PIPELINE_HEAP" "/descend must pipeline approve, local rerun, and the next ask"
+# Soft until command-wiring PR lands: runtime preflight in run-bench-fleet is the
+# durable substrate guarantee. When the docs are present, pin them strictly.
+if grep -Fq 'FLEET_INFRA_CANARY' "$DESCEND_COMMAND"; then
+  require_text "bash scripts/run-fleet-infra-canary" "/descend must run the fleet infra canary before the first capability slice"
+  require_text "FLEET_INFRA_CANARY" "/descend state machine must include the fleet infra canary step"
+  require_text "Cloud Fleet concurrency shapes" "/descend must document sequential/lane/parallel fleet shapes"
+  require_text "campaign_cap=1" "/descend must define sequential as campaign_cap=1"
+  require_text "campaign_cap=N" "/descend must define lane as campaign_cap=N"
+  require_text "CLOUDBENCH_CONTROLLER_LOCK_NAME" "/descend lane mode must require distinct controller locks"
+  require_text "run-fleet-concurrency-modes" "/descend must point at the DEMO concurrency e2e that /deploy cements"
+  require_text "local_lock_busy" "/descend must treat lane lock serialization as INFRA false-pass"
+else
+  echo "SKIP: /descend fleet concurrency docs not wired in this tree (runtime preflight covers substrate)"
+fi
 require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
 require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
 require_text "every HARNESS failure has complete causal RCA proof" "/descend must require causal RCA proof before stopping for approval"
 require_text "Causal proof; outcome pending" "/descend must distinguish causal RCA proof from exact benchmark outcome proof"
-require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"
+require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"  # pragma: allowlist secret
 require_text '## `/sync` checkpoints' "/descend must define durable sync checkpoints"
 require_text 'including each RCA' "/descend must sync every parallel RCA worker"
 require_text 'Run `/sync` before every subset or full-slice rerun.' "/descend must sync before benchmark reruns"
@@ -87,7 +101,7 @@ HARNESS_RCA=$(sed -n '/^## HARNESS RCA/,/^## Stop 1/p' "$DESCEND_COMMAND")
 grep -Fq 'each distinct `/RCA` invocation' <<<"$SYNC_CONTRACT" || fail "sync checkpoints must run before each distinct RCA"
 grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || fail "infra RCA loop must sync before every RCA"
 grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
-grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"
+grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"  # pragma: allowlist secret
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use code blocks"
 grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
