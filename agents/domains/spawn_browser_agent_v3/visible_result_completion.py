@@ -7,9 +7,14 @@ return that visible score and verdict, not to keep retrying proof-of-work.
 
 A later smoke failure (agent b234cfa8) stated Risk Score 0.11 + the same bot
 verdict, then burned the 420s cap on scroll/screenshot loops instead of wait.
-Rewrite post-submit idle actions (`wait`, `scroll`, `read_browser_state`, …)
-into `attempt_completion` so the parent can finish instead of burning the
-harness timeout.
+Agent 15a85ea0 then showed the same visible 0.15 / "Bot detected" result in
+an evaluate tool result, but reasoning only named pow_not_satisfied and kept
+waiting / inspecting PoW. Scan post-submit action-entry blobs, not just LLM
+reasoning, and treat network/log inspection as idle once that result exists.
+
+Rewrite post-submit idle actions (`wait`, `scroll`, `read_browser_state`,
+`read_network_requests`, …) into `attempt_completion` so the parent can
+finish instead of burning the harness timeout.
 
 Page-changing actions after the last submit invalidate prior visible-result
 evidence — a scroll on a later page must not complete against a stale score.
@@ -46,11 +51,21 @@ _POST_RESULT_IDLE_ACTIONS = frozenset(
         "page_down",
         "screenshot",
         "read_browser_state",
+        "read_network_requests",
+        "read_logs",
         "noop",
         "sleep",
         "move",
         "hover",
     }
+)
+# Form-submit verdicts (not checkbox "Verified!") — used when the score lives
+# in a tool result rather than the model's reasoning.
+_FORM_RESULT_VERDICTS = (
+    "bot detected",
+    "form blocked",
+    "pow_not_satisfied",
+    "human detected",
 )
 # Actions that leave the page where the score/verdict was observed.
 _NAVIGATION_MARKERS = (
@@ -84,6 +99,25 @@ def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
     has_verdict = any(marker in lowered for marker in _VERDICT_MARKERS)
     has_numeric = bool(_NUMERIC_SCORE_RE.search(blob))
     return has_verdict or has_numeric
+
+
+def observation_states_visible_fcaptcha_result(text: str) -> bool:
+    """True when a post-submit tool result already shows the form verdict.
+
+    Evaluate/read results dump the whole page, so a static "Risk Score" label
+    plus a version number (v1.34.1) must not count. Require an explicit
+    form-result verdict plus a score marker.
+    """
+    blob = str(text or "")
+    if not blob.strip():
+        return False
+    lowered = blob.lower()
+    if not any(marker in lowered for marker in _FORM_RESULT_VERDICTS):
+        return False
+    has_score = bool(
+        _RISK_SCORE_RE.search(blob) or _FCAPTCHA_SCORE_RE.search(blob) or _NUMERIC_SCORE_RE.search(blob)
+    )
+    return has_score
 
 
 def _entry_blob(entry: Any) -> str:
@@ -162,6 +196,13 @@ def history_has_navigation_before_latest_submit(
     return 0 <= last_nav_idx < last_submit_idx
 
 
+def _post_submit_observation_blobs(entries: list[str]) -> list[str]:
+    last_submit_idx = _last_submit_index(entries)
+    if last_submit_idx < 0:
+        return []
+    return entries[last_submit_idx + 1 :]
+
+
 def should_force_visible_result_completion(
     *,
     action_name: str,
@@ -187,7 +228,16 @@ def should_force_visible_result_completion(
         candidates = [last_reasoning]
     else:
         candidates = [last_reasoning, *(prior_reasoning_messages or [])]
-    return any(reasoning_states_visible_fcaptcha_result(text) for text in candidates)
+    if any(reasoning_states_visible_fcaptcha_result(text) for text in candidates):
+        return True
+    # 15a85ea0: evaluate already returned 0.15 + "Bot detected" while
+    # reasoning only named pow_not_satisfied and kept waiting. Tool-result
+    # text after the latest submit is the same visible result.
+    history_blobs = _history_entries(summaries, entries)
+    return any(
+        observation_states_visible_fcaptcha_result(blob)
+        for blob in _post_submit_observation_blobs(history_blobs)
+    )
 
 
 def forced_visible_result_completion_action(thinking: str) -> dict[str, Any]:

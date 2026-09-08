@@ -6,12 +6,13 @@ surface: agents
 component: spawn-browser-agent-v3 / visible_result_completion
 classification: our-bug
 problem_class: model-intelligence-limitation
-first_bad_boundary: "agents/domains/spawn_browser_agent_v3/handler.py live action loop — executes post-submit wait after reasoning already stated risk score + verdict"
+first_bad_boundary: "agents/domains/spawn_browser_agent_v3/visible_result_completion.py should_force_visible_result_completion — ignored post-submit evaluate/tool-result text that already contained the visible score + form verdict"
 symptoms:
-  - browser-biometrics-webdecoy smoke timeout / PAUSED at 426s / cap 420s
+  - Timeout after 420s (dynamic cap=420s) | Agent status: PAUSED (expected COMPLETED)
+  - last assistant: "The challenge is fetched with difficulty 4 and minAgeMs 1500"
+  - evaluate "0.15" / "Risk Score" / "Bot detected - form blocked" / pow_not_satisfied
+  - wait 5–10s after visible FCaptcha score instead of attempt_completion
   - last assistant: "Let me try submitting the form one more time."
-  - wait 5–10s repeated after "risk score of 0.07" + "Bot detected - form blocked"
-  - drag TypeError and unknown-action-drag fixes held
 tags:
   - browser
   - smoke
@@ -21,7 +22,8 @@ tags:
 sources:
   - agent c3762be3-59be-4aa4-af6c-83d8eed9aeb9
   - PR #1209
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_post_submit_wait
+  - agent 15a85ea0-46e4-429b-ae37-d75514b0cd97
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
 status: fixed
 ---
 
@@ -63,8 +65,26 @@ cases (no submit yet, non-wait action, no score).
 
 None recorded.
 
+## Recurrence 2026-09-08 (agent 15a85ea0)
+
+Same smoke task, serial exclusive fixture (not the 2026-09-07 contention
+case). No take-control / USER_REQUESTED. LLM path was claudeAuth
+`claude-fable-5-claude`, not waterfall/credits.
+
+Evaluate at 16:56:05 already returned visible `0.15` / `Risk Score` /
+`Bot detected - form blocked` / `pow_not_satisfied`. Reasoning then said
+"wait longer for PoW" (verdict words, no "risk score") and burned the rest
+of the 420s cap on wait/resubmit/`read_network_requests`. The 2026-09-02
+guardrail missed it because it only scanned LLM reasoning, not post-submit
+action-entry tool results, and did not treat network/log inspection as idle.
+
+Owning-boundary repro:
+`test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score`
+failed on `wait` before the tool-result scan and passed after.
+
 ## Reusable lesson
 
-Once the agent has already written the user-requested visible result, an idle
-`wait` is budget burn, not progress. Force completion at that boundary instead
+Once the visible score and form verdict are already on the page — in
+reasoning or a post-submit tool result — an idle wait or network inspect
+is budget burn, not progress. Force completion at that boundary instead
 of hoping the model stops retrying a third-party proof-of-work.

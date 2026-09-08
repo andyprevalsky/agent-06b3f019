@@ -574,6 +574,67 @@ def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
     assert "0.11" in forced["params"]["reasoning"]
 
 
+def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score():
+    """15a85ea0 evaluate already returned score 0.15 + bot verdict, then waited.
+
+    The earlier helper only scanned LLM reasoning. This trajectory named
+    pow_not_satisfied in thinking (no 'risk score' words) and kept waiting /
+    inspecting PoW until the 420s cap. Post-submit evaluate/tool-result text
+    that already contains the visible score + form verdict must force
+    completion on the next idle action, including network/log inspection.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    pow_retry_reasoning = (
+        'The submission is being blocked with reason "pow_not_satisfied" — the '
+        "proof-of-work likely hasn't completed yet. Let me wait longer for the "
+        "background PoW to finish, then submit again."
+    )
+    evaluate_after_submit = {
+        "action": "evaluate",
+        "result": {
+            "success": True,
+            "message": (
+                "Executed JS, result: Invisible Mode\n"
+                "Submit (Protected by Invisible CAPTCHA)\n"
+                "0.15\n"
+                "Risk Score (lower = human)\n"
+                "Bot detected - form blocked\n"
+                '{\n  "reason": "pow_not_satisfied",\n'
+                '  "score": 0.14629999999999999,\n'
+                '  "success": false\n}'
+            ),
+        },
+    }
+    history = [
+        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+        evaluate_after_submit,
+    ]
+    for action_name in ("wait", "screenshot", "read_network_requests", "read_logs"):
+        assert should_force_visible_result_completion(
+            action_name=action_name,
+            last_reasoning=pow_retry_reasoning,
+            action_entries=history,
+        ), action_name
+    # Static page chrome before submit (Risk Score label + version) must not force.
+    pre_submit_page = {
+        "action": "evaluate",
+        "result": {
+            "message": "Running v1.34.1\nRisk Score (lower = human)\nI'm not a robot\nVerified!"
+        },
+    }
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Waiting for the checkbox to settle.",
+        action_entries=[
+            pre_submit_page,
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+        ],
+    )
+
+
 def test_max_steps_best_effort_prefers_last_reasoning():
     """Best-effort answer = the agent's most recent synthesized reasoning.
 
@@ -19220,6 +19281,10 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_rewrites_post_submit_score_without_verdict",
         test_visible_result_completion_rewrites_post_submit_score_without_verdict,
+    )
+    r.record(
+        "visible_result_completion_rewrites_wait_when_evaluate_already_has_score",
+        test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
