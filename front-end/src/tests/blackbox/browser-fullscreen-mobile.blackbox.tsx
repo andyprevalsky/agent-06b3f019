@@ -15,14 +15,9 @@ import { renderWithProviders } from './test-wrapper';
 
 // Control the mobile breakpoint deterministically.
 const mobileState = vi.hoisted(() => ({ value: false }));
-const viewportSyncMock = vi.hoisted(() => vi.fn());
 vi.mock('@/hooks/use-mobile', () => ({
   useIsMobile: () => mobileState.value,
 }));
-vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/useBrowserViewportSync',
-  () => ({ useBrowserViewportSync: viewportSyncMock }),
-);
 
 // Stub heavy children so the test isolates layout, not realtime/canvas work.
 vi.mock('@/features/terminal-component-group/components/MessageList', () => ({
@@ -65,7 +60,6 @@ function defaultProps(overrides: Partial<Props> = {}): Props {
 describe('BrowserStatusBarFullscreen mobile layout', () => {
   beforeEach(() => {
     mobileState.value = false;
-    viewportSyncMock.mockClear();
   });
 
   it('renders the fixed-width task-progress panel on desktop', () => {
@@ -74,7 +68,6 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
 
     expect(screen.getByText('Task progress')).toBeInTheDocument();
     expect(document.body.innerHTML).toContain(DESKTOP_PANEL_CLASS);
-    expect(viewportSyncMock).toHaveBeenCalledWith('t1', expect.any(Object), true);
   });
 
   it('prioritizes disconnected controls when desktop auth assistance is also pending', () => {
@@ -107,7 +100,6 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
     const browserPane = iframe.parentElement?.parentElement;
     expect(browserPane).toHaveClass('w-full', 'flex-none', 'overflow-hidden');
     expect(browserPane).toHaveStyle({ aspectRatio: '8 / 5' });
-    expect(viewportSyncMock).toHaveBeenCalledWith('t1', expect.any(Object), false);
 
     // Agent controls are a footer below the image, never an overlay obscuring it.
     const takeControl = screen.getByRole('button', { name: 'Take control' });

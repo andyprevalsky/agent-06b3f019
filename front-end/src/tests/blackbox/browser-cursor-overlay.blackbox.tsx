@@ -48,11 +48,11 @@ describe('BrowserCursorOverlay realtime stream', () => {
     realtimeMocks.subscribeToChannel.mockResolvedValue({ topic: 'agent:agent-1' });
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
       configurable: true,
-      get: () => 1288,
+      get: () => 1280,
     });
     Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
       configurable: true,
-      get: () => 891,
+      get: () => 800,
     });
     localStorage.setItem(
       'rose-session',
@@ -84,7 +84,7 @@ describe('BrowserCursorOverlay realtime stream', () => {
     });
 
     const cursor = screen.getByTestId('browser-cursor');
-    expect(cursor).toHaveStyle({ left: '324px', top: '291px' });
+    expect(cursor).toHaveStyle({ left: '320px', top: '200px' });
   });
 
   it('interpolates between consecutive realtime cursor samples instead of snapping', async () => {
@@ -125,7 +125,7 @@ describe('BrowserCursorOverlay realtime stream', () => {
       });
 
       const cursor = screen.getByTestId('browser-cursor');
-      expect(cursor).toHaveStyle({ left: '104px', top: '191px' });
+      expect(cursor).toHaveStyle({ left: '100px', top: '100px' });
 
       act(() => {
         handlers.BROWSER_CURSOR({
@@ -142,19 +142,19 @@ describe('BrowserCursorOverlay realtime stream', () => {
         });
       });
 
-      expect(cursor).toHaveStyle({ left: '104px', top: '191px' });
+      expect(cursor).toHaveStyle({ left: '100px', top: '100px' });
 
       act(() => {
         rafCallbacks.shift()?.(1035);
       });
 
-      expect(cursor).toHaveStyle({ left: '304px', top: '291px' });
+      expect(cursor).toHaveStyle({ left: '300px', top: '200px' });
 
       act(() => {
         rafCallbacks.shift()?.(1070);
       });
 
-      expect(cursor).toHaveStyle({ left: '504px', top: '391px' });
+      expect(cursor).toHaveStyle({ left: '500px', top: '300px' });
     } finally {
       requestAnimationFrameSpy.mockRestore();
       cancelAnimationFrameSpy.mockRestore();
@@ -172,7 +172,7 @@ describe('BrowserCursorOverlay realtime stream', () => {
     );
 
     const cursor = screen.getByTestId('browser-cursor');
-    expect(cursor).toHaveStyle({ left: '104px', top: '141px' });
+    expect(cursor).toHaveStyle({ left: '100px', top: '50px' });
     expect(realtimeMocks.subscribeToChannel).not.toHaveBeenCalled();
   });
 
@@ -194,7 +194,7 @@ describe('BrowserCursorOverlay realtime stream', () => {
       });
     });
 
-    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '644px', top: '491px' });
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '640px', top: '400px' });
   });
 
   it('rejects a cursor payload whose agent identity differs from its channel', async () => {
@@ -213,7 +213,7 @@ describe('BrowserCursorOverlay realtime stream', () => {
       });
     });
 
-    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '644px', top: '491px' });
+    expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '640px', top: '400px' });
   });
 });
 

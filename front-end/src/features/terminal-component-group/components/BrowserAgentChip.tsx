@@ -67,6 +67,7 @@ import {
   seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
+import { steelLiveViewIframeCropStyle } from './browser-status-bar/liveViewFrame';
 
 type Tab = 'result' | 'recording';
 
@@ -469,7 +470,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         onTimeUpdate={handleVideoTimeSync}
                         onSeeked={handleVideoTimeSync}
                         onLoadedMetadata={handleVideoTimeSync}
-                        className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                        className="aspect-[16/10] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black object-contain"
                       />
                     </RecordingWithLiveTrajectory>
                   )}
@@ -521,7 +522,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                         onEnded={() => {
                           setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
                         }}
-                        className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                        className="aspect-[16/10] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black object-contain"
                       />
                     </div>
                   </RecordingWithLiveTrajectory>
@@ -530,11 +531,14 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                   recordingState === 'ready' &&
                   recordingSource?.kind === 'pointer' &&
                   recordingUrl && (
-                    <iframe
-                      title="Browser recording"
-                      src={recordingUrl}
-                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
-                    />
+                    <div className="relative aspect-[1280/800] max-h-[75vh] w-full overflow-hidden rounded border border-border bg-black">
+                      <iframe
+                        title="Browser recording"
+                        src={recordingUrl}
+                        className="border-0"
+                        style={steelLiveViewIframeCropStyle()}
+                      />
+                    </div>
                   )}
               </div>
             )}

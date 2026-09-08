@@ -36,17 +36,10 @@ import {
   type BrowserCursorPayload,
   type CursorPosition,
 } from './useCursorAnimation';
-
-// Steel browser dimensions
-// Debug view shows full browser window (1288x891), content viewport is 1280x800
-// Chrome offsets: ~4px left border, ~91px top toolbar
-const BROWSER_WINDOW_WIDTH = 1288;
-const BROWSER_WINDOW_HEIGHT = 891;
-const CONTENT_VIEWPORT_WIDTH = 1280;
-const CONTENT_VIEWPORT_HEIGHT = 800;
-const CHROME_OFFSET_X = 4; // Left border
-const CHROME_OFFSET_Y = 91; // Toolbar height
-const WINDOW_ASPECT = BROWSER_WINDOW_WIDTH / BROWSER_WINDOW_HEIGHT;
+import {
+  LIVE_VIEW_CONTENT_VIEWPORT,
+  computeLiveViewLetterbox,
+} from './browser-status-bar/liveViewFrame';
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.
@@ -85,33 +78,17 @@ function isBrowserCursorPayload(value: unknown): value is BrowserCursorPayload {
 }
 
 function computeViewportBounds(container: HTMLDivElement): ViewportBounds {
-  const containerWidth = container.clientWidth;
-  const containerHeight = container.clientHeight;
-  const containerAspect = containerWidth / containerHeight;
-
-  let windowWidth: number;
-  let windowHeight: number;
-  let windowOffsetX: number;
-  let windowOffsetY: number;
-
-  if (containerAspect > WINDOW_ASPECT) {
-    windowHeight = containerHeight;
-    windowWidth = containerHeight * WINDOW_ASPECT;
-    windowOffsetX = (containerWidth - windowWidth) / 2;
-    windowOffsetY = 0;
-  } else {
-    windowWidth = containerWidth;
-    windowHeight = containerWidth / WINDOW_ASPECT;
-    windowOffsetX = 0;
-    windowOffsetY = (containerHeight - windowHeight) / 2;
-  }
-
-  const scale = windowWidth / BROWSER_WINDOW_WIDTH;
+  const box = computeLiveViewLetterbox(
+    container.clientWidth,
+    container.clientHeight,
+    LIVE_VIEW_CONTENT_VIEWPORT.width,
+    LIVE_VIEW_CONTENT_VIEWPORT.height,
+  );
   return {
-    offsetX: windowOffsetX + CHROME_OFFSET_X * scale,
-    offsetY: windowOffsetY + CHROME_OFFSET_Y * scale,
-    width: CONTENT_VIEWPORT_WIDTH * scale,
-    height: CONTENT_VIEWPORT_HEIGHT * scale,
+    offsetX: box.offsetX,
+    offsetY: box.offsetY,
+    width: box.width,
+    height: box.height,
   };
 }
 
@@ -275,9 +252,11 @@ export default function BrowserCursorOverlay({
   const cursorPos = useCursorPosition(agentId, taskId, messages);
 
   const cursorLeft =
-    viewportBounds.offsetX + (cursorPos.x / CONTENT_VIEWPORT_WIDTH) * viewportBounds.width;
+    viewportBounds.offsetX +
+    (cursorPos.x / LIVE_VIEW_CONTENT_VIEWPORT.width) * viewportBounds.width;
   const cursorTop =
-    viewportBounds.offsetY + (cursorPos.y / CONTENT_VIEWPORT_HEIGHT) * viewportBounds.height;
+    viewportBounds.offsetY +
+    (cursorPos.y / LIVE_VIEW_CONTENT_VIEWPORT.height) * viewportBounds.height;
 
   return (
     <div
