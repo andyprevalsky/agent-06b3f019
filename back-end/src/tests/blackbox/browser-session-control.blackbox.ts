@@ -84,31 +84,28 @@ async function testOwnershipHandshake(accessToken: string, userId: string): Prom
   const endpoint = `${BASE_URL}/api/browser-session/task/${session.id}/control`;
   const userHeaders = { Authorization: `Bearer ${accessToken}` };
   try {
-    const requested = await request(endpoint, {
+    const taken = await request(endpoint, {
       method: 'POST',
       headers: userHeaders,
       body: JSON.stringify({ mode: 'user' }),
     });
-    expectState(requested, 'requested');
+    expectState(taken, 'user');
     if (
-      (requested.data as { debugUrl?: string }).debugUrl !==
-      'https://steel.example/replacement-live'
+      (taken.data as { debugUrl?: string }).debugUrl !== 'https://steel.example/replacement-live'
     ) {
-      throw new Error(
-        `Control snapshot lost replacement live URL: ${JSON.stringify(requested.data)}`
-      );
+      throw new Error(`Control snapshot lost the live session URL: ${JSON.stringify(taken.data)}`);
     }
-    const requestedRow = await prisma.browserSession.findUniqueOrThrow({
+    const takenRow = await prisma.browserSession.findUniqueOrThrow({
       where: { id: session.id },
-      select: { status: true, controlState: true, controlLeaseExpiresAt: true },
+      select: { status: true, controlState: true, controlLeaseExpiresAt: true, sessionId: true },
     });
     if (
-      requestedRow.status !== 'ACTIVE' ||
-      requestedRow.controlState !== 'USER_REQUESTED' ||
-      requestedRow.controlLeaseExpiresAt === null
+      takenRow.status !== 'ACTIVE' ||
+      takenRow.controlState !== 'USER' ||
+      takenRow.controlLeaseExpiresAt === null
     ) {
       throw new Error(
-        `Control handoff corrupted browser lifecycle: ${JSON.stringify(requestedRow)}`
+        `Control handoff was not immediate same-session: ${JSON.stringify(takenRow)}`
       );
     }
     expectStatus(
@@ -139,7 +136,7 @@ async function testOwnershipHandshake(accessToken: string, userId: string): Prom
         headers: userHeaders,
         body: JSON.stringify({ mode: 'user' }),
       }),
-      'requested'
+      'user'
     );
     expectState(
       await request(endpoint, {

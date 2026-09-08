@@ -1,9 +1,8 @@
 /**
  * Seed the minimum DB rows for the browser take-control Playwright semantic test.
  *
- * Creates a browser context + ACTIVE browser session keyed by TASK_ID and pauses
- * the owning agent so POST /control {mode:"user"} transitions straight to USER
- * without a live Temporal worker to acknowledge the handoff.
+ * Creates a browser context + ACTIVE browser session keyed by TASK_ID.
+ * Take-control grants USER immediately on that same session — no worker ack.
  *
  * Usage (local DB only):
  *   AGENT_ID=<uuid> TASK_ID=<uuid> USER_ID=<uuid> \
@@ -23,7 +22,7 @@ const USER_ID = process.env.USER_ID?.trim() ?? '';
 const DEBUG_URL =
   process.env.DEBUG_URL?.trim() ??
   `data:text/html;charset=utf-8,${encodeURIComponent(
-    '<!doctype html><title>Take control e2e</title><body><h1>Semantic browser</h1></body>',
+    '<!doctype html><title>Take control e2e</title><body><h1>Semantic browser</h1></body>'
   )}`;
 
 function assertSeedAllowed(): void {
@@ -38,7 +37,7 @@ function assertSeedAllowed(): void {
   const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
   if (!localHosts.has(host)) {
     throw new Error(
-      `Refusing to seed: DATABASE_URL host is "${host}", not local. Set ALLOW_E2E_DB_SEED=1 for semantic e2e runs.`,
+      `Refusing to seed: DATABASE_URL host is "${host}", not local. Set ALLOW_E2E_DB_SEED=1 for semantic e2e runs.`
     );
   }
 }
@@ -74,7 +73,7 @@ async function main(): Promise<void> {
       taskId: TASK_ID,
       userId: USER_ID,
       debugUrl: DEBUG_URL,
-    }),
+    })
   );
 }
 

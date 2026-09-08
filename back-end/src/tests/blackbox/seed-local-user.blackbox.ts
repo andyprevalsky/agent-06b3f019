@@ -4,6 +4,7 @@ import {
   runSyncStep,
   syncUserRecord,
   syncWaitlistAccounts,
+  uniqueConflictWhere,
 } from '../../../scripts/seed-local-helpers';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -120,11 +121,35 @@ async function testScopedUsersPreserveLocalIdentity(): Promise<void> {
   assert(stored.usedInviteCode === 42, 'expected remote account fields to be refreshed');
 }
 
+async function testSingleFieldUniqueConflictUsesScalarWhere(): Promise<void> {
+  const phone = '+19729777432';
+  const where = uniqueConflictWhere(['phone'], { phone, name: 'Andy' });
+  assert(
+    where.phone === phone,
+    `single-field unique must be a scalar where, got ${JSON.stringify(where)}`
+  );
+  assert(
+    typeof where.phone !== 'object' || where.phone === null,
+    'Waitlist.phone P2002 recovery must not wrap the scalar as { phone: { phone } }'
+  );
+
+  const compound = uniqueConflictWhere(['userId', 'rpId'], {
+    userId: 'user-1',
+    rpId: 'rp.example',
+  });
+  assert(
+    JSON.stringify(compound) ===
+      JSON.stringify({ userId_rpId: { userId: 'user-1', rpId: 'rp.example' } }),
+    `compound unique must keep the joined Prisma where, got ${JSON.stringify(compound)}`
+  );
+}
+
 async function main(): Promise<void> {
   await testProductionColumnCompatibility();
   await testSyncFailureIsFatal();
   await testMissingOptionalUser();
   await testScopedUsersPreserveLocalIdentity();
+  await testSingleFieldUniqueConflictUsesScalarWhere();
   console.log('PASS seed-local user compatibility');
 }
 

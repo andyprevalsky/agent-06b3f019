@@ -30,6 +30,7 @@ import {
   syncRowsWithConcurrency,
   syncUserRecord,
   syncWaitlistAccounts,
+  uniqueConflictWhere,
 } from './seed-local-helpers';
 import {
   createScopedBrowserAuthReaders,
@@ -342,10 +343,13 @@ async function upsertById(model: any, records: any[]): Promise<number> {
       if (existingById) throw error;
 
       const fields = target as string[];
-      const compoundKey = fields.join('_');
-      const compoundValue = Object.fromEntries(fields.map((field) => [field, r[field]]));
       // Refresh the conflicting row in place; its local id stays authoritative.
-      await model.update({ where: { [compoundKey]: compoundValue }, data: rest });
+      // Single-field uniques (Waitlist.phone) must use a scalar where, not
+      // `{ phone: { phone } }` — that Prisma shape is only for compound keys.
+      await model.update({
+        where: uniqueConflictWhere(fields, r as Record<string, unknown>),
+        data: rest,
+      });
     }
   }
   return records.length;
