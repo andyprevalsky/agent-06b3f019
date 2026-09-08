@@ -46,17 +46,17 @@ while [ "$#" -gt 0 ]; do
     --dry-contract) DRY_CONTRACT=1; shift ;;
     --mode)
       MODE="${2:-}"
-      shift 2
       case "$MODE" in all|sequential|lane|parallel) ;; *)
         echo "❌ unknown --mode: $MODE" >&2; usage >&2; exit 2 ;;
       esac
+      shift 2
       ;;
     --cap)
       LANE_CAP="${2:-}"
-      shift 2
       case "$LANE_CAP" in ''|*[!0-9]*|0)
         echo "❌ --cap must be a positive integer" >&2; exit 2 ;;
       esac
+      shift 2
       ;;
     -h|--help) usage; exit 0 ;;
     --) shift; EXTRA_FLEET_ARGS+=("$@"); break ;;

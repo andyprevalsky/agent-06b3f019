@@ -1490,6 +1490,17 @@ class AgentWorkflow:
             _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
+        # continue_as_new / deployment resume may restore fast_cache_goal from
+        # runtime_state. Recompute the DEMO cache gate from the restored goals
+        # so a non-demo input goal cannot leave cache replay disabled when the
+        # durable goal is demo (the persisted-goal resolver below no-ops when
+        # the restored goal already matches).
+        self.fast_mode_cache_enabled = is_demo_cache_task(self)
+        self.compute_token_fast_cache_affinity_key = (
+            _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or goal)
+            if self.fast_mode_cache_enabled
+            else None
+        )
         if isinstance(context, list):
             self.context = list(context)
         if self.start_time is None:

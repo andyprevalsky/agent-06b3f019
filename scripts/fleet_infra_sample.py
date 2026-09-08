@@ -69,6 +69,9 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
     except CatalogError as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
+    if args.width < 1:
+        print("❌ width must be a positive integer", file=sys.stderr)
+        return 2
     if args.width > len(pool):
         print(
             f"❌ width {args.width} exceeds catalog pool size {len(pool)}",

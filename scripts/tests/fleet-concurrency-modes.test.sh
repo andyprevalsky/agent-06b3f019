@@ -94,4 +94,17 @@ else
   pass "cap overflow rejected"
 fi
 
+# Validate before shift so a trailing --mode/--cap reports exit 2 (not set -e 1).
+rc=0
+bash "$SCRIPT" --mode >/tmp/fleet-concurrency-mode-missing.out 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "trailing --mode must exit 2 (got $rc)"
+grep -Eqi 'unknown --mode' /tmp/fleet-concurrency-mode-missing.out \
+  || fail "trailing --mode must report unknown mode"
+
+rc=0
+bash "$SCRIPT" --cap >/tmp/fleet-concurrency-cap-missing.out 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "trailing --cap must exit 2 (got $rc)"
+grep -Eqi 'positive integer' /tmp/fleet-concurrency-cap-missing.out \
+  || fail "trailing --cap must report positive-integer requirement"
+
 pass "fleet DEMO concurrency e2e contracts"

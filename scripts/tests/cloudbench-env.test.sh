@@ -1698,6 +1698,50 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'Never stop the warm machine ourselves' \
   "fleet must wait for warm stop without stopping a sibling-owned warm source"
 
+# Hub port selection must fail closed when the TCP probe errors (not "free").
+require_text "$HELPER_SRC" \
+  'refusing fail-open port selection' \
+  "central hub port selection must fail closed on TCP probe errors"
+require_text "$HELPER_SRC" \
+  'raise SystemExit(3)' \
+  "TCP listener probe must use exit 3 for unexpected probe failures"
+(
+  # Behavioral: free port → exit 1; occupied → 0; bad arg → 2.
+  free_port=19731
+  while cloudbench_tcp_listener_present "$free_port"; do
+    free_port=$((free_port + 1))
+  done
+  rc=0
+  cloudbench_tcp_listener_present "$free_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "free port probe must exit 1 (got $rc)"
+  rc=0
+  cloudbench_tcp_listener_present not-a-port || rc=$?
+  [ "$rc" -eq 2 ] || fail "bad port arg must exit 2 (got $rc)"
+  # Occupy free_port briefly and assert exit 0.
+  python3 - "$free_port" <<'PY' &
+import socket, sys, time
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port))
+s.listen(1)
+time.sleep(2)
+s.close()
+PY
+  listener_pid=$!
+  trap 'kill "$listener_pid" 2>/dev/null || true' RETURN
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if cloudbench_tcp_listener_present "$free_port"; then
+      break
+    fi
+    sleep 0.05
+  done
+  cloudbench_tcp_listener_present "$free_port" \
+    || fail "occupied port probe must exit 0"
+  kill "$listener_pid" 2>/dev/null || true
+  wait "$listener_pid" 2>/dev/null || true
+) || fail "TCP listener probe exit-code contract broken"
+
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only
 # classifier so a missing tasks.json never swallows the parallel-safety message.

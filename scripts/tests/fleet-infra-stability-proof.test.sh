@@ -26,6 +26,35 @@ if "$PROOF" --width 99 --dry-sample >/tmp/infra-proof-cap.out 2>&1; then
 fi
 grep -Fq 'hard cap 32' /tmp/infra-proof-cap.out || fail "over-cap must mention hard cap 32"
 
+# Env overrides must also fail closed (CLI path is not the only entry).
+if FLEET_INFRA_PROOF_RUNS=0 "$PROOF" --dry-sample >/tmp/infra-proof-runs0.out 2>&1; then
+  fail "FLEET_INFRA_PROOF_RUNS=0 must fail closed"
+fi
+grep -Eqi 'RUNS must be a positive integer' /tmp/infra-proof-runs0.out \
+  || fail "RUNS=0 must explain failure"
+
+if python3 "$SAMPLER" dry-proof --repo "$ROOT_DIR" --runs 1 --width 0 --seed 1 \
+  >/tmp/infra-sample-width0.out 2>&1; then
+  fail "fleet_infra_sample dry-proof --width 0 must exit non-zero"
+fi
+grep -Eqi 'positive integer|width' /tmp/infra-sample-width0.out \
+  || fail "dry-proof --width 0 must explain failure (exit 2 path, not traceback)"
+rc=0
+python3 "$SAMPLER" dry-proof --repo "$ROOT_DIR" --runs 1 --width 0 --seed 1 \
+  >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "dry-proof --width 0 must exit 2 (got $rc)"
+
+# Negative seeds are valid integers for deterministic sampling.
+"$PROOF" --dry-sample --runs 1 --width 2 --seed -7 >/tmp/infra-proof-neg-seed.out \
+  || fail "negative --seed must be accepted"
+grep -Fq '"seed": -7' /tmp/infra-proof-neg-seed.out || fail "negative seed must round-trip in JSON"
+
+# Dual-writer race: failure lines must go to stdout only (outer tee captures).
+grep -Fvq 'tee -a "$SUMMARY_ARTIFACT"' "$PROOF" \
+  || fail "proof must not append SUMMARY_ARTIFACT while also piping to tee"
+grep -Fq 'tee "$SUMMARY_ARTIFACT"' "$PROOF" \
+  || fail "proof must still tee the outer summary artifact once"
+
 # Dry sample: 10×20 deterministic, unique within slice, catalog-valid.
 OUT="$(mktemp)"
 "$PROOF" --dry-sample --runs 10 --width 20 --seed 20260908 >"$OUT"

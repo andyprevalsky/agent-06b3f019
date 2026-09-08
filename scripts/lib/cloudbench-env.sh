@@ -280,6 +280,12 @@ cloudbench_tcp_listener_present() {  # <port>
   # the fleet select an occupied foreign hub port.  A TCP connect probe answers
   # the question we actually need here and is portable to every controller
   # because Python is already a hard cloudbench dependency.
+  #
+  # Exit codes:
+  #   0 — listener present
+  #   1 — no listener (port free)
+  #   2 — bad argument
+  #   3 — probe failed (timeout / python / unexpected); callers must fail closed
   python3 - "$1" <<'PY'
 import socket
 import sys
@@ -289,14 +295,19 @@ try:
 except (IndexError, ValueError):
     raise SystemExit(2)
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-    probe.settimeout(0.2)
-    raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(3)
 PY
 }
 
 cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
-  local preferred="$1" expected_root="$2" candidate
+  local preferred="$1" expected_root="$2" candidate probe_rc
 
   # A Conductor port can be reused while another workspace's persistent hub is
   # still alive. Reuse a listener only when it identifies the same runs root;
@@ -304,14 +315,20 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   # port. The identity endpoint also makes a previously rebased hub reusable by
   # later runs from this workspace.
   for candidate in $(seq "$preferred" $((preferred + 500))); do
-    if ! cloudbench_tcp_listener_present "$candidate"; then
+    if cloudbench_tcp_listener_present "$candidate"; then
+      if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      continue
+    fi
+    probe_rc=$?
+    if [ "$probe_rc" -eq 1 ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
-    if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+    echo "FATAL: central hub TCP probe failed on port ${candidate} (rc=${probe_rc}); refusing fail-open port selection" >&2
+    return 1
   done
 
   echo "FATAL: no free central benchmark hub port in ${preferred}..$((preferred + 500))" >&2

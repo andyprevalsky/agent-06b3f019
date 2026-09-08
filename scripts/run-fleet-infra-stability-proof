@@ -57,7 +57,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --seed)
       SEED="${2:-}"; shift 2
-      case "$SEED" in ''|*[!0-9]*) echo "❌ --seed must be an integer" >&2; exit 2 ;; esac
+      if ! [[ "$SEED" =~ ^-?[0-9]+$ ]]; then
+        echo "❌ --seed must be an integer" >&2; exit 2
+      fi
       ;;
     --timeout)
       TIMEOUT="${2:-}"; shift 2
@@ -71,6 +73,21 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# Env overrides (FLEET_INFRA_PROOF_*) bypass CLI validation above — re-check
+# after parse so RUNS=0 cannot emit PASSED without testing a slice.
+case "$RUNS" in ''|*[!0-9]*|0)
+  echo "❌ RUNS must be a positive integer (got: $RUNS)" >&2; exit 2 ;;
+esac
+case "$WIDTH" in ''|*[!0-9]*|0)
+  echo "❌ WIDTH must be a positive integer (got: $WIDTH)" >&2; exit 2 ;;
+esac
+case "$TIMEOUT" in ''|*[!0-9]*|0)
+  echo "❌ TIMEOUT must be a positive integer (got: $TIMEOUT)" >&2; exit 2 ;;
+esac
+if ! [[ "$SEED" =~ ^-?[0-9]+$ ]]; then
+  echo "❌ SEED must be an integer (got: $SEED)" >&2; exit 2
+fi
 
 if [ "$WIDTH" -gt 32 ]; then
   echo "❌ refusing width>32 (hard cap 32; same as infra canary; ratchet deliberately)" >&2
@@ -181,7 +198,9 @@ PY
       FAILED_RC=2
       record_slice "$i" 2 "$PROOF_DIR/slice-${i}.log" "${BENCHES[@]:-}"
       finalize failed
-      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)" | tee -a "$SUMMARY_ARTIFACT"
+      # stdout only — the outer `tee "$SUMMARY_ARTIFACT"` captures these lines;
+      # a second `tee -a` races the outer writer and can clobber failure lines.
+      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)"
       exit 2
     fi
 
@@ -209,8 +228,8 @@ PY
       FAILED_SLICE="$i"
       FAILED_RC="$rc"
       finalize failed
-      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (fleet exit=$rc)" | tee -a "$SUMMARY_ARTIFACT"
-      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining" | tee -a "$SUMMARY_ARTIFACT"
+      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (fleet exit=$rc)"
+      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining"
       exit "$rc"
     fi
 
