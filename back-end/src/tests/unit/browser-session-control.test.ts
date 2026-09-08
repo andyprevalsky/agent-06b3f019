@@ -126,11 +126,11 @@ async function runAll(): Promise<void> {
   await testLeftoverRequestedBecomesUserOnSameSession();
   await testSecondBrowserHandoffDoesNotTouchTheFirst();
   await prisma.$disconnect();
-  console.log('PASS browser-session-control unit (3 cases)');
+  process.stdout.write('PASS browser-session-control unit (3 cases)\n');
 }
 
 runAll().catch(async (error) => {
-  console.error('FAIL browser-session-control unit', error);
+  process.stderr.write(`FAIL browser-session-control unit ${String(error)}\n`);
   await prisma.$disconnect().catch(() => undefined);
   process.exit(1);
 });
