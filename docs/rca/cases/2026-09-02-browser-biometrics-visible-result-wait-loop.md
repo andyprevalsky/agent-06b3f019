@@ -23,6 +23,7 @@ sources:
   - agent c3762be3-59be-4aa4-af6c-83d8eed9aeb9
   - PR #1209
   - agent 15a85ea0-46e4-429b-ae37-d75514b0cd97
+  - agent 9dc6b7e4-eee9-4ed9-8502-ed43531471cf
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
 status: fixed
 ---
@@ -81,6 +82,20 @@ action-entry tool results, and did not treat network/log inspection as idle.
 Owning-boundary repro:
 `test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score`
 failed on `wait` before the tool-result scan and passed after.
+
+## Recurrence 2026-09-08 (agent 9dc6b7e4)
+
+Same smoke task on HEAD `50dd6f349` after CodeRabbit tightened score matching
+to require the words `risk score` / `fcaptcha` / JSON `"score"`. After Submit
+the model said `a score "0.07" appeared` and then scrolled. Observation dumps
+correctly stayed strict; the reasoning path no longer rewrote scroll because
+it omitted the word `risk`. The earlier guardrail failed to hold because the
+review-cycle tightening over-constrained the LLM-visible phrasing.
+
+Owning-boundary repro:
+`test_visible_result_completion_rewrites_post_submit_score_without_verdict`
+now uses that exact `a score "0.07" appeared` sentence. Observation still
+rejects the same phrasing without a labeled/JSON score.
 
 ## Reusable lesson
 

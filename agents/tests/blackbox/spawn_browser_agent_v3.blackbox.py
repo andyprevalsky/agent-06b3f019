@@ -561,7 +561,7 @@ def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
         should_force_visible_result_completion,
     )
 
-    stated = "A risk score of 0.11 appeared. Let me scroll down to see the full result."
+    stated = 'The form was submitted and a score "0.07" appeared below the form.'
     prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
     for action_name in ("scroll_down", "wait", "screenshot"):
         assert should_force_visible_result_completion(
@@ -571,7 +571,7 @@ def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
         ), action_name
     forced = forced_visible_result_completion_action(stated)
     assert forced["action"] == "attempt_completion"
-    assert "0.11" in forced["params"]["reasoning"]
+    assert "0.07" in forced["params"]["reasoning"]
 
 
 def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score():
@@ -669,7 +669,11 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     assert not observation_states_visible_fcaptcha_result("Bot detected; threshold 0.15")
     assert reasoning_states_visible_fcaptcha_result("Risk Score: 0")
     assert reasoning_states_visible_fcaptcha_result("Risk Score: 1.0")
+    assert reasoning_states_visible_fcaptcha_result(
+        'The form was submitted and a score "0.07" appeared below the form.'
+    )
     assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
+    assert not reasoning_states_visible_fcaptcha_result("threshold 0.15")
     assert not observation_states_visible_fcaptcha_result(
         'Bot detected; {"score": 2, "success": false}'
     )
@@ -681,6 +685,10 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     )
     assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 0.15.2")
     assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 1.0.15")
+    # Observation dumps stay labeled; bare "a score 0.07 appeared" is reasoning-only.
+    assert not observation_states_visible_fcaptcha_result(
+        'Bot detected - form blocked; a score "0.07" appeared below the form.'
+    )
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():

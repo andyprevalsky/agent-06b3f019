@@ -85,9 +85,14 @@ a fake worker-ack loop; FE no longer storms `/control` 4 times/sec for 120s.
 10k-agent behavior: one indexed `updateMany` per take-control (keyed by
 `BrowserSession.id`). No per-user fan-in, no 480-GET poll storm.
 
-Same unit command now prints `PASS browser-session-control unit (3 cases)`.
+Same unit command now prints `PASS browser-session-control unit (5 cases)`.
 HTTP blackbox `browser-session-control` PASS (387ms). FE
 `browser-take-control` handover is 4ms / one POST.
+
+Follow-on (CodeRabbit 3961302106): user grants also CAS on
+`status=ACTIVE`. A close between the service-layer ACTIVE check and
+`updateMany` can no longer flip a dead session to USER. Leftover
+`USER_REQUESTED` on CLOSED stays requested.
 
 ## Human feedback
 

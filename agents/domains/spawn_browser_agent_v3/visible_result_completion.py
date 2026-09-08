@@ -119,7 +119,12 @@ def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
     blob = str(text or "")
     if not blob.strip():
         return False
-    return _blob_has_fcaptcha_score_value(blob)
+    if _blob_has_fcaptcha_score_value(blob):
+        return True
+    # 9dc6b7e4: "a score 0.07 appeared" after Submit, then scrolled until the
+    # 420s cap. Observation dumps stay strict; model reasoning may omit "risk".
+    text = _normalize_history_blob(blob)
+    return bool(re.search(r"\bscore\b", text, re.IGNORECASE) and _UNIT_INTERVAL_SCORE_RE.search(text))
 
 
 def observation_states_visible_fcaptcha_result(text: str) -> bool:
