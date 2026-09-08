@@ -44,9 +44,10 @@ if grep -Eq 'world_model_mode.: .infra-probe' "$DRIVER"; then
   fail "infra probe must not emit world_model_mode=infra-probe (breaks result contract)"
 fi
 grep -Fq 'BENCHMARK_WORLD_MODEL_MODE' "$DRIVER" || fail "infra probe must inherit BENCHMARK_WORLD_MODEL_MODE"
-# Runtime guarantee: multi-bench fleets must preflight a recent infra canary
-# before provisioning (so /descend stops dying on INFRA even before command docs
-# land). Command-wiring asserts below are soft until /descend docs merge.
+# Runtime guarantee: every capability fleet (N>=1) must preflight a recent
+# infra canary before provisioning so /descend multi-bench slices AND
+# single-bench outcome-proof reruns fail closed on INFRA. Command-wiring
+# asserts below are soft until /descend docs merge.
 grep -Fq 'fleet_infra_canary_preflight' "$FLEET" \
   || fail "run-bench-fleet must define fleet_infra_canary_preflight"
 grep -Fq 'fleet-infra-canary.last-pass' "$FLEET" \
@@ -55,6 +56,15 @@ grep -Fq 'CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT' "$FLEET" \
   || fail "preflight must honor CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT"
 grep -Fq 'cloudbench-controller-infra-canary-preflight.lock' "$FLEET" \
   || fail "preflight must use a distinct controller lock"
+# N=1 must NOT early-return — single-bench outcome-proof is a common /descend path.
+if grep -E '#BENCHES\[@\] -lt 2|BENCHES\[@\] -lt 2' "$FLEET" | grep -v '^[[:space:]]*#' >/dev/null; then
+  # Allow comments mentioning the old hole; forbid a live size skip.
+  if awk '/^fleet_infra_canary_preflight\(\)/,/^}/' "$FLEET" | grep -E '#BENCHES\[@\] -lt 2|\$\{#BENCHES\[@\]\} -lt 2'; then
+    fail "preflight must not skip single-bench fleets (N=1 /descend outcome-proof hole)"
+  fi
+fi
+grep -Fq 'including single-bench' "$FLEET" \
+  || fail "preflight docs must cover single-bench capability fleets"
 if grep -Fq 'FLEET_INFRA_CANARY' "$DESCEND"; then
   grep -Fq 'bash scripts/run-fleet-infra-canary' "$DESCEND" \
     || fail "/descend must invoke the infra canary when wired"

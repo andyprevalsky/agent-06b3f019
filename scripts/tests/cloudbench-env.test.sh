@@ -1742,6 +1742,19 @@ PY
   wait "$listener_pid" 2>/dev/null || true
 ) || fail "TCP listener probe exit-code contract broken"
 
+# Behavioral: select_central_hub_port must return a free preferred port.
+# Regression for the `if cmd; $?` trap — free ports used to FATAL with rc=0.
+(
+  free_port=19811
+  while cloudbench_tcp_listener_present "$free_port"; do
+    free_port=$((free_port + 1))
+  done
+  selected="$(cloudbench_select_central_hub_port "$free_port" "/tmp/cloudbench-hub-select-$$")" || {
+    fail "select_central_hub_port must succeed on a free preferred port"
+  }
+  [ "$selected" = "$free_port" ] || fail "select_central_hub_port must return preferred free port (got $selected)"
+) || fail "central hub free-port selection contract broken"
+
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only
 # classifier so a missing tasks.json never swallows the parallel-safety message.
