@@ -1740,6 +1740,10 @@ PY
     || fail "occupied port probe must exit 0"
   kill "$listener_pid" 2>/dev/null || true
   wait "$listener_pid" 2>/dev/null || true
+
+  # `if probe; then` must not swallow exit 1: a free preferred port is allocatable.
+  selected="$(cloudbench_select_central_hub_port "$free_port" "/tmp/no-such-hub-root")"
+  [ "$selected" = "$free_port" ] || fail "free preferred port must be selected (got ${selected:-empty})"
 ) || fail "TCP listener probe exit-code contract broken"
 
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox

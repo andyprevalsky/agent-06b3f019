@@ -315,14 +315,18 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   # port. The identity endpoint also makes a previously rebased hub reusable by
   # later runs from this workspace.
   for candidate in $(seq "$preferred" $((preferred + 500))); do
-    if cloudbench_tcp_listener_present "$candidate"; then
+    # Capture immediately. `if cmd; then ... fi` resets $? to 0 when cmd is
+    # false, which made a free port (probe exit 1) look like probe exit 0 and
+    # fail closed as "TCP probe failed (rc=0)".
+    cloudbench_tcp_listener_present "$candidate"
+    probe_rc=$?
+    if [ "$probe_rc" -eq 0 ]; then
       if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
         printf '%s\n' "$candidate"
         return 0
       fi
       continue
     fi
-    probe_rc=$?
     if [ "$probe_rc" -eq 1 ]; then
       printf '%s\n' "$candidate"
       return 0
