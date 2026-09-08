@@ -37,9 +37,15 @@ const LIVE_VIEW_V2 = 'https://example.com/take-control-v2';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');
 const seedScript = path.join(repoRoot, 'back-end/scripts/seed-browser-take-control-e2e.ts');
-const LOCAL_DATABASE_URL =
-  process.env.SEMANTIC_DATABASE_URL ??
-  'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30';
+const LOCAL_DATABASE_URL = (() => {
+  if (process.env.SEMANTIC_DATABASE_URL) return process.env.SEMANTIC_DATABASE_URL;
+  // Deploy / run.sh isolate Postgres on LOCAL_DB_PORT (base+5). Seeding 5432
+  // while the backend reads that isolated DB makes Take control 404 and stall.
+  if (process.env.LOCAL_DB_PORT) {
+    return `postgresql://postgres:postgres@localhost:${process.env.LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30`;
+  }
+  return 'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30';
+})();
 
 function seedBrowserControlSession(agentId: string, taskId: string, userId: string): void {
   execFileSync('npx', ['tsx', seedScript], {

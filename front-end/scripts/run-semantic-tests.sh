@@ -93,6 +93,12 @@ else
   export BACKEND_URL="http://localhost:${BACKEND_PORT}"
   export BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
   export VITE_BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
+  # Take-control e2e seeds BrowserSession rows. Those must land in the same
+  # Postgres the running backend uses (LOCAL_DB_PORT on isolated deploy stacks).
+  if [[ -n "${LOCAL_DB_PORT:-}" && -z "${SEMANTIC_DATABASE_URL:-}" ]]; then
+    export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
+    export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
+  fi
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2
