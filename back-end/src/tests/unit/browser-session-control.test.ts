@@ -80,6 +80,25 @@ async function testLeftoverRequestedBecomesUserOnSameSession(): Promise<void> {
   });
 }
 
+async function testClosedUserDoesNotReportUser(): Promise<void> {
+  await withOwnedSession(async ({ taskId, userId }) => {
+    await prisma.browserSession.update({
+      where: { id: taskId },
+      data: { status: 'CLOSED', controlState: 'USER' },
+    });
+    await assert.rejects(
+      () => setBrowserControlState(taskId, 'user', userId),
+      BrowserControlUnavailableError
+    );
+    const row = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: taskId },
+      select: { controlState: true, status: true },
+    });
+    assert.equal(row.status, 'CLOSED');
+    assert.equal(row.controlState, 'USER');
+  });
+}
+
 async function testClosedRequestedDoesNotGrantUser(): Promise<void> {
   await withOwnedSession(async ({ taskId, userId }) => {
     await prisma.browserSession.update({
@@ -170,10 +189,11 @@ async function runAll(): Promise<void> {
   await testActiveTakeControlIsImmediateSameSession();
   await testLeftoverRequestedBecomesUserOnSameSession();
   await testClosedRequestedDoesNotGrantUser();
+  await testClosedUserDoesNotReportUser();
   await testClosedRequestedTransitionIsRejectedByStatusFilter();
   await testSecondBrowserHandoffDoesNotTouchTheFirst();
   await prisma.$disconnect();
-  process.stdout.write('PASS browser-session-control unit (5 cases)\n');
+  process.stdout.write('PASS browser-session-control unit (6 cases)\n');
 }
 
 runAll().catch(async (error) => {

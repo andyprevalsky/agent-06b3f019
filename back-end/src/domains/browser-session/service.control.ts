@@ -104,9 +104,6 @@ async function grantUserControl(
   if (transitioned) return getBrowserControlState(taskId, userId);
 
   const current = await requireControlRecord(taskId, userId);
-  if (current.controlState === USER) {
-    return getBrowserControlState(taskId, userId);
-  }
   if (current.status !== ACTIVE) {
     throw new BrowserControlUnavailableError(current.status);
   }
