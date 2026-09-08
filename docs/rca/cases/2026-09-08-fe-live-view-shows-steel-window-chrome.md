@@ -21,6 +21,7 @@ tags:
   - antibot
 sources:
   - agent 3b2a912a-0248-478a-a4b9-0693a4983d75
+  - PR #1293
 repro: front-end/src/tests/blackbox/browser-live-view-frame.blackbox.ts
 status: fixed
 ---
