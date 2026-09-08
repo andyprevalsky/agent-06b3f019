@@ -693,6 +693,10 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     assert not observation_states_visible_fcaptcha_result(
         'Bot detected - form blocked; a score "0.07" appeared below the form.'
     )
+    # Static Risk Score chrome plus an unrelated 0.xx must not complete.
+    assert not observation_states_visible_fcaptcha_result(
+        "Bot detected - form blocked\nRisk Score (lower = human)\nthreshold 0.15"
+    )
     # FCaptcha and Score often sit on adjacent evaluate lines after unescape.
     multiline_fcaptcha = "Bot detected\nFCaptcha\nScore: 0.15"
     assert observation_states_visible_fcaptcha_result(multiline_fcaptcha)

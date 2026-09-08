@@ -109,6 +109,13 @@ unit-interval path; observation did not. Enable `re.DOTALL` so the
 existing FCaptcha/Score label pair works across adjacent lines. Cemented
 in `test_visible_result_completion_ignores_post_submit_version_decimal_without_score`.
 
+## Recurrence 2026-09-08 (CodeRabbit 3962052511)
+
+Independent label + `0.xx` matching treated static `Risk Score` chrome plus
+`threshold 0.15` as a visible result. Observation now requires the
+unit-interval next to `Risk Score` or `FCaptcha`+`Score`, or a JSON
+`score` field. Reasoning stays relaxed.
+
 ## Reusable lesson
 
 Once the visible score and form verdict are already on the page — in

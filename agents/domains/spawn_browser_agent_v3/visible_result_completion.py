@@ -26,11 +26,6 @@ import json
 import re
 from typing import Any, Iterable
 
-_RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
-_FCAPTCHA_SCORE_RE = re.compile(
-    r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b",
-    re.IGNORECASE | re.DOTALL,
-)
 # FCaptcha risk scores are unit-interval (0.07, 0.15) plus labeled bounds 0/1/1.0.
 # Reject version fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after a dot).
 _UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b(?!\.\d+)")
@@ -50,6 +45,16 @@ _REASONING_BOUND_SCORE_RE = re.compile(
     r"|(?<![vV\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+).{0,40}\bscore\b",
     re.IGNORECASE | re.DOTALL,
 )
+# Observation: unit-interval must sit next to Risk Score or FCaptcha+Score,
+# not a static label plus an unrelated 0.xx (threshold/session/version).
+_THRESHOLD_UNIT_INTERVAL_RE = re.compile(r"\bthreshold\s+0\.\d+\b", re.IGNORECASE)
+_ASSOCIATED_UNIT_INTERVAL_RE = re.compile(
+    r"\brisk\s+score\b(?:(?!\bthreshold\b).){0,80}(?<![\d.])\b0\.\d+\b(?!\.\d+)"
+    r"|(?<![\d.])\b0\.\d+\b(?!\.\d+)(?:(?!\bthreshold\b).){0,80}\brisk\s+score\b"
+    r"|\bfcaptcha\b.{0,80}\bscore\b(?:(?!\bthreshold\b).){0,40}(?<![\d.])\b0\.\d+\b(?!\.\d+)"
+    r"|\bscore\b.{0,80}\bfcaptcha\b(?:(?!\bthreshold\b).){0,40}(?<![\d.])\b0\.\d+\b(?!\.\d+)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _normalize_history_blob(blob: str) -> str:
@@ -64,13 +69,12 @@ def _blob_has_fcaptcha_score_value(blob: str) -> bool:
     and `v1.0.15` must not force completion (CodeRabbit). History blobs are
     json.dumps of action entries, so unescape before matching labels.
     """
-    text = _normalize_history_blob(blob)
+    text = _THRESHOLD_UNIT_INTERVAL_RE.sub("", _normalize_history_blob(blob))
     if _JSON_SCORE_RE.search(text):
         return True
     if _LABELED_BOUND_SCORE_RE.search(text):
         return True
-    has_label = bool(_RISK_SCORE_RE.search(text) or _FCAPTCHA_SCORE_RE.search(text))
-    return has_label and bool(_UNIT_INTERVAL_SCORE_RE.search(text))
+    return bool(_ASSOCIATED_UNIT_INTERVAL_RE.search(text))
 
 
 # Idle / exploratory actions that cannot change a result already on the page.
