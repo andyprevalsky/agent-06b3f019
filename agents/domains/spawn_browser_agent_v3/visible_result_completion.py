@@ -119,8 +119,10 @@ _NAVIGATION_MARKERS = (
     "open_url",
     "open_page",
     "go_back",
+    "navback",
     "go_forward",
     "new_tab",
+    "open_new_tab",
     "switch_tab",
     "close_tab",
 )

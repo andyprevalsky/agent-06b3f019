@@ -450,6 +450,27 @@ def test_visible_result_completion_does_not_rewrite_after_navigation():
     )
 
 
+def test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab():
+    """Producer names navback/open_new_tab must count as navigation.
+
+    service_actions records those exact action names. If the marker set only
+    has go_back/new_tab aliases, a later idle action can complete against the
+    pre-navigation score.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'Risk Score 0.11, Bot detected - form blocked'
+    submit = {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"}
+    for nav_action in ("navback", "open_new_tab"):
+        assert not should_force_visible_result_completion(
+            action_name="scroll",
+            last_reasoning=stated,
+            action_entries=[submit, {"action": nav_action}],
+        ), nav_action
+
+
 def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit():
     """submit(A) → score A → navigate(B) → submit(B) → scroll must not use score A.
 
@@ -19373,6 +19394,14 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_does_not_rewrite_after_navigation",
         test_visible_result_completion_does_not_rewrite_after_navigation,
+    )
+    r.record(
+        "visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab",
+        test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab,
+    )
+    r.record(
+        "visible_result_completion_ignores_submit_words_inside_observation_dumps",
+        test_visible_result_completion_ignores_submit_words_inside_observation_dumps,
     )
     r.record(
         "visible_result_completion_ignores_pre_navigation_evidence_after_later_submit",
