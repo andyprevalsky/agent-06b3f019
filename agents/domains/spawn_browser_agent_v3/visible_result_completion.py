@@ -29,9 +29,9 @@ from typing import Any, Iterable
 _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
 _FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
 _NUMERIC_SCORE_RE = re.compile(r"\b\d+\.\d+\b")
-# FCaptcha risk scores are unit-interval (0.07, 0.15). Do not treat product
-# versions like v1.34.1 as a score — `\b\d+\.\d+\b` matches 34.1 there.
-_UNIT_INTERVAL_SCORE_RE = re.compile(r"\b0\.\d+\b")
+# FCaptcha risk scores are unit-interval (0.07, 0.15). Reject version
+# fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after another dotted token).
+_UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b")
 _JSON_SCORE_RE = re.compile(r"""['"]score['"]\s*:\s*\d*\.?\d+""", re.IGNORECASE)
 _VERDICT_MARKERS = (
     "bot detected",
@@ -97,12 +97,11 @@ def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
     if not blob.strip():
         return False
     has_score = bool(_RISK_SCORE_RE.search(blob) or _FCAPTCHA_SCORE_RE.search(blob))
-    if not has_score:
-        return False
-    lowered = blob.lower()
-    has_verdict = any(marker in lowered for marker in _VERDICT_MARKERS)
-    has_numeric = bool(_NUMERIC_SCORE_RE.search(blob))
-    return has_verdict or has_numeric
+    has_unit = bool(_UNIT_INTERVAL_SCORE_RE.search(blob) or _JSON_SCORE_RE.search(blob))
+    if has_score and has_unit:
+        return True
+    # JSON `"score": 0.15` is an explicit FCaptcha field even without the label.
+    return bool(_JSON_SCORE_RE.search(blob) and any(marker in blob.lower() for marker in _VERDICT_MARKERS))
 
 
 def observation_states_visible_fcaptcha_result(text: str) -> bool:

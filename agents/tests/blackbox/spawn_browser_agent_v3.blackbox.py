@@ -654,6 +654,17 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
             {"action": "evaluate", "result": {"message": version_only}},
         ],
     )
+    # v1.0.15 still contains a unit-interval token (`0.15`) after a dotted version.
+    version_unit_fragment = "Bot detected - form blocked; browser version v1.0.15"
+    assert not observation_states_visible_fcaptcha_result(version_unit_fragment)
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Risk Score; Bot detected",
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": version_unit_fragment}},
+        ],
+    )
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():
