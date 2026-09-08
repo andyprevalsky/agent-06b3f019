@@ -116,6 +116,10 @@ Independent label + `0.xx` matching treated static `Risk Score` chrome plus
 unit-interval next to `Risk Score` or `FCaptcha`+`Score`, or a JSON
 `score` field. Reasoning stays relaxed.
 
+Threshold stripping also covers `threshold: 0.15` and `threshold of 0.15`
+so `_LABELED_BOUND_SCORE_RE` cannot treat those as the visible score
+(CodeRabbit 3962184379).
+
 ## Reusable lesson
 
 Once the visible score and form verdict are already on the page — in

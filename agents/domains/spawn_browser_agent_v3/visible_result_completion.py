@@ -47,7 +47,10 @@ _REASONING_BOUND_SCORE_RE = re.compile(
 )
 # Observation: unit-interval must sit next to Risk Score or FCaptcha+Score,
 # not a static label plus an unrelated 0.xx (threshold/session/version).
-_THRESHOLD_UNIT_INTERVAL_RE = re.compile(r"\bthreshold\s+0\.\d+\b", re.IGNORECASE)
+_THRESHOLD_UNIT_INTERVAL_RE = re.compile(
+    r"\bthreshold\b(?:\s*(?:of|is|=|:)?\s*)0\.\d+\b",
+    re.IGNORECASE,
+)
 _ASSOCIATED_UNIT_INTERVAL_RE = re.compile(
     r"\brisk\s+score\b(?:(?!\bthreshold\b).){0,80}(?<![\d.])\b0\.\d+\b(?!\.\d+)"
     r"|(?<![\d.])\b0\.\d+\b(?!\.\d+)(?:(?!\bthreshold\b).){0,80}\brisk\s+score\b"
