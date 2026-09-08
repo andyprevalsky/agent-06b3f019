@@ -331,7 +331,7 @@ set -e
 if [ "$SYSTEM_MATERIALIZE_STATUS" -eq 0 ] \
    && [ "$SYSTEM_MATERIALIZED_PATH" = "$EXPECTED_PATH" ] \
    && [ "$(cat "$EXPECTED_PATH" 2>/dev/null)" = "seed-dump-from-system-pg" ] \
-   && grep -q -- '-h localhost -p 5432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"; then
+   && grep -q -- '-h 127.0.0.1 -p 5432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"; then
     PASS=$((PASS+1)); echo "  ✅ system token materializes via host pg_dump (no Docker)"
 else
     FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"

@@ -11,6 +11,7 @@ import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { installCaptchaSolveIndicator } from '../browser/captchaSolveIndicator';
+import { persistBrowserSessionRow } from '../browser/sessionPersist';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 import {
   envEnabled,
@@ -330,22 +331,20 @@ export async function createSessionWithContext(
         dbContext = { ...dbContext, contextId: session.profileId };
       }
 
-      // Save to DB
-      const dbSession = await prisma.browserSession.create({
-        data: {
-          id: options?.taskId,
-          contextId: dbContextId,
-          agentId,
-          sessionId: session.id,
-          debugUrl,
-          wsUrl,
-          status: 'ACTIVE',
-          startUrl: startUrl || undefined,
-          provider: 'steel',
-          providerProfileId: session.profileId ?? profile.profileId ?? null,
-          providerProfileSource: profile.profileSource,
-          providerProfilePersist: profile.persistProfile,
-        },
+      // Save to DB (idempotent when taskId is preallocated for Temporal retries)
+      const dbSession = await persistBrowserSessionRow({
+        taskId: options?.taskId,
+        contextId: dbContextId,
+        agentId,
+        sessionId: session.id,
+        debugUrl,
+        wsUrl,
+        startUrl: startUrl || undefined,
+        provider: 'steel',
+        providerProfileId: session.profileId ?? profile.profileId ?? null,
+        providerProfileSource: profile.profileSource,
+        providerProfilePersist: profile.persistProfile,
+        releaseRemoteSession: releaseSteelRemoteSession,
       });
 
       log.info(`✓ Created Steel session: ${session.id}`);

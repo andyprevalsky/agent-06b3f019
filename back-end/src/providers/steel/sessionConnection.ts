@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Browser } from 'playwright';
-import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { retryWithBackoff } from '../retry';
+import { persistBrowserSessionRow } from '../browser/sessionPersist';
 import { log } from './types';
 import { steelCdpConnectionUrl } from './urls';
 
@@ -92,21 +92,18 @@ export async function createLocalBrowserSession(
 
   const sessionId = `local-${randomUUID()}`;
   const debugUrl = process.env.LOCAL_BROWSER_DEBUG_URL?.trim() ?? wsUrl;
-  const dbSession = await prisma.browserSession.create({
-    data: {
-      id: taskId,
-      contextId: dbContextId,
-      agentId,
-      sessionId,
-      debugUrl,
-      wsUrl,
-      status: 'ACTIVE',
-      startUrl: startUrl !== undefined && startUrl !== '' ? startUrl : undefined,
-      provider: 'steel',
-      providerProfileId: null,
-      providerProfileSource: 'local',
-      providerProfilePersist: false,
-    },
+  const dbSession = await persistBrowserSessionRow({
+    taskId,
+    contextId: dbContextId,
+    agentId,
+    sessionId,
+    debugUrl,
+    wsUrl,
+    startUrl: startUrl !== undefined && startUrl !== '' ? startUrl : undefined,
+    provider: 'steel',
+    providerProfileId: null,
+    providerProfileSource: 'local',
+    providerProfilePersist: false,
   });
 
   log.info(`Created local browser session: ${sessionId}`);

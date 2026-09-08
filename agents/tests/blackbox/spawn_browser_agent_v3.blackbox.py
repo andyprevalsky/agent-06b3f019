@@ -6014,6 +6014,36 @@ async def test_init_browser_session_transient_failure_returns_retryable():
     assert out["transient_init_failure"] is True
     assert out["status_code"] == 400
 
+
+async def test_init_browser_session_unique_constraint_is_not_transient():
+    """A P2002 on the preallocated BrowserSession.id is never a proxy hiccup.
+
+    Prod agent 43b3a83b burned five transient retries on
+    ``Unique constraint failed on the fields: (id)`` because every 5xx was
+    treated as retryable. The reclaim path must handle this; classifying it
+    transient only masks the idempotency bug.
+    """
+    from domains.spawn_browser_agent_v3.repo import (
+        init_browser_session,
+        is_transient_session_init_failure,
+    )
+
+    body = (
+        '{"error":"\\nInvalid `prisma.browserSession.create()` invocation:\\n\\n\\n'
+        'Unique constraint failed on the fields: (`id`)"}'
+    )
+    assert is_transient_session_init_failure(500, body) is False
+
+    setup_mock({"/api/browser-session/init": {"status": 500, "text": body}})
+    cfg = _fake_config()
+    try:
+        await init_browser_session(cfg, "u", "a", "", task_id="11111111-1111-4111-8111-111111111111")
+        raise AssertionError("unique-constraint 500 must be fatal, not transient")
+    except Exception as e:
+        assert "Failed to init session" in str(e)
+        assert "Unique constraint failed" in str(e)
+
+
 async def test_init_browser_session_error_raises():
     from domains.spawn_browser_agent_v3.repo import init_browser_session
 
@@ -19499,6 +19529,10 @@ async def run_all_tests():
     await r.record_async(
         "init_browser_session_transient_retryable",
         test_init_browser_session_transient_failure_returns_retryable,
+    )
+    await r.record_async(
+        "init_browser_session_unique_constraint_not_transient",
+        test_init_browser_session_unique_constraint_is_not_transient,
     )
     await r.record_async("init_browser_session_error", test_init_browser_session_error_raises)
     await r.record_async("fetch_session_info_success", test_fetch_session_info_success)

@@ -456,18 +456,32 @@ _TRANSIENT_INIT_FAILURE_MARKERS = (
     "err_proxy_connection_failed",
 )
 
+# Substrings that are NEVER transient, even on HTTP 5xx. A unique-constraint on
+# the preallocated BrowserSession.id means the row already exists from a prior
+# create — retrying the identical create burns the transient budget without
+# reallocating anything. The backend reclaim path must handle this; classifying
+# it transient only masks the idempotency bug (prod agent 43b3a83b).
+_NON_TRANSIENT_INIT_FAILURE_MARKERS = (
+    "unique constraint failed",
+    "p2002",
+)
+
 
 def is_transient_session_init_failure(status_code: int, body: str) -> bool:
     """Classify a non-2xx/429 init response as retryable-transient vs. fatal.
 
-    5xx from the provider is always transient. A 4xx is transient only when its
+    5xx from the provider is usually transient. A 4xx is transient only when its
     body matches a known infra-hiccup marker (e.g. Kernel's
     ``400 Proxy is marked unavailable from the last health check``); an ordinary
     4xx (bad request) stays fatal so real errors are not masked by retries.
+    Unique-constraint failures are never transient: the preallocated task row
+    already exists and a fresh create cannot succeed.
     """
+    text = (body or "").lower()
+    if any(marker in text for marker in _NON_TRANSIENT_INIT_FAILURE_MARKERS):
+        return False
     if status_code >= 500:
         return True
-    text = (body or "").lower()
     return any(marker in text for marker in _TRANSIENT_INIT_FAILURE_MARKERS)
 
 
