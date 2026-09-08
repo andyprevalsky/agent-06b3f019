@@ -85,7 +85,7 @@ a fake worker-ack loop; FE no longer storms `/control` 4 times/sec for 120s.
 10k-agent behavior: one indexed `updateMany` per take-control (keyed by
 `BrowserSession.id`). No per-user fan-in, no 480-GET poll storm.
 
-Same unit command now prints `PASS browser-session-control unit (5 cases)`.
+Same unit command now prints `PASS browser-session-control unit (6 cases)`.
 HTTP blackbox `browser-session-control` PASS (387ms). FE
 `browser-take-control` handover is 4ms / one POST.
 

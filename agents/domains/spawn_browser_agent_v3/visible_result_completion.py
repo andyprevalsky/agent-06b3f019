@@ -40,6 +40,13 @@ _JSON_SCORE_RE = re.compile(
     r"""['"]score['"]\s*:\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+)""",
     re.IGNORECASE,
 )
+# Reasoning may say "a score 1 appeared" without "risk". Reject version
+# prefixes (`score v1.0`) and dotted fragments (`1.0.15`).
+_REASONING_BOUND_SCORE_RE = re.compile(
+    r"\bscore\b.{0,40}(?<![vV\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+)"
+    r"|(?<![vV\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+).{0,40}\bscore\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _normalize_history_blob(blob: str) -> str:
@@ -124,7 +131,9 @@ def reasoning_states_visible_fcaptcha_result(text: str) -> bool:
     # 9dc6b7e4: "a score 0.07 appeared" after Submit, then scrolled until the
     # 420s cap. Observation dumps stay strict; model reasoning may omit "risk".
     text = _normalize_history_blob(blob)
-    return bool(re.search(r"\bscore\b", text, re.IGNORECASE) and _UNIT_INTERVAL_SCORE_RE.search(text))
+    if re.search(r"\bscore\b", text, re.IGNORECASE) and _UNIT_INTERVAL_SCORE_RE.search(text):
+        return True
+    return bool(_REASONING_BOUND_SCORE_RE.search(text))
 
 
 def observation_states_visible_fcaptcha_result(text: str) -> bool:

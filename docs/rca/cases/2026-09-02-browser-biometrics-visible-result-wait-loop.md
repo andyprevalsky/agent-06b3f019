@@ -95,7 +95,9 @@ review-cycle tightening over-constrained the LLM-visible phrasing.
 Owning-boundary repro:
 `test_visible_result_completion_rewrites_post_submit_score_without_verdict`
 now uses that exact `a score "0.07" appeared` sentence. Observation still
-rejects the same phrasing without a labeled/JSON score.
+rejects the same phrasing without a labeled/JSON score. The relaxed
+reasoning path also accepts bound scores `0` / `1` / `1.0` next to `score`
+and still rejects `score v1.0`.
 
 ## Reusable lesson
 

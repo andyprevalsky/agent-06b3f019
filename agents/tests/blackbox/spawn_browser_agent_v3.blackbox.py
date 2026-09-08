@@ -672,8 +672,12 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     assert reasoning_states_visible_fcaptcha_result(
         'The form was submitted and a score "0.07" appeared below the form.'
     )
+    assert reasoning_states_visible_fcaptcha_result("a score 0 appeared")
+    assert reasoning_states_visible_fcaptcha_result("a score 1 appeared")
+    assert reasoning_states_visible_fcaptcha_result("a score 1.0 appeared")
     assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
     assert not reasoning_states_visible_fcaptcha_result("threshold 0.15")
+    assert not reasoning_states_visible_fcaptcha_result("score v1.0")
     assert not observation_states_visible_fcaptcha_result(
         'Bot detected; {"score": 2, "success": false}'
     )
