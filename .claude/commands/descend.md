@@ -89,9 +89,10 @@ Downstream Implications sections.
    the RCA from Causal proof; outcome pending to Complete. After the first
    infra-clean run with causal RCA for every failing task, freeze a min-heap
    over those tasks and pipeline the rest: do not wait for one task's
-   approve → local rerun cycle to finish before asking about the next idle
-   task. On approve, immediately apply the fix on a local snapshot and rerun
-   that task; immediately ask about the next idle heap item.
+   approve → outcome-proof cycle to finish before asking about the next idle
+   task. On approve, immediately apply the fix on a local code snapshot and
+   rerun that task on the cloud fleet; immediately ask about the next idle
+   heap item.
 12. **Approval format is the ONLY response format — no exceptions.** Every
    response emitted while `/descend` is active MUST consist of exactly: the
    header block (including the approvals counter), the delta rows of the
@@ -497,10 +498,11 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-On each approve, immediately start that task's outcome-proof run on a local
-snapshot. Do not wait to batch approvals or rerun the whole failed subset
-first. Run `/sync` before every subset or full-slice rerun. The final
-acceptance run covers the entire original slice.
+On each approve, immediately start that task's outcome-proof run on the cloud
+fleet (`scripts/run-bench <task>`; `--local` only if Andy explicitly directed
+it). Do not wait to batch approvals or rerun the whole failed subset first.
+Run `/sync` before every subset or full-slice rerun. The final acceptance run
+covers the entire original slice.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
