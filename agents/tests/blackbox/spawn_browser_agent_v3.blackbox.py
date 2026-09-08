@@ -679,6 +679,8 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     assert observation_states_visible_fcaptcha_result(
         'Bot detected; {"score": 0.15, "success": false}'
     )
+    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 0.15.2")
+    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 1.0.15")
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():

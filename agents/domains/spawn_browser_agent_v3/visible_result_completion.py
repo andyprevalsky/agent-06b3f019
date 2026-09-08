@@ -30,10 +30,10 @@ _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
 _FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
 # FCaptcha risk scores are unit-interval (0.07, 0.15) plus labeled bounds 0/1/1.0.
 # Reject version fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after a dot).
-_UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b")
+_UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b(?!\.\d+)")
 _LABELED_BOUND_SCORE_RE = re.compile(
-    r"\brisk\s+score\b.{0,40}(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b"
-    r"|(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b.{0,40}\brisk\s+score\b",
+    r"\brisk\s+score\b.{0,40}(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+)"
+    r"|(?<![\d.])\b(?:0(?:\.\d+)?|1(?:\.0+)?)\b(?!\.\d+).{0,40}\brisk\s+score\b",
     re.IGNORECASE | re.DOTALL,
 )
 _JSON_SCORE_RE = re.compile(

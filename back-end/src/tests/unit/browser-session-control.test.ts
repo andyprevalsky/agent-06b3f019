@@ -7,7 +7,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { setBrowserControlState } from '../../domains/browser-session/service.control';
+import {
+  BrowserControlUnavailableError,
+  setBrowserControlState,
+} from '../../domains/browser-session/service.control';
 
 const LIVE_URL = 'https://connect.steel.dev/v1/sessions/second-browser/player?interactive=false';
 
@@ -76,6 +79,25 @@ async function testLeftoverRequestedBecomesUserOnSameSession(): Promise<void> {
   });
 }
 
+async function testClosedRequestedDoesNotGrantUser(): Promise<void> {
+  await withOwnedSession(async ({ taskId, userId }) => {
+    await prisma.browserSession.update({
+      where: { id: taskId },
+      data: { status: 'CLOSED', controlState: 'USER_REQUESTED' },
+    });
+    await assert.rejects(
+      () => setBrowserControlState(taskId, 'user', userId),
+      BrowserControlUnavailableError
+    );
+    const row = await prisma.browserSession.findUniqueOrThrow({
+      where: { id: taskId },
+      select: { controlState: true, status: true },
+    });
+    assert.equal(row.status, 'CLOSED');
+    assert.equal(row.controlState, 'USER_REQUESTED');
+  });
+}
+
 async function testSecondBrowserHandoffDoesNotTouchTheFirst(): Promise<void> {
   const userId = `control-user-${randomUUID()}`;
   const context = await prisma.browserContext.create({
@@ -124,9 +146,10 @@ async function testSecondBrowserHandoffDoesNotTouchTheFirst(): Promise<void> {
 async function runAll(): Promise<void> {
   await testActiveTakeControlIsImmediateSameSession();
   await testLeftoverRequestedBecomesUserOnSameSession();
+  await testClosedRequestedDoesNotGrantUser();
   await testSecondBrowserHandoffDoesNotTouchTheFirst();
   await prisma.$disconnect();
-  process.stdout.write('PASS browser-session-control unit (3 cases)\n');
+  process.stdout.write('PASS browser-session-control unit (4 cases)\n');
 }
 
 runAll().catch(async (error) => {

@@ -78,13 +78,13 @@ export async function setBrowserControlState(
     return getBrowserControlState(taskId, userId);
   }
 
+  if (session.status !== ACTIVE) throw new BrowserControlUnavailableError(session.status);
   if (session.controlState === USER || session.controlState === USER_REQUESTED) {
     // Leftover USER_REQUESTED from the old handshake must also become USER
     // immediately so a mid-action lease cannot expire back to AGENT.
     await repo.transitionBrowserControlState(taskId, [session.controlState], USER, leaseExpiry());
     return getBrowserControlState(taskId, userId);
   }
-  if (session.status !== ACTIVE) throw new BrowserControlUnavailableError(session.status);
 
   // Same-session handover is immediate. The activity still yields when it
   // next observes USER; do not block the live view on an action-boundary ack.
