@@ -27,7 +27,10 @@ import re
 from typing import Any, Iterable
 
 _RISK_SCORE_RE = re.compile(r"\brisk\s+score\b", re.IGNORECASE)
-_FCAPTCHA_SCORE_RE = re.compile(r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b", re.IGNORECASE)
+_FCAPTCHA_SCORE_RE = re.compile(
+    r"\bfcaptcha\b.*\bscore\b|\bscore\b.*\bfcaptcha\b",
+    re.IGNORECASE | re.DOTALL,
+)
 # FCaptcha risk scores are unit-interval (0.07, 0.15) plus labeled bounds 0/1/1.0.
 # Reject version fragments: v1.34.1 (`34.1`) and v1.0.15 (`0.15` after a dot).
 _UNIT_INTERVAL_SCORE_RE = re.compile(r"(?<![\d.])\b0\.\d+\b(?!\.\d+)")

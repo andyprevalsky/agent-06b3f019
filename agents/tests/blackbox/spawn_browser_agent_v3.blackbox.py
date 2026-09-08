@@ -693,6 +693,17 @@ def test_visible_result_completion_ignores_post_submit_version_decimal_without_s
     assert not observation_states_visible_fcaptcha_result(
         'Bot detected - form blocked; a score "0.07" appeared below the form.'
     )
+    # FCaptcha and Score often sit on adjacent evaluate lines after unescape.
+    multiline_fcaptcha = "Bot detected\nFCaptcha\nScore: 0.15"
+    assert observation_states_visible_fcaptcha_result(multiline_fcaptcha)
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; waiting.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": multiline_fcaptcha}},
+        ],
+    )
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():

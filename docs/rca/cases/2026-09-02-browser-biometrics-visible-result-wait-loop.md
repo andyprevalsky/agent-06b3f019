@@ -99,6 +99,16 @@ rejects the same phrasing without a labeled/JSON score. The relaxed
 reasoning path also accepts bound scores `0` / `1` / `1.0` next to `score`
 and still rejects `score v1.0`.
 
+## Recurrence 2026-09-08 (CodeRabbit 3961783563)
+
+`_normalize_history_blob` turns `\\n` into real newlines, but
+`_FCAPTCHA_SCORE_RE` used `.*` without `re.DOTALL`. An evaluate dump
+`Bot detected\\nFCaptcha\\nScore: 0.15` therefore failed the labeled
+observation check. Reasoning still matched via the relaxed `score` +
+unit-interval path; observation did not. Enable `re.DOTALL` so the
+existing FCaptcha/Score label pair works across adjacent lines. Cemented
+in `test_visible_result_completion_ignores_post_submit_version_decimal_without_score`.
+
 ## Reusable lesson
 
 Once the visible score and form verdict are already on the page — in
