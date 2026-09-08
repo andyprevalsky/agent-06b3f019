@@ -1,5 +1,5 @@
 ---
-description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel, freeze a min-heap of failing tasks by fix complexity, pipeline approve → local-snapshot rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel on the cloud fleet by default, freeze a min-heap of failing tasks by fix complexity, pipeline approve → cloud-fleet outcome-proof rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
 argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
@@ -89,9 +89,10 @@ Downstream Implications sections.
    the RCA from Causal proof; outcome pending to Complete. After the first
    infra-clean run with causal RCA for every failing task, freeze a min-heap
    over those tasks and pipeline the rest: do not wait for one task's
-   approve → local rerun cycle to finish before asking about the next idle
-   task. On approve, immediately apply the fix on a local snapshot and rerun
-   that task; immediately ask about the next idle heap item.
+   approve → outcome-proof rerun cycle to finish before asking about the next
+   idle task. On approve, immediately apply the fix on a local code snapshot
+   and rerun that task on the cloud fleet (default); immediately ask about the
+   next idle heap item.
 12. **Approval format is the ONLY response format — no exceptions.** Every
    response emitted while `/descend` is active MUST consist of exactly: the
    header block (including the approvals counter), the delta rows of the
@@ -193,7 +194,7 @@ transition. It must contain:
   record ID;
 - the frozen min-heap: each failing task's immutable rank, complexity class,
   issue cluster, and row ID;
-- each heap task's pipeline state: idle | applying | local-rerunning | rca.
+- each heap task's pipeline state: idle | applying | outcome-rerunning | rca.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
@@ -328,12 +329,12 @@ RESOLVE_SLICE
                            → RANK_HEAP (freeze 1..N once)                   │
                            → PIPELINE_HEAP                                  │
                                 ├─ ask min idle → HARNESS_FIX_DECISION [STOP 1]
-                                ├─ approve → APPLY_AND_LOCAL_RERUN (sub-agent)
+                                ├─ approve → APPLY_AND_CLOUD_RERUN (sub-agent)
                                 │    ├─ pass → ENQUEUE_DEPLOY_UNIT ─────────┤
                                 │    └─ fail → /rca again, reinsert at rank │
                                 └─ immediately ask next idle ───────────────┘
 
-MAIN:   continue every independent RCA, local rerun, and deploy
+MAIN:   continue every independent RCA, cloud-fleet outcome-proof, and deploy
 
 DEPLOY: prepare isolated fix-only worktree → /deploy
         ├─ no admin approval required → merge → verify production
@@ -346,21 +347,33 @@ FULL_SLICE_ACCEPTANCE
 ~~~
 
 HARNESS_FIX_DECISION pauses only the next ask, not the pipeline. Approved
-workers keep applying and local-rerunning. DEPLOY_ADMIN_APPROVAL pauses only
-the affected deploy unit while the controller continues every independent RCA,
-rerun, and deploy. If no independent work remains, the controller may wait for
-that deploy approval.
+workers keep applying the fix on a local code snapshot and outcome-proof-
+rerunning on the cloud fleet. DEPLOY_ADMIN_APPROVAL pauses only the affected
+deploy unit while the controller continues every independent RCA, rerun, and
+deploy. If no independent work remains, the controller may wait for that
+deploy approval.
 
 User input can be injected at any time and is applied at the next safe boundary,
 but the agent deliberately yields for input only in the two states above.
 
 ## Benchmark and infra-clean loop
 
-Run only through the isolated entrypoint:
+**Default substrate: cloud fleet.** Every `/descend` benchmark run — the initial
+slice, every infra-epoch rerun, every post-approval outcome-proof, and the final
+full-slice acceptance — goes through the per-bench isolated Fly fleet. Local is
+opt-in only: use `scripts/run-bench --local …` solely when Andy explicitly
+directs a local run for that invocation. Do not infer local from convenience,
+cost, or a single-task subset.
+
+Run only through the isolated entrypoint (cloud fleet by default):
 
 ~~~bash
 scripts/run-bench <resolved task names...>
 ~~~
+
+`scripts/run-bench` already defaults to `run-bench-fleet`. Never prepend
+`--local` unless Andy asked for local. Never use `--single-box` (disabled;
+not parallel-safe).
 
 Capture the controller PID, dashboard, artifact path, actual start/finish
 timestamps, and every agent FE link. Actively monitor until every requested
@@ -442,9 +455,9 @@ Infra and External Blocker never enter this heap.
 
 Same-rank ties break by task name, then row ID.
 
-A task is **idle** when it is not applying, local-rerunning, or in RCA. Ask
+A task is **idle** when it is not applying, outcome-rerunning, or in RCA. Ask
 Andy about `min{ idle tasks that need a fix decision }`. Andy sees a deeper
-bench only if every easier bench is applying, local-rerunning, or in RCA.
+bench only if every easier bench is applying, outcome-rerunning, or in RCA.
 
 Do not yank an in-flight ask if a higher-priority task becomes idle. After
 Andy answers, the next ask is the new min idle.
@@ -473,13 +486,15 @@ responds to the current HARNESS row with approve, edit, or reject. Infra rows
 use Not required.
 
 - **approve:** set Approval to Fix approved. Immediately fire a sub-agent to
-  apply the approved fix on a local snapshot — not a prod deploy — and rerun
-  that exact bench via `scripts/run-bench --local <task>`. Immediately ask
-  about the next idle heap item. If the local rerun fails, the sub-agent
-  reruns `/rca` and reinserts the task at its original frozen rank.
+  apply the approved fix on a local code snapshot — not a prod deploy — and
+  rerun that exact bench on the **cloud fleet** via `scripts/run-bench <task>`
+  (no `--local` unless Andy explicitly directed local for this rerun).
+  Immediately ask about the next idle heap item. If the outcome-proof rerun
+  fails, the sub-agent reruns `/rca` and reinserts the task at its original
+  frozen rank.
 - **edit:** set Approval to Edit requested, apply the instruction, return the
-  row through the identical local verification gate, and ask again at the
-  same frozen rank.
+  row through the identical owning-boundary verification gate, and ask again
+  at the same frozen rank.
 - **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
   fix. The task stays at its original rank and needs a new RCA for a
   different approach.
@@ -489,10 +504,11 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-On each approve, immediately start that task's outcome-proof run on a local
-snapshot. Do not wait to batch approvals or rerun the whole failed subset
-first. Run `/sync` before every subset or full-slice rerun. The final
-acceptance run covers the entire original slice.
+On each approve, immediately start that task's outcome-proof run on the **cloud
+fleet** (apply the fix in a local code snapshot / worktree, then
+`scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
+to batch approvals or rerun the whole failed subset first. Run `/sync` before every subset or full-slice rerun. The final acceptance run covers the entire
+original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
