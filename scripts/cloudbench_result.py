@@ -4,12 +4,42 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# This validator is itself loaded by path in blackbox tools, so resolve its
+# sibling catalog by path too. That keeps the shared loader available without
+# mutating process-wide import lookup or suppressing import-order checks.
+_CATALOG_MODULE_PATH = Path(__file__).resolve().with_name("cloudbench_catalog.py")
+_CATALOG_SPEC = importlib.util.spec_from_file_location(
+    "rose_cloudbench_catalog", _CATALOG_MODULE_PATH
+)
+if _CATALOG_SPEC is None or _CATALOG_SPEC.loader is None:
+    raise ImportError(f"could not load cloudbench catalog module: {_CATALOG_MODULE_PATH}")
+_CATALOG_MODULE = importlib.util.module_from_spec(_CATALOG_SPEC)
+_CATALOG_SPEC.loader.exec_module(_CATALOG_MODULE)
+CatalogError = _CATALOG_MODULE.CatalogError
+load_unified_catalog = _CATALOG_MODULE.load_unified_catalog
+
+_PROVENANCE_MODULE_PATH = Path(__file__).resolve().with_name(
+    "cloudbench_execution_provenance.py"
+)
+_PROVENANCE_SPEC = importlib.util.spec_from_file_location(
+    "rose_cloudbench_execution_provenance", _PROVENANCE_MODULE_PATH
+)
+if _PROVENANCE_SPEC is None or _PROVENANCE_SPEC.loader is None:
+    raise ImportError(
+        f"could not load cloudbench execution provenance module: {_PROVENANCE_MODULE_PATH}"
+    )
+_PROVENANCE_MODULE = importlib.util.module_from_spec(_PROVENANCE_SPEC)
+_PROVENANCE_SPEC.loader.exec_module(_PROVENANCE_MODULE)
+load_provenance = _PROVENANCE_MODULE.load_provenance
+validate_run_provenance = _PROVENANCE_MODULE.validate_run_provenance
 
 ROOT = Path(__file__).resolve().parents[1]
 CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
@@ -20,20 +50,13 @@ CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
 def _claude_code_task_names() -> set[str]:
     tasks_path = ROOT / "agents" / "benchmarks" / "tasks.json"
     try:
-        tasks = json.loads(tasks_path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        tasks = load_unified_catalog(tasks_path)
+    except CatalogError:
         return set()
-    if isinstance(tasks, dict):
-        raw_tasks = tasks.get("tasks", [])
-    else:
-        raw_tasks = tasks
     names: set[str] = set()
-    if isinstance(raw_tasks, list):
-        for task in raw_tasks:
-            if isinstance(task, dict) and task.get("requires_claude_code") is True:
-                name = task.get("name") or task.get("id")
-                if isinstance(name, str) and name:
-                    names.add(name)
+    for task in tasks:
+        if task.get("requires_claude_code") is True:
+            names.add(task["name"])
     return names
 
 
@@ -69,6 +92,8 @@ def validate_run_document(
     require_pass: bool = False,
     allow_claude_code_credential_skip: bool = False,
     not_before_epoch: float | None = None,
+    expected_execution_provenance: object | None = None,
+    expected_world_model_mode: str | None = None,
 ) -> list[str]:
     """Return contract violations for a run artifact.
 
@@ -90,6 +115,21 @@ def validate_run_document(
         errors.append("every task result must be an object")
     if Counter(actual_names) != Counter(expected_tasks):
         errors.append(f"task identity mismatch: expected {expected_tasks!r}, got {actual_names!r}")
+
+    if expected_execution_provenance is not None:
+        errors.extend(validate_run_provenance(document, expected_execution_provenance))
+    if expected_world_model_mode is not None:
+        wrong_modes = [
+            str(task.get("name") or index)
+            for index, task in enumerate(tasks)
+            if isinstance(task, dict)
+            and task.get("world_model_mode") != expected_world_model_mode
+        ]
+        if wrong_modes:
+            errors.append(
+                "task world_model_mode mismatch: "
+                f"expected {expected_world_model_mode!r} for {wrong_modes!r}"
+            )
 
     if not_before_epoch is not None:
         timestamp = _parse_timestamp(document.get("timestamp"))
@@ -151,6 +191,8 @@ def validate_run_file(
     require_pass: bool = False,
     allow_claude_code_credential_skip: bool = False,
     not_before_epoch: float | None = None,
+    expected_execution_provenance: object | None = None,
+    expected_world_model_mode: str | None = None,
 ) -> list[str]:
     try:
         document: Any = json.loads(path.read_text())
@@ -164,6 +206,8 @@ def validate_run_file(
         require_pass=require_pass,
         allow_claude_code_credential_skip=allow_claude_code_credential_skip,
         not_before_epoch=not_before_epoch,
+        expected_execution_provenance=expected_execution_provenance,
+        expected_world_model_mode=expected_world_model_mode,
     )
 
 
@@ -174,7 +218,19 @@ def main() -> int:
     parser.add_argument("--require-pass", action="store_true")
     parser.add_argument("--allow-claude-code-credential-skip", action="store_true")
     parser.add_argument("--not-before-epoch", type=float)
+    parser.add_argument("--expected-execution-provenance-file", type=Path)
+    parser.add_argument("--expected-world-model-mode", choices=("real", "simulate"))
     args = parser.parse_args()
+
+    expected_execution_provenance = None
+    if args.expected_execution_provenance_file is not None:
+        try:
+            expected_execution_provenance = load_provenance(
+                args.expected_execution_provenance_file
+            )
+        except (OSError, ValueError) as exc:
+            print(f"cloudbench result rejected: expected execution provenance is invalid: {exc}", file=sys.stderr)
+            return 1
 
     errors = validate_run_file(
         args.run_json,
@@ -182,6 +238,8 @@ def main() -> int:
         require_pass=args.require_pass,
         allow_claude_code_credential_skip=args.allow_claude_code_credential_skip,
         not_before_epoch=args.not_before_epoch,
+        expected_execution_provenance=expected_execution_provenance,
+        expected_world_model_mode=args.expected_world_model_mode,
     )
     if errors:
         for error in errors:

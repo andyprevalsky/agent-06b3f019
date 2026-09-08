@@ -77,11 +77,11 @@ fi
 # Helper exit codes (do not collapse):
 #   0 — all-production_only batch (newline-delimited names on stdout)
 #   1 — valid catalog, but not an all-production_only batch → fall through to fleet
-#   2 — catalog unreadable / invalid names → fail closed (never look like "empty")
+#   2 — unknown task, catalog unreadable, or invalid names → fail closed
 PROD_ONLY_STATUS=0
 PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "$@")" || PROD_ONLY_STATUS=$?
 if [ "$PROD_ONLY_STATUS" -eq 2 ]; then
-    echo "❌ production-only classifier failed (catalog unreadable or invalid task names)" >&2
+    echo "❌ production-only classifier failed (unknown task, unreadable catalog, or invalid task name)" >&2
     exit 2
 fi
 if [ "$PROD_ONLY_STATUS" -eq 0 ] && [ -n "$PROD_ONLY_TASKS" ]; then

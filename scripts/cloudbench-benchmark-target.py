@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
+
+from cloudbench_catalog import CatalogError, index_unified_catalog
 
 
 def main() -> int:
@@ -20,18 +21,11 @@ def main() -> int:
     local_port = sys.argv[2]
     task_names = sys.argv[3:]
     try:
-        catalog = json.loads(catalog_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        print(
-            f"could not read benchmark catalog {catalog_path}: {exc}", file=sys.stderr
-        )
+        tasks_by_name = index_unified_catalog(catalog_path)
+    except CatalogError as exc:
+        print(f"could not read benchmark catalog {catalog_path}: {exc}", file=sys.stderr)
         return 1
 
-    tasks_by_name = {
-        task.get("name"): task
-        for task in catalog
-        if isinstance(task, dict) and isinstance(task.get("name"), str)
-    }
     missing = [name for name in task_names if name not in tasks_by_name]
     if missing:
         print(f"unknown benchmark task(s): {', '.join(missing)}", file=sys.stderr)

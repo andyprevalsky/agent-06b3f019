@@ -37,9 +37,15 @@ const LIVE_VIEW_V2 = 'https://example.com/take-control-v2';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');
 const seedScript = path.join(repoRoot, 'back-end/scripts/seed-browser-take-control-e2e.ts');
-const LOCAL_DATABASE_URL =
-  process.env.SEMANTIC_DATABASE_URL ??
-  'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30';
+const LOCAL_DATABASE_URL = (() => {
+  if (process.env.SEMANTIC_DATABASE_URL) return process.env.SEMANTIC_DATABASE_URL;
+  // Deploy / run.sh isolate Postgres on LOCAL_DB_PORT (base+5). Seeding 5432
+  // while the backend reads that isolated DB makes Take control 404 and stall.
+  if (process.env.LOCAL_DB_PORT) {
+    return `postgresql://postgres:postgres@localhost:${process.env.LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30`;
+  }
+  return 'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30';
+})();
 
 function seedBrowserControlSession(agentId: string, taskId: string, userId: string): void {
   execFileSync('npx', ['tsx', seedScript], {
@@ -57,43 +63,6 @@ function seedBrowserControlSession(agentId: string, taskId: string, userId: stri
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
   });
-}
-
-async function acknowledgeControlHandoff(taskId: string): Promise<() => void> {
-  let stopped = false;
-  const userId = await resolveTestUserId();
-  const session = process.env.SEMANTIC_SESSION;
-  const bearerHeaders =
-    session !== undefined && session !== ''
-      ? { Authorization: `Bearer ${JSON.parse(session).access_token}` }
-      : { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId };
-
-  const loop = async () => {
-    while (!stopped) {
-      try {
-        const snapshotRes = await fetch(`${BACKEND_URL}/api/browser-session/task/${taskId}/control`, {
-          headers: { ...bearerHeaders, 'Content-Type': 'application/json' },
-        });
-        if (snapshotRes.ok) {
-          const snapshot = (await snapshotRes.json()) as { state?: string };
-          if (snapshot.state === 'requested') {
-            await fetch(`${BACKEND_URL}/api/browser-session/task/${taskId}/control`, {
-              method: 'POST',
-              headers: { 'X-API-Key': TEST_API_KEY, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ mode: 'acknowledge' }),
-            });
-          }
-        }
-      } catch {
-        // Retry until the test finishes or control settles.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  };
-  void loop();
-  return () => {
-    stopped = true;
-  };
 }
 
 async function postToolMessage(
@@ -167,15 +136,12 @@ test.describe('browser-take-control', () => {
       });
       await openFullscreenFromChip(page);
 
-      const stopAck = await acknowledgeControlHandoff(taskId);
-      try {
-        await page.getByRole('button', { name: 'Take control', exact: true }).click();
-        await expect(page.getByRole('button', { name: 'Hand back control', exact: true })).toBeVisible({
-          timeout: 30_000,
-        });
-      } finally {
-        stopAck();
-      }
+      await page.getByRole('button', { name: 'Take control', exact: true }).click();
+      await expect(
+        page.getByRole('button', { name: 'Hand back control', exact: true }),
+      ).toBeVisible({
+        timeout: 5_000,
+      });
       await expect(page.locator('iframe[title="Browser"]')).toHaveAttribute(
         'src',
         /interactive=true/,
@@ -191,7 +157,9 @@ test.describe('browser-take-control', () => {
         browser_url: LIVE_VIEW_V2,
         title: 'Navigated to cart',
       });
-      await expect(page.getByRole('button', { name: 'Hand back control', exact: true })).toBeVisible({
+      await expect(
+        page.getByRole('button', { name: 'Hand back control', exact: true }),
+      ).toBeVisible({
         timeout: 15_000,
       });
       await expect(page.locator('iframe[title="Browser"]')).toHaveAttribute(

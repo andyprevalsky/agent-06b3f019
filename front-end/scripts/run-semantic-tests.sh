@@ -25,6 +25,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_DIR="$(dirname "$FRONTEND_DIR")"
+
+apply_local_semantic_db_urls() {
+  if [[ -n "${LOCAL_DB_PORT:-}" ]]; then
+    if [[ -z "${SEMANTIC_DATABASE_URL:-}" ]]; then
+      export SEMANTIC_DATABASE_URL="postgresql://postgres:postgres@localhost:${LOCAL_DB_PORT}/victoria?connection_limit=50&pool_timeout=30"
+    fi
+    if [[ -z "${SEMANTIC_DIRECT_URL:-}" ]]; then
+      export SEMANTIC_DIRECT_URL="$SEMANTIC_DATABASE_URL"
+    fi
+  fi
+}
+
 cd "$FRONTEND_DIR"
 
 PROD_MODE=0
@@ -93,6 +105,9 @@ else
   export BACKEND_URL="http://localhost:${BACKEND_PORT}"
   export BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
   export VITE_BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
+  # Take-control e2e seeds BrowserSession rows. Those must land in the same
+  # Postgres the running backend uses (LOCAL_DB_PORT on isolated deploy stacks).
+  apply_local_semantic_db_urls
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2

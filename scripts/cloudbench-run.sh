@@ -50,19 +50,32 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# The provenance helper and result tooling are controller-staged code. Never
+# create sibling bytecode while consuming that immutable bundle on the guest.
+export PYTHONDONTWRITEBYTECODE=1
+
 REPO_DIR="${CLOUDBENCH_REPO_DIR:-/data/repo}"
 DEPS_DIR="${CLOUDBENCH_DEPS_DIR:-/app}"           # baked dependency donor image.
 WMH_DIR="${CLOUDBENCH_WMH_DIR:-/data/world-model}"
 APP_USER=rose
 CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
-FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$REPO_DIR/scripts/cloudbench-fetch-ref.sh}"
-SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-deps.sh}"
-SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-prisma-client.sh}"
-CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
-PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
-STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
-BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$REPO_DIR/scripts/cloudbench-benchmark-target.py}"
+# The driver is controller-owned control-plane code. Resolve every helper beside
+# that immutable driver by default, never from the requested ref's checkout. A
+# direct repo invocation still resolves to scripts/, while boot and legacy cloud
+# launches resolve to their staged / or /data bundles respectively.
+CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+[ -d "$CONTROL_DIR/lib" ] && CONTROL_LIB_DIR="$CONTROL_DIR/lib" || CONTROL_LIB_DIR="$CONTROL_DIR"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
+SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$CONTROL_DIR/cloudbench-sync-deps.sh}"
+SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$CONTROL_DIR/cloudbench-sync-prisma-client.sh}"
+CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$CONTROL_DIR/cloudbench-current-run-artifact.py}"
+PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$CONTROL_DIR/cloudbench-prepare-patch.sh}"
+STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$CONTROL_DIR/cloudbench-status-server.py}"
+BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$CONTROL_DIR/cloudbench-benchmark-target.py}"
+CATALOG_SCRIPT="${CLOUDBENCH_CATALOG_SCRIPT:-$CONTROL_DIR/cloudbench_catalog.py}"
+ENV_HELPER="${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
+EXECUTION_PROVENANCE_SCRIPT="${CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT:-$CONTROL_DIR/cloudbench_execution_provenance.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -89,6 +102,18 @@ CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
 STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"
 
+if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
+    [ -s "$EXECUTION_PROVENANCE_SCRIPT" ] \
+        && [ -s "${CLOUDBENCH_EXECUTION_PROVENANCE_FILE:-}" ] || {
+        echo "[cloudbench] FATAL: trusted execution provenance bundle is missing"
+        exit 2
+    }
+    python3 "$EXECUTION_PROVENANCE_SCRIPT" verify-code \
+        --provenance "$CLOUDBENCH_EXECUTION_PROVENANCE_FILE" \
+        --base-sha "$REF" \
+        --workspace-patch-sha256 "${LOCAL_PATCH_SHA256:-none}" || exit 2
+fi
+
 if [ -n "$CLOUDBENCH_RUN_TOKEN" ]; then
     case "$CLOUDBENCH_RUN_TOKEN" in
         *[!a-zA-Z0-9._-]*)
@@ -112,6 +137,94 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
+CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+INTERRUPT_CLEANUP_STATUS_FILE="/data/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+ACTIVE_COMMAND_PID=""
+ACTIVE_COMMAND_SIGNALLED=0
+ACTIVE_COMMAND_STARTING=0
+HEARTBEAT_SLEEP_PID=""
+STACK_PID=""
+TAIL_PID=""
+
+publish_cleanup_ack() {
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token
+    # Library/contract probes intentionally invoke the driver without a guest
+    # run token and without /data. They do not own a status service to ack.
+    [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
+    if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
+        cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
+            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
+            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        if [ "$cleanup_state" != "clean" ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ]; then
+            log "FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+    fi
+    mkdir -p "${CLEANUP_ACK_FILE%/*}" || return 1
+    printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
+        && mv -f "$temporary" "$CLEANUP_ACK_FILE"
+}
+
+cleanup_stack() {
+    local original_rc=$?
+    trap - EXIT
+    trap '' HUP INT TERM
+    [ -z "$HEARTBEAT_SLEEP_PID" ] || kill "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
+    [ -z "$TAIL_PID" ] || kill "$TAIL_PID" 2>/dev/null || true
+    declare -F stop_dashboard >/dev/null 2>&1 && stop_dashboard
+    if [ -n "$STACK_PID" ] && kill -0 "$STACK_PID" 2>/dev/null; then
+        # Signal only run.sh. It owns its worker/backend descendants and waits
+        # for their graceful shutdown; group-signalling here can double-signal
+        # those descendants and bypass their session/replay cleanup.
+        kill -TERM "$STACK_PID" 2>/dev/null || true
+        wait "$STACK_PID" 2>/dev/null || true
+    elif [ -n "$STACK_PID" ]; then
+        wait "$STACK_PID" 2>/dev/null || true
+    fi
+    if ! publish_cleanup_ack; then
+        log "FATAL: could not publish guest cleanup acknowledgement"
+        [ "$original_rc" -ne 0 ] || original_rc=1
+    fi
+    exit "$original_rc"
+}
+trap cleanup_stack EXIT
+
+request_graceful_shutdown() {
+    log "guest shutdown requested; draining benchmark root before stack teardown"
+    if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
+        if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
+            ACTIVE_COMMAND_SIGNALLED=1
+            # Bash defers traps while a foreground `sleep` is running. The
+            # heartbeat wait is interruptible instead, and killing its child
+            # lets this handler reach benchmark cancellation immediately.
+            [ -z "$HEARTBEAT_SLEEP_PID" ] || kill "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
+            trap '' HUP INT TERM
+            # asyncio.run translates SIGINT into task cancellation. The benchmark
+            # cancellation path can then archive and DELETE the exact root agent,
+            # which closes browser sessions and finalizes replays canonically.
+            kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || true
+        fi
+        return
+    fi
+    # run_with_heartbeat checks the durable request immediately after publishing
+    # its child PID. Do not exit in the few instructions between launch and that
+    # check or the newly spawned benchmark could outlive this driver un-cancelled.
+    [ "$ACTIVE_COMMAND_STARTING" = "1" ] && return
+    # Before/after the benchmark subprocess there is no root agent to cancel.
+    # EXIT cleanup still drains run.sh (if started) before publishing the ack.
+    exit 143
+}
+trap request_graceful_shutdown HUP INT TERM
+
+# The status service persists a request before signalling, so a request racing
+# driver launch is consumed here rather than starting a benchmark after teardown.
+if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+    log "shutdown request preceded driver startup; honoring it without launching a benchmark"
+    exit 143
+fi
+
 # stack_wait_budget_seconds: the box's fallback-safe stack-health ceiling. A
 # pre-launch dump check cannot prove run.sh will restore instead of cold-syncing,
 # so matching dumps retain the larger ceiling without delaying healthy startup.
@@ -120,7 +233,7 @@ step() { log "STEP $*"; }
 # exactly like cloudbench-fetch-ref.sh / cloudbench-sync-deps.sh: at driver start the
 # /data/repo checkout is still at the OLD ref (the driver git-fetches the ref later),
 # so the lib must come from the controller-staged /data copy, not /data/repo.
-SEED_BUDGET_LIB="${CLOUDBENCH_SEED_BUDGET_LIB:-$REPO_DIR/scripts/lib/cloudbench-seed-budget.sh}"
+SEED_BUDGET_LIB="${CLOUDBENCH_SEED_BUDGET_LIB:-$CONTROL_LIB_DIR/cloudbench-seed-budget.sh}"
 if [ ! -f "$SEED_BUDGET_LIB" ]; then
     echo "[cloudbench] FATAL: seed-budget lib missing: $SEED_BUDGET_LIB" >&2
     exit 1
@@ -129,18 +242,44 @@ fi
 source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
-    local label="$1" command_pid interval
+    local label="$1" command_pid interval command_rc=0
     shift
     interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
+    # A background job launched with job control disabled inherits SIGINT as
+    # ignored, and that disposition survives exec into Python. Briefly enabling
+    # monitor mode gives the benchmark the normal asyncio SIGINT cancellation
+    # path while keeping heartbeat supervision in this shell.
+    ACTIVE_COMMAND_STARTING=1
+    set -m
     "$@" &
     command_pid=$!
+    set +m
+    ACTIVE_COMMAND_PID="$command_pid"
+    ACTIVE_COMMAND_SIGNALLED=0
+    ACTIVE_COMMAND_STARTING=0
+    if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+        request_graceful_shutdown
+    fi
     while kill -0 "$command_pid" 2>/dev/null; do
-        sleep "$interval"
+        sleep "$interval" &
+        HEARTBEAT_SLEEP_PID=$!
+        wait "$HEARTBEAT_SLEEP_PID" 2>/dev/null || true
+        HEARTBEAT_SLEEP_PID=""
+        if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
+            # Signals are ignored after the one canonical cancellation above,
+            # so this wait cannot be shortened into premature stack teardown.
+            wait "$command_pid" 2>/dev/null || command_rc=$?
+            break
+        fi
         if kill -0 "$command_pid" 2>/dev/null; then
             log "$label heartbeat (pid=$command_pid)"
         fi
     done
-    wait "$command_pid"
+    if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
+        wait "$command_pid" 2>/dev/null || command_rc=$?
+    fi
+    ACTIVE_COMMAND_PID=""
+    return "$command_rc"
 }
 
 manifest_public_frontend_url() {
@@ -199,36 +338,29 @@ TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
 BENCH_NEEDS_PAYMENT_FIXTURE=0
-TASK_GATE_PYTHON="${CLOUDBENCH_TASK_GATE_PYTHON:-}"
-if [ -z "$TASK_GATE_PYTHON" ] && [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
-    TASK_GATE_PYTHON="$REPO_DIR/agents/venv/bin/python"
-fi
-if [ -z "$TASK_GATE_PYTHON" ]; then
-    TASK_GATE_PYTHON="$(command -v python3 || true)"
-fi
-if [ -z "$TASK_GATE_PYTHON" ]; then
-    echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
-    exit 1
-fi
-PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" "$TASK_GATE_PYTHON" - "${BENCH_TASK_LIST[@]}" <<'PY'
-import sys
-
-from benchmarks.benchmark_tasks import selected_tasks_require_gate_type
-
-raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 10)
-PY
-task_gate_status=$?
-case "$task_gate_status" in
-    0)
-        TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
-        ;;
-    10)
-        ;;
-    *)
-        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
-        exit "$task_gate_status"
-        ;;
-esac
+resolve_task_gate() {
+    local task_gate_python task_gate_status
+    task_gate_python="${CLOUDBENCH_TASK_GATE_PYTHON:-$(command -v python3 || true)}"
+    if [ -z "$task_gate_python" ]; then
+        echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
+        return 1
+    fi
+    "$task_gate_python" "$CATALOG_SCRIPT" requires-gate \
+        "$REPO_DIR/agents/benchmarks/tasks.json" source_connect \
+        "${BENCH_TASK_LIST[@]}"
+    task_gate_status=$?
+    case "$task_gate_status" in
+        0)
+            TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+            ;;
+        10)
+            ;;
+        *)
+            echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+            return "$task_gate_status"
+            ;;
+    esac
+}
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)
@@ -252,9 +384,11 @@ render_task_worker_exports() {
         printf 'export %q\n' "$entry"
     done
 }
-TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
+TASK_WORKER_EXPORTS=""
 
 if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
+    resolve_task_gate || exit $?
+    TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
     if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
         for entry in "${TASK_WORKER_ENV[@]}"; do
             printf 'stack:%s\n' "$entry"
@@ -273,11 +407,24 @@ emit_report_and_result() {
     # so the controller can retrieve output from /data/bench.log as a fallback
     # even when the direct-fetch ssh reads race the machine stop.
     local card="$CONTEXT_DIR/report-card.json"
-    local latest_run
+    local latest_run emitted_run=""
     latest_run="$(python3 "$CURRENT_RUN_ARTIFACT_SCRIPT" "$REPO_DIR/agents/benchmarks/runs" "$RUN_OUTPUT_MARKER" 2>/dev/null || true)"
     if [ -n "$latest_run" ] && [ -f "$latest_run" ]; then
-        cp -f "$latest_run" "$CONTEXT_DIR/run.json" 2>/dev/null || true
-        chown "$APP_USER:$APP_USER" "$CONTEXT_DIR/run.json" 2>/dev/null || true
+        if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
+            if python3 "$EXECUTION_PROVENANCE_SCRIPT" stamp \
+                --run-json "$latest_run" \
+                --provenance "$CLOUDBENCH_EXECUTION_PROVENANCE_FILE" \
+                --output "$CONTEXT_DIR/run.json"; then
+                emitted_run="$CONTEXT_DIR/run.json"
+            else
+                echo "[cloudbench] FATAL: could not stamp execution provenance"
+                rm -f "$CONTEXT_DIR/run.json" 2>/dev/null || true
+            fi
+        elif cp -f "$latest_run" "$CONTEXT_DIR/run.json" 2>/dev/null; then
+            emitted_run="$CONTEXT_DIR/run.json"
+        fi
+        [ -z "$emitted_run" ] \
+            || chown "$APP_USER:$APP_USER" "$emitted_run" 2>/dev/null || true
     fi
     echo "$REPORT_BEGIN"
     if [ -f "$card" ] && [ "$card" -nt "$RUN_OUTPUT_MARKER" ]; then
@@ -289,9 +436,9 @@ emit_report_and_result() {
     echo "$REPORT_END"
 
     echo "$RESULT_BEGIN"
-    if [ -n "$latest_run" ] && [ -f "$latest_run" ]; then
-        echo "run_file: $latest_run"
-        cat "$latest_run"
+    if [ -n "$emitted_run" ] && [ -f "$emitted_run" ]; then
+        echo "run_file: $emitted_run"
+        cat "$CONTEXT_DIR/run.json"
     else
         echo '{"error":"no fresh matching benchmark run produced"}'
     fi
@@ -368,7 +515,7 @@ unset CLOUDBENCH_GITHUB_TOKEN_B64
 # reset --hard does not remove untracked files created by an earlier uploaded
 # worktree patch. Remove only non-ignored untracked files; dependency/cache trees
 # are ignored and remain warm.
-if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -ffd 2>&1 | sed 's/^/   /'; then
     log "FATAL: could not remove stale untracked worktree files"
     finish 1
 fi
@@ -382,23 +529,65 @@ if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
         log "FATAL: local patch payload has no checksum"
         finish 1
     }
-    _actual_patch_sha="$(sha256sum "$LOCAL_PATCH_FILE" | awk '{print $1}')"
+    # The controller may compress the patch, because flyctl embeds it
+    # base64-encoded in the machine-config body and Fly caps that body. Verify
+    # the bytes that actually arrived, then the decompressed patch against the
+    # plaintext digest that execution provenance is bound to.
+    _patch_payload="$LOCAL_PATCH_FILE"
+    case "${LOCAL_PATCH_COMPRESSION:-none}" in
+        ""|none) ;;
+        gzip)
+            [ -n "${LOCAL_PATCH_TRANSPORT_SHA256:-}" ] || {
+                log "FATAL: compressed patch payload has no transport checksum"
+                finish 1
+            }
+            _transport_sha="$(sha256sum "$LOCAL_PATCH_FILE" | awk '{print $1}')"
+            [ "$_transport_sha" = "$LOCAL_PATCH_TRANSPORT_SHA256" ] || {
+                log "FATAL: compressed patch transport checksum mismatch"
+                finish 1
+            }
+            _patch_payload="$CONTROL_DIR/cloudbench-local.patch"
+            if ! gzip -dc "$LOCAL_PATCH_FILE" > "$_patch_payload"; then
+                log "FATAL: could not decompress uploaded local workspace patch"
+                finish 1
+            fi
+            ;;
+        *)
+            log "FATAL: unknown local patch compression '${LOCAL_PATCH_COMPRESSION}'"
+            finish 1
+            ;;
+    esac
+    [ -s "$_patch_payload" ] || {
+        log "FATAL: local patch payload is empty after transport"
+        finish 1
+    }
+    _actual_patch_sha="$(sha256sum "$_patch_payload" | awk '{print $1}')"
     [ "$_actual_patch_sha" = "$LOCAL_PATCH_SHA256" ] || {
         log "FATAL: patch payload checksum mismatch"
         finish 1
     }
     log "applying uploaded local workspace patch on top of checkout"
-    if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$LOCAL_PATCH_FILE"; then
+    if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$_patch_payload"; then
         log "FATAL: could not prepare uploaded local workspace patch"
         finish 1
     fi
     if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn - \
-        < "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+        < "$_patch_payload" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not apply uploaded local workspace patch"
         finish 1
     fi
     log "verified local workspace patch $_actual_patch_sha"
 fi
+
+# Gate metadata belongs to the exact requested+patched catalog, but its parser
+# is immutable controller code. Never import Python from a stale warm checkout
+# before git-sync, and never let arbitrary ref code replace this decision.
+resolve_task_gate
+task_gate_status=$?
+if [ "$task_gate_status" -ne 0 ]; then
+    finish "$task_gate_status"
+fi
+TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
 
 # Replace the bootstrap read-only http.server with the ref's authenticated
 # data-plane server. The same WireGuard proxy keeps serving bench.log, while the
@@ -413,13 +602,13 @@ setsid python3 "$STATUS_SERVER_SCRIPT" \
     --directory /data \
     --port "$CLOUDBENCH_STATUS_PORT" \
     --barrier "$CLOUDBENCH_START_BARRIER" \
+    --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
     >/dev/null 2>&1 </dev/null &
 STATUS_PID=$!
 
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
 step env_decode
 # Fly secrets are exposed as env vars in the machine init AND in ssh sessions.
-ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
@@ -593,6 +782,11 @@ STACK_ENV=(
     "HOME=/home/$APP_USER"
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
+    # Every warm machine restores the same canonical DB fixture. Its seeded
+    # BrowserProviderProfile names one external Kernel profile, so database
+    # isolation alone cannot prevent concurrent machines from sharing browser
+    # state. Allocate a run-local provider profile; server shutdown deletes it.
+    "BENCHMARK_ISOLATED_BROWSER_PROFILES=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
     "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
@@ -654,20 +848,35 @@ if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
         "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30"
     )
 fi
-# Guest-checkout tasks (e.g. Blue Bottle) must disable saved cookie/Steel auth on
-# the backend/worker stack — setting the flag only in run_benchmark's process leaves
-# cookie_bundle injection on and fails the guest-checkout semantic criterion.
-if (
-    cd "$REPO_DIR/agents"
-    python3 -c '
+# Browser tasks without an explicit live fixture must disable saved cookies,
+# provider profiles, and origin state on the backend/worker stack. Setting the
+# flag only in run_benchmark's process leaves the prod-synced base auth graph on.
+GUEST_AUTH_PYTHON="$REPO_DIR/agents/venv/bin/python"
+if [ ! -x "$GUEST_AUTH_PYTHON" ]; then
+    log "FATAL: hydrated agents Python is unavailable for saved-browser-auth fixture resolution: $GUEST_AUTH_PYTHON"
+    finish 1
+fi
+(
+    cd "$REPO_DIR/agents" || exit 1
+    "$GUEST_AUTH_PYTHON" -c '
 import sys
 from benchmarks.spawn_contract import tasks_require_disabled_saved_browser_auth
-sys.exit(0 if tasks_require_disabled_saved_browser_auth(sys.argv[1:]) else 1)
+sys.exit(0 if tasks_require_disabled_saved_browser_auth(sys.argv[1:]) else 10)
 ' "${BENCH_TASK_LIST[@]}"
-); then
-    log "guest-checkout task(s) detected — disabling saved browser auth on stack"
-    STACK_ENV+=("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true")
-fi
+)
+guest_auth_status=$?
+case "$guest_auth_status" in
+    0)
+        log "no-live-fixture browser task(s) detected — disabling saved browser auth on stack"
+        STACK_ENV+=("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true")
+        ;;
+    10)
+        ;;
+    *)
+        log "FATAL: saved-browser-auth fixture resolution failed (exit $guest_auth_status)"
+        finish "$guest_auth_status"
+        ;;
+esac
 if [ -n "$FRONTEND_SUPABASE_URL" ]; then
     STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
 fi
@@ -718,20 +927,6 @@ log "stack pid=$STACK_PID (logs → $STACK_LOG)"
 
 tail -n +1 -F "$STACK_LOG" &
 TAIL_PID=$!
-
-cleanup_stack() {
-    kill "$TAIL_PID" 2>/dev/null || true
-    stop_dashboard
-    if kill -0 "$STACK_PID" 2>/dev/null; then
-        kill -TERM "-$STACK_PID" 2>/dev/null || kill -TERM "$STACK_PID" 2>/dev/null || true
-        for _ in $(seq 1 20); do
-            kill -0 "$STACK_PID" 2>/dev/null || break
-            sleep 1
-        done
-        kill -KILL "$STACK_PID" 2>/dev/null || true
-    fi
-}
-trap 'cleanup_stack' EXIT
 
 # ── 9. Wait for services.json (status=running) + WMH health ────────────────
 step services_wait
@@ -854,11 +1049,84 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
     log "synchronized start barrier released: $CLOUDBENCH_START_BARRIER"
 fi
 
-# ── 10. Run the benchmark ──────────────────────────────────────────────────
+# ── 10. Run the benchmark (or emit infra-probe DONE) ───────────────────────
 step benchmark
 if [ "${#BENCH_TASK_LIST[@]}" -eq 0 ]; then
     log "FATAL: BENCH_TASKS is empty"
     finish 1
+fi
+
+# Fleet infra canary: prove clone → stack healthy → barrier → release → DONE
+# without spending LLM / agent wall-clock. Synthetic artifacts must still pass
+# cloudbench_result identity checks so the controller does not treat a green
+# probe as INFRA_ERROR (missing cloudbench-run.json).
+#
+# world_model_mode MUST match the catalog/fleet expected mode (real|simulate).
+# Emitting a literal "infra-probe" mode fails cloudbench_result /
+# execution-task-matrix checks after #1285 provenance wiring
+# ("expected 'real' … got 'infra-probe'"), which surfaced as NORESULT with a
+# green barrier. Keep top-level infra_probe=true as the probe marker.
+if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+    log "infra probe: skipping run_benchmark.py; emitting synthetic pass artifacts"
+    PROBE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PROBE_WMM="$(printf '%s' "${BENCHMARK_WORLD_MODEL_MODE:-real}" | tr '[:upper:]' '[:lower:]')"
+    case "$PROBE_WMM" in
+        simulate) ;;
+        *) PROBE_WMM="real" ;;
+    esac
+    PROBE_TASKS_JSON="$(printf '%s\n' "${BENCH_TASK_LIST[@]}" | PROBE_WMM="$PROBE_WMM" PROBE_TS="$PROBE_TS" python3 -c '
+import json, os, sys
+names = [line.strip() for line in sys.stdin if line.strip()]
+mode = os.environ["PROBE_WMM"]
+tasks = [
+    {
+        "name": name,
+        "passed": True,
+        "status": "PASSED",
+        "duration_seconds": 0,
+        "world_model_mode": mode,
+        "agent_id": None,
+        "failure_reason": None,
+    }
+    for name in names
+]
+doc = {
+    "timestamp": os.environ["PROBE_TS"],
+    "infra_probe": True,
+    "summary": {
+        "total": len(names),
+        "passed": len(names),
+        "failed": 0,
+        "skipped": 0,
+        "pass_rate": 1.0,
+        "total_duration_seconds": 0,
+        "total_cost_cents": 0,
+    },
+    "tasks": tasks,
+}
+print(json.dumps(doc))
+')"
+    PROBE_CARD_JSON="$(printf '%s\n' "${BENCH_TASK_LIST[@]}" | python3 -c '
+import json, sys
+names = [line.strip() for line in sys.stdin if line.strip()]
+print(json.dumps({
+    "infra_probe": True,
+    "tasks": {name: {"passed": True, "status": "PASSED"} for name in names},
+    "summary": {"total": len(names), "passed": len(names), "failed": 0, "pass_rate": 1.0},
+}))
+')"
+    printf '%s\n' "$PROBE_TASKS_JSON" > "$CONTEXT_DIR/run.json"
+    printf '%s\n' "$PROBE_CARD_JSON" > "$CONTEXT_DIR/report-card.json"
+    chown "$APP_USER:$APP_USER" "$CONTEXT_DIR/run.json" "$CONTEXT_DIR/report-card.json" 2>/dev/null || true
+    # Point CURRENT_RUN_ARTIFACT_SCRIPT at a fresh file under runs/ so emit_report
+    # copies a non-stale artifact (it requires mtime newer than RUN_OUTPUT_MARKER).
+    mkdir -p "$REPO_DIR/agents/benchmarks/runs"
+    PROBE_RUN_FILE="$REPO_DIR/agents/benchmarks/runs/infra-probe-$(date -u +%Y%m%d%H%M%S)-$$.json"
+    cp -f "$CONTEXT_DIR/run.json" "$PROBE_RUN_FILE"
+    chown "$APP_USER:$APP_USER" "$PROBE_RUN_FILE" 2>/dev/null || true
+    touch "$PROBE_RUN_FILE"
+    log "infra probe: synthetic artifacts written (world_model_mode=$PROBE_WMM)"
+    finish 0
 fi
 
 # Task selector: pass the exact requested task names. `run_benchmark.py`
@@ -895,6 +1163,7 @@ log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
 touch "$RUN_OUTPUT_MARKER"
+rm -f "$INTERRUPT_CLEANUP_STATUS_FILE"
 set +e
 # Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
 # prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
@@ -903,6 +1172,10 @@ run_with_heartbeat "benchmark" gosu "$APP_USER" bash -c "
 export HOME='/home/$APP_USER'
 export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
 export BENCHMARK_ISOLATED_RUN=true
+export BENCHMARK_ISOLATED_BROWSER_PROFILES=true
+export BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT=true
+export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$INTERRUPT_CLEANUP_STATUS_FILE'
+export BENCHMARK_INTERRUPT_CLEANUP_TOKEN='$CLOUDBENCH_RUN_TOKEN'
 export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'

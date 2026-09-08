@@ -450,6 +450,27 @@ def test_visible_result_completion_does_not_rewrite_after_navigation():
     )
 
 
+def test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab():
+    """Producer names navback/open_new_tab must count as navigation.
+
+    service_actions records those exact action names. If the marker set only
+    has go_back/new_tab aliases, a later idle action can complete against the
+    pre-navigation score.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    stated = 'Risk Score 0.11, Bot detected - form blocked'
+    submit = {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"}
+    for nav_action in ("navback", "open_new_tab"):
+        assert not should_force_visible_result_completion(
+            action_name="scroll",
+            last_reasoning=stated,
+            action_entries=[submit, {"action": nav_action}],
+        ), nav_action
+
+
 def test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit():
     """submit(A) → score A → navigate(B) → submit(B) → scroll must not use score A.
 
@@ -561,7 +582,7 @@ def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
         should_force_visible_result_completion,
     )
 
-    stated = "A risk score of 0.11 appeared. Let me scroll down to see the full result."
+    stated = 'The form was submitted and a score "0.07" appeared below the form.'
     prior_submit = ['click: {"params": {"index": 12}, "text": "Submit (Protected by Invisible"}']
     for action_name in ("scroll_down", "wait", "screenshot"):
         assert should_force_visible_result_completion(
@@ -571,7 +592,176 @@ def test_visible_result_completion_rewrites_post_submit_score_without_verdict():
         ), action_name
     forced = forced_visible_result_completion_action(stated)
     assert forced["action"] == "attempt_completion"
-    assert "0.11" in forced["params"]["reasoning"]
+    assert "0.07" in forced["params"]["reasoning"]
+
+
+def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score():
+    """15a85ea0 evaluate already returned score 0.15 + bot verdict, then waited.
+
+    The earlier helper only scanned LLM reasoning. This trajectory named
+    pow_not_satisfied in thinking (no 'risk score' words) and kept waiting /
+    inspecting PoW until the 420s cap. Post-submit evaluate/tool-result text
+    that already contains the visible score + form verdict must force
+    completion on the next idle action, including network/log inspection.
+    """
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    pow_retry_reasoning = (
+        'The submission is being blocked with reason "pow_not_satisfied" — the '
+        "proof-of-work likely hasn't completed yet. Let me wait longer for the "
+        "background PoW to finish, then submit again."
+    )
+    evaluate_after_submit = {
+        "action": "evaluate",
+        "result": {
+            "success": True,
+            "message": (
+                "Executed JS, result: Invisible Mode\n"
+                "Submit (Protected by Invisible CAPTCHA)\n"
+                "0.15\n"
+                "Risk Score (lower = human)\n"
+                "Bot detected - form blocked\n"
+                '{\n  "reason": "pow_not_satisfied",\n'
+                '  "score": 0.14629999999999999,\n'
+                '  "success": false\n}'
+            ),
+        },
+    }
+    history = [
+        {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+        evaluate_after_submit,
+    ]
+    for action_name in ("wait", "screenshot", "read_network_requests", "read_logs"):
+        assert should_force_visible_result_completion(
+            action_name=action_name,
+            last_reasoning=pow_retry_reasoning,
+            action_entries=history,
+        ), action_name
+    # Static page chrome before submit (Risk Score label + version) must not force.
+    pre_submit_page = {
+        "action": "evaluate",
+        "result": {
+            "message": "Running v1.34.1\nRisk Score (lower = human)\nI'm not a robot\nVerified!"
+        },
+    }
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Waiting for the checkbox to settle.",
+        action_entries=[
+            pre_submit_page,
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+        ],
+    )
+
+
+def test_visible_result_completion_ignores_submit_words_inside_observation_dumps():
+    """Page chrome saying 'click Submit' must not look like a later submit action."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    evaluate_with_chrome = {
+        "action": "evaluate",
+        "result": {
+            "message": (
+                "click the Submit button\n"
+                "0.15\n"
+                "Risk Score (lower = human)\n"
+                "Bot detected - form blocked"
+            )
+        },
+    }
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            evaluate_with_chrome,
+        ],
+    )
+
+
+def test_visible_result_completion_ignores_post_submit_version_decimal_without_score():
+    """Bot detected + v1.34.1 after submit is not a visible FCaptcha score."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        observation_states_visible_fcaptcha_result,
+        reasoning_states_visible_fcaptcha_result,
+        should_force_visible_result_completion,
+    )
+
+    version_only = (
+        "Running v1.34.1\nRisk Score (lower = human)\nBot detected - form blocked"
+    )
+    assert not observation_states_visible_fcaptcha_result(version_only)
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; inspecting logs.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": version_only}},
+        ],
+    )
+    # v1.0.15 still contains a unit-interval token (`0.15`) after a dotted version.
+    version_unit_fragment = "Bot detected - form blocked; browser version v1.0.15"
+    assert not observation_states_visible_fcaptcha_result(version_unit_fragment)
+    assert not should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning="Risk Score; Bot detected",
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": version_unit_fragment}},
+        ],
+    )
+    assert not observation_states_visible_fcaptcha_result("Bot detected; threshold 0.15")
+    assert reasoning_states_visible_fcaptcha_result("Risk Score: 0")
+    assert reasoning_states_visible_fcaptcha_result("Risk Score: 1.0")
+    assert reasoning_states_visible_fcaptcha_result(
+        'The form was submitted and a score "0.07" appeared below the form.'
+    )
+    assert reasoning_states_visible_fcaptcha_result("a score 0 appeared")
+    assert reasoning_states_visible_fcaptcha_result("a score 1 appeared")
+    assert reasoning_states_visible_fcaptcha_result("a score 1.0 appeared")
+    assert not reasoning_states_visible_fcaptcha_result("Risk Score; Bot detected")
+    assert not reasoning_states_visible_fcaptcha_result("threshold 0.15")
+    assert not reasoning_states_visible_fcaptcha_result("score v1.0")
+    assert not observation_states_visible_fcaptcha_result(
+        'Bot detected; {"score": 2, "success": false}'
+    )
+    assert not observation_states_visible_fcaptcha_result(
+        'Bot detected; {"score": 1.34, "success": false}'
+    )
+    assert observation_states_visible_fcaptcha_result(
+        'Bot detected; {"score": 0.15, "success": false}'
+    )
+    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 0.15.2")
+    assert not observation_states_visible_fcaptcha_result("Bot detected; Risk Score: 1.0.15")
+    # Observation dumps stay labeled; bare "a score 0.07 appeared" is reasoning-only.
+    assert not observation_states_visible_fcaptcha_result(
+        'Bot detected - form blocked; a score "0.07" appeared below the form.'
+    )
+    # Static Risk Score chrome plus an unrelated 0.xx must not complete.
+    assert not observation_states_visible_fcaptcha_result(
+        "Bot detected - form blocked\nRisk Score (lower = human)\nthreshold 0.15"
+    )
+    assert not observation_states_visible_fcaptcha_result(
+        "Bot detected; Risk Score threshold: 0.15"
+    )
+    assert not observation_states_visible_fcaptcha_result(
+        "Bot detected; Risk Score threshold of 0.15"
+    )
+    # FCaptcha and Score often sit on adjacent evaluate lines after unescape.
+    multiline_fcaptcha = "Bot detected\nFCaptcha\nScore: 0.15"
+    assert observation_states_visible_fcaptcha_result(multiline_fcaptcha)
+    assert should_force_visible_result_completion(
+        action_name="wait",
+        last_reasoning='Blocked with reason "pow_not_satisfied"; waiting.',
+        action_entries=[
+            {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
+            {"action": "evaluate", "result": {"message": multiline_fcaptcha}},
+        ],
+    )
 
 
 def test_max_steps_best_effort_prefers_last_reasoning():
@@ -18774,6 +18964,29 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     acknowledge.assert_awaited_once()
     assert heartbeat.call_count == 2
 
+
+async def test_browser_agent_yields_when_ownership_is_already_user():
+    """Immediate same-session USER ownership still parks the activity until release."""
+    from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_browser_control_state",
+            AsyncMock(side_effect=["user", "agent"]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.acknowledge_browser_user_control",
+            AsyncMock(return_value="user"),
+        ) as acknowledge,
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat") as heartbeat,
+        patch("domains.spawn_browser_agent_v3.handler.asyncio.sleep", new=AsyncMock()),
+    ):
+        yielded = await _wait_for_browser_user_control(SimpleNamespace(), "task-2")
+
+    assert yielded is True
+    acknowledge.assert_not_awaited()
+    assert heartbeat.call_count == 1
+
 _TOAST_PAYMENT_CARD_ARGS = {
     "merchant": "Nopa Fish Market",
     "line_items": [
@@ -19183,6 +19396,14 @@ async def run_all_tests():
         test_visible_result_completion_does_not_rewrite_after_navigation,
     )
     r.record(
+        "visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab",
+        test_visible_result_completion_does_not_rewrite_after_navback_or_open_new_tab,
+    )
+    r.record(
+        "visible_result_completion_ignores_submit_words_inside_observation_dumps",
+        test_visible_result_completion_ignores_submit_words_inside_observation_dumps,
+    )
+    r.record(
         "visible_result_completion_ignores_pre_navigation_evidence_after_later_submit",
         test_visible_result_completion_ignores_pre_navigation_evidence_after_later_submit,
     )
@@ -19197,6 +19418,14 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_rewrites_post_submit_score_without_verdict",
         test_visible_result_completion_rewrites_post_submit_score_without_verdict,
+    )
+    r.record(
+        "visible_result_completion_rewrites_wait_when_evaluate_already_has_score",
+        test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
+    )
+    r.record(
+        "visible_result_completion_ignores_post_submit_version_decimal_without_score",
+        test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
     )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
@@ -19215,7 +19444,6 @@ async def run_all_tests():
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
     )
-    
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
     await r.record_async(
         "action_history_resume_monotonic_steps",
