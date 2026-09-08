@@ -5,7 +5,6 @@ export interface BrowserSessionResumeResponse {
 }
 
 export type BrowserControlState = 'agent' | 'requested' | 'user';
-const CONTROL_HANDOFF_POLL_ATTEMPTS = 480;
 
 export interface BrowserControlSnapshot {
   state: BrowserControlState;
@@ -39,20 +38,8 @@ async function setBrowserControlMode(
 }
 
 export async function takeBrowserControl(taskId: string): Promise<BrowserControlSnapshot> {
-  let snapshot = await setBrowserControlMode(taskId, 'user');
-  for (
-    let attempt = 0;
-    snapshot.state !== 'user' && attempt < CONTROL_HANDOFF_POLL_ATTEMPTS;
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    snapshot =
-      attempt > 0 && attempt % 20 === 0
-        ? await setBrowserControlMode(taskId, 'user')
-        : await readBrowserControlState(taskId);
-  }
-  if (snapshot.state !== 'user') {
-    await setBrowserControlMode(taskId, 'agent').catch(() => {});
+  const snapshot = await setBrowserControlMode(taskId, 'user');
+  if (snapshot.state === 'agent') {
     throw new Error('Browser agent did not hand control over in time');
   }
   return snapshot;

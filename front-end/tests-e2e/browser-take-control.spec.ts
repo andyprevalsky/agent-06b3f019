@@ -59,43 +59,6 @@ function seedBrowserControlSession(agentId: string, taskId: string, userId: stri
   });
 }
 
-async function acknowledgeControlHandoff(taskId: string): Promise<() => void> {
-  let stopped = false;
-  const userId = await resolveTestUserId();
-  const session = process.env.SEMANTIC_SESSION;
-  const bearerHeaders =
-    session !== undefined && session !== ''
-      ? { Authorization: `Bearer ${JSON.parse(session).access_token}` }
-      : { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId };
-
-  const loop = async () => {
-    while (!stopped) {
-      try {
-        const snapshotRes = await fetch(`${BACKEND_URL}/api/browser-session/task/${taskId}/control`, {
-          headers: { ...bearerHeaders, 'Content-Type': 'application/json' },
-        });
-        if (snapshotRes.ok) {
-          const snapshot = (await snapshotRes.json()) as { state?: string };
-          if (snapshot.state === 'requested') {
-            await fetch(`${BACKEND_URL}/api/browser-session/task/${taskId}/control`, {
-              method: 'POST',
-              headers: { 'X-API-Key': TEST_API_KEY, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ mode: 'acknowledge' }),
-            });
-          }
-        }
-      } catch {
-        // Retry until the test finishes or control settles.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  };
-  void loop();
-  return () => {
-    stopped = true;
-  };
-}
-
 async function postToolMessage(
   agentId: string,
   metadata: Record<string, unknown>,
@@ -167,15 +130,12 @@ test.describe('browser-take-control', () => {
       });
       await openFullscreenFromChip(page);
 
-      const stopAck = await acknowledgeControlHandoff(taskId);
-      try {
-        await page.getByRole('button', { name: 'Take control', exact: true }).click();
-        await expect(page.getByRole('button', { name: 'Hand back control', exact: true })).toBeVisible({
-          timeout: 30_000,
-        });
-      } finally {
-        stopAck();
-      }
+      await page.getByRole('button', { name: 'Take control', exact: true }).click();
+      await expect(
+        page.getByRole('button', { name: 'Hand back control', exact: true }),
+      ).toBeVisible({
+        timeout: 5_000,
+      });
       await expect(page.locator('iframe[title="Browser"]')).toHaveAttribute(
         'src',
         /interactive=true/,
@@ -191,7 +151,9 @@ test.describe('browser-take-control', () => {
         browser_url: LIVE_VIEW_V2,
         title: 'Navigated to cart',
       });
-      await expect(page.getByRole('button', { name: 'Hand back control', exact: true })).toBeVisible({
+      await expect(
+        page.getByRole('button', { name: 'Hand back control', exact: true }),
+      ).toBeVisible({
         timeout: 15_000,
       });
       await expect(page.locator('iframe[title="Browser"]')).toHaveAttribute(

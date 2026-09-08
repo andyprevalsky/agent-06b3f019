@@ -18774,6 +18774,29 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     acknowledge.assert_awaited_once()
     assert heartbeat.call_count == 2
 
+
+async def test_browser_agent_yields_when_ownership_is_already_user():
+    """Immediate same-session USER ownership still parks the activity until release."""
+    from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_browser_control_state",
+            AsyncMock(side_effect=["user", "agent"]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.acknowledge_browser_user_control",
+            AsyncMock(return_value="user"),
+        ) as acknowledge,
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat") as heartbeat,
+        patch("domains.spawn_browser_agent_v3.handler.asyncio.sleep", new=AsyncMock()),
+    ):
+        yielded = await _wait_for_browser_user_control(SimpleNamespace(), "task-2")
+
+    assert yielded is True
+    acknowledge.assert_not_awaited()
+    assert heartbeat.call_count == 1
+
 _TOAST_PAYMENT_CARD_ARGS = {
     "merchant": "Nopa Fish Market",
     "line_items": [

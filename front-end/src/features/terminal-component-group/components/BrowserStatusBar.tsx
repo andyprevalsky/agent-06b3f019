@@ -41,6 +41,16 @@
  * [ACTIVE]
  *
  * [DISCONNECTED] is derived separately from a session_paused browser message.
+ *
+ * TAKE CONTROL (same live session, no reinjection):
+ * [AGENT] --Take control--> POST /control {mode:user} --> USER immediately
+ *     |                        (same debugUrl / sessionId)
+ *     v
+ * [USER_CONTROLLING] iframe flips interactive=true on that URL
+ *     |
+ *     | Hand back
+ *     v
+ * [AGENT]
  */
 
 import { memo } from 'react';

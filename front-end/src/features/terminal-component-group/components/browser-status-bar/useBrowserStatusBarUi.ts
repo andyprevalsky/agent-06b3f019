@@ -44,10 +44,7 @@ interface BrowserControlTransitions {
   setUserControl: (session: SessionOverride | null) => void;
 }
 
-function currentSession(
-  session: SessionOverride | null,
-  taskId: string,
-): SessionOverride | null {
+function currentSession(session: SessionOverride | null, taskId: string): SessionOverride | null {
   return session?.taskId === taskId ? session : null;
 }
 
@@ -85,7 +82,7 @@ async function requestUserControl(
     const snapshot = await takeBrowserControl(taskId);
     transitions.setUserControl({
       taskId,
-      browserUrl: interactiveBrowserUrl(liveBrowserUrl),
+      browserUrl: interactiveBrowserUrl(snapshot.debugUrl || liveBrowserUrl),
       resumedFromDisconnected: isDisconnected || snapshot.agentPaused,
     });
   } catch (error) {
@@ -128,7 +125,7 @@ function useBrowserControlRecovery(
       try {
         let snapshot = await readBrowserControlState(taskId);
         if (snapshot.state === 'requested') snapshot = await takeBrowserControl(taskId);
-        if (!cancelled && snapshot.state === 'user') {
+        if (!cancelled && snapshot.state !== 'agent') {
           const liveBrowserUrl = snapshot.debugUrl;
           if (liveBrowserUrl === null || liveBrowserUrl === '') return;
           const recoveredControl = {
