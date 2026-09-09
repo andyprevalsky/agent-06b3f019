@@ -6964,6 +6964,56 @@ if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
     assert "volumes destroy vol_neighbor" not in log
 
 
+def test_forced_recovery_retires_only_aged_absent_name_only_clone(
+    tmp_path: Path,
+) -> None:
+    """Exact recovery has the same dead-owner proof as automatic stale recovery."""
+    fleet = FLEET_SCRIPT.read_text()
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("c" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    clone_name = "cloudbench-phantom"
+    record = clones / clone_name
+    record.write_text(f"name={clone_name}\n")
+    (registry / "meta").write_text("version=2\n")
+    audit_calls = tmp_path / "audit-calls"
+
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+RECORD={shlex.quote(str(record))}
+AUDIT_CALLS={shlex.quote(str(audit_calls))}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_resolve_name() {{ return 1; }}
+registry_record_is_stale_phantom() {{ return 0; }}
+fleet_audit_update_registry_clone() {{ printf '%s\n' "$*" >> "$AUDIT_CALLS"; }}
+registry_retire_absent_stale_pre_volume_records() {{ return 0; }}
+registry_record_is_stale_pre_volume_id() {{ return 1; }}
+{reaper}
+
+current_rc=0
+reap_registry_clones "$REG" current >/dev/null 2>&1 || current_rc=$?
+[ "$current_rc" -ne 0 ] || exit 20
+[ -f "$RECORD" ] || exit 21
+[ ! -e "$AUDIT_CALLS" ] || exit 22
+
+reap_registry_clones "$REG" forced >/dev/null 2>&1 || exit 23
+[ ! -e "$RECORD" ] || exit 24
+grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_stale_registry_identity_promotes_original_audit_before_publish_and_retries(
     tmp_path: Path,
 ) -> None:
