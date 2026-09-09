@@ -542,9 +542,9 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 On each approve, immediately start that task's outcome-proof run on the **cloud
 fleet** (apply the fix in a local code snapshot / worktree, then
 `scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
-to batch approvals or rerun the whole failed subset first. Run `/sync` before
-every subset or full-slice rerun. The final acceptance run covers the entire
-original slice and also defaults to the cloud fleet.
+to batch approvals or rerun the whole failed subset first.
+Run `/sync` before every subset or full-slice rerun. The final acceptance run
+covers the entire original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
