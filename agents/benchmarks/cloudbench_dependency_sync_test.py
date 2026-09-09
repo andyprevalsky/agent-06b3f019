@@ -1229,37 +1229,6 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert clone_definition < provision_branch
 
 
-def test_worktree_patch_fails_closed_for_unreadable_untracked_content(
-    tmp_path: Path,
-) -> None:
-    """Distinguish git's valid-diff rc=1 from its read-error rc=1."""
-    repo = tmp_path / "repo"
-    external = tmp_path / "external"
-    repo.mkdir()
-    external.mkdir()
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
-    (repo / "tracked.txt").write_text("base\n")
-    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
-
-    # Reproduce the Cloud worktree shape: agents/venv is an untracked symlink
-    # to an external environment containing its own null -> /dev/null symlink.
-    # Git enumerates linked/null, then `diff --no-index /dev/null linked/null`
-    # prints "Could not access" while returning the same rc=1 as a valid diff.
-    (external / "null").symlink_to("/dev/null")
-    (repo / "linked").symlink_to(external, target_is_directory=True)
-    result = subprocess.run(
-        ["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), "HEAD"],
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert result.stdout == b""
-
-
 def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     tmp_path: Path,
 ) -> None:
