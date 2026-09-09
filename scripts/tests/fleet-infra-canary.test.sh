@@ -105,6 +105,7 @@ awk '
 INFRA_PROBE=0
 RECOVER_STALE_ONLY=0
 PROVISION_POOL=
+INFRA_CANARY_PREFLIGHT_SCRIPT="$ROOT_DIR/scripts/cloudbench-infra-canary-preflight.py"
 fleet_infra_canary_preflight
 status=$?
 printf 'preflight_status=%s\n' "$status"
@@ -121,6 +122,31 @@ grep -Fq 'FAILED (exit=17)' "$PREFLIGHT_REPRO/output" \
   || fail "failed preflight must report the original canary status"
 [ ! -e "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass" ] \
   || fail "failed canary must never stamp preflight success"
+
+# Two campaign controllers may have distinct lifecycle locks, but their
+# check→canary→stamp transaction is shared. Exactly one canary may run; the
+# follower must wait, observe the fresh stamp, and return success.
+cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" >> "$CLOUDBENCH_PREFLIGHT_CALLS"
+sleep 0.5
+SH
+chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
+rm -f "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass"
+: > "$PREFLIGHT_REPRO/calls"
+CLOUDBENCH_PREFLIGHT_CALLS="$PREFLIGHT_REPRO/calls" \
+  bash "$PREFLIGHT_REPRO/run.sh" >"$PREFLIGHT_REPRO/concurrent-a.out" 2>&1 &
+PREFLIGHT_A=$!
+CLOUDBENCH_PREFLIGHT_CALLS="$PREFLIGHT_REPRO/calls" \
+  bash "$PREFLIGHT_REPRO/run.sh" >"$PREFLIGHT_REPRO/concurrent-b.out" 2>&1 &
+PREFLIGHT_B=$!
+wait "$PREFLIGHT_A" || fail "first concurrent preflight failed"
+wait "$PREFLIGHT_B" || fail "second concurrent preflight failed"
+[ "$(grep -c . "$PREFLIGHT_REPRO/calls")" -eq 1 ] \
+  || fail "concurrent controllers must execute exactly one serialized infra canary"
+grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-a.out" \
+  || grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-b.out" \
+  || fail "serialized follower must consume the first controller's fresh stamp"
 
 # Dry-run arg validation (no Fly): invalid N fails closed.
 # Scrub inherited fixture env so N validation is what we exercise.

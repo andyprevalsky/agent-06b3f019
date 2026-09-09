@@ -184,6 +184,7 @@ campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
       → canonical catalog selection
       → one fleet for the ordinary fully-parallel slice
       └─ bounded campaign for task × repetition instances
+           → one shared serialized infra-canary stamp transaction
            → at most N one-task fleet controllers
            → distinct controller lock + run ID + machine/volume/queue per instance
 ~~~
