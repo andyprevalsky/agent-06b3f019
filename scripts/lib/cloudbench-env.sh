@@ -315,9 +315,10 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   # port. The identity endpoint also makes a previously rebased hub reusable by
   # later runs from this workspace.
   for candidate in $(seq "$preferred" $((preferred + 500))); do
-    # Capture immediately. `if cmd; then ... fi` resets $? to 0 when cmd is
-    # false, which made a free port (probe exit 1) look like probe exit 0 and
-    # fail closed as "TCP probe failed (rc=0)".
+    # Capture probe_rc BEFORE interpreting it. `if cmd; then …; fi` resets $?
+    # to 0 when cmd is false and there is no else — so reading $? after the if
+    # always looked like "probe failed with rc=0" on free ports and refused
+    # fail-open even when the port was actually free (broke hub bring-up).
     cloudbench_tcp_listener_present "$candidate"
     probe_rc=$?
     if [ "$probe_rc" -eq 0 ]; then

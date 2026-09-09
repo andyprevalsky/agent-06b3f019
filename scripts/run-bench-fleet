@@ -56,14 +56,13 @@
 #                      barrier is tolerant for wide capability fleets)
 #
 # Infra canary preflight (runtime guarantee for /descend fleets):
-#   Multi-bench capability fleets refuse to provision until a recent
-#   `scripts/run-fleet-infra-canary` PASS stamp exists under
-#   `.context/fleet-infra-canary.last-pass` (TTL
+#   Every capability fleet (including single-bench outcome-proof reruns)
+#   refuses to provision until a recent `scripts/run-fleet-infra-canary`
+#   PASS stamp exists under `.context/fleet-infra-canary.last-pass` (TTL
 #   FLEET_INFRA_CANARY_TTL_SECONDS, default 3600). Stale/missing stamps run
 #   N=FLEET_INFRA_CANARY_PREFLIGHT_N (default 2) automatically and fail closed
-#   on INFRA. Skipped for --infra-probe, CLOUDBENCH_FAKE_DIR, recover/pool
-#   ops, or CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT=1. Force single-bench with
-#   CLOUDBENCH_REQUIRE_INFRA_CANARY_PREFLIGHT=1.
+#   on INFRA. Skipped only for --infra-probe, CLOUDBENCH_FAKE_DIR, recover/pool
+#   ops, or CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT=1.
 #
 # Prereq: a warm box exists (bash scripts/run-bench-cloud --setup).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8710,8 +8709,9 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 # ── Epoch-0 substrate preflight (fail closed before capability provisioning) ─
 # /descend fleets historically burned wall-clock on INFRA because capability
 # benches launched against a broken substrate. Pin a recent infra-canary PASS
-# stamp before cloning so every multi-bench fleet (and forced single-bench)
-# proves bring-up → strict barrier → DONE with zero exclusions first.
+# stamp before cloning so every capability fleet — including single-bench
+# outcome-proof reruns — proves bring-up → strict barrier → DONE with zero
+# exclusions first. N=1 used to skip this gate and still died on INFRA.
 fleet_infra_canary_preflight() {
     local stamp ttl age n rc
     if [ "${INFRA_PROBE:-0}" = "1" ]; then
@@ -8728,9 +8728,6 @@ fleet_infra_canary_preflight() {
         return 0
     fi
     if [ "${RECOVER_STALE_ONLY:-0}" = "1" ] || [ -n "${PROVISION_POOL:-}" ]; then
-        return 0
-    fi
-    if [ "${#BENCHES[@]}" -lt 2 ] && [ "${CLOUDBENCH_REQUIRE_INFRA_CANARY_PREFLIGHT:-0}" != "1" ]; then
         return 0
     fi
     stamp="$ROOT_DIR/.context/fleet-infra-canary.last-pass"
