@@ -228,7 +228,7 @@ transition. It must contain:
   record ID;
 - the frozen min-heap: each failing task's immutable rank, complexity class,
   issue cluster, and row ID;
-- each heap task's pipeline state: idle | applying | local-rerunning | rca.
+- each heap task's pipeline state: idle | applying | outcome-rerunning | rca.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
@@ -363,12 +363,12 @@ RESOLVE_SLICE
                            → RANK_HEAP (freeze 1..N once)                   │
                            → PIPELINE_HEAP                                  │
                                 ├─ ask min idle → HARNESS_FIX_DECISION [STOP 1]
-                                ├─ approve → APPLY_AND_LOCAL_RERUN (sub-agent)
+                                ├─ approve → APPLY_AND_CLOUD_RERUN (sub-agent)
                                 │    ├─ pass → ENQUEUE_DEPLOY_UNIT ─────────┤
                                 │    └─ fail → /rca again, reinsert at rank │
                                 └─ immediately ask next idle ───────────────┘
 
-MAIN:   continue every independent RCA, local rerun, and deploy
+MAIN:   continue every independent RCA, cloud-fleet outcome-proof, and deploy
 
 DEPLOY: prepare isolated fix-only worktree → /deploy
         ├─ no admin approval required → merge → verify production
@@ -381,10 +381,11 @@ FULL_SLICE_ACCEPTANCE
 ~~~
 
 HARNESS_FIX_DECISION pauses only the next ask, not the pipeline. Approved
-workers keep applying and local-rerunning. DEPLOY_ADMIN_APPROVAL pauses only
-the affected deploy unit while the controller continues every independent RCA,
-rerun, and deploy. If no independent work remains, the controller may wait for
-that deploy approval.
+workers keep applying the fix on a local code snapshot and outcome-proof-
+rerunning on the cloud fleet. DEPLOY_ADMIN_APPROVAL pauses only the affected
+deploy unit while the controller continues every independent RCA, rerun, and
+deploy. If no independent work remains, the controller may wait for that
+deploy approval.
 
 User input can be injected at any time and is applied at the next safe boundary,
 but the agent deliberately yields for input only in the two states above.
@@ -489,9 +490,9 @@ Infra and External Blocker never enter this heap.
 
 Same-rank ties break by task name, then row ID.
 
-A task is **idle** when it is not applying, local-rerunning, or in RCA. Ask
+A task is **idle** when it is not applying, outcome-rerunning, or in RCA. Ask
 Andy about `min{ idle tasks that need a fix decision }`. Andy sees a deeper
-bench only if every easier bench is applying, local-rerunning, or in RCA.
+bench only if every easier bench is applying, outcome-rerunning, or in RCA.
 
 Do not yank an in-flight ask if a higher-priority task becomes idle. After
 Andy answers, the next ask is the new min idle.
