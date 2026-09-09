@@ -8812,10 +8812,12 @@ fleet_infra_canary_preflight() {
     mkdir -p "$ROOT_DIR/.context"
     # Distinct lock so preflight never contends with the capability controller.
     # PREFLIGHT_ACTIVE + SKIP prevent recursion when the canary re-enters fleet.
-    if ! CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE=1 \
+    if CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE=1 \
         CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT=1 \
         CLOUDBENCH_CONTROLLER_LOCK_NAME="cloudbench-controller-infra-canary-preflight.lock" \
         bash "$ROOT_DIR/scripts/run-fleet-infra-canary" "$n"; then
+        rc=0
+    else
         rc=$?
         echo "❌ infra canary preflight FAILED (exit=$rc) — refusing capability fleet (INFRA)" >&2
         return "$rc"
