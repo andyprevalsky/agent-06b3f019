@@ -1407,11 +1407,17 @@ rm -f "$POOL_A" "$POOL_B"
 # Pre-serve each workspace's central hub on its DERIVED port (CONDUCTOR_PORT +
 # 5764) so the fleet adopts it — and so the test proves two workspaces get
 # NON-COLLIDING hub ports.
-hub_stub() {  # hub_stub <port> <runs-root>
-    local port="$1" runs_root="$2" context token pending_file pid
+hub_stub() {  # hub_stub <port> <runs-root> [test-owner-token]
+    local port="$1" runs_root="$2" requested_token="${3:-}" context token pending_file pid
     local deadline pending_ready=0 deferred_signal launch_failed=0
     context="$runs_root/_hub"
-    token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    if [ -n "$requested_token" ]; then
+        case "$requested_token" in *[!0-9a-f]*) return 1 ;; esac
+        [ "${#requested_token}" -eq 32 ] || return 1
+        token="$requested_token"
+    else
+        token="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    fi
     pending_file="$context/agent-link-server.$port.$token.pending"
     mkdir -p "$context" || return 1
 
@@ -1754,7 +1760,7 @@ PY
 terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
     local ws="$1" runs_root="$1/.context/fleet/runs"
     local hub_context="$runs_root/_hub" pending_file pid pid_start pgid port
-    local process_state actual_pgid deadline group_state
+    local process_state actual_pgid deadline group_state listener_owner
     [ -d "$hub_context" ] || return 0
     for pending_file in "$hub_context"/agent-link-server.*.*.pending; do
         [ -f "$pending_file" ] || continue
@@ -1810,8 +1816,16 @@ terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
             return 1
         }
         if cloudbench_tcp_listener_present "$port"; then
-            echo "❌ pending test Hub listener survived exact teardown on :$port" >&2
-            return 1
+            listener_owner="$(cloudbench_central_hub_owner_for \
+                "$port" "$runs_root" "$ws" || true)"
+            # A shared port is not process identity. Defer a verified distinct
+            # owner to the owner-record pass below; every other listener means
+            # this exact pending teardown failed and the reset must stop.
+            if [ -z "$listener_owner" ] \
+                || [ "$listener_owner" = "${pending_file%.pending}.owner" ]; then
+                echo "❌ pending test Hub listener survived exact teardown on :$port" >&2
+                return 1
+            fi
         fi
         untrack_test_hub_pid "$pid"
         chmod u+w "$pending_file" 2>/dev/null || true
@@ -2077,6 +2091,7 @@ stale_hub_replacement_finalize_contract() {  # <original-owner-file>
         || fail "retired Hub fixture still has its original PID birth"
 
     hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
+        "${CLOUDBENCH_TEST_REPLACEMENT_HUB_TOKEN:-ffffffffffffffffffffffffffffffff}" \
         || fail "could not launch the replacement Hub fixture"
     replacement_owner=""
     deadline=$((SECONDS + 10))
@@ -2331,6 +2346,7 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
 fi
 
 hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
+    "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
     || fail "workstream A test Hub failed its pending-owner launch handshake"
 hub_stub "$HUB_PORT_B" "$WS_B/.context/fleet/runs" \
     || fail "workstream B test Hub failed its pending-owner launch handshake"
