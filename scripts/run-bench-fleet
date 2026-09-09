@@ -7409,6 +7409,11 @@ enforce_app_capacity_guard() {
     primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; primary_nx="${primary_nx%x}"
     case "$primary_nx" in ''|*[!0-9]*) primary_shared_units=2 ;; *) primary_shared_units="$primary_nx" ;; esac
     requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
+    # The provider-wide config mutation limit bounds aggregate updates, while
+    # this reservation owns only this fleet's updates. A narrow fleet cannot
+    # have more config replacements in flight than it has primary Machines.
+    [ "$replacement_slots" -gt "$requested_machines" ] \
+        && replacement_slots="$requested_machines"
     requested_pool_eligible_machines="$requested_machines"
     if [ -n "${PROVISION_POOL:-}" ]; then
         requested_shared=$(( requested_machines * primary_shared_units ))

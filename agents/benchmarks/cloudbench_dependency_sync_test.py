@@ -13157,6 +13157,84 @@ enforce_app_capacity_guard
     assert "benchmark-app Machine ceiling 56" in result.stderr
 
 
+def test_single_task_capacity_reservations_scale_with_actual_fleet_width(tmp_path: Path) -> None:
+    """Concurrent one-task fleets reserve one replacement slot apiece.
+
+    Ten independent one-task controllers starting from the same 19-Machine
+    inventory need two physical slots each: one fresh primary and at most one
+    in-flight boot-config replacement.  A global four-update ceiling must not
+    make each one-task fleet reserve four replacement Machines.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    support = _fleet_primary_shape_helpers(fleet) + "".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "available_stopped_pool_machine_count() {",
+            "capacity_reserve_slots() {",
+        )
+    )
+    guard = _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+    machines = [
+        {
+            "id": f"active-{index}",
+            "state": "started",
+            "config": {"guest": {"cpu_kind": "shared", "cpus": 2}},
+        }
+        for index in range(19)
+    ]
+    worker = tmp_path / "one-task-capacity-worker.sh"
+    ready = tmp_path / "ready"
+    done = tmp_path / "done"
+    ready.mkdir()
+    done.mkdir()
+    worker.write_text(
+        f"""#!/usr/bin/env bash
+set -u
+warm_json={shlex.quote(json.dumps(machines))}
+BENCHES=(one-task)
+PROVISION_POOL=""
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+APP=fixture-bench-app
+RUN_ID="one-task-$1"
+FLEET_OWNER_HOST="$(hostname)"
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNER_TOKEN="$1"
+POOL_IDS_FILE={shlex.quote(str(tmp_path / "no-pool.ids"))}
+POOL_CLAIMS_DIR={shlex.quote(str(tmp_path / "claims"))}
+CLOUDBENCH_CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / "reservations"))}
+CLOUDBENCH_APP_MACHINE_CEILING=56
+CLOUDBENCH_SHARED_CPU_GOVERNOR=160
+CLOUDBENCH_SHARED_CPU_HEADROOM=20
+CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
+{support}
+{guard}
+touch "$3/$1"
+while [ "$(find "$3" -type f | wc -l | tr -d ' ')" -lt 10 ]; do sleep 0.01; done
+status=0
+enforce_app_capacity_guard || status=$?
+printf '%s\n' "$status" > "$2"
+touch "$4/$1"
+while [ "$(find "$4" -type f | wc -l | tr -d ' ')" -lt 10 ]; do sleep 0.01; done
+exit "$status"
+"""
+    )
+    worker.chmod(0o755)
+    statuses = [tmp_path / f"{index}.status" for index in range(10)]
+    processes = [
+        subprocess.Popen(
+            ["bash", str(worker), f"{index:032x}", str(statuses[index]), str(ready), str(done)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for index in range(10)
+    ]
+    results = [process.communicate(timeout=10) for process in processes]
+
+    observed = [int(status.read_text().strip()) for status in statuses]
+    assert observed == [0] * 10, results
+
+
 def test_capacity_guard_serializes_cross_workspace_reservations(tmp_path: Path) -> None:
     """Two workspaces must not both admit from the same provider snapshot.
 
