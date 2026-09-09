@@ -139,6 +139,115 @@ fleet_production_function() {
     ' "$ROOT_DIR/scripts/run-bench-fleet"
 }
 
+clone_source_read_rate_limit_contract() (
+    local function_name function_source call_count refresh_count status=0
+    local clone_output="$TMP_ROOT/clone-source-rate-limit.out"
+    local clone_error="$TMP_ROOT/clone-source-rate-limit.err"
+    local clone_calls="$TMP_ROOT/clone-source-rate-limit.calls"
+    local refresh_calls="$TMP_ROOT/clone-source-rate-limit-refresh.calls"
+    local ledger="$TMP_ROOT/clone-source-rate-limit/primary.ids"
+
+    for function_name in clone_failure_definitively_unallocated \
+        clone_failure_owned_volume_id machine_id_for_clone_name clone_machine_target; do
+        function_source="$(fleet_production_function "$function_name")"
+        [ -n "$function_source" ] \
+            || { echo "FAIL: could not load production $function_name" >&2; return 1; }
+        eval "$function_source"
+    done
+
+    : > "$clone_calls"
+    : > "$refresh_calls"
+    APP="$FLEET_BENCH_APP"
+    WARM_ID="683e47df5094d8"
+    SNAP_ID="vs_captured"
+    REGION="iad"
+    CLOUDBENCH_CLONE_MAX_ATTEMPTS=2
+    CLOUDBENCH_CLONE_RETRY_SECONDS=0
+    CLOUDBENCH_CLONE_RETRY_MAX_SECONDS=0
+    CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+    RANDOM=0
+
+    # region agent log
+    _agent_debug_log() {
+        python3 - "$@" <<'PY'
+import json
+import sys
+import time
+
+data = {}
+for raw in sys.argv[4:]:
+    key, separator, value = raw.partition("=")
+    if separator:
+        data[key] = value
+with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "hypothesisId": sys.argv[1],
+        "location": sys.argv[2],
+        "message": sys.argv[3],
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }, separators=(",", ":")) + "\n")
+PY
+    }
+    # endregion
+
+    fleet_registry_record_name() { return 0; }
+    fleet_registry_record_id() { return 0; }
+    fleet_registry_release_name() { return 0; }
+    fleet_audit_update_fresh_clone() { return 0; }
+    registry_resolve_name() { return 1; }
+    worker_ledger_lock_acquire() { return 0; }
+    worker_ledger_lock_release() { return 0; }
+    machine_volume_id() { printf 'vol_captured'; }
+    machine_storage_ready() { return 0; }
+    machine_storage_failed() { return 1; }
+    inventory_machine_id_for_name() { return 1; }
+    machines_snapshot_identity() {
+        printf 'generation-%s' "$(wc -l < "$refresh_calls" | tr -d ' ')"
+    }
+    refresh_machines_snapshot_after() {
+        printf 'refresh\n' >> "$refresh_calls"
+        return 0
+    }
+    sleep() { :; }
+    fly_with_timeout() {
+        call_count="$(wc -l < "$clone_calls" | tr -d ' ')"
+        call_count=$((call_count + 1))
+        printf '%s\n' "$call_count" >> "$clone_calls"
+        if [ "$call_count" -eq 1 ]; then
+            printf '%s\n' \
+                "Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded (Request ID: captured-lax)" >&2
+            return 1
+        fi
+        printf '%s\n' "Machine abcdef12345678 has been created..."
+    }
+
+    mkdir -p "$(dirname "$ledger")"
+    clone_machine_target "$ledger" > "$clone_output" 2> "$clone_error" || status=$?
+    [ "$status" -eq 0 ] \
+        || { echo "FAIL: captured source-read rejection did not reach the successful retry" >&2; return 1; }
+    [ "$(cat "$clone_output")" = "abcdef12345678" ] \
+        || { echo "FAIL: successful retry returned the wrong clone id" >&2; return 1; }
+    call_count="$(wc -l < "$clone_calls" | tr -d ' ')"
+    [ "$call_count" -eq 2 ] \
+        || { echo "FAIL: captured source-read rejection used $call_count clone attempts, expected 2" >&2; return 1; }
+    refresh_count="$(wc -l < "$refresh_calls" | tr -d ' ')"
+    if [ "$refresh_count" -ne 0 ]; then
+        echo "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution ($refresh_count forced inventory refreshes)" >&2
+        cat "$clone_error" >&2
+        return 1
+    fi
+    if grep -qF "unresolved clone name" "$clone_error"; then
+        echo "FAIL: pre-allocation source-machine rejection was misreported as an unresolved allocated clone" >&2
+        return 1
+    fi
+)
+
+if [ "${CLOUDBENCH_TEST_CLONE_SOURCE_RATE_LIMIT_REPRO:-0}" = "1" ]; then
+    clone_source_read_rate_limit_contract
+    exit $?
+fi
+
 registry_retirement_during_scan_contract() (
     local root registry meta signal owner_pid owner_start
     local registry_meta_source registry_alive_source reconcile_source race_error malformed_error
