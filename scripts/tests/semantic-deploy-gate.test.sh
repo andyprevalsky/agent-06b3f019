@@ -180,6 +180,8 @@ require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMAN
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB volume must use normalized identity"
 require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/deploy DB preflight must use the validated run.sh database port"
+require_text "$DEPLOY_ENV" 'if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then' "/deploy must point LOCAL_DB_PORT at system Postgres 5432 when ROSE_USE_SYSTEM_PG=true"
+require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=5432' "/deploy system-Postgres path must advertise localhost:5432 to semantic seeders"
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
@@ -238,6 +240,7 @@ require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitud
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
+require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
 require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
@@ -264,6 +267,9 @@ LIVE_AMPLITUDE_OUTPUT=$(
 LIVE_AMPLITUDE_RC=$?
 set -e
 [ "$LIVE_AMPLITUDE_RC" -ne 0 ] || fail "/deploy live Amplitude probe must reject missing credentials"
+if printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq 'Cannot find module'; then
+  fail "/deploy live Amplitude probe could not start (install back-end workspace deps before this gate)"
+fi
 printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
   'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || \
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"

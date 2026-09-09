@@ -252,6 +252,35 @@ def _supports_anthropic_fast_mode(model: str) -> bool:
     return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
 
 
+def _model_rejects_forced_tool_choice(model: str) -> bool:
+    """Fable 5.1 / Mythos 5.1 400 on tool_choice type any/tool.
+
+    Official Claude API IDs are `claude-fable-5-1` / `claude-mythos-5-1`.
+    OpenRouter uses a dot (`claude-fable-5.1`); normalize so both match.
+    Do not match leftover Fable 5 (`claude-fable-5`) — that model still
+    accepts forced tool_choice.
+    """
+    canonical = model.lower().replace(".", "-")
+    return "claude-fable-5-1" in canonical or "claude-mythos-5-1" in canonical
+
+
+def _downgrade_forced_tool_choice_if_unsupported(body: Dict[str, Any], model: str) -> None:
+    if not _model_rejects_forced_tool_choice(model):
+        return
+    tc = body.get("tool_choice")
+    if not isinstance(tc, dict):
+        return
+    tc_type = tc.get("type")
+    if tc_type not in ("any", "tool"):
+        return
+    downgraded: Dict[str, Any] = {"type": "auto"}
+    if tc_type == "tool":
+        # Named required_tool used to mean "call this once". auto alone would
+        # re-open parallel same-tool fan-out; keep the single-call contract.
+        downgraded["disable_parallel_tool_use"] = True
+    body["tool_choice"] = downgraded
+
+
 def build_anthropic_body(
     *,
     pool_spec: PoolSpec,
@@ -339,6 +368,7 @@ def build_anthropic_body(
         native_tools,
         effective_tool_choice,
     )
+    _downgrade_forced_tool_choice_if_unsupported(body, pool_spec.claude_auth_model)
 
     # Context-only tools (e.g. the planner's get_memories fork) are declared so
     # the forked tool_use/tool_result history is legal, but never callable:

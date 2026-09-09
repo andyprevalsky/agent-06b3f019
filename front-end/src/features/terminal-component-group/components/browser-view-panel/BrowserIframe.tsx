@@ -14,19 +14,19 @@
  *   - iframe + blurred Take Control overlay
  *
  * SIZING:
- *   fullscreen -> flex-1 (fills the fullscreen column)
- *   inline desktop -> aspect-video (16:9)
- *   inline mobile -> h-[60vh] (a fixed 16:9 letterbox is a tiny sliver on a
- *     narrow portrait phone, so use available viewport height instead)
+ *   fullscreen -> flex-1 letterboxed LiveViewFrame (content 1280/800)
+ *   inline desktop -> LiveViewFrame at content 1280/800 (Steel chrome cropped)
+ *   inline mobile -> h-[60vh] letterboxed LiveViewFrame
  */
 
-import { useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState } from '../browserControlState';
+import { LiveViewFrame } from '../browser-status-bar/LiveViewFrame';
+import { resolveLiveViewDisplaySize } from '../browser-status-bar/liveViewFrame';
 import { StatusOverlay } from './StatusOverlay';
 import type { Message } from '../../hooks';
 
@@ -53,30 +53,28 @@ export function BrowserIframe({
   isResuming,
   onResume,
 }: BrowserIframeProps) {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const isMobile = useIsMobile();
   const controlState = resolveBrowserControlState({
     isDisconnected,
     isWaitingForAuthAssistance,
   });
   const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
+  const stream = resolveLiveViewDisplaySize(url);
 
   return (
-    <div
+    <LiveViewFrame
+      url={url}
+      title="Browser Session"
       className={cn(
-        'bg-white border-x border-b border-border w-full relative',
-        isFullscreen ? 'flex-1' : isMobile ? 'h-[60vh]' : 'aspect-video',
+        'border-x border-b border-border bg-white',
+        isFullscreen ? 'flex-1' : isMobile ? 'h-[60vh]' : 'w-full',
       )}
+      style={
+        !isFullscreen && !isMobile
+          ? { aspectRatio: `${stream.width} / ${stream.height}` }
+          : undefined
+      }
     >
-      <iframe
-        ref={iframeRef}
-        src={url}
-        className="w-full h-full border-0 absolute inset-0 z-0"
-        allow="clipboard-read; clipboard-write"
-        sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
-        title="Browser Session"
-      />
-
       {controlState === 'active' && <BrowserBorderGlow tone={glowTone} />}
       {controlState === 'active' && (
         <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
@@ -93,6 +91,6 @@ export function BrowserIframe({
           loadingLabel="Loading..."
         />
       )}
-    </div>
+    </LiveViewFrame>
   );
 }

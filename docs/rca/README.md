@@ -73,7 +73,10 @@ Five required sections:
 
 - **Problem** — observed wrong behavior + the runtime evidence that proved it.
 - **Diagnosis** — causal chain to the first-bad boundary, then the deepest
-  _owned_ cause (Step 5a). Say what made the failure _possible_.
+  _owned_ cause (Step 5a). Say what made the failure _possible_. When the
+  intended fix is a prompt edit, also record the Step 5b climb: the class you
+  stopped at, the next-deeper class you tried, and why the more general
+  solution failed to be coherent.
 - **Solution** — the generalizable fix, where it landed, which sibling failures
   it also prevents.
 - **Human feedback** — what the human corrected, rejected, or insisted on.

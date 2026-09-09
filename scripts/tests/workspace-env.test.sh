@@ -23,6 +23,7 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   ROSE_DEPLOY_WORKTREE \
   ROSE_DEPLOY_WORKTREE_PATH \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
+  ROSE_USE_SYSTEM_PG \
   TEMPORAL_TASK_QUEUE 2>/dev/null || true
 
 expect_eq() {
@@ -149,6 +150,15 @@ esac
 expect_eq "$deploy_backend_url" "http://localhost:55190" "deploy backend URL uses assigned port"
 expect_eq "$deploy_db_port" "55195" "deploy DB port uses assigned range"
 expect_eq "$deploy_strict_port" "1" "deploy stack forbids silent port reassignment"
+
+system_pg_db_port="$(
+  cd "$workspace"
+  CONDUCTOR_PORT=55190 \
+  CONDUCTOR_WORKSPACE_PATH="$workspace" \
+  ROSE_USE_SYSTEM_PG=true \
+  bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env >/dev/null; printf '%s' \"\$LOCAL_DB_PORT\""
+)"
+expect_eq "$system_pg_db_port" "5432" "system Postgres deploy env advertises localhost:5432, not conductor+5"
 
 expect_deploy_port_rejected "abc" "deploy env rejects a nonnumeric assigned port"
 expect_deploy_port_rejected "055190" "deploy env rejects a leading-zero assigned port"

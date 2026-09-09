@@ -62,6 +62,7 @@ const SONNET_5_PRICE_CHANGE_AT = Date.parse('2026-09-01T00:00:00.000Z');
 // rather than combining usage changes with old provider price changes.
 const MODEL_RATES: Record<string, ModelRates> = {
   'claude-fable-5': anthropic(10, 50),
+  'claude-fable-5-1': anthropic(10, 50),
   'claude-opus-4.8': anthropic(5, 25),
   'claude-opus-4-8': anthropic(5, 25),
   'claude-opus-4.7': anthropic(5, 25),
@@ -105,11 +106,13 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
   'z-ai/glm-4.7': openRouter(0.4, 1.75),
-  // Current chat/SMS Cerebras primary + OpenRouter Cerebras spill (2026-08-20).
-  // Direct Cerebras list: $0.99/$1.49 per M. OpenRouter headline for the same
-  // weights is cheaper because OR can land on non-Cerebras hosts when unpinned.
+  // Historical Cerebras chat primary (chat-dead 2026-09-09: listed on /models
+  // but chat/completions 404s). Keep for ledger rows.
   'gemma-4-31b': uncached(0.99, 1.49),
   'google/gemma-4-31b-it': openRouter(0.09, 0.34),
+  // Current chat/SMS Cerebras primary (2026-09-09). Public Cerebras list
+  // $0.35/$0.75 per M (ComputePrices 2026-09-07).
+  'gpt-oss-120b': uncached(0.35, 0.75),
   'google/gemini-2.5-flash-lite': openRouter(0.1, 0.4),
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates

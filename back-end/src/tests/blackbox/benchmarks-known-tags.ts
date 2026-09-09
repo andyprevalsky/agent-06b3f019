@@ -20,6 +20,7 @@ export const KNOWN_TAGS = [
   'job-applications',
   'cache',
   'DEMO',
+  'fleet-concurrency',
   'load-test',
   'mass-agent',
   'research',

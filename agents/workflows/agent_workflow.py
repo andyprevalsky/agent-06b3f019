@@ -25,6 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
+    from domains.param_populator.config import PARAM_POPULATOR_MODEL
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -3403,7 +3404,7 @@ class AgentWorkflow:
             call_llm_activity,
             args=[
                 self.agent_id,
-                self.model,
+                PARAM_POPULATOR_MODEL,
                 self._current_tools,
                 256,
                 self.agent_id,

@@ -171,6 +171,7 @@ An RCA is **incomplete** until all of the following are true:
    been observed failing on the buggy revision and passing on the fixed revision;
    both artifacts and FE links are recorded.
 10. A case file exists in `docs/rca/cases/` and `python3 scripts/rca_archive.py validate` exits 0 (see Step 8).
+11. If the intended fix is a prompt edit, Step 5b is recorded: the class you stopped at, the next-deeper class you tried, and why the more general solution failed to be coherent.
 
 ### Autonomous fix, approval, and verification handoff
 
@@ -282,7 +283,7 @@ Before writing any fix, state ALL of these:
 2. **Where** — the root cause location (file, function, line)
 3. **Why** — the causal chain from root cause to symptom
 4. **Proof** — the specific log line, DB query result, or isolated reproduction step that confirms causation
-5. **Problem** — the generalizable problem class, not just the local failure instance
+5. **Problem** — the generalizable problem class, not just the local failure instance. When the intended fix is a prompt edit, Step 5b must verify this class by trying one level of abstraction deeper.
 
 If you cannot fill in all five, you have not found the root cause yet. Keep investigating.
 
@@ -323,6 +324,23 @@ For benchmark failures, attach the diagnosis to one of the problem buckets below
 
 The bucket is the **problem**, not the solution. Do not classify "add popup auto-dismiss" as the problem when the general failure is that screenshot/observation support omits active popups. The general fix is to improve the observation channel so every caller sees the popup state; auto-dismiss is a point workaround unless the product requirement is specifically to dismiss that class of popup.
 
+### Step 5b: Abstraction-deepening gate for prompt edits
+
+This gate is mandatory whenever the intended fix is a **prompt edit** (system prompt, tool description, skill, instruction, or any other LLM-visible text). Naming a Problem class is not enough. You must verify that class by trying to go **one level of abstraction deeper**.
+
+The way to avoid overfitting is to try to come up with a **more general solution**, and only accept the current class when that more general solution **fails to be coherent**. A prompt token that names the incident, the benchmark, or one captured miss is overfitting by construction. The prompt edit must eliminate the **class** of the issue — or the **class of class**, or the class of class of class — not the instance.
+
+Climb until the next rung fails:
+
+1. Name the current problem class `C` (the Step 5 Problem / Step 5a deepest owned cause).
+2. Form `C+1`: the class of `C`, or a strictly more general formulation of the same failure.
+3. Attempt a coherent generalizable fix at `C+1` that would eliminate `C` and the siblings you can name.
+4. If `C+1` is coherent — you can fill What / Where / Why / Proof / Problem and state a non-hand-wavy repair — `C` is too specific. Adopt `C+1` as the Problem and repeat.
+5. If the more general solution **fails to be coherent** (the next rung leaves what you own, is a design decision you do not control, or collapses into an incoherent grab-bag / "the whole architecture is wrong"), stop. The current class is the deepest coherent one.
+6. Only then may you propose a prompt edit, and only if that edit eliminates the class you stopped at. If a non-prompt fix at that class is coherent, do that instead — a prompt edit is not a consolation prize for skipping the climb.
+
+Record in the RCA, before any prompt-edit approval or implementation: the class you stopped at, the **next-deeper class** you tried, and the one-sentence reason the more general solution failed to be coherent. A prompt-edit RCA that omits that failed deeper attempt is not finished.
+
 ## Step 6: Design a generalizable fix
 
 Before writing code, ask: "Am I fixing the instance or the class of bug?"
@@ -346,7 +364,7 @@ class HttpToolClient:
 
 Prefer fixes that:
 
-- Eliminate the **class** of bug, not just the **instance**
+- Eliminate the **class** of bug, not just the **instance**. For a prompt edit, Step 5b must already have shown that a more general solution fails to be coherent; otherwise keep climbing (class of class, class of class of class) instead of editing the prompt.
 - Respect encapsulation — fix it in the layer that owns the responsibility
 - Don't duplicate logic that already exists elsewhere (search the codebase first)
 - Don't add new code paths that aren't tested
@@ -396,6 +414,7 @@ Give the sub-agent:
 - The draft RCA.
 - The runtime evidence used.
 - The proposed root cause and generalizable problem class.
+- For a prompt-edit fix: the Step 5b climb (class stopped at, next-deeper class tried, why the more general solution failed to be coherent).
 - The fix or next action.
 
 If the sub-agent finds gaps, fix the RCA or gather more evidence before

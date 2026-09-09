@@ -1629,21 +1629,15 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.queryByTestId('thinking-animation')).toBeNull();
     expect(screen.queryByTestId('browser-border-glow')).toBeNull();
     expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
-    await waitFor(() => {
-      expect(resizedViewports).toEqual([{ taskId: 'task-auth', width: 1180, height: 720 }]);
-    });
+    expect(resizedViewports).toEqual([]);
+    const livePane = document.querySelector('[data-testid="live-view-pane"]');
+    expect(livePane).toHaveClass('overflow-hidden');
     await act(async () => {
       emitResize?.(1280, 760);
       await new Promise((resolve) => window.setTimeout(resolve, 200));
     });
-    expect(resizedViewports).toHaveLength(1);
     releaseFirstResize?.();
-    await waitFor(() => {
-      expect(resizedViewports).toEqual([
-        { taskId: 'task-auth', width: 1180, height: 720 },
-        { taskId: 'task-auth', width: 1280, height: 760 },
-      ]);
-    });
+    expect(resizedViewports).toEqual([]);
 
     await user.click(screen.getByRole('button', { name: 'Start Agent' }));
     await waitFor(() => expect(completedRequestId).toBe('auth-req-1'));

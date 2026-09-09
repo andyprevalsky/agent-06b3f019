@@ -1018,6 +1018,46 @@ def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
     assert ctx.llm_key("execute_loop", changed_request) != original_key
 
 
+def test_fable_51_pool_contract_shares_fable_5_fingerprint():
+    """claudeAuth 5 → 5.1 must not miss the warm exact key (mass-agent p:1)."""
+    shared = {
+        "pool": "rose-1-ultra",
+        "messages": [{"role": "system", "content": "static system"}],
+        "tools": [{"name": "spawn_agent"}],
+        "temperature": 0,
+    }
+    fable_5 = {
+        **shared,
+        "pool_contract": {
+            "claude_auth_model": "claude-fable-5",
+            "gpt_auth_model": "gpt-5.6-sol",
+            "waterfall": ("openai/gpt-5.6-sol", "moonshotai/kimi-k3"),
+        },
+    }
+    fable_51 = {
+        **shared,
+        "pool_contract": {
+            "claude_auth_model": "claude-fable-5-1",
+            "gpt_auth_model": "gpt-5.6-sol",
+            "waterfall": ("openai/gpt-5.6-sol", "moonshotai/kimi-k3"),
+        },
+    }
+    assert normalize.position_request_fingerprint(fable_5) == normalize.position_request_fingerprint(fable_51)
+    assert normalize.oai_demo_position_request_fingerprint(fable_5) == (
+        normalize.oai_demo_position_request_fingerprint(fable_51)
+    )
+    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    assert ctx.llm_key("dag_param_populator", fable_5) == ctx.llm_key("dag_param_populator", fable_51)
+    live = rose_cache.request_key_material({"pool": "rose-1-ultra"})
+    assert live["pool_contract"]["claude_auth_model"] == "claude-fable-5-1"
+    aliased = dict(live)
+    aliased["pool_contract"] = {
+        **live["pool_contract"],
+        "claude_auth_model": "claude-fable-5",
+    }
+    assert ctx.llm_key("dag_param_populator", live) == ctx.llm_key("dag_param_populator", aliased)
+
+
 def test_llm_request_key_separates_anthropic_exclusion_policy(monkeypatch):
     monkeypatch.delenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", raising=False)
     ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
