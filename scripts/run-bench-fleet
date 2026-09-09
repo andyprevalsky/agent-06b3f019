@@ -678,6 +678,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
     enter_script_snapshot "$@"
 fi
 
+FLEET_CONTROLLER_STARTED_EPOCH="$(date +%s)"
+
 # Bash 3.2 preserves an inherited export attribute when a shell variable is
 # reassigned (including through `local`). Provider inventory is unbounded JSON;
 # never let a caller's generic exported name turn one of these internal buffers
@@ -6151,12 +6153,26 @@ fi
 # is visibly "starting", never invisible. The live aggregator overwrites this
 # card once real per-bench results flow.
 write_startup_card() {  # write_startup_card <phase-text>
+    local i startup_modes="" mode
     mkdir -p "$FLEET_DIR/_batch"
-    STARTUP_BENCHES="${BENCHES[*]:-}" PHASE="$1" CARD_RUN_ID="$RUN_ID" \
-    python3 - "$FLEET_DIR/_batch/report-card.json" <<'PY'
+    for i in "${!BENCHES[@]}"; do
+        mode="REAL"
+        [ "${CATALOG_MODES[$i]:-real}" = "simulate" ] && mode="SIM"
+        case ",${SIM_ON_CSV:-}," in
+            *",${BENCHES[$i]},"*) mode="SIM" ;;
+        esac
+        startup_modes="${startup_modes}${mode} "
+    done
+    STARTUP_BENCHES="${BENCHES[*]:-}" STARTUP_MODES="$startup_modes" \
+    PHASE="$1" CARD_RUN_ID="$RUN_ID" python3 - "$FLEET_DIR/_batch" <<'PY'
 import json, os, sys
+from pathlib import Path
+
 benches = os.environ.get("STARTUP_BENCHES", "").split()
+modes = os.environ.get("STARTUP_MODES", "").split()
 phase = os.environ["PHASE"]
+if len(benches) != len(modes):
+    raise SystemExit("startup bench/mode manifest length mismatch")
 card = {
     "run_id": os.environ["CARD_RUN_ID"],
     "status": "starting",
@@ -6166,7 +6182,19 @@ card = {
     "tasks": [{"name": b, "status": "starting", "phase": phase} for b in benches],
     "per_task": [{"name": b, "status": "starting", "phase": phase} for b in benches],
 }
-json.dump(card, open(sys.argv[1], "w"), indent=1)
+batch = Path(sys.argv[1])
+documents = {
+    "report-card.json": card,
+    "benches.json": [
+        {"name": name, "mode": mode}
+        for name, mode in zip(benches, modes)
+    ],
+}
+for name, document in documents.items():
+    target = batch / name
+    temporary = batch / f".{name}.tmp.{os.getpid()}"
+    temporary.write_text(json.dumps(document, indent=1) + "\n")
+    temporary.replace(target)
 PY
 }
 start_central_hub() {
@@ -6453,6 +6481,31 @@ CHILD_BENCH=()
 CHILD_MODE=()
 CHILD_PORT=()
 CHILD_MACHINE=()
+
+finalize_terminal_projection() {  # finalize_terminal_projection <controller-exit-code>
+    local controller_exit_code="${1:-1}" now elapsed
+    local -a provenance_args
+    [ -z "$PROVISION_POOL" ] || return 0
+    [ -s "$FLEET_DIR/_batch/benches.json" ] || return 1
+    now="$(date +%s)"
+    elapsed=$((now - FLEET_CONTROLLER_STARTED_EPOCH))
+    [ "$elapsed" -ge 0 ] || return 1
+    provenance_args=()
+    if [ -s "${EXECUTION_PROVENANCE_FILE:-}" ] \
+        && [ -s "${EXECUTION_TASK_MATRIX_FILE:-}" ]; then
+        provenance_args=(
+            --expected-execution-provenance-file "$EXECUTION_PROVENANCE_FILE"
+            --expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"
+        )
+    fi
+    if ! CLOUDBENCH_CONTROLLER_ELAPSED_SECONDS="$elapsed" \
+        CLOUDBENCH_CONTROLLER_EXIT_CODE="$controller_exit_code" \
+        python3 "$AGGREGATE_RUNS_SCRIPT" \
+            "$FLEET_DIR" "$FLEET_DIR/_batch/run.json" \
+            "${provenance_args[@]}"; then
+        return 1
+    fi
+}
 
 cloudbench_confirm_guest_shutdowns() {
     local deadline j out port status_code marker_tmp failed=0
@@ -6812,6 +6865,11 @@ cleanup() {
             teardown_failed=1
         fi
         CAPACITY_RESERVATION_PUBLISHED=0
+    fi
+    if ! finalize_terminal_projection "$ec"; then
+        echo "❌ could not finalize Cloud Fleet run/report-card projection" >&2
+        ec=1
+        teardown_failed=1
     fi
     # Autoscaler EXIT cleanup calls the snapshotted port-lease helper. Remove
     # an invocation-owned immutable bundle only after every child/autoscaler is
@@ -9098,22 +9156,15 @@ echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
 # points at its own bench's /open-agent (localhost:<bench-port>), so clicking
 # "open" from the batch view routes to the right isolated machine's viewer.
 UNIFIED_DIR="$FLEET_DIR/_batch"
-rm -rf "$UNIFIED_DIR" 2>/dev/null || true; mkdir -p "$UNIFIED_DIR"
+mkdir -p "$UNIFIED_DIR"
 printf '%s' "${CODE_SUMMARY:-}" > "$UNIFIED_DIR/code.txt"   # shown in the dashboard header
 cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html" 2>/dev/null || true
 # NOTE: never kill whatever holds DASH_BASE — that is the ONE persistent central
 # hub, shared across every run + carrying the user's open tab. It picks up this
 # new run dir on its next scan. We (re)start it below ONLY if it isn't already up.
-# Manifest of EVERY bench in the batch — the dashboard always renders all N rows
-# (queued → running → done), never a subset while some machines are still booting.
-{
-    printf '['
-    for j in "${!CHILD_BENCH[@]}"; do
-        [ "$j" -gt 0 ] && printf ','
-        printf '{"name":"%s","mode":"%s","port":%s}' "${CHILD_BENCH[$j]}" "${CHILD_MODE[$j]}" "${CHILD_PORT[$j]}"
-    done
-    printf ']'
-} > "$UNIFIED_DIR/benches.json"
+# benches.json was frozen with the complete requested task list at fire time.
+# Live and terminal projections consume that same manifest, including when
+# provisioning exits before every child has an output directory.
 # Revalidate/restart the identity-owned hub BEFORE the aggregator captures
 # DASH_BASE. If the early hub disappeared and a foreign workspace took its
 # port, every generated agent URL must use the newly selected port.
@@ -9453,9 +9504,7 @@ if ! cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
     exit 1
 fi
 UNIFIED_AGG_PID=""
-if ! python3 "$AGGREGATE_RUNS_SCRIPT" "$FLEET_DIR" "$UNIFIED_DIR/run.json" \
-    --expected-execution-provenance-file "$EXECUTION_PROVENANCE_FILE" \
-    --expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"; then
+if ! finalize_terminal_projection 0; then
     echo "❌ aggregate rejected missing or mismatched execution provenance" >&2
     exit 1
 fi

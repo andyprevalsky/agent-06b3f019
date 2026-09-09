@@ -5786,6 +5786,174 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     assert usage["providers"]["codex_token"]["models"]["gpt-5.6-sol"]["input_tokens"] == 20
 
 
+def test_fleet_terminal_projection_uses_two_archives_and_one_terminal_task_list(
+    tmp_path: Path,
+) -> None:
+    fleet = tmp_path / "terminal-projection"
+    batch = fleet / "_batch"
+    batch.mkdir(parents=True)
+    benches = [
+        {"name": "success", "mode": "REAL"},
+        {"name": "benchmark-failure", "mode": "REAL"},
+        {"name": "early-failure", "mode": "REAL"},
+    ]
+    (batch / "benches.json").write_text(json.dumps(benches))
+    archived_tasks = {
+        "success": {
+            "name": "success",
+            "passed": True,
+            "status": "PASSED",
+            "duration_seconds": 11,
+            "cost_cents": 2.5,
+            "tokens_in": 10,
+            "tokens_out": 4,
+            "world_model_mode": "real",
+        },
+        "benchmark-failure": {
+            "name": "benchmark-failure",
+            "passed": False,
+            "status": "FAILED",
+            "duration_seconds": 13,
+            "cost_cents": 1.5,
+            "tokens_in": 8,
+            "tokens_out": 2,
+            "world_model_mode": "real",
+            "failure_reason": "benchmark assertion failed",
+        },
+    }
+    for name, task in archived_tasks.items():
+        task_dir = fleet / name
+        task_dir.mkdir()
+        (task_dir / "cloudbench-run.json").write_text(
+            json.dumps({"tasks": [task]})
+        )
+
+    output = batch / "run.json"
+    env = {
+        **os.environ,
+        "CLOUDBENCH_CONTROLLER_ELAPSED_SECONDS": "47.5",
+    }
+    command = [sys.executable, str(AGGREGATE_SCRIPT), str(fleet), str(output)]
+    first = subprocess.run(
+        command,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert first.returncode == 0, first.stderr
+    run = json.loads(output.read_text())
+    report_path = batch / "report-card.json"
+    report_names = []
+    if report_path.is_file():
+        report_names = [
+            row.get("name")
+            for row in json.loads(report_path.read_text()).get("per_task", [])
+        ]
+    expected_names = [bench["name"] for bench in benches]
+    missing = [name for name in expected_names if name not in report_names]
+    assert not missing, f"terminal child outcomes absent from batch card: {missing}"
+
+    report = json.loads(report_path.read_text())
+    assert [task["name"] for task in run["tasks"]] == expected_names
+    assert run["elapsed_s"] == 47.5
+    assert report["elapsed_s"] == 47.5
+    assert [row["status"] for row in report["per_task"]] == [
+        "passed",
+        "failed",
+        "error",
+    ]
+    assert report["per_task"][1]["failure_reason"] == "benchmark assertion failed"
+    assert report["per_task"][2]["failure_reason"] == "no current run artifact produced"
+    assert report["tasks"] == {
+        "total": 3,
+        "running": 0,
+        "completed": 3,
+        "queued": 0,
+    }
+    assert report["results"] == {
+        "passed": 1,
+        "failed": 2,
+        "transient": 0,
+        "success_rate": 0.333,
+    }
+
+    second = subprocess.run(
+        command,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    rerun = json.loads(output.read_text())
+    rerun_report = json.loads(report_path.read_text())
+    assert rerun["tasks"] == run["tasks"]
+    assert rerun_report["per_task"] == report["per_task"]
+    assert len(rerun["tasks"]) == len(benches)
+    assert len(rerun_report["per_task"]) == len(benches)
+
+    fleet_source = FLEET_SCRIPT.read_text()
+    cleanup = _extract_fleet_function(fleet_source, "cleanup() {")
+    assert 'finalize_terminal_projection "$ec"' in cleanup
+    assert "trap cleanup EXIT" in fleet_source
+
+
+def test_fleet_terminal_projection_runs_from_signal_exit_finalization(
+    tmp_path: Path,
+) -> None:
+    fleet = tmp_path / "signal-finalization"
+    batch = fleet / "_batch"
+    batch.mkdir(parents=True)
+    (batch / "benches.json").write_text(
+        json.dumps([{"name": "interrupted-infra", "mode": "REAL"}])
+    )
+    finalizer = _extract_fleet_function(
+        FLEET_SCRIPT.read_text(),
+        "finalize_terminal_projection() {",
+    )
+    script = f"""set -uo pipefail
+FLEET_DIR={shlex.quote(str(fleet))}
+PROVISION_POOL=
+FLEET_CONTROLLER_STARTED_EPOCH=$(($(date +%s) - 2))
+AGGREGATE_RUNS_SCRIPT={shlex.quote(str(AGGREGATE_SCRIPT))}
+EXECUTION_PROVENANCE_FILE=
+EXECUTION_TASK_MATRIX_FILE=
+{finalizer}
+cleanup() {{
+  result_ec=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+  finalize_terminal_projection "$result_ec" || exit 1
+  exit "$result_ec"
+}}
+trap cleanup EXIT
+trap 'exit 143' TERM
+kill -TERM "$$"
+exit 99
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 143, result.stderr
+    run = json.loads((batch / "run.json").read_text())
+    report = json.loads((batch / "report-card.json").read_text())
+    assert run["controller_exit_code"] == 143
+    assert run["status"] == "failed"
+    assert run["tasks"][0]["status"] == "INFRA_ERROR"
+    assert run["elapsed_s"] >= 2
+    assert report["controller_exit_code"] == 143
+    assert report["status"] == "failed"
+    assert report["per_task"][0]["status"] == "error"
+    assert report["per_task"][0]["failure_reason"] == "no current run artifact produced"
+
+
 def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
     snapshot = tmp_path / "controller-snapshot"
     snapshot.mkdir()
@@ -6420,7 +6588,7 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
     assert '--expected-execution-provenance-file "$EXECUTION_PROVENANCE_FILE"' in fleet
     assert '--expected-execution-task-matrix-file "$EXECUTION_TASK_MATRIX_FILE"' in fleet
     assert 'digest-task-matrix \\' in fleet
-    aggregate_acceptance = fleet.index('if ! python3 "$AGGREGATE_RUNS_SCRIPT"')
+    aggregate_acceptance = fleet.index("if ! finalize_terminal_projection 0; then")
     final_upload = fleet.index(
         'python3 "$HUB_UPLOAD_HELPER" --upload-final', aggregate_acceptance
     )
@@ -10606,6 +10774,8 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
 FLEET_DIR="$FD"
 RUN_ID=test-run
 BENCHES=(alpha beta)
+CATALOG_MODES=(real simulate)
+SIM_ON_CSV=
 {helper}
 write_startup_card "healing warm snapshot (dep trees)"
 """,
@@ -10624,6 +10794,11 @@ write_startup_card "healing warm snapshot (dep trees)"
     assert all(t["status"] == "starting" for t in card["tasks"])
     assert [t["name"] for t in card["per_task"]] == ["alpha", "beta"]
     assert all(t["status"] == "starting" for t in card["per_task"])
+    manifest = json.loads((tmp_path / "_batch" / "benches.json").read_text())
+    assert manifest == [
+        {"name": "alpha", "mode": "REAL"},
+        {"name": "beta", "mode": "SIM"},
+    ]
 
     visibility_start = fleet.index("require_central_hub_visibility() {")
     visibility_fn = fleet[visibility_start : fleet.index("\n}\n", visibility_start) + 3]
@@ -10851,7 +11026,7 @@ printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
 
         # The post-provisioning revalidation must precede the aggregator fork so
         # its subshell captures the final rebound DASH_BASE for every agent URL.
-        manifest = fleet.index('} > "$UNIFIED_DIR/benches.json"')
+        manifest = fleet.index("# benches.json was frozen")
         late_start = fleet.index("start_central_hub || exit 1", manifest)
         aggregator = fleet.index("(\n    while :; do", late_start)
         assert late_start < aggregator
