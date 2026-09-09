@@ -20,7 +20,7 @@ sources:
   - commit c6e97b8a98651699bf325e4a290680bf391afe60
   - fleet run 20260909-142400-3810682
 repro: scripts/tests/cloudbench-status-service-shutdown.test.sh
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -68,8 +68,13 @@ The production-shaped executable regression proves CLI readiness, rejects
 unauthenticated shutdown, observes request-to-ack state, preserves a process
 owned by another run, persists shutdown during the pre-driver race, and rejects
 unsafe run tokens. `scripts/test.sh` now discovers it with the other Cloud
-benchmark lifecycle tests. The implementation remains open until both the
-unchanged owning-boundary regression and the unchanged N=2 fleet canary pass.
+benchmark lifecycle tests. The unchanged test passes with
+`PASS: status service enforces authenticated run-scoped shutdown and cleanup
+acknowledgement`.
+
+The unchanged N=2 fleet canary then passed as run
+`20260909-155351-4042019`: both isolated stacks reached the synchronized start
+barrier, both infra probes passed, and both exact-owned clones were destroyed.
 
 At 10,000 agents this adds no per-agent polling or shared fan-in. There is one
 status service per active guest and work occurs only on run teardown, so cost is
