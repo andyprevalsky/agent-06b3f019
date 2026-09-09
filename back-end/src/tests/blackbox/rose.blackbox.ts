@@ -41,6 +41,7 @@ import {
   getPool,
   isRoseModel,
   markCacheable,
+  PARAM_POPULATOR_MODEL,
   POOL_REGISTRY,
   poolForModel,
   RoseAllFailed,
@@ -292,6 +293,8 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.gptAuthModel, 'gpt-5.6-terra', 'lite.gptAuthModel');
   assert(lite.waterfall.length >= 1, 'lite.waterfall length');
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
+  assertEqual(PARAM_POPULATOR_MODEL, 'rose-labs/rose-1-ultra', 'param populator model');
+  assertEqual(poolForModel(PARAM_POPULATOR_MODEL), 'rose-1-ultra', 'param populator pool');
   assertEqual(ultra.claudeAuthModel, 'claude-fable-5-1', 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from both deep pools: opus-4.8 was the priciest layer

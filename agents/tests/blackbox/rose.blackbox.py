@@ -215,6 +215,11 @@ def test_pool_registry_lookup():
     assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
+    from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
+    from providers.rose.pools import PARAM_POPULATOR_MODEL
+
+    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
+    assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
     assert ultra.claude_auth_model == "claude-fable-5-1"
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
     # OpenRouter fable 5.1 is $10/$50 per M vs sol $2/$10, so the paid

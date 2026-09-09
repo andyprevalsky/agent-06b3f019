@@ -4560,70 +4560,6 @@ async def test_call_llm_activity_forces_required_tool_at_provider():
     assert result["tool_calls"][0]["tool"] == "attempt_completion"
 
 
-async def test_call_llm_activity_accepts_repeated_required_tool_calls():
-    """A required-tool handoff may return N copies of that tool; the caller selects."""
-    from helpers.llm import call_llm_activity
-
-    async def fake_structured_streaming(**kwargs):
-        response_model = kwargs["response_model"]
-        return (
-            response_model(
-                response="",
-                tool_calls=[
-                    {
-                        "tool": "spawn_agent",
-                        "type": "browser",
-                        "goal": "Edit sms-inbound-0.png",
-                        "start_url": "https://replicate.com/google/nano-banana",
-                        "output_schema": {
-                            "fields": [{"name": "image_url", "type": "str", "required": True}]
-                        },
-                    },
-                    {
-                        "tool": "spawn_agent",
-                        "type": "browser",
-                        "goal": "Edit sms-inbound-1.png",
-                        "start_url": "https://replicate.com/google/nano-banana",
-                        "output_schema": {
-                            "fields": [{"name": "image_url", "type": "str", "required": True}]
-                        },
-                    },
-                    {
-                        "tool": "spawn_agent",
-                        "type": "browser",
-                        "goal": "Edit sms-inbound-2.png",
-                        "start_url": "https://replicate.com/google/nano-banana",
-                        "output_schema": {
-                            "fields": [{"name": "image_url", "type": "str", "required": True}]
-                        },
-                    },
-                ],
-            ),
-            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            [],
-        )
-
-    with (
-        patch("helpers.llm.call_llm_structured_streaming", fake_structured_streaming),
-        patch("temporalio.activity.heartbeat"),
-    ):
-        result = await call_llm_activity(
-            messages_or_agent_id=[{"role": "user", "content": "Populate the planned browser spawn"}],
-            model="rose-labs/rose-1-lite",
-            tool_names=["spawn_agent", "web_search"],
-            reasoning_max_tokens=0,
-            call_site="required-tool-same-tool-fanout-test",
-            required_tool="spawn_agent",
-        )
-
-    assert [call["tool"] for call in result["tool_calls"]] == ["spawn_agent", "spawn_agent", "spawn_agent"]
-    assert [call["goal"] for call in result["tool_calls"]] == [
-        "Edit sms-inbound-0.png",
-        "Edit sms-inbound-1.png",
-        "Edit sms-inbound-2.png",
-    ]
-
-
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
     """When agent_id is passed, activity reads context from _pending_llm_context."""
     import httpx
@@ -8283,10 +8219,6 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_required_tool_forced_at_provider",
         test_call_llm_activity_forces_required_tool_at_provider,
-    )
-    await r.record_async(
-        "call_llm_activity_accepts_repeated_required_tool_calls",
-        test_call_llm_activity_accepts_repeated_required_tool_calls,
     )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)

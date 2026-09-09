@@ -148,67 +148,24 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
     return params
 
 
-_GOAL_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
-
-
-def _normalize_goal(text: str) -> str:
-    return " ".join((text or "").lower().split())
-
-
-def _goal_match_score(task_goal: str, call_goal: str) -> int:
-    """Score how uniquely a populator call binds to this DAG task's goal."""
-    task_norm = _normalize_goal(task_goal)
-    call_norm = _normalize_goal(call_goal)
-    if not task_norm or not call_norm:
-        return 0
-    if task_norm == call_norm:
-        return 1_000_000 + len(task_norm)
-    if call_norm in task_norm or task_norm in call_norm:
-        return 100_000 + min(len(task_norm), len(call_norm))
-    task_tokens = set(_GOAL_TOKEN_RE.findall(task_norm))
-    call_tokens = set(_GOAL_TOKEN_RE.findall(call_norm))
-    return sum(len(token) for token in task_tokens & call_tokens)
-
-
 def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
-    """Bind this DAG task to the matching required-tool call.
-
-    Parallel same-alias siblings often share one populator turn that emits one
-    call per sibling. Select the unique goal match instead of failing the batch.
-    """
-    if not tool_calls:
-        raise ParamPopulationContractError(f"LLM must return a {actual_tool} call for task {task.index}; got 0")
-
-    matching_tool = [tool_call for tool_call in tool_calls if tool_call.get("tool") == actual_tool]
-    if not matching_tool:
+    """Require the one planned tool call promised by the param-populator prompt."""
+    if len(tool_calls) != 1:
         raise ParamPopulationContractError(
-            f"LLM expected {actual_tool}, got {tool_calls[0].get('tool')} for task {task.index}"
+            f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}"
         )
+
+    tool_call = tool_calls[0]
+    returned_tool = tool_call.get("tool")
+    if returned_tool != actual_tool:
+        raise ParamPopulationContractError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
 
     expected_type = ALIAS_TYPE_OVERRIDES.get(task.tool_name, {}).get("type")
-    if actual_tool == "spawn_agent" and expected_type:
-        typed = [tool_call for tool_call in matching_tool if tool_call.get("type") in (None, expected_type)]
-        if not typed:
-            raise ParamPopulationContractError(
-                f"LLM expected {actual_tool} type {expected_type}, got {matching_tool[0].get('type')} for task {task.index}"
-            )
-        matching_tool = typed
-
-    if len(matching_tool) == 1:
-        return matching_tool[0]
-
-    scored = [
-        (_goal_match_score(task.goal, tool_call.get("goal") or ""), index, tool_call)
-        for index, tool_call in enumerate(matching_tool)
-    ]
-    best_score = max(score for score, _index, _tool_call in scored)
-    winners = [tool_call for score, _index, tool_call in scored if score == best_score]
-    winner_goals = {_normalize_goal(tool_call.get("goal") or "") for tool_call in winners}
-    if best_score <= 0 or len(winner_goals) != 1:
+    if actual_tool == "spawn_agent" and expected_type and tool_call.get("type") != expected_type:
         raise ParamPopulationContractError(
-            f"LLM returned {len(matching_tool)} {actual_tool} calls for task {task.index} with no unique goal match"
+            f"LLM expected {actual_tool} type {expected_type}, got {tool_call.get('type')} for task {task.index}"
         )
-    return winners[0]
+    return tool_call
 
 
 def _build_param_population_message(
@@ -970,7 +927,7 @@ async def _execute_single_task(
                 raise ValueError("DAG param population requires the full execute-phase tool schema")
             # Force ultra even when the parent agent is lite. Same conversation
             # prefix, different pool — lite/sonnet-5 fans out one spawn_agent
-            # per sibling; ultra binds the assigned step.
+            # per sibling; ultra follows the exactly-one contract.
             llm_args = [
                 agent_id,
                 PARAM_POPULATOR_MODEL,
