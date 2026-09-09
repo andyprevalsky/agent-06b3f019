@@ -83,6 +83,45 @@ grep -Fq 'already_cleaned' "$FLEET" \
 grep -Fq 'Skip the absent→not-allocated-verified transition' "$FLEET" \
   || fail "clone retry must document the owned-volume vs reconcile ordering"
 
+# Exercise the production function body with a canary that exits 17. Negating
+# the command before reading $? turns that failure into 0 and launches the
+# capability fleet, so this must assert behavior rather than source strings.
+PREFLIGHT_REPRO="$(mktemp -d)"
+trap 'rm -rf "$PREFLIGHT_REPRO"' EXIT
+mkdir -p "$PREFLIGHT_REPRO/root/scripts"
+cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
+#!/usr/bin/env bash
+exit 17
+SH
+chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
+awk '
+  /^fleet_infra_canary_preflight\(\) \{/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$FLEET" > "$PREFLIGHT_REPRO/run.sh"
+{
+  printf 'ROOT_DIR=%q\n' "$PREFLIGHT_REPRO/root"
+  cat <<'SH'
+INFRA_PROBE=0
+RECOVER_STALE_ONLY=0
+PROVISION_POOL=
+fleet_infra_canary_preflight
+status=$?
+printf 'preflight_status=%s\n' "$status"
+exit "$status"
+SH
+} >> "$PREFLIGHT_REPRO/run.sh"
+set +e
+bash "$PREFLIGHT_REPRO/run.sh" > "$PREFLIGHT_REPRO/output" 2>&1
+PREFLIGHT_STATUS=$?
+set -e
+[ "$PREFLIGHT_STATUS" -eq 17 ] \
+  || fail "failed canary status must propagate unchanged (expected 17, got $PREFLIGHT_STATUS)"
+grep -Fq 'FAILED (exit=17)' "$PREFLIGHT_REPRO/output" \
+  || fail "failed preflight must report the original canary status"
+[ ! -e "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass" ] \
+  || fail "failed canary must never stamp preflight success"
+
 # Dry-run arg validation (no Fly): invalid N fails closed.
 # Scrub inherited fixture env so N validation is what we exercise.
 unset CLOUDBENCH_FAKE_DIR
