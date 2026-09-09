@@ -169,8 +169,11 @@ export function computeLiveViewLetterbox(
   streamWidth: number,
   streamHeight: number,
 ): LiveViewLetterbox {
-  if (paneWidth <= 0 || paneHeight <= 0 || streamWidth <= 0 || streamHeight <= 0) {
+  if (streamWidth <= 0 || streamHeight <= 0 || paneWidth < 0 || paneHeight < 0) {
     throw new Error('Live-view letterbox requires positive pane and stream dimensions');
+  }
+  if (paneWidth === 0 || paneHeight === 0) {
+    return { width: 0, height: 0, offsetX: 0, offsetY: 0, scale: 0 };
   }
   const scale = Math.min(paneWidth / streamWidth, paneHeight / streamHeight);
   const width = Math.min(paneWidth, streamWidth * scale);

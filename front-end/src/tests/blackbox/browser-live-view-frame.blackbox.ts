@@ -128,4 +128,33 @@ describe('Steel chrome crop (display-only)', () => {
     expect(box.offsetX).toBeCloseTo(0);
     expect(box.offsetY).toBeCloseTo(0);
   });
+
+  it('returns a zero letterbox for a 0×0 mount pane without throwing', () => {
+    const { width, height } = LIVE_VIEW_CONTENT_VIEWPORT;
+    expect(computeLiveViewLetterbox(0, 0, width, height)).toEqual({
+      width: 0,
+      height: 0,
+      offsetX: 0,
+      offsetY: 0,
+      scale: 0,
+    });
+    expect(computeLiveViewLetterbox(0, 700, width, height).width).toBe(0);
+    expect(computeLiveViewLetterbox(1100, 0, width, height).height).toBe(0);
+  });
+
+  it('still rejects invalid stream dimensions and negative panes', () => {
+    const { width, height } = LIVE_VIEW_CONTENT_VIEWPORT;
+    expect(() => computeLiveViewLetterbox(1100, 700, 0, height)).toThrow(
+      /positive pane and stream dimensions/,
+    );
+    expect(() => computeLiveViewLetterbox(1100, 700, width, 0)).toThrow(
+      /positive pane and stream dimensions/,
+    );
+    expect(() => computeLiveViewLetterbox(-1, 700, width, height)).toThrow(
+      /positive pane and stream dimensions/,
+    );
+    expect(() => computeLiveViewLetterbox(1100, -1, width, height)).toThrow(
+      /positive pane and stream dimensions/,
+    );
+  });
 });

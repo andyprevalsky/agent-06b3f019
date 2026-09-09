@@ -245,6 +245,20 @@ describe('BrowserCursorOverlay realtime stream', () => {
 
     expect(screen.getByTestId('browser-cursor')).toHaveStyle({ left: '640px', top: '400px' });
   });
+
+  it('keeps a zero-sized mount pane from aborting cursor bounds', () => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get: () => 0,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => 0,
+    });
+    expect(() =>
+      render(<BrowserCursorOverlay agentId="agent-1" taskId="task-1" messages={[]} />),
+    ).not.toThrow();
+  });
 });
 
 describe('browser auth URL isolation', () => {

@@ -24,6 +24,7 @@ vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', (
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import { BrowserIframe } from '@/features/terminal-component-group/components/browser-view-panel/BrowserIframe';
 import { BrowserStatusBarExpanded } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded';
+import { LiveViewFrame } from '@/features/terminal-component-group/components/browser-status-bar/LiveViewFrame';
 import {
   LIVE_VIEW_CONTENT_VIEWPORT,
   STEEL_LIVE_VIEW_WINDOW,
@@ -136,5 +137,28 @@ describe('live-view iframe containment', () => {
     const translateMatch = transform.match(/translate\(([-0-9.]+)px,\s*([-0-9.]+)px\)/);
     expect(translateMatch).not.toBeNull();
     expect(Number(translateMatch![2])).toBeLessThan(0);
+  });
+
+  it('does not recreate the Steel clip ResizeObserver when the same url rerenders', () => {
+    let constructed = 0;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    const originalResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = class {
+      observe = observe;
+      disconnect = disconnect;
+      constructor() {
+        constructed += 1;
+      }
+    } as unknown as typeof ResizeObserver;
+
+    const { rerender } = renderWithProviders(<LiveViewFrame url={STEEL_PLAYER} title="Browser" />);
+    expect(constructed).toBe(1);
+
+    rerender(<LiveViewFrame url={STEEL_PLAYER} title="Browser" iframeKey="rerender" />);
+    expect(constructed).toBe(1);
+    expect(disconnect).not.toHaveBeenCalled();
+
+    window.ResizeObserver = originalResizeObserver;
   });
 });

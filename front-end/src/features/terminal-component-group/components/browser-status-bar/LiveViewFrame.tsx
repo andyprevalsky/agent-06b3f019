@@ -43,11 +43,12 @@ export function LiveViewFrame({
 }: LiveViewFrameProps) {
   const display = resolveLiveViewDisplaySize(url);
   const crop = resolveLiveViewChromeCrop(url);
+  const needsClipMeasure = crop !== null;
   const streamRef = useRef<HTMLDivElement>(null);
   const [clipWidth, setClipWidth] = useState(0);
   useLayoutEffect(() => {
     const el = streamRef.current;
-    if (!el || !crop) return;
+    if (!el || !needsClipMeasure) return;
     const update = () => {
       const width = el.getBoundingClientRect().width;
       if (width > 0) setClipWidth(width);
@@ -56,7 +57,7 @@ export function LiveViewFrame({
     const observer = new ResizeObserver(update);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [crop]);
+  }, [needsClipMeasure]);
   const iframeStyle = crop
     ? clipWidth > 0
       ? steelLiveViewScaledCropStyle(clipWidth)
