@@ -197,6 +197,32 @@ MARKETING_OPT_IN_PATTERNS = (
     "sign me up for",
 )
 
+# In-product AI composers submit a prompt to the current product. That is not
+# an outbound message to a third party, so it must not trip email_send.
+# Agent 37b7bb31 (2026-09-09): ChatGPT ``Send prompt`` after an image upload
+# parked the run on write_lock approval for a tattoo edit.
+AI_COMPOSER_SUBMIT_PHRASES = (
+    "send prompt",
+    "submit prompt",
+)
+
+# Generic composer labels that are email_send elsewhere ("Send", "Send
+# message") become composer submits only on known AI-assistant hosts.
+AI_COMPOSER_SUBMIT_EXACT = frozenset({
+    "send",
+    "send message",
+    "submit",
+    "send prompt",
+    "submit prompt",
+})
+
+AI_ASSISTANT_COMPOSER_HOSTS = (
+    "chatgpt.com",
+    "chat.openai.com",
+    "claude.ai",
+    "gemini.google.com",
+)
+
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
 PURCHASE_BUTTON_PHRASES = [
@@ -473,6 +499,32 @@ def _is_marketing_opt_in_action(normalized: str) -> bool:
     return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
 
 
+def is_ai_assistant_composer_host(url: str) -> bool:
+    """Return True when ``url`` is an in-product AI assistant composer host."""
+    if not url:
+        return False
+    try:
+        domain = urlparse(url.lower()).netloc
+    except Exception:
+        return False
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return any(domain == host or domain.endswith("." + host) for host in AI_ASSISTANT_COMPOSER_HOSTS)
+
+
+def _is_ai_composer_submit(normalized: str, url: str = "") -> bool:
+    """Return True when the label submits a prompt to an in-product AI composer.
+
+    ``send prompt`` / ``submit prompt`` are content tests and never email,
+    regardless of host. Bare ``send`` / ``send message`` / ``submit`` are
+    composer submits only on known AI-assistant hosts so Gmail/iMessage
+    stay locked.
+    """
+    if any(phrase in normalized for phrase in AI_COMPOSER_SUBMIT_PHRASES):
+        return True
+    return bool(url) and is_ai_assistant_composer_host(url) and normalized in AI_COMPOSER_SUBMIT_EXACT
+
+
 def _matches_specific_email_send(normalized: str) -> bool:
     """True for exact ``send`` or multi-word outbound-send phrases.
 
@@ -489,14 +541,16 @@ def _matches_specific_email_send(normalized: str) -> bool:
     return False
 
 
-def is_email_send_button(element_text: str) -> bool:
+def is_email_send_button(element_text: str, url: str = "") -> bool:
     """Check whether any local action signal is an outbound send.
 
     Exemptions: one-time code (content, anywhere), resend (positional prefix),
-    and marketing/newsletter opt-in (content) — but marketing never suppresses a
-    specific outbound-send phrase (e.g. ``send email`` in a composite label).
-    Each newline-delimited signal is classified on its own so an exempt label
-    can never unlock a neighbouring send control or action-bearing attribute.
+    marketing/newsletter opt-in (content), and in-product AI composer submits
+    (``send prompt`` anywhere; generic send/submit only on AI-assistant hosts)
+    — but none of those suppress a specific outbound-send phrase (e.g.
+    ``send email`` in a composite label). Each newline-delimited signal is
+    classified on its own so an exempt label can never unlock a neighbouring
+    send control or action-bearing attribute.
     """
     if not element_text:
         return False
@@ -506,6 +560,8 @@ def is_email_send_button(element_text: str) -> bool:
         if not normalized:
             continue
         if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+            continue
+        if _is_ai_composer_submit(normalized, url):
             continue
         # Specific outbound phrases win over marketing opt-in (composite labels).
         if _matches_specific_email_send(normalized):

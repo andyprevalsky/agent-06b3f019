@@ -3031,7 +3031,7 @@ def _evaluate_element_text_write_lock(
 
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
-        ("email_send", is_email_send_button(element_text), "email send"),
+        ("email_send", is_email_send_button(element_text, current_url), "email send"),
         ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
