@@ -977,7 +977,11 @@ async function testClaudeAuth_fable51DowngradesForcedToolChoice() {
     toolChoice: 'any',
   });
   assertEqual(anyChoice.model, 'claude-fable-5-1', 'browser-use claudeAuth model');
-  assertEqual(JSON.stringify(anyChoice.tool_choice), JSON.stringify({ type: 'auto' }), 'any → auto');
+  assertEqual(
+    JSON.stringify(anyChoice.tool_choice),
+    JSON.stringify({ type: 'auto' }),
+    'any → auto'
+  );
 
   const structured = buildAnthropicBody({
     poolSpec: getPool('rose-1-ultra'),
