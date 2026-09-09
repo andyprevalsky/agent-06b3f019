@@ -185,6 +185,28 @@ For example, an unchanged call failing on Opus 4.8 and passing on Fable 5 can
 qualify. If the prompt, context, schema, tools, provider behavior, or config also
 changed, do not use this classification until a model-only replay proves it.
 
+## Prompt-edit abstraction gate
+
+When the intended fix is a **prompt edit**, you have not finished naming the
+root **Problem** until you have verified it by trying to go **one level of abstraction deeper**.
+Follow Step 5b in `docs/root-cause-analysis.md`.
+
+The way to avoid overfitting is to try to come up with a **more general solution**,
+and only stop when that more general solution **fails to be coherent**. The prompt
+edit must eliminate the **class** of the issue — or the **class of class**, or the
+class of class of class — not the instance. A token that names the incident, the
+benchmark, or one captured miss is overfitting by construction.
+
+Do not propose or implement a prompt edit until the RCA records:
+
+- the class you stopped at
+- the **next-deeper class** you tried
+- the one-sentence reason the more general solution failed to be coherent
+
+If the deeper solution is coherent, that is the Problem. Climb again. A
+non-prompt fix at the deepest coherent class beats a prompt edit at a shallower
+one.
+
 ## What "done" means (RCA completion gate)
 
 - Deterministic repro artifact exists locally and was executed (record the command + output).
@@ -201,6 +223,9 @@ changed, do not use this classification until a model-only replay proves it.
 - **The case file is written and validated** (next section). An RCA that leaves
   no archive entry is not complete — the next agent will pay for the diagnosis
   a second time.
+- If the intended fix is a prompt edit, Step 5b is recorded: the class you
+  stopped at, the next-deeper class you tried, and why the more general
+  solution failed to be coherent.
 
 ## Step 8 — WRITE THE CASE FILE (mandatory, every time)
 
@@ -243,6 +268,9 @@ When the correct generalizable fix requires an approval-gated change, present
 the evidence, which archive searches you ran and whether this is a
 recurrence/relative/novel, a one-sentence root cause at the first-bad boundary,
 exact local repro command + recorded failure, and proposed generalizable fix.
+If that fix is a prompt edit, also present the Step 5b climb: the class you
+stopped at, the **next-deeper class** you tried, and why the more general
+solution failed to be coherent.
 Then stop at that approval boundary using the canonical approval narrative from
 `.claude/shared/approval-format.md`. Evidence must include a task-framed `What failed:` sentence, the durable FE link
 (`https://www.roselabs.ai/?agent-id=…` after
