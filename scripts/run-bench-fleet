@@ -2651,7 +2651,7 @@ fleet_audit_record_pool_handoff() {  # <transfer-claim> <clone-name> <machine-id
 
 fleet_audit_finalize_provider_teardown() {
     local hub_disposition hub_owner_file hub_owner_token
-    local hub_pid hub_pid_start hub_argv_sha256
+    local hub_pid hub_pid_start hub_argv_sha256 hub_port hub_birth_state
     local shared_only="${FLEET_AUDIT_SHARED_ONLY:-0}"
     local shared_only_reason="${FLEET_AUDIT_SHARED_ONLY_REASON:-}"
     local tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/meta.tmp.$$"
@@ -2667,7 +2667,7 @@ fleet_audit_finalize_provider_teardown() {
         || { rm -f "$OWNED_CLONES_FILE.tmp.$$"; return 1; }
     python3 - "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$OWNED_CLONE_NAMES_FILE" \
         "$OWNED_CLONES_FILE" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$APP" \
-        "$POOL_CLAIMS_DIR" "$GIT_COMMON_DIR" <<'PY' \
+        "$POOL_CLAIMS_DIR" "$GIT_COMMON_DIR" "$RUNS_ROOT" "$ROOT_DIR" <<'PY' \
         || return 1
 import hashlib
 import re
@@ -2678,6 +2678,8 @@ audit, names_path, ids_path = map(Path, sys.argv[1:4])
 owner, run_id, app = sys.argv[4:7]
 claims_dir = Path(sys.argv[7])
 git_common = Path(sys.argv[8])
+runs_root = Path(sys.argv[9])
+workspace_root = Path(sys.argv[10])
 
 def lines(path: Path):
     values = [line for line in path.read_text().splitlines() if line]
@@ -2697,6 +2699,58 @@ def record(path: Path, required):
     if set(fields) != set(required):
         raise SystemExit(1)
     return fields
+
+audit_meta = record(audit / "meta", {
+    "version", "fleet_owner_token", "run_id", "app", "workspace_root", "status",
+    "hub_disposition", "hub_owner_file", "hub_owner_token", "hub_pid",
+    "hub_pid_start", "hub_argv_sha256",
+})
+if (
+    audit_meta["version"] != "1"
+    or audit_meta["fleet_owner_token"] != owner
+    or audit_meta["run_id"] != run_id
+    or audit_meta["app"] != app
+    or audit_meta["workspace_root"] != str(workspace_root)
+    or audit_meta["status"] not in {"incomplete", "provider-teardown-verified"}
+):
+    raise SystemExit(1)
+hub_fields = {
+    key: audit_meta[key]
+    for key in (
+        "hub_owner_file", "hub_owner_token", "hub_pid", "hub_pid_start",
+        "hub_argv_sha256",
+    )
+}
+if audit_meta["hub_disposition"] == "not-applicable":
+    if any(hub_fields.values()):
+        raise SystemExit(1)
+elif audit_meta["hub_disposition"] in {
+    "retained-exact-owner-transfer-required",
+    "retired-exact-owner-verified-absent",
+}:
+    try:
+        hub_pid = int(hub_fields["hub_pid"])
+    except ValueError:
+        raise SystemExit(1)
+    hub_owner = Path(hub_fields["hub_owner_file"])
+    token = hub_fields["hub_owner_token"]
+    owner_match = re.fullmatch(
+        rf"agent-link-server\.([0-9]+)\.{re.escape(token)}\.owner",
+        hub_owner.name,
+    )
+    if (
+        hub_pid <= 1
+        or not re.fullmatch(r"[0-9a-f]{32}", token)
+        or not hub_fields["hub_pid_start"]
+        or not re.fullmatch(r"[0-9a-f]{64}", hub_fields["hub_argv_sha256"])
+        or not hub_owner.is_absolute()
+        or hub_owner.parent.resolve() != (runs_root / "_hub").resolve()
+        or owner_match is None
+        or not 1 <= int(owner_match.group(1)) <= 65535
+    ):
+        raise SystemExit(1)
+else:
+    raise SystemExit(1)
 
 expected_names = set(lines(names_path))
 expected_ids = set(lines(ids_path))
@@ -2850,51 +2904,59 @@ if claims_dir.is_dir():
         if fields.get("fleet_owner_token") == owner:
             raise SystemExit(1)
 PY
-    if [ "$shared_only" = "1" ]; then
-        [ "$shared_only_reason" = "original-worktree-deleted" ] || return 1
-        # The live worktree (and therefore its owner-file pathname) is gone.
-        # Preserve the exact immutable hub identity captured before launch;
-        # never dereference or signal through that now-unavailable path.
-        hub_disposition="$(registry_meta_value \
-            "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_disposition)"
-        hub_owner_file="$(registry_meta_value \
-            "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_owner_file)"
-        hub_owner_token="$(registry_meta_value \
-            "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_owner_token)"
-        hub_pid="$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_pid)"
-        hub_pid_start="$(registry_meta_value \
-            "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_pid_start)"
-        hub_argv_sha256="$(registry_meta_value \
-            "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_argv_sha256)"
-        case "$hub_disposition" in
-            not-applicable) ;;
-            retained-exact-owner-transfer-required)
-                case "$hub_owner_token" in ''|*[!0-9a-f]*) return 1 ;; esac
-                [ "${#hub_owner_token}" -eq 32 ] && [ -n "$hub_owner_file" ] \
-                    && [ -n "$hub_pid" ] && [ -n "$hub_pid_start" ] \
-                    && [ -n "$hub_argv_sha256" ] || return 1
-                ;;
-            *) return 1 ;;
-        esac
-    elif [ -n "$CENTRAL_HUB_OWNER_FILE" ]; then
-        cloudbench_central_hub_owner_matches "$DASH_BASE" "$RUNS_ROOT" \
-            "$ROOT_DIR" "$CENTRAL_HUB_OWNER_FILE" || return 1
-        hub_disposition="retained-exact-owner-transfer-required"
-        hub_owner_file="$CENTRAL_HUB_OWNER_FILE"
-        hub_owner_token="$(cloudbench_tracked_owner_value "$hub_owner_file" owner_token)"
-        hub_pid="$(cloudbench_tracked_owner_value "$hub_owner_file" pid)"
-        hub_pid_start="$(cloudbench_tracked_owner_value "$hub_owner_file" pid_start)"
-        hub_argv_sha256="$(cloudbench_tracked_owner_value "$hub_owner_file" argv_sha256)"
-    elif [ -n "$PROVISION_POOL" ]; then
-        hub_disposition="not-applicable"
-        hub_owner_file=""
-        hub_owner_token=""
-        hub_pid=""
-        hub_pid_start=""
-        hub_argv_sha256=""
-    else
-        return 1
-    fi
+    [ "$shared_only" != "1" ] \
+        || [ "$shared_only_reason" = "original-worktree-deleted" ] || return 1
+    # The audit snapshot is the single durable source for this run's Hub
+    # obligation. Provider teardown must not be coupled to whichever process
+    # later occupies the same port. A live exact birth still has to match its
+    # endpoint and immutable owner file; an absent/reused birth is terminalized
+    # without dereferencing or signaling the replacement.
+    hub_disposition="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_disposition)"
+    hub_owner_file="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_owner_file)"
+    hub_owner_token="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_owner_token)"
+    hub_pid="$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_pid)"
+    hub_pid_start="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_pid_start)"
+    hub_argv_sha256="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_argv_sha256)"
+    case "$hub_disposition" in
+        not-applicable)
+            [ -n "$PROVISION_POOL" ] || [ "$shared_only" = "1" ] || return 1
+            ;;
+        retained-exact-owner-transfer-required|retired-exact-owner-verified-absent)
+            hub_port="${hub_owner_file##*/}"
+            hub_port="${hub_port#agent-link-server.}"
+            hub_port="${hub_port%.$hub_owner_token.owner}"
+            case "$hub_port" in ''|*[!0-9]*) return 1 ;; esac
+            hub_birth_state="$(cloudbench_pid_birth_state "$hub_pid" "$hub_pid_start")"
+            case "$hub_birth_state" in
+                live)
+                    [ "$hub_disposition" = "retained-exact-owner-transfer-required" ] \
+                        || return 1
+                    if [ "$shared_only" != "1" ]; then
+                        cloudbench_central_hub_owner_matches "$hub_port" "$RUNS_ROOT" \
+                            "$ROOT_DIR" "$hub_owner_file" || return 1
+                        [ "$(cloudbench_tracked_owner_value "$hub_owner_file" owner_token)" \
+                            = "$hub_owner_token" ] \
+                            && [ "$(cloudbench_tracked_owner_value "$hub_owner_file" pid)" \
+                                = "$hub_pid" ] \
+                            && [ "$(cloudbench_tracked_owner_value "$hub_owner_file" pid_start)" \
+                                = "$hub_pid_start" ] \
+                            && [ "$(cloudbench_tracked_owner_value "$hub_owner_file" argv_sha256)" \
+                                = "$hub_argv_sha256" ] || return 1
+                    fi
+                    ;;
+                absent)
+                    hub_disposition="retired-exact-owner-verified-absent"
+                    ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *) return 1 ;;
+    esac
     {
         printf 'version=1\n'
         printf 'fleet_owner_token=%s\n' "$FLEET_OWNER_TOKEN"

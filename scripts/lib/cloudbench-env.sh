@@ -1175,11 +1175,36 @@ cloudbench_pid_start_time() {
     awk '{$1=$1; print}'
 }
 
+cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
+  local pid="$1" expected_start="$2" actual_start ps_status
+  case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  [ "$pid" -gt 1 ] && [ -n "$expected_start" ] \
+    || { echo unknown; return 0; }
+  if actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null)"; then
+    actual_start="$(printf '%s\n' "$actual_start" | awk '{$1=$1; print}')"
+    [ -n "$actual_start" ] || { echo unknown; return 0; }
+    if [ "$actual_start" = "$expected_start" ]; then
+      echo live
+    else
+      # The numeric PID exists, but the recorded process birth does not.
+      echo absent
+    fi
+    return 0
+  else
+    ps_status=$?
+  fi
+  # procps/BSD ps use status 1 for a well-formed PID that does not exist.
+  # If the PID concurrently appeared, kill -0 catches it and preserves the
+  # fail-closed unknown state rather than claiming an absence.
+  if [ "$ps_status" -eq 1 ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo absent
+  else
+    echo unknown
+  fi
+}
+
 cloudbench_pid_matches_start() {
-  local pid="$1" expected_start="$2" actual_start
-  [ -n "$expected_start" ] || return 1
-  actual_start="$(cloudbench_pid_start_time "$pid")"
-  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+  [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ]
 }
 
 cloudbench_terminate_tree_and_wait() {
