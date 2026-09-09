@@ -81,8 +81,8 @@ async function main(): Promise<void> {
         assert(
           JSON.stringify(body.advanced_settings) ===
             JSON.stringify({
-              max_results: 10,
-              excerpt_settings: { max_chars_per_result: 6000 },
+              max_results: 5,
+              excerpt_settings: { max_chars_per_result: 800 },
             }),
           `unexpected advanced settings ${JSON.stringify(body.advanced_settings)}`
         );
