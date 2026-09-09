@@ -404,8 +404,8 @@ Run only through the isolated entrypoint (cloud fleet by default):
 scripts/run-bench <resolved slice-or-task names...>
 ~~~
 
-`scripts/run-bench` defaults to `run-bench-fleet`, fail-closes on a stale or
-missing infra-canary stamp, and owns `--concurrency N` plus `-k K`/`--runs K`
+`scripts/run-bench` defaults to `run-bench-fleet`, fail-closes on a stale/missing
+infra-canary stamp, and owns `--concurrency N` plus `-k K`/`--runs K`
 when independent repeated trials are required. Never prepend `--local` unless
 Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
 
