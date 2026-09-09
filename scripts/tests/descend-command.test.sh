@@ -147,6 +147,7 @@ mkdir -p "$(dirname "$capture")"
   printf 'task=%s\n' "$RUN_BENCH_CAMPAIGN_TASK"
   printf 'run=%s\n' "$RUN_BENCH_CAMPAIGN_RUN"
   printf 'lock=%s\n' "$CLOUDBENCH_CONTROLLER_LOCK_NAME"
+  printf 'parent=%s\n' "${BENCHMARK_HUB_PARENT_RUN_ID:-}"
   printf 'args='
   printf '<%s>' "$@"
   printf '\n'
@@ -187,6 +188,9 @@ assert len(captures) == 4
 for capture in captures:
     text = capture.read_text()
     assert "task=demo-fleet-alpha" in text
+    assert "parent=\n" in text, (
+        "campaign child inherited a parent Hub run that the campaign never registered"
+    )
     assert "<demo-fleet-alpha><--timeout><7><--foreground>" in text
 PY
 

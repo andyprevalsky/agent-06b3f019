@@ -164,6 +164,11 @@ def main() -> int:
             while pending and len(active) < args.concurrency and not stop_signal:
                 job = pending.popleft()
                 environment = os.environ.copy()
+                # The campaign is only a local scheduler and does not create an
+                # in-app Hub aggregate. Each fleet child must therefore register
+                # its own visible aggregate before it provisions machines. A
+                # genuinely visible parent supplied by an outer controller is
+                # preserved through the copied environment.
                 environment.update(
                     {
                         "RUN_BENCH_CAMPAIGN_CHILD": "1",
@@ -173,7 +178,6 @@ def main() -> int:
                         "CLOUDBENCH_CONTROLLER_LOCK_NAME": str(
                             job["controller_lock"]
                         ),
-                        "BENCHMARK_HUB_PARENT_RUN_ID": safe_id,
                     }
                 )
                 command = [
