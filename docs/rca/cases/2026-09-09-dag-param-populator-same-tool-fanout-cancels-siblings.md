@@ -23,6 +23,7 @@ tags:
   - sibling-cancel
 sources:
   - agent 37b7bb31-8db5-4c7e-806d-d31b7891106f
+  - PR #1298
 repro: agents/tests/blackbox/dag_executor.blackbox.py::test_execute_dag_parallel_browser_fanout_does_not_cancel_siblings
 status: fixed
 ---
