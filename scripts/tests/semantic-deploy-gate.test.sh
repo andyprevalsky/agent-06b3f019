@@ -180,6 +180,8 @@ require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMAN
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB volume must use normalized identity"
 require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/deploy DB preflight must use the validated run.sh database port"
+require_text "$DEPLOY_ENV" 'if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then' "/deploy must point LOCAL_DB_PORT at system Postgres 5432 when ROSE_USE_SYSTEM_PG=true"
+require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=5432' "/deploy system-Postgres path must advertise localhost:5432 to semantic seeders"
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
