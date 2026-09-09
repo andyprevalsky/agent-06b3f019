@@ -95,10 +95,10 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     const options = phaseGeneratorOptions();
     const chunks = await collect(await createStreamingCompletion(options));
     assert.deepEqual(calls, [CEREBRAS_API_URL]);
-    assert.equal(capturedBody.model, 'gemma-4-31b');
+    assert.equal(capturedBody.model, 'gpt-oss-120b');
     assert.equal(capturedBody.temperature, 0.7);
     assert.equal(capturedBody.clear_thinking, undefined);
-    assert.equal(capturedBody.reasoning_effort, 'none');
+    assert.equal(capturedBody.reasoning_effort, 'low');
     assert.deepEqual(capturedBody.messages, options.messages);
     assert.deepEqual(capturedBody.response_format, options.response_format);
     const format = capturedBody.response_format as {
@@ -107,7 +107,7 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     assert.equal(format.json_schema?.name, 'generator_response');
     assert.equal(format.json_schema?.strict, true);
     assert.deepEqual(format.json_schema?.schema, GENERATOR_JSON_SCHEMA);
-    assert.equal(chunks[0]?.actual_model, 'gemma-4-31b');
+    assert.equal(chunks[0]?.actual_model, 'gpt-oss-120b');
     assert.equal(chunks[0]?.pool_name, 'cerebras-direct');
     assert.equal(calls.includes(OPENROUTER_API_URL), false);
   } finally {

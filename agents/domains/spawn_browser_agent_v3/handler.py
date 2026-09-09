@@ -57,6 +57,10 @@ from utils.payment_card import (
 )
 from utils.prompts import build_verifier_prompt
 
+from .activity_heartbeat import (
+    start_browser_activity_heartbeat,
+    stop_browser_activity_heartbeat,
+)
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
@@ -78,7 +82,6 @@ from .config import (
     BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
     BROWSER_USE_PRICING_POOL,
     BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
-    HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
     MAX_ACTIVITY_ATTEMPTS,
     MAX_CLAUDE_TOKEN_ROTATIONS,
@@ -5693,24 +5696,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     session_credential_ref: Optional[Dict[str, Any]] = None
     browser_session_metadata: Dict[str, Any] = {}
 
-    # Decouple the Temporal heartbeat from the main loop. A bot-challenge (e.g.
-    # Cloudflare Turnstile proof-of-work) can CPU-freeze the page renderer — and
-    # therefore every CDP call (get_browser_state, screenshots) — for 90-260s.
-    # While the main loop is blocked on a hung CDP await it cannot reach
-    # activity.heartbeat(), so without this the activity would hit
-    # HEARTBEAT_TIMEOUT_SECONDS and Temporal would kill it mid-challenge — exactly
-    # the prod failure on agent 9ec05898. This background task keeps heartbeating
-    # at a fixed cadence regardless of what the main loop is blocked on.
-    _hb_stop = asyncio.Event()
-
-    async def _background_heartbeat() -> None:
-        while not _hb_stop.is_set():
-            with contextlib.suppress(Exception):
-                activity.heartbeat("browser keepalive (renderer/CDP may be blocked by a bot-challenge)")
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(_hb_stop.wait(), timeout=HEARTBEAT_KEEPALIVE_SECONDS)
-
-    _heartbeat_task = asyncio.create_task(_background_heartbeat())
+    # Decouple the Temporal heartbeat from the browser event loop. A
+    # bot-challenge can freeze CDP for 90-260s (agent 9ec05898), and concurrent
+    # screenshot/DOM work can starve the asyncio loop itself (agent 37b7bb31):
+    # an asyncio keepalive then dies with the work it was meant to outlive.
+    # A process-local thread pump heartbeats every registered activity context.
+    _heartbeat_token = start_browser_activity_heartbeat()
     action_entries: List[Dict[str, Any]] = []
     browser_turn_messages: List[Dict[str, Any]] = [
         message
@@ -9784,10 +9775,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         raise
     finally:
-        _hb_stop.set()
-        _heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await _heartbeat_task
+        stop_browser_activity_heartbeat(_heartbeat_token)
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:

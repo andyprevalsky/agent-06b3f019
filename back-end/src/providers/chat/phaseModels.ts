@@ -1,8 +1,8 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> Rose Lite ──> Cerebras Gemma-4-31B
- *                   ├─ generator ──> Rose Lite ──> Cerebras Gemma-4-31B
+ * requested model ──┬─ router ──> Rose Lite ──> Cerebras gpt-oss-120b
+ *                   ├─ generator ──> Rose Lite ──> Cerebras gpt-oss-120b
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
  * Both synchronous chat phases are latency-sensitive and use the Rose Lite pool.
