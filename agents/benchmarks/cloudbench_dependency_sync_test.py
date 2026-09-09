@@ -35,6 +35,7 @@ WORKER_SCRIPT = ROOT / "scripts" / "cloudbench-worker.sh"
 FLEET_SCRIPT = Path(
     os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", ROOT / "scripts" / "run-bench-fleet")
 )
+FLEET_CANARY_SCRIPT = ROOT / "scripts" / "run-fleet-infra-canary"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 HUB_POLLER_SCRIPT = ROOT / "scripts" / "run-bench-hub-poller"
 CLOUDBENCH_RESULT_SCRIPT = ROOT / "scripts" / "cloudbench_result.py"
@@ -9591,6 +9592,8 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-status-server.py",
         "cloudbench-benchmark-target.py",
         "cloudbench_catalog.py",
+        "run-fleet-infra-canary",
+        "fleet_infra_sample.py",
         "cloudbench-port-lease.py",
         "cloudbench-machine-readiness.py",
         "cloudbench-select-snapshot.py",
@@ -9672,6 +9675,86 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     assert "benchmark catalog preflight failed before Fly provisioning" in rejected.stderr
     assert not list(tmp_path.glob("cloudbench-scripts.*")), (
         "an error before provider allocation leaked its invocation-owned script snapshot"
+    )
+
+
+def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) -> None:
+    """A nested control process may execute a parent's immutable snapshot, but
+    inherited environment variables must not make it a second cleanup owner."""
+    snapshot_root = tmp_path / "snapshots"
+    snapshot_root.mkdir()
+    entry_ready = tmp_path / "entry-ready"
+    entry_release = tmp_path / "entry-release"
+    owner = subprocess.Popen(
+        ["bash", str(FLEET_SCRIPT), "--help"],
+        env={
+            **os.environ,
+            "CLOUDBENCH_SCRIPT_SNAPSHOT": "",
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_READY": str(entry_ready),
+            "CLOUDBENCH_TEST_SCRIPT_SNAPSHOT_ENTRY_RELEASE": str(entry_release),
+            "TMPDIR": str(snapshot_root),
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not entry_ready.exists():
+            if owner.poll() is not None:
+                break
+            time.sleep(0.02)
+        assert entry_ready.exists(), "owner never entered its immutable script snapshot"
+        snapshots = list(snapshot_root.glob("cloudbench-scripts.*"))
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
+        marker = json.loads(
+            (snapshot / ".cloudbench-script-snapshot-owner.json").read_text()
+        )
+        nested = subprocess.run(
+            ["bash", str(snapshot / "run-bench-fleet"), "--help"],
+            env={
+                **os.environ,
+                "CLOUDBENCH_FLEET_ROOT": str(ROOT),
+                "CLOUDBENCH_SCRIPT_SNAPSHOT": str(snapshot),
+                "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE": "owner",
+                "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_TOKEN": str(marker["token"]),
+                "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID": str(marker["owner_pid"]),
+                "CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID_START": str(
+                    marker["owner_pid_start"]
+                ),
+                "TMPDIR": str(snapshot_root),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        assert nested.returncode == 0, nested.stderr
+        assert snapshot.exists(), "nested borrower deleted its parent's snapshot"
+        assert json.loads(
+            (snapshot / ".cloudbench-script-snapshot-owner.json").read_text()
+        ) == marker
+        assert (snapshot / "run-fleet-infra-canary").read_bytes() == (
+            FLEET_CANARY_SCRIPT.read_bytes()
+        )
+        assert (snapshot / "fleet_infra_sample.py").is_file()
+        canary_source = (snapshot / "run-fleet-infra-canary").read_text()
+        assert 'CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-' in (
+            canary_source
+        )
+        assert 'exec bash "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/run-bench-fleet"' in (
+            canary_source
+        )
+    finally:
+        entry_release.touch(exist_ok=True)
+        owner_stdout, owner_stderr = owner.communicate(timeout=15)
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=5)
+    assert owner.returncode == 0, (owner_stdout, owner_stderr)
+    assert not list(snapshot_root.glob("cloudbench-scripts.*")), (
+        "the exact parent owner did not remove its snapshot"
     )
 
 

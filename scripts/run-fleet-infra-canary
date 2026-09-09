@@ -21,7 +21,8 @@
 # docs/plans/active/fleet-demo-concurrency-e2e.md.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}"
 N="${1:-${FLEET_INFRA_CANARY_N:-4}}"
 case "$N" in
   ''|*[!0-9]*|0)
@@ -69,7 +70,7 @@ esac
 
 SEED="${FLEET_INFRA_CANARY_SEED:-20260908}"
 mapfile -t BENCHES < <(
-  python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" sample \
+  python3 "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/fleet_infra_sample.py" sample \
     --repo "$ROOT_DIR" \
     --width "$N" \
     --seed "$SEED" \
@@ -94,7 +95,7 @@ else
   EXTRA+=(--foreground)
 fi
 
-exec bash "$ROOT_DIR/scripts/run-bench-fleet" \
+exec bash "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/run-bench-fleet" \
   "${BENCHES[@]}" \
   --infra-probe \
   --timeout "${FLEET_INFRA_CANARY_TIMEOUT:-1800}" \

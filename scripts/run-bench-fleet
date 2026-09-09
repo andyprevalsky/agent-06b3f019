@@ -111,6 +111,23 @@ script_snapshot_current_pid_start() {
     ps -p $$ -o lstart= 2>/dev/null | awk '{$1=$1; print}'
 }
 
+normalize_script_snapshot_ownership() {
+    local sealed_pid
+    [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] || return 0
+    [ "${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE:-borrow}" = "owner" ] || return 0
+    sealed_pid="${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID:-}"
+    case "$sealed_pid" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ "$sealed_pid" != "$$" ]; then
+        # Environment is inherited; cleanup ownership is not. A synchronous
+        # nested controller executes the same sealed bytes as a borrower while
+        # the exact PID-birth owner retains the one cleanup responsibility.
+        CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE="borrow"
+        export CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE
+    fi
+}
+
 claim_script_snapshot_ownership() {
     local owner_start
     owner_start="$(script_snapshot_current_pid_start)"
@@ -449,6 +466,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
     }
 fi
 
+normalize_script_snapshot_ownership
 if [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
     case "${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE:-borrow}" in
         owner)
@@ -640,6 +658,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-status-server.py" \
        "$ROOT_DIR/scripts/cloudbench-benchmark-target.py" \
        "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+       "$ROOT_DIR/scripts/run-fleet-infra-canary" \
+       "$ROOT_DIR/scripts/fleet_infra_sample.py" \
        "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" \
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
@@ -1079,6 +1099,10 @@ fi
 # launching terminal/agent session dying mid-run. The surviving process owns
 # the controller lock, the clones, and the teardown.
 if [ "$DETACH" = "1" ]; then
+    if [ "${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE:-borrow}" != "owner" ]; then
+        echo "FATAL: a borrowed script snapshot cannot outlive its owner via --detach" >&2
+        exit 1
+    fi
     DETACH_ARGS=()
     for a in "${ORIG_ARGS[@]}"; do
         case "$a" in
@@ -8868,7 +8892,7 @@ fleet_infra_canary_preflight() {
     if CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE=1 \
         CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT=1 \
         CLOUDBENCH_CONTROLLER_LOCK_NAME="cloudbench-controller-infra-canary-preflight.lock" \
-        bash "$ROOT_DIR/scripts/run-fleet-infra-canary" "$n"; then
+        bash "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-fleet-infra-canary" "$n"; then
         rc=0
     else
         rc=$?
