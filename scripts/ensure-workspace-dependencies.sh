@@ -42,6 +42,32 @@ for (const dependency of Object.keys(dependencies)) {
 NODE
 }
 
+# npm ls --depth=0 exits 1 for "invalid" URL/tarball packages that are still
+# installed (e.g. xlsx from cdn.sheetjs.com) and for leftover workspace copies.
+# Treating that as "need install" retriggers `npm install --workspace=`, which
+# prunes a healthy hoisted tree (vite and other bins disappear).
+workspace_npm_graph_ready() {
+    local workspace="$1"
+    local mode="$2"
+    local ls_out
+    local ls_rc=0
+    if [ "$mode" = "workspace" ]; then
+        ls_out="$(npm ls --workspace="$workspace" --depth=0 --silent 2>&1)" || ls_rc=$?
+    else
+        ls_out="$(cd "$workspace" && npm ls --depth=0 --silent 2>&1)" || ls_rc=$?
+    fi
+    if [ "$ls_rc" -eq 0 ]; then
+        return 0
+    fi
+    if printf '%s\n' "$ls_out" | grep -Eq 'UNMET DEPENDENCY|not installed|missing:'; then
+        return 1
+    fi
+    if printf '%s\n' "$ls_out" | grep -Eq 'invalid:|ELSPROBLEMS|extraneous:'; then
+        return 0
+    fi
+    return 1
+}
+
 for workspace in "$@"; do
     if [ ! -f "$workspace/package.json" ]; then
         echo "dependency preflight: missing $workspace/package.json" >&2
@@ -49,7 +75,7 @@ for workspace in "$@"; do
     fi
 
     if npm pkg get name --workspace="$workspace" --silent >/dev/null 2>&1; then
-        if npm ls --workspace="$workspace" --depth=0 --silent >/dev/null 2>&1 \
+        if workspace_npm_graph_ready "$workspace" workspace \
             && workspace_dependencies_resolve "$workspace"; then
             continue
         fi
@@ -62,16 +88,16 @@ for workspace in "$@"; do
             echo "📦 Workspace install failed; retrying $workspace from its lockfile..."
             (cd "$workspace" && npm ci --workspaces=false --no-audit --no-fund)
         fi
-        npm ls --workspace="$workspace" --depth=0 --silent >/dev/null
+        workspace_npm_graph_ready "$workspace" workspace
         workspace_dependencies_resolve "$workspace"
     else
-        if (cd "$workspace" && npm ls --depth=0 --silent >/dev/null 2>&1) \
+        if workspace_npm_graph_ready "$workspace" standalone \
             && workspace_dependencies_resolve "$workspace"; then
             continue
         fi
         echo "📦 Installing $workspace dependencies..."
         (cd "$workspace" && npm install --no-audit --no-fund)
-        (cd "$workspace" && npm ls --depth=0 --silent >/dev/null)
+        workspace_npm_graph_ready "$workspace" standalone
         workspace_dependencies_resolve "$workspace"
     fi
     echo "📦 $workspace deps ready"
