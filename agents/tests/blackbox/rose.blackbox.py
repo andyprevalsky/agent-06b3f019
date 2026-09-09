@@ -215,11 +215,12 @@ def test_pool_registry_lookup():
     assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
-    assert ultra.claude_auth_model.startswith("claude-")
+    assert ultra.claude_auth_model == "claude-fable-5-1"
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
-    # Anthropic dropped: sol leads (cheaper AND higher-scoring than opus-4.8),
-    # kimi-k3 backs it from a different vendor.
+    # OpenRouter fable 5.1 is $10/$50 per M vs sol $2/$10, so the paid
+    # waterfall stays sol -> kimi. claudeAuth is the only fable 5.1 hop.
     assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert "anthropic/claude-fable-5.1" not in ultra.waterfall
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
     assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)

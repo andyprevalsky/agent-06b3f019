@@ -20,6 +20,7 @@ def test_direct_claude_suffix_always_free():
         "claude-sonnet-4-6-claude",
         "claude-haiku-4-5-claude",  # absent from the explicit direct list
         "claude-fable-5-claude",
+        "claude-fable-5-1-claude",
     ):
         p = get_model_pricing(m)
         assert p == {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0}, m

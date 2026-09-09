@@ -1,7 +1,8 @@
 """param_populator domain — constants and configuration."""
 
-# Model used for parameter population (cheap one-shot call)
-PARAM_POPULATOR_MODEL = "rose-labs/rose-1-lite"
+# Always ultra. Lite/sonnet-5 systematically emits one spawn per sibling DAG
+# node even when told "exactly one tool"; ultra/fable follows the contract.
+PARAM_POPULATOR_MODEL = "rose-labs/rose-1-ultra"
 
 # LLM generation settings
 TEMPERATURE = 0.38

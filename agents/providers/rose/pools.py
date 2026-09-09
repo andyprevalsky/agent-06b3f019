@@ -16,7 +16,7 @@ Model contract (P1):
         waterfall  = google/gemini-3.6-flash -> moonshotai/kimi-k3
 
     rose-1-ultra:
-        claudeAuth = claude-fable-5
+        claudeAuth = claude-fable-5-1
         gptAuth    = gpt-5.6-sol
         waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
 
@@ -91,15 +91,11 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
-        claude_auth_model="claude-fable-5",
+        claude_auth_model="claude-fable-5-1",
         gpt_auth_model="gpt-5.6-sol",
-        # Anthropic dropped from the waterfall: opus-4.8 was both the most
-        # expensive layer ($5/$25 per M) and scored below the models beneath
-        # it (AA intelligence 57.3 vs sol 60.9). Sol leads — it is the
-        # highest-scoring model in the registry on all three AA indices
-        # (intelligence 60.9 / coding 77.4 / agentic 57.8) at half opus's
-        # price. kimi-k3 backs it with a different vendor, so a single
-        # OpenAI-side outage cannot take the whole waterfall down.
+        # claudeAuth is fable 5.1. OpenRouter fable 5.1 is $10/$50 per M vs
+        # sol $2/$10, so the paid waterfall stays sol -> kimi. Anthropic was
+        # dropped earlier (opus-4.8 cost more and scored below sol).
         waterfall=(
             "openai/gpt-5.6-sol",
             "moonshotai/kimi-k3",
@@ -112,7 +108,9 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-browser-use",
         claude_auth_model="claude-fable-5",
         gpt_auth_model="gpt-5.6-sol",
-        # Same reordering as rose-1-ultra. Both layers must stay in
+        # Paid waterfall matches ultra (sol -> kimi). claudeAuth stays on
+        # fable-5; ultra's claudeAuth is fable-5-1. Both waterfall layers must
+        # stay in
         # VISION_MODELS (transforms.py) — the browser loop feeds screenshots,
         # and a model missing from that allowlist silently drops the image
         # instead of erroring, so the agent would fly blind on fallback.

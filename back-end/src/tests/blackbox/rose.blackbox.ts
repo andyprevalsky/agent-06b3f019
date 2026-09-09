@@ -292,7 +292,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.gptAuthModel, 'gpt-5.6-terra', 'lite.gptAuthModel');
   assert(lite.waterfall.length >= 1, 'lite.waterfall length');
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
-  assert(ultra.claudeAuthModel.startsWith('claude-'), 'ultra claudeAuthModel');
+  assertEqual(ultra.claudeAuthModel, 'claude-fable-5-1', 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from both deep pools: opus-4.8 was the priciest layer
   // while scoring below sol on every AA index. Sol leads, kimi-k3 backs it

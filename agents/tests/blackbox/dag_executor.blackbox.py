@@ -660,6 +660,10 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert all(len(c["args"]) <= max_positional for c in llm_calls)
 
     param_args = llm_calls[0]["args"]
+    from domains.param_populator.config import PARAM_POPULATOR_MODEL
+
+    assert param_args[1] == PARAM_POPULATOR_MODEL
+    assert param_args[1] != "rose-lite"
     assert param_args[2] == ["web_search", "spawn_agent", "attempt_completion"]
     assert param_args[8] == "dag_param_populator"
     assert param_args[9] == "test system prompt"

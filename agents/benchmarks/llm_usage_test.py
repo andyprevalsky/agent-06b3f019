@@ -46,7 +46,7 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
             "model": "rose-labs/rose-1-ultra",
             "provider": "Verifier (rose-labs/rose-1-ultra)",
         }
-    ) == ("claude_oauth_token", "claude-fable-5")
+    ) == ("claude_oauth_token", "claude-fable-5-1")
     assert classify_usage_item({"model": None, "provider": "Rose 1 Browser Use"}) == (
         "claude_oauth_token",
         "claude-fable-5",
