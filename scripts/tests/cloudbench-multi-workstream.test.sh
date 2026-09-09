@@ -131,6 +131,103 @@ TMPDIR="$TMP_ROOT" CLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST=1 \
     || fail "an exact Hub cleanup failure must make an otherwise-green harness exit nonzero"
 echo "PASS: exact Hub cleanup failure is a hard harness failure"
 
+fleet_production_function() {
+    awk -v function_name="$1" '
+      $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$ROOT_DIR/scripts/run-bench-fleet"
+}
+
+registry_retirement_during_scan_contract() (
+    local root registry meta signal owner_pid owner_start
+    local registry_meta_source registry_alive_source reconcile_source race_error malformed_error
+    root="$TMP_ROOT/registry-retirement-race"
+    registry="$root/retiring-owner"
+    meta="$registry/meta"
+    signal="$root/remove-owner"
+    mkdir -p "$registry/clones"
+
+    registry_meta_source="$(fleet_production_function registry_meta_value)"
+    registry_alive_source="$(fleet_production_function registry_owner_alive)"
+    reconcile_source="$(fleet_production_function reconcile_stale_fleet_registries)"
+    [ -n "$registry_meta_source" ] && [ -n "$registry_alive_source" ] \
+        && [ -n "$reconcile_source" ] \
+        || fail "could not load the production fleet-registry reconciliation boundary"
+    registry_meta_source="${registry_meta_source/registry_meta_value()/production_registry_meta_value()}"
+    eval "$registry_meta_source"
+    eval "$registry_alive_source"
+    eval "$reconcile_source"
+
+    (
+        while [ ! -e "$signal" ]; do sleep 0.01; done
+        rm -rf "$registry"
+    ) &
+    owner_pid=$!
+    owner_start="$(ps -p "$owner_pid" -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    {
+        printf 'version=2\n'
+        printf 'app=%s\n' "$FLEET_BENCH_APP"
+        printf 'cleanup_policy=reap\n'
+        printf 'host=%s\n' "$(hostname 2>/dev/null || uname -n)"
+        printf 'pid=%s\n' "$owner_pid"
+        printf 'pid_start=%s\n' "$owner_start"
+    } > "$meta"
+
+    RETIRING_META_PATH="$meta"
+    RETIRING_REGISTRY_PATH="$registry"
+    RETIRING_SIGNAL_PATH="$signal"
+    registry_meta_value() {
+        local target_meta="$1" key="$2" value
+        value="$(production_registry_meta_value "$target_meta" "$key")"
+        if [ "$target_meta" = "$RETIRING_META_PATH" ] \
+            && [ "$key" = "host" ] && [ -e "$target_meta" ]; then
+            : > "$RETIRING_SIGNAL_PATH"
+            while [ -e "$RETIRING_REGISTRY_PATH" ]; do sleep 0.01; done
+        fi
+        printf '%s' "$value"
+    }
+
+    FLEET_OWNERSHIP_ROOT="$root"
+    FLEET_REGISTRY_DIR="$root/current-owner"
+    FLEET_OWNER_HOST="$(hostname 2>/dev/null || uname -n)"
+    APP="$FLEET_BENCH_APP"
+    if ! reconcile_stale_fleet_registries 2> "$root/race.err"; then
+        race_error="$(cat "$root/race.err")"
+        wait "$owner_pid" 2>/dev/null || true
+        fail "a registry retired by its live owner during startup scan was rejected: $race_error"
+    fi
+    wait "$owner_pid" || fail "retiring registry owner did not exit cleanly"
+    if grep -qF "invalid controller identity" "$root/race.err"; then
+        fail "a vanished owner registry was misclassified as malformed identity"
+    fi
+
+    mkdir -p "$root/malformed-owner/clones"
+    {
+        printf 'version=2\n'
+        printf 'app=%s\n' "$APP"
+        printf 'cleanup_policy=reap\n'
+        printf 'host=%s\n' "$FLEET_OWNER_HOST"
+        printf 'pid=not-a-pid\n'
+        printf 'pid_start=still-present\n'
+    } > "$root/malformed-owner/meta"
+    if reconcile_stale_fleet_registries 2> "$root/malformed.err"; then
+        fail "a still-present malformed owner registry did not fail closed"
+    fi
+    malformed_error="$(cat "$root/malformed.err")"
+    case "$malformed_error" in
+        *"invalid controller identity in $root/malformed-owner"*) ;;
+        *) fail "malformed owner registry failed at the wrong boundary: $malformed_error" ;;
+    esac
+)
+
+registry_retirement_during_scan_contract \
+    || fail "fleet-registry retirement concurrency contract failed"
+echo "PASS: a concurrently retired registry is benign while present malformed ownership fails closed"
+if [ "${CLOUDBENCH_TEST_REGISTRY_RETIRE_RACE_SELF_TEST:-0}" = "1" ]; then
+    exit 0
+fi
+
 assert_no_controller_script_snapshots() {
     local phase="$1" leaked
     leaked="$(find "$SCRIPT_SNAPSHOT_TMP" -mindepth 1 -maxdepth 1 \

@@ -4466,12 +4466,16 @@ reconcile_stale_fleet_registries() {
         app="$(registry_meta_value "$meta" app)"
         policy="$(registry_meta_value "$meta" cleanup_policy)"
         host="$(registry_meta_value "$meta" host)"
-        { [ "$version" = "1" ] || [ "$version" = "2" ]; } \
-            && [ "$app" = "$APP" ] && [ -n "$host" ] || {
+        if ! { { [ "$version" = "1" ] || [ "$version" = "2" ]; } \
+            && [ "$app" = "$APP" ] && [ -n "$host" ]; }; then
+            # The exact owner may complete and remove this atomically published
+            # registry during any metadata read. Only a still-present invalid
+            # record is malformed ownership.
+            [ ! -e "$meta" ] && continue
             echo "❌ malformed fleet ownership registry $registry; refusing to provision" >&2
             unresolved=1
             continue
-        }
+        fi
         [ "$policy" = "retain" ] && continue
         if [ "$policy" != "reap" ]; then
             echo "❌ unknown cleanup policy '$policy' in $registry" >&2
@@ -4485,6 +4489,9 @@ reconcile_stale_fleet_registries() {
         registry_owner_alive "$meta"
         owner_status=$?
         [ "$owner_status" -eq 0 ] && continue
+        # An exact owner may retire the registry after either a dead or invalid
+        # classification. Never recover a path that no longer exists.
+        [ ! -e "$meta" ] && continue
         if [ "$owner_status" -ne 1 ]; then
             echo "❌ invalid controller identity in $registry" >&2
             unresolved=1
