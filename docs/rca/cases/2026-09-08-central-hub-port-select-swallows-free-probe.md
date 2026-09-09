@@ -18,8 +18,9 @@ tags:
   - bash
   - port-selection
 sources:
-  - /deploy Step 4cb
-repro: agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py -k test_central_hub_runs_in_own_session_after_launcher_exit
+  - PR #1293
+  - commit db686562235f25d54e65206796a32995d15e9f61
+repro: scripts/tests/cloudbench-env.test.sh
 status: fixed
 ---
 
@@ -53,3 +54,14 @@ is `$?` after `if`, not CONDUCTOR_PORT collision). Novel.
 Capture `probe_rc=$?` immediately after the probe, then branch on 0/1/other.
 Cemented in `scripts/tests/cloudbench-env.test.sh` (free preferred port
 must be selected) and the original pytest.
+
+10k-agent: one extra integer capture per hub boot, no per-agent cost.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Capture `$?` immediately after the command that produced it — never after an
+`if`/`while`/`until` whose condition already consumed the status.
