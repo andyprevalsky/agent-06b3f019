@@ -4116,6 +4116,9 @@ def test_data_plane_proxy_waits_for_accepted_lifecycle_response(tmp_path: Path) 
     import http.client
 
     cloud = CLOUD_SCRIPT.read_text()
+    accepted = _extract_fleet_function(
+        cloud, "status_proxy_lifecycle_response_accepted() {"
+    )
     starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
     leased_starter = _extract_fleet_function(
         cloud, "start_leased_data_plane_proxy() {"
@@ -4217,6 +4220,7 @@ ReusableServer(("127.0.0.1", int(sys.argv[1])), ProxyHandler).serve_forever()
     local_port = local_reservation.getsockname()[1]
     local_reservation.close()
     script = f"""set -u
+{accepted}
 {starter}
 {leased_starter}
 {transport_health}
