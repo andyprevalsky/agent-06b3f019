@@ -6,11 +6,13 @@
  * A short first-content deadline protects the synchronous chat budget. This
  * route is exclusive and surfaces every failure to its caller.
  *
- * Model note (2026-08-20): Cerebras archived `zai-glm-4.7` for our org
- * (`model_archived_error`). Chat then fell through to the OpenRouter
- * waterfall (gemini 400 → kimi-k3 9–30s), which breached the 5s web_search
- * lifecycle ratchet. `gemma-4-31b` is the current Cerebras inventory that
- * still clears the chat latency budget with structured outputs.
+ * Model note (2026-09-09): Cerebras still lists `gemma-4-31b` on /models
+ * but chat/completions returns `model_not_found` 404. Same class as the
+ * 2026-08-20 `zai-glm-4.7` archive — every direct-cerebras call would
+ * fall to the OpenRouter waterfall and miss the 5s lifecycle ratchet.
+ * `gpt-oss-120b` is the inventory that still answers chat (structured
+ * outputs included) inside the budget. It rejects `reasoning_effort=none`
+ * (only low/medium/high); `low` is the minimum.
  */
 
 import { createLogger } from '../logger';
@@ -30,11 +32,14 @@ import type { CompletionOptions, RoseStreamChunk } from './types';
 
 const log = createLogger('CerebrasRoute');
 
-export const CEREBRAS_CHAT_MODEL = 'gemma-4-31b';
+export const CEREBRAS_CHAT_MODEL = 'gpt-oss-120b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 1_200;
 /** Archived Cerebras id — must never be reintroduced as the chat primary. */
 export const ARCHIVED_CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';
+/** Listed on /models but chat/completions 404s (2026-09-09). */
+export const CHAT_DEAD_CEREBRAS_MODEL = 'gemma-4-31b';
+export const CEREBRAS_CHAT_REASONING_EFFORT = 'low';
 
 function chatIdleTimeoutMs(): number {
   const configured = Number(process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS);
@@ -45,10 +50,10 @@ function chatIdleTimeoutMs(): number {
 
 /**
  * Only user-visible output satisfies the chat first-content deadline. This
- * route requests reasoning_effort 'none', so a reasoning trickle is a
- * throttled/queued stream (e.g. provider rate-cap queuing), not progress —
- * counting it kept a silent chat open past the stall guard while the user
- * saw nothing (web_search lifecycle ratchet breach, 2026-07-19).
+ * route requests the lowest effort `gpt-oss-120b` accepts (`low`). A
+ * reasoning trickle is still not progress — counting it kept a silent
+ * chat open past the stall guard while the user saw nothing (web_search
+ * lifecycle ratchet breach, 2026-07-19).
  */
 export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
   return kind === 'content' || kind === 'tool_call';
@@ -63,7 +68,7 @@ export function buildCerebrasChatBody(options: CompletionOptions): Record<string
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
-    reasoning_effort: 'none',
+    reasoning_effort: CEREBRAS_CHAT_REASONING_EFFORT,
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_completion_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),

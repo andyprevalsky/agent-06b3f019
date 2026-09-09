@@ -84,13 +84,14 @@ async function run(): Promise<void> {
 
     assert.deepEqual(calls, [CEREBRAS_API_URL]);
     assert.equal(calls.includes(OPENROUTER_API_URL), false);
-    assert.equal(body.model, 'gemma-4-31b');
+    assert.equal(body.model, 'gpt-oss-120b');
     assert.equal(body.stream, true);
     assert.equal(body.clear_thinking, undefined);
     assert.notEqual(body.model, 'zai-glm-4.7');
-    assert.equal(body.reasoning_effort, 'none');
+    assert.notEqual(body.model, 'gemma-4-31b');
+    assert.equal(body.reasoning_effort, 'low');
     assert.equal(headers['X-Cerebras-Version-Patch'], '2');
-    assert.equal(chunks[0]?.actual_model, 'gemma-4-31b');
+    assert.equal(chunks[0]?.actual_model, 'gpt-oss-120b');
     assert.equal(chunks[0]?.pool_name, 'cerebras-direct');
     assert.equal(chunks.at(-1)?.usage?.cache_read_input_tokens, 3);
   } finally {
@@ -101,7 +102,7 @@ async function run(): Promise<void> {
     else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
   }
 
-  process.stdout.write('PASS synchronous Chat uses direct Cerebras Gemma-4-31B exclusively\n');
+  process.stdout.write('PASS synchronous Chat uses direct Cerebras gpt-oss-120b exclusively\n');
 
   // Live inventory probe: the archived GLM id must stay 404, and the configured
   // chat model must not return model_archived. Skipped when no real key.
