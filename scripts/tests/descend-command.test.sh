@@ -6,6 +6,8 @@ DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
 DESCEND_STEP_LOGGER="$ROOT_DIR/scripts/descend_step_log.py"
 DESCEND_STEP_HISTORY="$ROOT_DIR/agents/benchmarks/history/descend_steps.jsonl"
 GIT_ATTRIBUTES="$ROOT_DIR/.gitattributes"
+RUN_BENCH="$ROOT_DIR/scripts/run-bench"
+CLAUDE_RULES="$ROOT_DIR/CLAUDE.md"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -42,6 +44,13 @@ require_text "fail-closes on a stale/missing infra-canary stamp" "/descend must 
 require_text "outcome-proof run on the cloud" "/descend Rerun section must default outcome-proof to cloud fleet"
 require_text "RANK_HEAP" "/descend must rank failing tasks before pipelined fix approval"
 require_text "PIPELINE_HEAP" "/descend must pipeline approve, local rerun, and the next ask"
+require_text "## One benchmark command" "/descend must define one benchmark entrypoint"
+require_text "--concurrency N" "/descend must document bounded benchmark concurrency"
+require_text "-k K" "/descend must document repeated isolated benchmark runs"
+require_text "distinct controller lock + run ID + machine/volume/queue per instance" \
+  "/descend must preserve per-copy isolation"
+require_text 'existing always-run `Descend Command` deploy gate' \
+  "/descend must keep command proof in the existing zero-cost deploy gate"
 # Soft until command-wiring PR lands: runtime preflight in run-bench-fleet is the
 # durable substrate guarantee. When the docs are present, pin them strictly.
 if grep -Fq 'FLEET_INFRA_CANARY' "$DESCEND_COMMAND"; then
@@ -113,5 +122,121 @@ grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin mu
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
 
 python3 "$ROOT_DIR/scripts/tests/descend-step-log.test.py"
+
+grep -Fq '`scripts/run-bench` is the one supported entrypoint' "$CLAUDE_RULES" \
+  || fail "CLAUDE.md must name the canonical benchmark command"
+grep -Fq '`scripts/run-bench <task> -k K --concurrency N`' "$CLAUDE_RULES" \
+  || fail "CLAUDE.md must document repeat and concurrency flags"
+
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+mkdir -p "$tmp/captures"
+cat >"$tmp/fake-fleet" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+capture="$RUN_BENCH_FAKE_CAPTURE_ROOT/$RUN_BENCH_CAMPAIGN_ID/$RUN_BENCH_CAMPAIGN_JOB_ID"
+mkdir -p "$(dirname "$capture")"
+{
+  printf 'task=%s\n' "$RUN_BENCH_CAMPAIGN_TASK"
+  printf 'run=%s\n' "$RUN_BENCH_CAMPAIGN_RUN"
+  printf 'lock=%s\n' "$CLOUDBENCH_CONTROLLER_LOCK_NAME"
+  printf 'args='
+  printf '<%s>' "$@"
+  printf '\n'
+} >"$capture"
+sleep 0.02
+if [ "${RUN_BENCH_FAKE_FAIL_RUN:-}" = "$RUN_BENCH_CAMPAIGN_RUN" ]; then
+  exit 17
+fi
+SH
+chmod +x "$tmp/fake-fleet"
+
+run_campaign() {
+  local campaign_id="$1"
+  shift
+  RUN_BENCH_CAMPAIGN_ID="$campaign_id" \
+  RUN_BENCH_CAMPAIGN_ROOT="$tmp/campaigns" \
+  RUN_BENCH_FAKE_CAPTURE_ROOT="$tmp/captures" \
+  RUN_BENCH_FLEET_BIN_UNDER_TEST="$tmp/fake-fleet" \
+    "$RUN_BENCH" "$@"
+}
+
+run_campaign repeat-short demo-fleet-alpha -k=4 --concurrency=2 --timeout 7
+python3 - "$tmp/campaigns/repeat-short/summary.json" "$tmp/captures/repeat-short" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+captures = sorted(Path(sys.argv[2]).iterdir())
+assert summary["status"] == "passed"
+assert summary["runs"] == 4
+assert summary["concurrency"] == 2
+assert summary["total_jobs"] == 4
+assert summary["peak_concurrency"] == 2
+assert [job["run"] for job in summary["jobs"]] == [1, 2, 3, 4]
+assert len({job["controller_lock"] for job in summary["jobs"]}) == 4
+assert len(captures) == 4
+for capture in captures:
+    text = capture.read_text()
+    assert "task=demo-fleet-alpha" in text
+    assert "<demo-fleet-alpha><--timeout><7><--foreground>" in text
+PY
+
+set +e
+RUN_BENCH_FAKE_FAIL_RUN=2 run_campaign repeat-long \
+  demo-fleet-alpha --runs 3 --concurrency 2
+campaign_status=$?
+set -e
+[ "$campaign_status" -eq 17 ] \
+  || fail "campaign must propagate the first child exit exactly (got $campaign_status)"
+python3 - "$tmp/campaigns/repeat-long/summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+assert summary["status"] == "failed"
+assert summary["total_jobs"] == 3
+assert [job["controller_exit_code"] for job in summary["jobs"]] == [0, 17, 0]
+PY
+
+mkdir -p "$tmp/catalog"
+cat >"$tmp/catalog/tasks.json" <<'JSON'
+[
+  {"name":"slice-smoke","status":"ready","tags":["smoke"]},
+  {"name":"slice-daily","status":"ready","bench":"pipeline-e2e"}
+]
+JSON
+cat >"$tmp/catalog/polar_tasks.json" <<'JSON'
+[
+  {"name":"slice-polar","status":"ready","group":"polar-bench","tags":["polar-bench"]}
+]
+JSON
+RUN_BENCH_CATALOG_UNDER_TEST="$tmp/catalog/tasks.json" \
+  run_campaign named-slices pre-deploy daily --concurrency=2
+python3 - "$tmp/campaigns/named-slices/summary.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text())
+assert summary["task_count"] == 2
+assert summary["total_jobs"] == 2
+assert summary["peak_concurrency"] == 2
+assert [job["task"] for job in summary["jobs"]] == ["slice-smoke", "slice-daily"]
+PY
+
+for invalid in '-k=0' '--runs=bad' '--concurrency=0'; do
+  if run_campaign "invalid-${invalid//[^a-zA-Z0-9]/-}" demo-fleet-alpha "$invalid" \
+      >"$tmp/invalid.out" 2>&1; then
+    fail "$invalid must fail closed"
+  fi
+  grep -Fq 'must be positive integers' "$tmp/invalid.out" \
+    || fail "$invalid must explain its positive-integer contract"
+done
 
 echo "All /descend command checks passed."

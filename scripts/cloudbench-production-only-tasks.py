@@ -12,6 +12,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,12 @@ def _task_name_ok(name: str) -> bool:
 
 def main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parents[1]
-    catalog_path = root / "agents" / "benchmarks" / "tasks.json"
+    catalog_path = Path(
+        os.environ.get(
+            "RUN_BENCH_CATALOG_UNDER_TEST",
+            root / "agents" / "benchmarks" / "tasks.json",
+        )
+    )
     # Strip known run-bench flags so only task names remain.
     skip_next = False
     flag_with_value = {

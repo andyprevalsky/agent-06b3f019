@@ -119,7 +119,34 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 - **Agents** requires 80% line+branch (see `agents/pyproject.toml` → `[tool.coverage.report]`). Current: 81%.
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `scripts/run-bench list`. For local iteration, prefer `scripts/run-bench <task...>` or `scripts/run-bench --rerun-failed latest`; the local wrapper starts an isolated `scripts/run.sh --benchmark` stack with per-run ports, DB container/volume name, frontend/public URL, Temporal task queue, and manifest under `.context/benchmarks/<run-id>/`, runs selected tasks with max concurrency 5, keeps failed agents long enough to run `agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services down. To checkpoint any single benchmark, use `scripts/run-bench <task> --checkpoint <turn_n>`; the runner creates the source by running that benchmark to the root message index, pauses/exports it, and resumes a cloned checkpoint. Add `--checkpoint-no-start` to create a paused FE-visible checkpoint, then resume it with the printed `--checkpoint-start-agent-id` command. Use `scripts/run-bench --full` only when you intentionally want the whole local suite. Use `scripts/run-bench eval` for the full eval suite through the same isolation layer. Direct `run_benchmark.py --port N` remains the lower-level path for already-running services or special cases. Simulator run: `cd agents && python benchmarks/run_benchmark.py --task <task> --simulate --world-model-url http://localhost:<wmh-port> --world-model-name <model>`; add `--wmh-eval` when you want post-run prediction-accuracy scoring recorded in the benchmark JSON. R2 trace-corpus hygiene: `cd back-end && TRACE_ARCHIVE_BACKEND=r2 npx tsx scripts/curate-trace-archive.ts --all --dry-run`; use `--delete` only to remove non-gold legacy/partial bundles after reviewing the dry-run report. The `/benchmark` command delegates to `scripts/run-bench` so Claude and shell users share the same isolation/concurrency behavior.
+**Benchmarks:** `scripts/run-bench` is the one supported entrypoint for humans,
+`/benchmark`, and `/descend`; see `agents/benchmarks/README.md` for the full CLI.
+Use `scripts/run-bench list` to inspect tasks, then run a named slice or explicit
+tasks with `scripts/run-bench <slice-or-task...>`. It defaults to the cloud
+fleet, one isolated machine/world/queue per task. Use
+`scripts/run-bench <task> -k K --concurrency N` (equivalently `--runs K`) for K
+independent copies with at most N active; never repeat a task by passing duplicate
+names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
+`polar-bench`, and `incomplete`.
+
+Local execution is explicit:
+`scripts/run-bench --local <task...>` or
+`scripts/run-bench --local --rerun-failed latest`. The local wrapper starts an
+isolated `scripts/run.sh --benchmark` stack with per-run ports, DB
+container/volume name, frontend/public URL, Temporal task queue, and manifest
+under `.context/benchmarks/<run-id>/`; it keeps failed agents long enough for
+`agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services
+down. Checkpoints are local-only:
+`scripts/run-bench --local <task> --checkpoint <turn_n>`; add
+`--checkpoint-no-start` for a paused FE-visible checkpoint.
+
+Use `scripts/run-bench eval` for the full eval suite. Direct
+`run_benchmark.py --port N` remains the lower-level path for already-running
+services or special cases. The command's selection, `-k`/`--runs`,
+`--concurrency`, isolation identities, and failure propagation are exercised
+with fake provider children inside the existing always-run `Descend Command`
+deploy test; keep that proof offline and `$0`, with no separate live benchmark
+stage or cloud wait added to `/deploy`.
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment

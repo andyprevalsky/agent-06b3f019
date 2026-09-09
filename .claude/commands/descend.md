@@ -1,5 +1,5 @@
 ---
-description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel, freeze a min-heap of failing tasks by fix complexity, pipeline approve → local-snapshot rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run all benches and RCAs in parallel on the cloud fleet by default, freeze a min-heap of failing tasks by fix complexity, pipeline approve → cloud-fleet outcome-proof rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
 argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
@@ -89,10 +89,10 @@ Downstream Implications sections.
    the RCA from Causal proof; outcome pending to Complete. After the first
    infra-clean run with causal RCA for every failing task, freeze a min-heap
    over those tasks and pipeline the rest: do not wait for one task's
-   approve → outcome-proof cycle to finish before asking about the next idle
-   task. On approve, immediately apply the fix on a local code snapshot and
-   rerun that task on the cloud fleet; immediately ask about the next idle
-   heap item.
+   approve → outcome-proof rerun cycle to finish before asking about the next
+   idle task. On approve, immediately apply the fix on a local code snapshot
+   and rerun that task on the cloud fleet (default); immediately ask about the
+   next idle heap item.
 12. **Approval format is the ONLY response format — no exceptions.** Every
    response emitted while `/descend` is active MUST consist of exactly: the
    header block (including the approvals counter), the delta rows of the
@@ -171,6 +171,40 @@ remove, fold in, or substitute another workstream's results. Executing that
 slice one task at a time, rerunning a failed subset, or running a diagnostic
 subset does not change the original slice name, task list, or denominator.
 Record and report every executed subset separately from overall slice progress.
+
+## One benchmark command
+
+Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
+campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
+`run-bench-cloud`, or an ad hoc repetition loop directly.
+
+~~~text
+/descend or operator
+  → scripts/run-bench <slice-or-task...> [--concurrency N] [-k K|--runs K]
+      → canonical catalog selection
+      → one fleet for the ordinary fully-parallel slice
+      └─ bounded campaign for task × repetition instances
+           → at most N one-task fleet controllers
+           → distinct controller lock + run ID + machine/volume/queue per instance
+~~~
+
+Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
+`incomplete`; explicit task names may be combined. Selection order is preserved,
+group members stay in catalog order, and duplicates are removed. The command
+prints the resolved list and count before any provider action.
+
+With no campaign flags, one isolated fleet runs the resolved tasks concurrently
+and preserves the single batch artifact. `-k K` and `--runs K` are equivalent
+and create K independent runs of every resolved task; `--concurrency N` bounds
+how many of those one-task fleet controllers may be active. Repetitions default
+to sequential when no concurrency is supplied. Every copy remains isolated;
+never implement `-k` by passing duplicate task names to one fleet.
+
+The command contract is exercised end to end with fake provider children inside
+the existing always-run `Descend Command` deploy gate: selection, both `-k`
+spellings, concurrency bounds, per-copy identities, and child-failure
+propagation. This must remain an offline `$0` extension of that existing gate;
+never add a separate live benchmark stage or cloud wait to `/deploy`.
 
 ## Persistent state
 
@@ -359,15 +393,21 @@ but the agent deliberately yields for input only in the two states above.
 
 **Default substrate: cloud fleet.** Every `/descend` benchmark run — the initial
 slice, every infra-epoch rerun, every post-approval outcome-proof, and the final
-full-slice acceptance — goes through `scripts/run-bench` (defaults to
-`run-bench-fleet`, which fail-closes on a stale/missing infra-canary stamp).
-Use `scripts/run-bench --local …` only when Andy explicitly directs a local run.
+full-slice acceptance — goes through the per-bench isolated Fly fleet. Local is
+opt-in only: use `scripts/run-bench --local …` solely when Andy explicitly
+directs a local run for that invocation. Do not infer local from convenience,
+cost, or a single-task subset.
 
 Run only through the isolated entrypoint (cloud fleet by default):
 
 ~~~bash
-scripts/run-bench <resolved task names...>
+scripts/run-bench <resolved slice-or-task names...>
 ~~~
+
+`scripts/run-bench` defaults to `run-bench-fleet`, fail-closes on a stale or
+missing infra-canary stamp, and owns `--concurrency N` plus `-k K`/`--runs K`
+when independent repeated trials are required. Never prepend `--local` unless
+Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
 
 Capture the controller PID, dashboard, artifact path, actual start/finish
 timestamps, and every agent FE link. Actively monitor until every requested
@@ -498,11 +538,12 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 
 ## Rerun and parallel deploy
 
-On each approve, immediately start that task's outcome-proof run on the cloud
-fleet (`scripts/run-bench <task>`; `--local` only if Andy explicitly directed
-it). Do not wait to batch approvals or rerun the whole failed subset first.
-Run `/sync` before every subset or full-slice rerun. The final acceptance run
-covers the entire original slice.
+On each approve, immediately start that task's outcome-proof run on the **cloud
+fleet** (apply the fix in a local code snapshot / worktree, then
+`scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
+to batch approvals or rerun the whole failed subset first. Run `/sync` before
+every subset or full-slice rerun. The final acceptance run covers the entire
+original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
