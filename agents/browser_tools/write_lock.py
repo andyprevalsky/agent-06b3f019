@@ -561,6 +561,12 @@ def is_email_send_button(element_text: str, url: str = "") -> bool:
             continue
         if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
             continue
+        # Email-only phrases win over the AI composer exemption so a composite
+        # label like "Send prompt and send email" cannot skip write-lock.
+        # Do not hoist ``send message`` here — that is a composer submit on
+        # ChatGPT/Claude/Gemini.
+        if "send email" in normalized or "send mail" in normalized:
+            return True
         if _is_ai_composer_submit(normalized, url):
             continue
         # Specific outbound phrases win over marketing opt-in (composite labels).

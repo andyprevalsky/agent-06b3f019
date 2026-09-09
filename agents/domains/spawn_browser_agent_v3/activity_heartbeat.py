@@ -14,11 +14,15 @@ threads.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import logging
 import threading
 from typing import Callable, Optional
 
 from temporalio import activity
+
+logger = logging.getLogger(__name__)
 
 from .config import HEARTBEAT_KEEPALIVE_SECONDS
 
@@ -37,17 +41,23 @@ class BrowserActivityHeartbeat:
         self._keepalive_seconds = keepalive_seconds
         self._heartbeat_fn = heartbeat_fn
         self._lock = threading.Lock()
-        self._entries: dict[int, contextvars.Context] = {}
+        self._entries: dict[
+            int, tuple[contextvars.Context, Optional[asyncio.AbstractEventLoop]]
+        ] = {}
         self._next_id = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def register(self) -> int:
         ctx = contextvars.copy_context()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
         with self._lock:
             self._next_id += 1
             token = self._next_id
-            self._entries[token] = ctx
+            self._entries[token] = (ctx, loop)
             self._ensure_thread_locked()
         return token
 
@@ -74,16 +84,39 @@ class BrowserActivityHeartbeat:
         )
         self._thread.start()
 
-    def _run(self) -> None:
+    def _dispatch(self, ctx: contextvars.Context, loop: Optional[asyncio.AbstractEventLoop]) -> None:
         beat = self._heartbeat_fn or activity.heartbeat
-        while not self._stop.is_set():
-            with self._lock:
-                items = list(self._entries.items())
-            for _token, ctx in items:
+        try:
+            ctx.run(beat, KEEPALIVE_MESSAGE)
+            return
+        except RuntimeError:
+            # temporalio 1.18.1's async-activity heartbeat calls
+            # asyncio.create_task() internally. That raises from this daemon
+            # thread (no running loop). Replay the same call on the activity
+            # loop so the keepalive is not silently dropped.
+            if loop is None or not loop.is_running():
+                logger.debug("browser heartbeat dropped: no running activity loop", exc_info=True)
+                return
+
+            def _on_loop() -> None:
                 try:
                     ctx.run(beat, KEEPALIVE_MESSAGE)
                 except Exception:
-                    continue
+                    logger.debug("browser heartbeat failed on activity loop", exc_info=True)
+
+            try:
+                loop.call_soon_threadsafe(_on_loop)
+            except Exception:
+                logger.debug("browser heartbeat could not schedule on activity loop", exc_info=True)
+        except Exception:
+            logger.debug("browser heartbeat failed", exc_info=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                items = list(self._entries.items())
+            for _token, (ctx, loop) in items:
+                self._dispatch(ctx, loop)
             if self._stop.wait(self._keepalive_seconds):
                 break
 

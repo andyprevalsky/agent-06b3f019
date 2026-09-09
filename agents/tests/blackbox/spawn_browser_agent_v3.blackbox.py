@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import textwrap
+import threading
 import time as time_module
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
@@ -13177,6 +13178,9 @@ def test_write_lock_email_send_excludes_ai_composer_submit():
     # A composer label must not unlock a neighbouring real send control.
     assert is_email_send_button("Send prompt\nSend email")
     assert is_email_send_button("Send email\nSend prompt")
+    # Same-signal composite: email-only phrase still locks on an AI host.
+    assert is_email_send_button("Send prompt and send email", chatgpt_url)
+    assert is_email_send_button("Submit prompt and send mail", claude_url)
 
     # Owning click-path boundary: the exact ChatGPT image-edit send must not
     # mint a write-lock approval.
@@ -19064,6 +19068,27 @@ async def test_browser_activity_heartbeat_survives_event_loop_block():
         pump.shutdown()
 
 
+async def test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop():
+    """Temporal 1.18.1 heartbeats use create_task; replay them onto the activity loop."""
+    from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
+
+    calls: list[str] = []
+
+    def flaky_then_ok(msg=None):
+        if threading.current_thread().name == "browser-activity-heartbeat":
+            raise RuntimeError("no running event loop")
+        calls.append(str(msg))
+
+    pump = BrowserActivityHeartbeat(keepalive_seconds=0.05, heartbeat_fn=flaky_then_ok)
+    token = pump.register()
+    try:
+        await asyncio.sleep(0.2)
+        assert calls, "expected heartbeat replayed onto the activity event loop"
+    finally:
+        pump.unregister(token)
+        pump.shutdown()
+
+
 def test_browser_activity_uses_thread_heartbeat_pump():
     """The browser activity must not emit keepalive from the asyncio loop it monitors."""
     import inspect
@@ -20032,6 +20057,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_activity_heartbeat_survives_event_loop_block",
         test_browser_activity_heartbeat_survives_event_loop_block,
+    )
+    await r.record_async(
+        "browser_activity_heartbeat_replays_runtimeerror_on_activity_loop",
+        test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop,
     )
     r.record(
         "browser_activity_uses_thread_heartbeat_pump",

@@ -107,3 +107,12 @@ Fix: process-local thread pump in
 thread, register/unregister per activity). 10k-agent behavior: still one
 thread per worker and the same per-activity heartbeat RPCs; no extra
 thread per browser.
+
+Review cycle 1: `temporalio` 1.18.1 `activity.heartbeat` from the daemon
+thread raises `RuntimeError` (`asyncio.create_task()` with no running
+loop). The first pump swallowed that and the keepalive was silent again.
+`_dispatch` now tries `ctx.run(beat)` on the thread (so injected
+`heartbeat_fn` still works during `time.sleep`); on `RuntimeError` it
+replays via `loop.call_soon_threadsafe` onto the loop captured at
+`register()`. Cemented in
+`test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop`.

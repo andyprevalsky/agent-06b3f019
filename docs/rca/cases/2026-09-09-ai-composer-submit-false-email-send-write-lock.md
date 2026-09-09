@@ -95,6 +95,15 @@ Cemented in `test_write_lock_email_send_excludes_ai_composer_submit`.
 10k-agent behavior: O(1) substring / host suffix checks per click; no
 shared state.
 
+Review cycle 1: a composite label `"Send prompt and send email"` matched
+`_is_ai_composer_submit` first and skipped the lock. Do not hoist every
+`_matches_specific_email_send` phrase before the composer exemption —
+that re-locks ChatGPT `"Send message"`. Order is now: OTP / resend →
+email-only phrases (`send email` / `send mail`) → AI composer exemption →
+remaining specific send → marketing → leftover `"send"`. Assertions cover
+`"Send prompt and send email"` on chatgpt.com and
+`"Submit prompt and send mail"` on claude.ai.
+
 ## Human feedback
 
 User asked to RCA agent 37b7bb31 and add a new test case that sending an
