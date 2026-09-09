@@ -5976,8 +5976,9 @@ async def call_llm_activity(
         extra_user_message: Optional user message appended after building messages.
             Used for param population — prompts the LLM to call a specific tool
             without changing system prompt/tools (preserves cache prefix).
-        required_tool: If set, validates the LLM called this tool. Raises ValueError
-            if the tool is not in the response.
+        required_tool: If set, every returned tool call must be this tool.
+            Multiple copies of the required tool are accepted so the caller can
+            select the matching sibling. Raises if the tool is missing or mixed.
         skip_cache_write: If True, skips the automatic trailing message cache
             breakpoint. Explicit prefix markers are preserved.
         force_backend_context: If True, bypasses process-global pending context
@@ -6249,7 +6250,10 @@ async def call_llm_activity(
 
         if required_tool:
             got = [tc.get("tool") for tc in tool_calls_dict]
-            if len(tool_calls_dict) != 1 or got[0] != required_tool:
+            # A required-tool handoff constrains the tool family, not the fan-out
+            # cardinality. Parallel DAG siblings of the same alias commonly emit
+            # N copies of the required tool; the caller selects the matching call.
+            if not tool_calls_dict or any(name != required_tool for name in got):
                 raise LLMStructuredOutputError(f"LLM must call exactly one tool, '{required_tool}'. Got: {got}")
 
         logger.info(

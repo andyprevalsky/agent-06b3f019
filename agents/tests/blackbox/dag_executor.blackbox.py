@@ -341,10 +341,18 @@ def test_build_param_population_message_non_spawn_no_extra():
     assert "SPAWN TYPE" not in msg
 
 
-def test_select_param_tool_call_requires_exactly_one_call():
-    """Param population rejects multiple calls instead of guessing which one to execute."""
-    import pytest
+def _browser_param_call(photo: str) -> dict:
+    return {
+        "tool": "spawn_agent",
+        "type": "browser",
+        "goal": f"Edit attached photo (file: {photo}) on https://replicate.com/google/nano-banana",
+        "start_url": "https://replicate.com/google/nano-banana",
+        "output_schema": {"fields": [{"name": "image_url", "type": "str", "required": True}]},
+    }
 
+
+def test_select_param_tool_call_binds_matching_goal_from_same_tool_fanout():
+    """A same-tool sibling fan-out binds the call whose goal matches this DAG task."""
     from loop.dag_executor import DAGTask, _select_param_tool_call
 
     task = DAGTask(
@@ -352,11 +360,54 @@ def test_select_param_tool_call_requires_exactly_one_call():
         goal="Find the current population of New York City using explore-agent web research.",
         tool_name="spawn_general_purpose_agent",
     )
-    with pytest.raises(ValueError, match="exactly one tool call"):
+    selected = _select_param_tool_call(
+        [
+            {"tool": "spawn_agent", "type": "general_purpose", "goal": "Find the current population of Tokyo."},
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": "Find the current population of New York City.",
+            },
+        ],
+        "spawn_agent",
+        task,
+    )
+    assert selected["goal"] == "Find the current population of New York City."
+
+
+def test_select_param_tool_call_binds_each_parallel_browser_photo():
+    """Three parallel browser photo tasks each bind their own filename from one 3-call fan-out."""
+    from loop.dag_executor import DAGTask, _select_param_tool_call
+
+    photos = ["sms-inbound-0.png", "sms-inbound-1.png", "sms-inbound-2.png"]
+    fanout = [_browser_param_call(photo) for photo in photos]
+    for index, photo in enumerate(photos):
+        task = DAGTask(
+            index=index,
+            goal=f"You are editing ONE attached photo (file: {photo}) to create 6 tattooed versions.",
+            tool_name="spawn_browser_agent",
+        )
+        selected = _select_param_tool_call(fanout, "spawn_agent", task)
+        assert selected["goal"] == fanout[index]["goal"]
+        assert photo in selected["goal"]
+
+
+def test_select_param_tool_call_rejects_ambiguous_same_tool_fanout():
+    """Unrelated same-tool calls with no unique goal match still fail closed."""
+    import pytest
+
+    from loop.dag_executor import DAGTask, _select_param_tool_call
+
+    task = DAGTask(
+        index=0,
+        goal="Find the current population of New York City using explore-agent web research.",
+        tool_name="spawn_general_purpose_agent",
+    )
+    with pytest.raises(ValueError, match="no unique goal match"):
         _select_param_tool_call(
             [
-                {"tool": "spawn_agent", "goal": "Find the current population of Tokyo."},
-                {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
+                {"tool": "spawn_agent", "type": "general_purpose", "goal": "Find the current population of Tokyo."},
+                {"tool": "spawn_agent", "type": "general_purpose", "goal": "Find the current population of Osaka."},
             ],
             "spawn_agent",
             task,
@@ -928,8 +979,8 @@ async def test_execute_dag_validates_overridden_spawn_payload_before_execution()
     assert dag.tasks[0].state.value == "FAILED"
 
 
-async def test_execute_dag_rejects_multiple_param_tool_calls():
-    """DAG execution refuses an ambiguous multi-call param-populator result."""
+async def test_execute_dag_binds_matching_call_from_same_tool_fanout():
+    """DAG param-populator sibling fan-out executes the call that matches this task."""
     plan_data = {
         "tasks": [
             {
@@ -948,8 +999,20 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
 
     def param_tool_calls(_args):
         return [
-            {"tool": "spawn_agent", "goal": "Find the current population of Tokyo."},
-            {"tool": "spawn_agent", "goal": "Find the current population of New York City."},
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "start_phase": "EXECUTE",
+                "goal": "Find the current population of Tokyo.",
+                "output_schema": {"fields": [{"name": "population", "type": "str", "required": True}]},
+            },
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "start_phase": "EXECUTE",
+                "goal": "Find the current population of New York City.",
+                "output_schema": {"fields": [{"name": "population", "type": "str", "required": True}]},
+            },
         ]
 
     result, _events, dag = await _run_execute_dag(
@@ -958,9 +1021,44 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
         param_tool_calls=param_tool_calls,
     )
 
-    assert result["status"] == "needs_llm"
-    assert recorded == []
-    assert dag.tasks[0].state.value == "FAILED"
+    assert result["status"] == "completed"
+    assert len(recorded) == 1
+    assert recorded[0][1]["goal"] == "Find the current population of New York City."
+    assert dag.tasks[0].state.value == "COMPLETED"
+
+
+async def test_execute_dag_parallel_browser_fanout_does_not_cancel_siblings():
+    """Three ready browser tasks survive a 3-call spawn_agent fan-out instead of ERROR+Cancelled."""
+    photos = ["sms-inbound-0.png", "sms-inbound-1.png", "sms-inbound-2.png"]
+    plan_data = {
+        "tasks": [
+            {
+                "goal": f"You are editing ONE attached photo (file: {photo}) to create 6 tattooed versions.",
+                "tool_name": "spawn_browser_agent",
+            }
+            for photo in photos
+        ],
+        "dependencies": {},
+    }
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, dict(params)))
+        return {"message": "spawned"}
+
+    fanout = [_browser_param_call(photo) for photo in photos]
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=lambda _args: list(fanout),
+    )
+
+    assert result["status"] == "completed"
+    assert [params["goal"] for _, params in recorded] == [call["goal"] for call in fanout]
+    assert all(task.state.value == "COMPLETED" for task in dag.tasks)
+    error_events = [event for event in events if event["type"] == "tool_event" and event["status"] == "ERROR"]
+    assert error_events == []
 
 
 async def test_execute_dag_tool_failure_returns_needs_llm():
@@ -1178,8 +1276,16 @@ async def run_all_tests():
     )
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     r.record(
-        "select_param_tool_call_requires_exactly_one_call",
-        test_select_param_tool_call_requires_exactly_one_call,
+        "select_param_tool_call_binds_matching_goal_from_same_tool_fanout",
+        test_select_param_tool_call_binds_matching_goal_from_same_tool_fanout,
+    )
+    r.record(
+        "select_param_tool_call_binds_each_parallel_browser_photo",
+        test_select_param_tool_call_binds_each_parallel_browser_photo,
+    )
+    r.record(
+        "select_param_tool_call_rejects_ambiguous_same_tool_fanout",
+        test_select_param_tool_call_rejects_ambiguous_same_tool_fanout,
     )
     r.record("select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool)
     r.record("select_param_tool_call_rejects_wrong_alias_types", test_select_param_tool_call_rejects_wrong_alias_types)
@@ -1217,8 +1323,12 @@ async def run_all_tests():
         test_execute_dag_validates_overridden_spawn_payload_before_execution,
     )
     await r.record_async(
-        "execute_dag_rejects_multiple_param_tool_calls",
-        test_execute_dag_rejects_multiple_param_tool_calls,
+        "execute_dag_binds_matching_call_from_same_tool_fanout",
+        test_execute_dag_binds_matching_call_from_same_tool_fanout,
+    )
+    await r.record_async(
+        "execute_dag_parallel_browser_fanout_does_not_cancel_siblings",
+        test_execute_dag_parallel_browser_fanout_does_not_cancel_siblings,
     )
     await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async(
