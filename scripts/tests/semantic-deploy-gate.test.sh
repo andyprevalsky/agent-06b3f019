@@ -240,6 +240,7 @@ require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitud
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
+require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
 require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
