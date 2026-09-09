@@ -337,6 +337,14 @@ proxy_function_source="$(awk '
   capture && /^}$/ { exit }
 ' "$ROOT_DIR/scripts/run-bench-cloud")"
 [ -n "$proxy_function_source" ] || fail "could not load the production data-plane proxy function"
+proxy_lifecycle_function_source="$(awk '
+  /^status_proxy_lifecycle_response_accepted\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$proxy_lifecycle_function_source" ] ||
+  fail "could not load the production status-proxy lifecycle contract"
+eval "$proxy_lifecycle_function_source"
 eval "$proxy_function_source"
 APP="cloudbench-proxy-regression"
 CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
@@ -356,6 +364,12 @@ proxy_elapsed=$((SECONDS - proxy_started))
   fail "a bind collision must return the reallocate signal (exit=$proxy_status)"
 [ "$proxy_elapsed" -lt 2 ] ||
   fail "a bind collision must fail fast enough to reallocate (elapsed=${proxy_elapsed}s)"
+curl() {
+  case " $* " in
+    *" -w %{http_code} "*) printf 425 ;;
+  esac
+  return 0
+}
 
 production_function() {
   awk -v function_name="$1" '
@@ -516,7 +530,8 @@ claim_local_port "$overflow_preferred" overflow_port ||
 release_local_port_leases
 [ ! -d "$PORT_LEASE_ROOT/$overflow_port" ] ||
   fail "overflow-regression dashboard lease survived cleanup"
-unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
+unset -f flyctl curl status_proxy_lifecycle_response_accepted \
+  start_data_plane_proxy start_leased_data_plane_proxy \
   local_port_is_bindable claim_exact_local_port claim_local_port \
   claim_local_archive_ports release_local_port_lease \
   release_local_port_leases publish_status_proxy_port production_function

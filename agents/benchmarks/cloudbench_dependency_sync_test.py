@@ -4085,13 +4085,23 @@ while {{ kill -0 "$runner_pid" 2>/dev/null || kill -0 "$grandchild" 2>/dev/null;
 
 def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     cloud = CLOUD_SCRIPT.read_text()
+    accepted = _extract_fleet_function(
+        cloud, "status_proxy_lifecycle_response_accepted() {"
+    )
     starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    transport = _extract_fleet_function(cloud, "status_proxy_transport_healthy() {")
     ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
 
+    assert "204|410|425" in accepted
     assert "CLOUDBENCH_DATA_PROXY_READY_TIMEOUT" in starter
     assert 'flyctl proxy "$local_port:$remote_port" "$host"' in starter
     assert 'kill -0 "$pid"' in starter
     assert '"http://127.0.0.1:$local_port/driver-health"' in starter
+    assert 'probe_path="/"' in starter
+    assert '[ "$label" = "status" ] && probe_path="/driver-health"' in starter
+    assert 'status_proxy_lifecycle_response_accepted "$health_code"' in starter
+    assert 'status_proxy_lifecycle_response_accepted "$health_code"' in transport
+    assert "204|410|425" not in transport
     assert "resolves the remote host lazily" in starter
     assert "CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS" in starter
     assert "post-probe survival window" in starter
@@ -4099,6 +4109,252 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))"' in cloud
     assert "start_leased_data_plane_proxy" in ensure
     assert "ensure_status_proxy >/dev/null 2>&1 || true" in cloud
+
+
+def test_data_plane_proxy_waits_for_accepted_lifecycle_response(tmp_path: Path) -> None:
+    """A live proxy PID is not ready until the remote status service answers HTTP."""
+    import http.client
+
+    cloud = CLOUD_SCRIPT.read_text()
+    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    leased_starter = _extract_fleet_function(
+        cloud, "start_leased_data_plane_proxy() {"
+    )
+    transport_health = _extract_fleet_function(
+        cloud, "status_proxy_transport_healthy() {"
+    )
+    ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+    read_log = _extract_fleet_function(cloud, "read_bench_log() {")
+    read_gate = _extract_fleet_function(cloud, "cloudbench_log_read_gate() {")
+
+    remote_reservation = socket.socket()
+    remote_reservation.bind(("127.0.0.1", 0))
+    remote_port = remote_reservation.getsockname()[1]
+    delayed_ready = tmp_path / "delayed-status.ready"
+    stop_delayed_status = threading.Event()
+    delayed_servers: list[ThreadingHTTPServer] = []
+
+    class DelayedStatusHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/driver-health":
+                self.send_response(425)
+            elif self.path.startswith("/bench.log?"):
+                self.send_response(204)
+                self.send_header("X-Cloudbench-Log-Size", "0")
+                self.send_header("X-Cloudbench-Log-Generation", "0" * 32)
+                self.send_header("X-Cloudbench-Log-Continuity", "1")
+            else:
+                self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    def serve_delayed_status() -> None:
+        if stop_delayed_status.wait(8):
+            remote_reservation.close()
+            return
+        remote_reservation.close()
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", remote_port), DelayedStatusHandler
+        )
+        delayed_servers.append(server)
+        delayed_ready.write_text("ready\n")
+        server.serve_forever()
+
+    delayed_thread = threading.Thread(target=serve_delayed_status, daemon=True)
+    delayed_thread.start()
+
+    fake_proxy = tmp_path / "fake-flyctl-proxy.py"
+    fake_proxy.write_text(
+        """import http.client
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+remote_port = int(sys.argv[2])
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        connection = http.client.HTTPConnection("127.0.0.1", remote_port, timeout=1)
+        try:
+            connection.request("GET", self.path, headers=dict(self.headers))
+            response = connection.getresponse()
+            body = response.read()
+        except (OSError, http.client.HTTPException):
+            self.close_connection = True
+            return
+        finally:
+            connection.close()
+        self.send_response(response.status)
+        for name, value in response.getheaders():
+            if name.lower() not in {"connection", "date", "server"}:
+                self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *args):
+        return
+
+class ReusableServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+ReusableServer(("127.0.0.1", int(sys.argv[1])), ProxyHandler).serve_forever()
+"""
+    )
+    fake_flyctl = tmp_path / "flyctl"
+    fake_flyctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        '[ "$1" = proxy ]\n'
+        'spec="$2"\n'
+        f'exec {shlex.quote(sys.executable)} {shlex.quote(str(fake_proxy))} '
+        '"${spec%%:*}" "$FAKE_REMOTE_STATUS_PORT"\n'
+    )
+    fake_flyctl.chmod(0o755)
+
+    local_reservation = socket.socket()
+    local_reservation.bind(("127.0.0.1", 0))
+    local_port = local_reservation.getsockname()[1]
+    local_reservation.close()
+    script = f"""set -u
+{starter}
+{leased_starter}
+{transport_health}
+{ensure}
+{read_log}
+{read_gate}
+claim_local_port() {{ printf -v "$2" '%s' "$1"; }}
+release_local_port_lease() {{ :; }}
+publish_status_proxy_port() {{ :; }}
+cloudbench_terminate_and_wait() {{
+  shift
+  local pid
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+cleanup() {{
+  cloudbench_terminate_and_wait 1 "${{STATUS_PROXY_PID:-}}"
+}}
+trap cleanup EXIT
+PATH={shlex.quote(str(tmp_path))}:$PATH
+FAKE_REMOTE_STATUS_PORT="$2"
+export FAKE_REMOTE_STATUS_PORT
+APP=fake-cloudbench
+OUT_DIR={shlex.quote(str(tmp_path))}
+LOCAL_STATUS_PORT="$1"
+REMOTE_STATUS_PORT="$2"
+REMOTE_STATUS_HOST=127.0.0.1
+STATUS_PROXY_PID=
+CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+SSH_LOG={shlex.quote(str(tmp_path / "bench.log"))}
+BENCH_LOG_HEADERS_FILE={shlex.quote(str(tmp_path / "headers"))}
+: > "$SSH_LOG"
+log_read_failures=0
+BENCH_LOG_READ_MAX_FAILURES=5
+
+starter_rc=0
+start_leased_data_plane_proxy "$LOCAL_STATUS_PORT" LOCAL_STATUS_PORT \
+  "$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" "$OUT_DIR/cloudbench-status-proxy.log" \
+  STATUS_PROXY_PID status 12 || starter_rc=$?
+[ "$starter_rc" = 0 ] || exit 90
+lifecycle_code="$(curl --noproxy '*' -sS --max-time 1 -o /dev/null -w '%{{http_code}}' \
+  "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
+endpoint_ready=false
+[ -f {shlex.quote(str(delayed_ready))} ] && endpoint_ready=true
+premature=0
+case "$lifecycle_code" in 204|410|425) ;; *) premature=1 ;; esac
+
+bounded_failure=0
+read_succeeded=0
+for attempt in 1 2 3 4 5; do
+  ensure_status_proxy >/dev/null 2>&1 || true
+  refresh_ok=0
+  read_bench_log > "$OUT_DIR/read-$attempt.chunk" && refresh_ok=1
+  if cloudbench_log_read_gate "$refresh_ok"; then gate_rc=0; else gate_rc=$?; fi
+  endpoint_ready=false
+  [ -f {shlex.quote(str(delayed_ready))} ] && endpoint_ready=true
+  case "$gate_rc" in
+    0) read_succeeded=1; break ;;
+    10) [ "$attempt" = "$BENCH_LOG_READ_MAX_FAILURES" ] || sleep 1 ;;
+    20) bounded_failure=1; break ;;
+    *) exit 91 ;;
+  esac
+done
+if [ "$premature" = 1 ] && [ "$bounded_failure" = 1 ]; then
+  echo "RCA_REPRO: proxy launcher returned ready with lifecycle HTTP $lifecycle_code; bounded bench.log read gate exhausted" >&2
+  exit 97
+fi
+[ "$read_succeeded" = 1 ] || exit 98
+"""
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script, "proxy-startup-repro", str(local_port), str(remote_port)],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    finally:
+        stop_delayed_status.set()
+        try:
+            remote_reservation.close()
+        except OSError:
+            pass
+        if delayed_servers:
+            delayed_servers[0].shutdown()
+            delayed_servers[0].server_close()
+        delayed_thread.join(timeout=2)
+
+    assert result.returncode == 0, f"{result.stderr}\n{result.stdout}"
+
+
+def test_backend_data_plane_proxy_keeps_process_readiness_contract(tmp_path: Path) -> None:
+    """Generic backend tunnels need process readiness, not status lifecycle."""
+    cloud = CLOUD_SCRIPT.read_text()
+    terminator = _extract_fleet_function(
+        ENV_HELPER_SCRIPT.read_text(), "cloudbench_terminate_and_wait() {"
+    )
+    accepted = _extract_fleet_function(
+        cloud, "status_proxy_lifecycle_response_accepted() {"
+    )
+    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    attempts = tmp_path / "attempts"
+    proxy_log = tmp_path / "proxy.log"
+    script = f"""set -u
+ATTEMPTS={shlex.quote(str(attempts))}
+APP=proxy-readiness-regression
+CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+sleep() {{ command sleep 0.05; }}
+flyctl() {{
+  printf 'attempt\\n' >> "$ATTEMPTS"
+  trap 'exit 0' TERM
+  while :; do sleep 1; done
+}}
+curl() {{ printf 000; return 0; }}
+{terminator}
+{accepted}
+{starter}
+proxy_pid=""
+cleanup() {{
+  cloudbench_terminate_and_wait 1 "${{proxy_pid:-}}"
+}}
+trap cleanup EXIT
+start_data_plane_proxy 61946 3001 backend.internal {shlex.quote(str(proxy_log))} proxy_pid backend 4
+test "$(wc -l < "$ATTEMPTS" | tr -d ' ')" = 1 || exit 97
+kill -0 "$proxy_pid" 2>/dev/null || exit 96
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:

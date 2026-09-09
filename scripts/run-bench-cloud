@@ -3782,12 +3782,20 @@ fi  # end launch: boot-launch vs legacy ssh path
 # ongoing traffic never touches the Machines API. The poll loop reads bench.log
 # over http://127.0.0.1:$LOCAL_STATUS_PORT through it, so 30 boxes polling every
 # few seconds no longer saturate Fly's control-plane rate limit.
+status_proxy_lifecycle_response_accepted() {
+    case "$1" in
+        204|410|425) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
     local local_port="$1" remote_port="$2" host="$3" log_file="$4"
     local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
-    local started_at pid attempt=0
+    local started_at pid attempt=0 probe_path="/" health_code
     started_at="$(date +%s)"
     : > "$log_file"
+    [ "$label" = "status" ] && probe_path="/driver-health"
     while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
         attempt=$((attempt + 1))
         printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
@@ -3800,7 +3808,7 @@ start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> 
         # Trigger lazy DNS, but classify a local bind collision before waiting.
         sleep 0.5
         curl --noproxy '*' -sS --max-time 2 -o /dev/null \
-            "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true
+            "http://127.0.0.1:$local_port$probe_path" 2>/dev/null || true
         if grep -Eiq 'listen tcp .*bind: address already in use|address already in use' "$log_file"; then
             wait "$pid" 2>/dev/null || true
             printf -v "$pid_var" '%s' ""
@@ -3809,14 +3817,27 @@ start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> 
         # Require a short post-probe survival window for asynchronous lazy-DNS failures.
         sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
         if kill -0 "$pid" 2>/dev/null; then
-            printf -v "$pid_var" '%s' "$pid"
-            return 0
+            if [ "$label" != "status" ]; then
+                printf -v "$pid_var" '%s' "$pid"
+                return 0
+            fi
+            health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true)"
+            if status_proxy_lifecycle_response_accepted "$health_code" \
+               && kill -0 "$pid" 2>/dev/null; then
+                printf -v "$pid_var" '%s' "$pid"
+                return 0
+            fi
+            printf '[%s] status proxy lifecycle HTTP %s not accepted; restarting pid %s\n' \
+                "$(date -u +%H:%M:%S)" "${health_code:-000}" "$pid" >> "$log_file"
+            cloudbench_terminate_and_wait 5 "$pid"
+        else
+            wait "$pid" 2>/dev/null || true
         fi
-        wait "$pid" 2>/dev/null || true
         sleep 2
     done
     printf -v "$pid_var" '%s' ""
-    echo "❌ $label data-plane proxy did not stay alive within ${timeout}s" >&2
+    echo "❌ $label data-plane proxy did not become ready within ${timeout}s" >&2
     tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
     # Ordinary remote readiness failures retain the bounded same-host retry
     # behavior above; only local ownership collisions ask the caller to rotate.
@@ -4328,10 +4349,7 @@ status_proxy_transport_healthy() {
     # explicit pre-launch lifecycle state while boot checkout is still running.
     health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
         "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
-    case "$health_code" in
-        204|410|425) return 0 ;;
-        *) return 1 ;;
-    esac
+    status_proxy_lifecycle_response_accepted "$health_code"
 }
 ensure_status_proxy() {
     if ! status_proxy_transport_healthy; then
