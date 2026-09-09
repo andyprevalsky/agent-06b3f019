@@ -19,6 +19,14 @@ fi
 
 MODE="${1:-check}"
 
+# spawn-browser-agent-v3 real-browser cases use the *venv* Playwright
+# revision (1.62 → chromium-1234). Node Playwright in this repo installs
+# chromium-1243 into the same ~/.cache/ms-playwright and can leave the
+# Python revision missing ("Executable doesn't exist at
+# chromium_headless_shell-1234"). Install the venv browsers before the
+# suite so a shared cache cannot fail the domain.
+"$PYTHON_BIN" -m playwright install chromium
+
 # Domain tests share process-global mock state. Give each domain a fresh process
 # inside a bounded worker pool, then merge their parallel coverage files before
 # the focused pytest suites append their data.

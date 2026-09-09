@@ -27,5 +27,13 @@ configure_deploy_local_env() {
   export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
   export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
   export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"
-  export LOCAL_DB_PORT=$((conductor_port + 5))
+  # Docker stacks publish Postgres on conductor+5. Cloud/system Postgres is
+  # always localhost:5432 — advertising +5 there makes semantic take-control
+  # seed a port nothing is listening on ("Can't reach database server at
+  # localhost:3006") while the backend already reads victoria on 5432.
+  if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
+    export LOCAL_DB_PORT=5432
+  else
+    export LOCAL_DB_PORT=$((conductor_port + 5))
+  fi
 }

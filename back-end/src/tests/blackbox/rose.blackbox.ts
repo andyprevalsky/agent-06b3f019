@@ -1980,7 +1980,7 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   //   OpenAI/Codex Responses → reasoning.effort (default xhigh)
   //   OpenRouter waterfall → reasoning.effort (default xhigh)
   //   OpenRouter fast chat → reasoning.effort (default xhigh)
-  //   Cerebras direct → reasoning_effort: 'none' (latency path; still set)
+  //   Cerebras direct → reasoning_effort: 'low' (gpt-oss-120b minimum)
   //   OpenRouter→Cerebras → reasoning.effort: 'none' (latency path; still set)
   const messages: CompletionMessage[] = [
     { role: 'system', content: 'be helpful' },
@@ -2080,7 +2080,7 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
 
   // Latency chat routes: effort still ALWAYS set (none for Cerebras; xhigh default for OR-fast).
   const cerebras = buildCerebrasChatBody({ messages });
-  assertEqual(cerebras.reasoning_effort, 'none', 'cerebras stamps reasoning_effort=none');
+  assertEqual(cerebras.reasoning_effort, 'low', 'cerebras stamps reasoning_effort=low');
 
   const orCerebras = buildOpenRouterCerebrasBody({ messages });
   assertEqual(
