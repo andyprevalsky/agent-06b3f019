@@ -36,6 +36,9 @@ FLEET_SCRIPT = Path(
     os.environ.get("CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST", ROOT / "scripts" / "run-bench-fleet")
 )
 FLEET_CANARY_SCRIPT = ROOT / "scripts" / "run-fleet-infra-canary"
+FLEET_CANARY_PREFLIGHT_SCRIPT = (
+    ROOT / "scripts" / "cloudbench-infra-canary-preflight.py"
+)
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 HUB_POLLER_SCRIPT = ROOT / "scripts" / "run-bench-hub-poller"
 CLOUDBENCH_RESULT_SCRIPT = ROOT / "scripts" / "cloudbench_result.py"
@@ -9593,6 +9596,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-benchmark-target.py",
         "cloudbench_catalog.py",
         "run-fleet-infra-canary",
+        "cloudbench-infra-canary-preflight.py",
         "fleet_infra_sample.py",
         "cloudbench-port-lease.py",
         "cloudbench-machine-readiness.py",
@@ -9737,6 +9741,9 @@ def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) 
         ) == marker
         assert (snapshot / "run-fleet-infra-canary").read_bytes() == (
             FLEET_CANARY_SCRIPT.read_bytes()
+        )
+        assert (snapshot / "cloudbench-infra-canary-preflight.py").read_bytes() == (
+            FLEET_CANARY_PREFLIGHT_SCRIPT.read_bytes()
         )
         assert (snapshot / "fleet_infra_sample.py").is_file()
         canary_source = (snapshot / "run-fleet-infra-canary").read_text()

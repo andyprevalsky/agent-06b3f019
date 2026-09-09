@@ -659,6 +659,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-benchmark-target.py" \
        "$ROOT_DIR/scripts/cloudbench_catalog.py" \
        "$ROOT_DIR/scripts/run-fleet-infra-canary" \
+       "$ROOT_DIR/scripts/cloudbench-infra-canary-preflight.py" \
        "$ROOT_DIR/scripts/fleet_infra_sample.py" \
        "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" \
@@ -707,6 +708,7 @@ FLEET_CONTROLLER_STARTED_EPOCH="$(date +%s)"
 export -n inventory machines machines_json warm_json POOL_INVENTORY_JSON SNAPSHOTS_JSON 2>/dev/null || true
 
 RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"
+INFRA_CANARY_PREFLIGHT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-infra-canary-preflight.py"
 AUTOSCALER_PORT_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-port-lease.py"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readiness.py"
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
@@ -8852,7 +8854,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 # outcome-proof reruns — proves bring-up → strict barrier → DONE with zero
 # exclusions first. N=1 used to skip this gate and still died on INFRA.
 fleet_infra_canary_preflight() {
-    local stamp ttl age n rc
+    local stamp ttl age n rc lock canary
     if [ "${INFRA_PROBE:-0}" = "1" ]; then
         return 0
     fi
@@ -8885,22 +8887,25 @@ fleet_infra_canary_preflight() {
     case "$n" in
         ''|*[!0-9]*|0) n=2 ;;
     esac
-    echo "🛡  infra canary preflight: stamp missing/stale — running N=$n before capability fleet"
     mkdir -p "$ROOT_DIR/.context"
-    # Distinct lock so preflight never contends with the capability controller.
-    # PREFLIGHT_ACTIVE + SKIP prevent recursion when the canary re-enters fleet.
-    if CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE=1 \
-        CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT=1 \
-        CLOUDBENCH_CONTROLLER_LOCK_NAME="cloudbench-controller-infra-canary-preflight.lock" \
-        bash "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-fleet-infra-canary" "$n"; then
+    lock="$ROOT_DIR/.context/fleet-infra-canary-preflight.transaction.lock"
+    canary="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-fleet-infra-canary"
+    # The helper holds a shared transaction lock while it rechecks the stamp,
+    # runs the canary, and stamps PASS. Its lock is distinct from the nested
+    # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
+    if python3 "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
+        --stamp "$stamp" \
+        --lock "$lock" \
+        --ttl-seconds "$ttl" \
+        --width "$n" \
+        --canary "$canary" \
+        --nested-controller-lock "cloudbench-controller-infra-canary-preflight.lock"; then
         rc=0
     else
         rc=$?
         echo "❌ infra canary preflight FAILED (exit=$rc) — refusing capability fleet (INFRA)" >&2
         return "$rc"
     fi
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$stamp"
-    echo "🛡  infra canary preflight PASS — stamped $stamp"
     return 0
 }
 fleet_infra_canary_preflight || exit $?

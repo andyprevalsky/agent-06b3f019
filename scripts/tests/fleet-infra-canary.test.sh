@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 CANARY="$ROOT_DIR/scripts/run-fleet-infra-canary"
+PREFLIGHT_HELPER="$ROOT_DIR/scripts/cloudbench-infra-canary-preflight.py"
 SAMPLER="$ROOT_DIR/scripts/fleet_infra_sample.py"
 FLEET="$ROOT_DIR/scripts/run-bench-fleet"
 DRIVER="$ROOT_DIR/scripts/cloudbench-run.sh"
@@ -13,6 +14,7 @@ DESCEND="$ROOT_DIR/.claude/commands/descend.md"
 PLAN="$ROOT_DIR/docs/plans/active/fleet-demo-concurrency-e2e.md"
 
 [ -x "$CANARY" ] || fail "run-fleet-infra-canary must be executable"
+[ -f "$PREFLIGHT_HELPER" ] || fail "cloudbench-infra-canary-preflight.py must exist"
 [ -f "$SAMPLER" ] || fail "fleet_infra_sample.py must exist"
 [ -f "$PLAN" ] || fail "fleet-demo-concurrency-e2e plan must exist"
 
@@ -56,6 +58,14 @@ grep -Fq 'CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT' "$FLEET" \
   || fail "preflight must honor CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT"
 grep -Fq 'cloudbench-controller-infra-canary-preflight.lock' "$FLEET" \
   || fail "preflight must use a distinct controller lock"
+grep -Fq 'INFRA_CANARY_PREFLIGHT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-infra-canary-preflight.py"' "$FLEET" \
+  || fail "preflight helper must resolve from the sealed runtime snapshot"
+grep -Fq '"$ROOT_DIR/scripts/cloudbench-infra-canary-preflight.py"' "$FLEET" \
+  || fail "preflight helper must be copied into the sealed runtime snapshot"
+grep -Fq 'fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)' "$PREFLIGHT_HELPER" \
+  || fail "preflight transaction lock must block portably on Linux/macOS"
+grep -Fq 'pass_fds=(lock_handle.fileno(),)' "$PREFLIGHT_HELPER" \
+  || fail "nested canary must retain the lock if its helper parent crashes"
 # N=1 must NOT early-return — single-bench outcome-proof is a common /descend path.
 if grep -E '#BENCHES\[@\] -lt 2|BENCHES\[@\] -lt 2' "$FLEET" | grep -v '^[[:space:]]*#' >/dev/null; then
   # Allow comments mentioning the old hole; forbid a live size skip.
@@ -89,6 +99,7 @@ grep -Fq 'Skip the absent→not-allocated-verified transition' "$FLEET" \
 PREFLIGHT_REPRO="$(mktemp -d)"
 trap 'rm -rf "$PREFLIGHT_REPRO"' EXIT
 mkdir -p "$PREFLIGHT_REPRO/root/scripts"
+cp "$PREFLIGHT_HELPER" "$PREFLIGHT_REPRO/root/scripts/cloudbench-infra-canary-preflight.py"
 cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
 #!/usr/bin/env bash
 exit 17
@@ -105,7 +116,7 @@ awk '
 INFRA_PROBE=0
 RECOVER_STALE_ONLY=0
 PROVISION_POOL=
-INFRA_CANARY_PREFLIGHT_SCRIPT="$ROOT_DIR/scripts/cloudbench-infra-canary-preflight.py"
+INFRA_CANARY_PREFLIGHT_SCRIPT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-infra-canary-preflight.py"
 fleet_infra_canary_preflight
 status=$?
 printf 'preflight_status=%s\n' "$status"
@@ -128,6 +139,9 @@ grep -Fq 'FAILED (exit=17)' "$PREFLIGHT_REPRO/output" \
 # follower must wait, observe the fresh stamp, and return success.
 cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
 #!/usr/bin/env bash
+[ "${CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT:-0}" = "1" ] || exit 91
+[ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = "1" ] || exit 92
+[ "${CLOUDBENCH_CONTROLLER_LOCK_NAME:-}" = "cloudbench-controller-infra-canary-preflight.lock" ] || exit 93
 printf '%s\n' "$$" >> "$CLOUDBENCH_PREFLIGHT_CALLS"
 sleep 0.5
 SH
@@ -147,6 +161,52 @@ wait "$PREFLIGHT_B" || fail "second concurrent preflight failed"
 grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-a.out" \
   || grep -Fq 'stamp fresh' "$PREFLIGHT_REPRO/concurrent-b.out" \
   || fail "serialized follower must consume the first controller's fresh stamp"
+
+# A killed lock-helper process must not orphan or prematurely release its lock.
+# The canary inherits the descriptor, so a follower blocks until the in-flight
+# nested canary exits, then rechecks the still-missing stamp and runs safely.
+cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
+#!/usr/bin/env bash
+if [ ! -e "$CLOUDBENCH_CRASH_STARTED" ]; then
+  : > "$CLOUDBENCH_CRASH_STARTED"
+  sleep 0.5
+  : > "$CLOUDBENCH_CRASH_FINISHED"
+elif [ ! -e "$CLOUDBENCH_CRASH_FINISHED" ]; then
+  : > "$CLOUDBENCH_CRASH_OVERLAP"
+fi
+SH
+chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
+CRASH_STAMP="$PREFLIGHT_REPRO/root/.context/crash.last-pass"
+CRASH_LOCK="$PREFLIGHT_REPRO/root/.context/crash.transaction.lock"
+export CLOUDBENCH_CRASH_STARTED="$PREFLIGHT_REPRO/crash-started"
+export CLOUDBENCH_CRASH_FINISHED="$PREFLIGHT_REPRO/crash-finished"
+export CLOUDBENCH_CRASH_OVERLAP="$PREFLIGHT_REPRO/crash-overlap"
+python3 "$PREFLIGHT_REPRO/root/scripts/cloudbench-infra-canary-preflight.py" \
+  --stamp "$CRASH_STAMP" --lock "$CRASH_LOCK" --ttl-seconds 3600 --width 2 \
+  --canary "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" \
+  --nested-controller-lock cloudbench-controller-infra-canary-preflight.lock \
+  >"$PREFLIGHT_REPRO/crash-a.out" 2>&1 &
+CRASH_HELPER=$!
+for _ in {1..50}; do
+  [ -e "$CLOUDBENCH_CRASH_STARTED" ] && break
+  sleep 0.02
+done
+[ -e "$CLOUDBENCH_CRASH_STARTED" ] || fail "crash-safety canary did not start"
+kill -9 "$CRASH_HELPER"
+set +e
+wait "$CRASH_HELPER" 2>/dev/null
+CRASH_STATUS=$?
+set -e
+[ "$CRASH_STATUS" -ne 0 ] || fail "killed preflight helper unexpectedly succeeded"
+python3 "$PREFLIGHT_REPRO/root/scripts/cloudbench-infra-canary-preflight.py" \
+  --stamp "$CRASH_STAMP" --lock "$CRASH_LOCK" --ttl-seconds 3600 --width 2 \
+  --canary "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" \
+  --nested-controller-lock cloudbench-controller-infra-canary-preflight.lock \
+  >"$PREFLIGHT_REPRO/crash-b.out" 2>&1 \
+  || fail "follower could not recover the crashed preflight lock"
+[ ! -e "$CLOUDBENCH_CRASH_OVERLAP" ] \
+  || fail "crashed lock helper released while its nested canary was still active"
+[ -f "$CRASH_STAMP" ] || fail "crash-recovery follower did not stamp success"
 
 # Dry-run arg validation (no Fly): invalid N fails closed.
 # Scrub inherited fixture env so N validation is what we exercise.
