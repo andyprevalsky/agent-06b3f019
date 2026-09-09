@@ -21,7 +21,7 @@ Model contract (P1):
         waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:
-        claudeAuth = claude-fable-5
+        claudeAuth = claude-fable-5-1
         gptAuth    = gpt-5.6-sol
         waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
 """
@@ -109,14 +109,13 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # for AVAILABLE_ACTIONS) and the response extractor (tool_use -> UnifiedAction).
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
-        claude_auth_model="claude-fable-5",
+        claude_auth_model="claude-fable-5-1",
         gpt_auth_model="gpt-5.6-sol",
-        # Paid waterfall matches ultra (sol -> kimi). claudeAuth stays on
-        # fable-5; ultra's claudeAuth is fable-5-1. Both waterfall layers must
-        # stay in
-        # VISION_MODELS (transforms.py) — the browser loop feeds screenshots,
-        # and a model missing from that allowlist silently drops the image
-        # instead of erroring, so the agent would fly blind on fallback.
+        # Paid waterfall matches ultra (sol -> kimi). claudeAuth is fable 5.1
+        # on both deep pools. Both waterfall layers must stay in VISION_MODELS
+        # (transforms.py) — the browser loop feeds screenshots, and a model
+        # missing from that allowlist silently drops the image instead of
+        # erroring, so the agent would fly blind on fallback.
         waterfall=(
             "openai/gpt-5.6-sol",
             "moonshotai/kimi-k3",

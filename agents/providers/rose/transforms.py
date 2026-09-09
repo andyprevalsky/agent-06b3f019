@@ -65,6 +65,7 @@ VISION_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-sonnet-4.6",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-fable-5",
+    "anthropic/claude-fable-5.1",
     "x-ai/grok-4.1-fast",
     "x-ai/grok-4.1",
 })

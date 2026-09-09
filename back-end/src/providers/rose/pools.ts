@@ -48,10 +48,10 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
-    claudeAuthModel: 'claude-fable-5',
+    claudeAuthModel: 'claude-fable-5-1',
     gptAuthModel: 'gpt-5.6-sol',
-    // Same reordering as rose-1-ultra; both layers must stay vision-capable
-    // (see VISION_MODELS in agents/providers/rose/transforms.py).
+    // Same claudeAuth + waterfall as rose-1-ultra; both waterfall layers must
+    // stay vision-capable (see VISION_MODELS in agents/providers/rose/transforms.py).
     waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
   },
 };

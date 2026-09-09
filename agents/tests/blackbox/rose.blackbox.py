@@ -226,8 +226,10 @@ def test_pool_registry_lookup():
     # waterfall stays sol -> kimi. claudeAuth is the only fable 5.1 hop.
     assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
     assert "anthropic/claude-fable-5.1" not in ultra.waterfall
+    assert browser_use.claude_auth_model == "claude-fable-5-1"
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
     assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
     assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
     assert lite.waterfall != ultra.waterfall
@@ -1164,6 +1166,75 @@ def test_build_anthropic_body_identity_and_cache_block():
     cached_blocks = [b for b in sys if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
+
+
+_SPAWN_AGENT_TOOL = [
+    {
+        "name": "spawn_agent",
+        "description": "spawn",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+]
+
+
+def test_fable_5_1_downgrades_named_tool_choice_to_auto():
+    """claude-fable-5-1 400s on tool_choice type tool/any (Anthropic docs)."""
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-fable-5-1"
+    assert body["tool_choice"] == {
+        "type": "auto",
+        "disable_parallel_tool_use": True,
+    }
+
+
+def test_fable_5_1_downgrades_any_tool_choice_to_auto():
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-browser-use"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-fable-5-1"
+    assert body["tool_choice"] == {"type": "auto"}
+
+
+def test_sonnet_and_legacy_fable_5_keep_named_tool_choice():
+    sonnet = build_anthropic_body(
+        pool_spec=get_pool("rose-1-lite"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert sonnet["tool_choice"]["type"] == "tool"
+    assert sonnet["tool_choice"]["name"] == "spawn_agent"
+
+    legacy = build_anthropic_body(
+        pool_spec=PoolSpec(
+            name="rose-1-ultra",
+            claude_auth_model="claude-fable-5",
+            gpt_auth_model="gpt-5.6-sol",
+            waterfall=(),
+        ),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert legacy["model"] == "claude-fable-5"
+    assert legacy["tool_choice"]["type"] == "tool"
+    assert legacy["tool_choice"]["name"] == "spawn_agent"
 
 
 def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
@@ -6612,6 +6683,18 @@ async def run_all_tests():
     r.record(
         "anthropic_body_native_tools_force_any_with_parallel",
         test_build_anthropic_body_native_tools_force_any_with_parallel,
+    )
+    r.record(
+        "fable_5_1_downgrades_named_tool_choice_to_auto",
+        test_fable_5_1_downgrades_named_tool_choice_to_auto,
+    )
+    r.record(
+        "fable_5_1_downgrades_any_tool_choice_to_auto",
+        test_fable_5_1_downgrades_any_tool_choice_to_auto,
+    )
+    r.record(
+        "sonnet_and_legacy_fable_5_keep_named_tool_choice",
+        test_sonnet_and_legacy_fable_5_keep_named_tool_choice,
     )
     r.record(
         "anthropic_body_never_sets_thinking_by_default",

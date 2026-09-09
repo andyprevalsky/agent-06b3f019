@@ -306,6 +306,7 @@ async function testPool_getPoolRegistryShape() {
     'ultra OpenRouter waterfall'
   );
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
+  assertEqual(browserUse.claudeAuthModel, 'claude-fable-5-1', 'browserUse.claudeAuthModel');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-sol', 'browserUse.gptAuthModel');
   assertEqual(
     browserUse.waterfall.join(','),
@@ -944,6 +945,84 @@ async function testClaudeAuth_bodyStaysWithinCacheBlockBudget() {
     JSON.stringify(marked[marked.length - 1]),
     JSON.stringify(systemBlocks.filter((b) => 'cache_control' in b).slice(-1)[0]),
     'the last system breakpoint is the one retained'
+  );
+}
+
+const SPAWN_AGENT_TOOL = [
+  {
+    name: 'spawn_agent',
+    description: 'spawn',
+    input_schema: { type: 'object', properties: {} },
+  },
+];
+
+async function testClaudeAuth_fable51DowngradesForcedToolChoice() {
+  const named = buildAnthropicBody({
+    poolSpec: getPool('rose-1-ultra'),
+    messages: [{ role: 'user', content: 'fill params' }],
+    tools: SPAWN_AGENT_TOOL,
+    toolChoice: { type: 'tool', name: 'spawn_agent' },
+  });
+  assertEqual(named.model, 'claude-fable-5-1', 'ultra claudeAuth model');
+  assertEqual(
+    JSON.stringify(named.tool_choice),
+    JSON.stringify({ type: 'auto', disable_parallel_tool_use: true }),
+    'named tool_choice becomes auto + single-call'
+  );
+
+  const anyChoice = buildAnthropicBody({
+    poolSpec: getPool('rose-1-browser-use'),
+    messages: [{ role: 'user', content: 'fill params' }],
+    tools: SPAWN_AGENT_TOOL,
+    toolChoice: 'any',
+  });
+  assertEqual(anyChoice.model, 'claude-fable-5-1', 'browser-use claudeAuth model');
+  assertEqual(JSON.stringify(anyChoice.tool_choice), JSON.stringify({ type: 'auto' }), 'any → auto');
+
+  const structured = buildAnthropicBody({
+    poolSpec: getPool('rose-1-ultra'),
+    messages: [{ role: 'user', content: 'hi' }],
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+  });
+  assertEqual(
+    (structured.tool_choice as Record<string, unknown>).type,
+    'auto',
+    'structured output also auto on 5.1'
+  );
+  assert('thinking' in structured, '5.1 keeps always-on thinking');
+
+  const sonnet = buildAnthropicBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [{ role: 'user', content: 'fill params' }],
+    tools: SPAWN_AGENT_TOOL,
+    toolChoice: { type: 'tool', name: 'spawn_agent' },
+  });
+  // Lite still enables thinking, so forced named choice already downgrades to
+  // auto — confirm we did not attach the fable-5.1 single-call flag.
+  assertEqual(
+    JSON.stringify(sonnet.tool_choice),
+    JSON.stringify({ type: 'auto' }),
+    'sonnet thinking path stays auto without fable-5.1 parallel lock'
+  );
+
+  const legacy = buildAnthropicBody({
+    poolSpec: {
+      name: 'rose-1-ultra',
+      claudeAuthModel: 'claude-fable-5',
+      gptAuthModel: 'gpt-5.6-sol',
+      waterfall: [],
+    },
+    messages: [{ role: 'user', content: 'fill params' }],
+    tools: SPAWN_AGENT_TOOL,
+    toolChoice: { type: 'tool', name: 'spawn_agent' },
+  });
+  // Legacy Fable 5 + thinking also downgrades forced choice to auto, but must
+  // not match the 5.1 detector (no disable_parallel_tool_use).
+  assertEqual(legacy.model, 'claude-fable-5', 'legacy fable-5 model id');
+  assertEqual(
+    JSON.stringify(legacy.tool_choice),
+    JSON.stringify({ type: 'auto' }),
+    'legacy fable-5 is not treated as 5.1'
   );
 }
 
@@ -3652,6 +3731,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / body stays within the cache_control block budget',
       fn: testClaudeAuth_bodyStaysWithinCacheBlockBudget,
+    },
+    {
+      name: 'claudeAuth / fable 5.1 downgrades forced tool_choice to auto',
+      fn: testClaudeAuth_fable51DowngradesForcedToolChoice,
     },
     {
       name: 'claudeAuth / nullable relaxation keeps non-nullable fields required',
