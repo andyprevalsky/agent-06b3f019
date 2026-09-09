@@ -264,6 +264,7 @@ def build_anthropic_body(
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
     provider_fast_mode: bool = True,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
 
@@ -339,6 +340,26 @@ def build_anthropic_body(
         effective_tool_choice,
     )
 
+    # Context-only tools (e.g. the planner's get_memories fork) are declared so
+    # the forked tool_use/tool_result history is legal, but never callable:
+    # structured output keeps its output_config and tool_choice is "none".
+    # Appended to real native tools when those exist (choice unchanged).
+    if context_tools:
+        declared = [
+            {
+                "name": tool.get("name"),
+                "description": tool.get("description"),
+                "input_schema": tool.get("input_schema") or tool.get("parameters") or {"type": "object"},
+            }
+            for tool in context_tools
+            if isinstance(tool, dict) and tool.get("name")
+        ]
+        if body.get("tools"):
+            body["tools"] = [*body["tools"], *declared]
+        else:
+            body["tools"] = declared
+            body["tool_choice"] = {"type": "none"}
+
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
 
@@ -369,6 +390,7 @@ async def claude_auth_complete(
     pool_spec: PoolSpec,
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
@@ -394,6 +416,7 @@ async def claude_auth_complete(
         pool_spec=pool_spec,
         messages=messages,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         response_format=response_format,
         max_tokens=max_tokens,
@@ -479,6 +502,7 @@ async def anthropic_api_key_complete(
     messages: List[Dict[str, Any]],
     api_key: str,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     response_format: Optional[Dict[str, Any]] = None,
     max_tokens: Optional[int] = None,
@@ -501,6 +525,7 @@ async def anthropic_api_key_complete(
         pool_spec=pool_spec,
         messages=messages,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         response_format=response_format,
         max_tokens=max_tokens,

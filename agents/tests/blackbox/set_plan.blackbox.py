@@ -406,20 +406,32 @@ def test_build_planner_messages_empty_context():
 
 
 def test_build_planner_messages_tool_and_system_roles():
-    """TOOL/SYSTEM messages are included as user role with prefix."""
+    """Declared tool calls keep native roles; system rows remain user notices."""
     from domains.set_plan.service import build_planner_messages
 
     context = [
         {"role": "USER", "text": "Goal"},
-        {"role": "TOOL", "text": "Result"},
+        {
+            "role": "ASSISTANT",
+            "text": "Calling search",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": "call-1", "query": "example"},
+                ]
+            },
+        },
+        {"role": "TOOL", "text": "Result", "metadata": {"toolCallId": "call-1", "title": "Search"}},
         {"role": "SYSTEM", "text": "Note"},
     ]
     base_messages, _ = build_planner_messages(context)
-    # goal + 3 messages
-    assert len(base_messages) == 4
-    # Find the TOOL message
-    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
-    assert tool_msg["role"] == "user"
+    # goal + user + assistant call + tool result + system notice
+    assert len(base_messages) == 5
+    assistant_msg = next(m for m in base_messages if m["role"] == "assistant")
+    assert assistant_msg["tool_calls"][0]["function"]["name"] == "web_search"
+    tool_msg = next(m for m in base_messages if m["role"] == "tool")
+    assert tool_msg["tool_call_id"] == "call-1"
+    assert tool_msg["name"] == "web_search"
+    assert tool_msg["content"] == "Search: Result"
     system_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
     assert system_msg["role"] == "user"
 
@@ -475,7 +487,7 @@ def test_build_planner_messages_compacts_long_tool_context():
     ]
 
     base_messages, _ = build_planner_messages(context)
-    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
+    tool_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
 
     assert len(tool_msg["content"]) < len(long_text)
     assert len(tool_msg["content"]) < PLANNER_CONTEXT_FULL_TEXT_LIMIT

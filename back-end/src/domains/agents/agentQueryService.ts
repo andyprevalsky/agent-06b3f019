@@ -37,6 +37,7 @@ function toListItem(agent: ListedAgent) {
     message_count: agent.messageCount,
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
     world_model_mode: agent.worldModelMode,
+    memory_enabled: agent.memoryEnabled,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   };
@@ -218,6 +219,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       tree_cost_cents: agent.treeCostCents,
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
       world_model_mode: agent.worldModelMode,
+      memory_enabled: agent.memoryEnabled,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,

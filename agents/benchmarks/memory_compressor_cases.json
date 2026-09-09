@@ -1,0 +1,598 @@
+{
+ "version": 1,
+ "description": "Real completed runs (one per benchmark task + the largest completed runs by LLM trace count) used to prove the memory compressor on real transcripts; assertions are generic and grounded in each transcript.",
+ "cases": [
+  {
+   "id": "bdc31946-9c50-451c-adc1-76458205bf39",
+   "task": "agent-for-each",
+   "kind": "per_task",
+   "llm_traces": 24,
+   "created_at": "2026-09-02T00:05:29.459Z",
+   "goal_head": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one inte"
+  },
+  {
+   "id": "8cb62c0b-878c-47fb-8519-6d2c92dd3731",
+   "task": "agent-payment-abandonment",
+   "kind": "per_task",
+   "llm_traces": 3,
+   "created_at": "2026-09-09T01:02:03.930Z",
+   "goal_head": "Use one browser agent to go to https://rose-cloud-44cb5599-bench-1788914669-358386-89913-bench.ngrok.app/test_payment?be"
+  },
+  {
+   "id": "f7316dd0-547e-434f-889e-fb2fd1bcfd31",
+   "task": "agent-payment-idempotent-abandonment",
+   "kind": "per_task",
+   "llm_traces": 6,
+   "created_at": "2026-09-09T00:53:42.132Z",
+   "goal_head": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against https://rose-cloud-44cb5599-bench-17"
+  },
+  {
+   "id": "6d7cd211-f088-4f7d-810c-c216f5a716d6",
+   "task": "agent-payment-production-abandonment",
+   "kind": "per_task",
+   "llm_traces": 2,
+   "created_at": "2026-09-04T03:08:18.703Z",
+   "goal_head": "Use one browser agent to go to https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle. Prepare the visible "
+  },
+  {
+   "id": "22324990-512e-4832-ac74-e0f93ea7bb22",
+   "task": "agent-payment-setup-resume",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T00:49:36.896Z",
+   "goal_head": "Use a browser agent to go to https://rose-cloud-44cb5599-bench-1788914669-358386-89913-bench.ngrok.app/test_payment and "
+  },
+  {
+   "id": "f6c06f5d-0f8b-4280-abb4-861164902027",
+   "task": "agent-payment-test-shop",
+   "kind": "per_task",
+   "llm_traces": 12,
+   "created_at": "2026-09-09T00:45:31.944Z",
+   "goal_head": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to htt"
+  },
+  {
+   "id": "b2371597-948a-472a-b02b-a601ae854f1b",
+   "task": "browser-1015-eventim-request-card",
+   "kind": "per_task",
+   "llm_traces": 25,
+   "created_at": "2026-09-02T21:09:01.747Z",
+   "goal_head": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the of"
+  },
+  {
+   "id": "8e32f706-85a3-46c8-a0d3-9f859df5e3c7",
+   "task": "browser-agent-amazon-cookie-payment",
+   "kind": "per_task",
+   "llm_traces": 38,
+   "created_at": "2026-08-20T21:38:11.701Z",
+   "goal_head": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button."
+  },
+  {
+   "id": "82532f31-6c4b-45d9-ac4f-eea5d737735d",
+   "task": "browser-agent-amazon-mx-buy-under-5-usd",
+   "kind": "big",
+   "llm_traces": 93,
+   "created_at": "2026-08-22T02:28:54.059Z",
+   "goal_head": "Buy me something for < 5$ from amazon, u pick"
+  },
+  {
+   "id": "2ff57b88-cf8b-454b-b629-5c981a487164",
+   "task": "browser-alchemy-springs-sauna",
+   "kind": "per_task",
+   "llm_traces": 37,
+   "created_at": "2026-08-26T20:40:46.737Z",
+   "goal_head": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose th"
+  },
+  {
+   "id": "4d12eee2-6b96-4ce5-8898-e5632572f96c",
+   "task": "browser-amazon-return",
+   "kind": "per_task",
+   "llm_traces": 37,
+   "created_at": "2026-09-02T21:09:00.935Z",
+   "goal_head": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to"
+  },
+  {
+   "id": "3b1c625f-8244-49b5-956d-4af175986c72",
+   "task": "browser-bing-search-single-result",
+   "kind": "per_task",
+   "llm_traces": 4,
+   "created_at": "2026-09-02T19:48:35.530Z",
+   "goal_head": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and ins"
+  },
+  {
+   "id": "19147a3b-54a2-45bf-8935-4bd120c6deaf",
+   "task": "browser-biometrics-webdecoy",
+   "kind": "per_task",
+   "llm_traces": 10,
+   "created_at": "2026-09-09T00:27:46.328Z",
+   "goal_head": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometri"
+  },
+  {
+   "id": "1cba6647-b233-42f2-aafe-40fd6729494b",
+   "task": "browser-blue-bottle-challenge-recovery",
+   "kind": "per_task",
+   "llm_traces": 46,
+   "created_at": "2026-08-29T21:27:11.895Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Buildin"
+  },
+  {
+   "id": "701d60d4-f937-4141-b8a9-593663206a2d",
+   "task": "browser-doordash-food-plan-grocery-order",
+   "kind": "per_task",
+   "llm_traces": 26,
+   "created_at": "2026-08-25T20:06:34.405Z",
+   "goal_head": "Execute the complete DoorDash grocery purchase now using the authenticated session. Deliver to Aman Gottumukkala at save"
+  },
+  {
+   "id": "ae9ffc6b-b602-419f-9ba0-fb258e00aca1",
+   "task": "browser-doordash-usb-c-cable",
+   "kind": "per_task",
+   "llm_traces": 22,
+   "created_at": "2026-08-26T21:04:36.950Z",
+   "goal_head": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at"
+  },
+  {
+   "id": "1235778a-62ae-4f8b-891b-52fbe8ba43f8",
+   "task": "browser-event-ticket",
+   "kind": "per_task",
+   "llm_traces": 34,
+   "created_at": "2026-09-03T10:32:08.089Z",
+   "goal_head": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for next week's Friday. Choose a movie starting between 7:"
+  },
+  {
+   "id": "c9615570-47cd-4d28-a027-7388e0c030fa",
+   "task": "browser-file-upload-tinypng",
+   "kind": "per_task",
+   "llm_traces": 12,
+   "created_at": "2026-09-02T19:48:36.617Z",
+   "goal_head": "upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked"
+  },
+  {
+   "id": "da21c245-fb13-4ddf-be01-976951770886",
+   "task": "browser-google-search-single-result",
+   "kind": "per_task",
+   "llm_traces": 14,
+   "created_at": "2026-08-22T04:05:10.034Z",
+   "goal_head": "Use a browser agent, not web_search or web_fetch, to go to https://www.google.com/search?q=OpenAI+official+website and i"
+  },
+  {
+   "id": "4f4e92c3-4ce3-4dd6-9e42-59dd4afb7dfb",
+   "task": "browser-hotel-booking",
+   "kind": "per_task",
+   "llm_traces": 49,
+   "created_at": "2026-09-01T08:06:34.042Z",
+   "goal_head": "Use exactly one browser agent to book a one-night stay for one adult at Hotel Kabuki in San Francisco from next Saturday"
+  },
+  {
+   "id": "230bd5ce-8432-4375-b578-3b9422427d39",
+   "task": "browser-imax-group-tickets",
+   "kind": "per_task",
+   "llm_traces": 38,
+   "created_at": "2026-09-01T16:32:59.395Z",
+   "goal_head": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining ton"
+  },
+  {
+   "id": "bc672760-f42c-40fe-afd6-b9109803b36d",
+   "task": "browser-indeed-account-create",
+   "kind": "per_task",
+   "llm_traces": 24,
+   "created_at": "2026-08-04T23:36:13.131Z",
+   "goal_head": "Use a browser agent to go to https://www.indeed.com/ and create a new Indeed job-seeker account."
+  },
+  {
+   "id": "35a1e4a3-994c-4b80-965c-a291673cc55e",
+   "task": "browser-instacart-grocery-order",
+   "kind": "big",
+   "llm_traces": 81,
+   "created_at": "2026-09-01T04:50:05.729Z",
+   "goal_head": "Go to Instacart. Shop only at Sprouts Farmers Market (do not switch to another store). Buy these items: blueberries, str"
+  },
+  {
+   "id": "fb38abca-99f0-45ab-b63e-1d41576d6e94",
+   "task": "browser-rotate-ip-escalation",
+   "kind": "per_task",
+   "llm_traces": 12,
+   "created_at": "2026-07-22T18:32:36.346Z",
+   "goal_head": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at htt"
+  },
+  {
+   "id": "e1e74b2f-3f0b-43d6-949a-637275db73f1",
+   "task": "browser-smoke",
+   "kind": "per_task",
+   "llm_traces": 3,
+   "created_at": "2026-09-09T00:38:42.060Z",
+   "goal_head": "Use a browser agent to go to https://example.com and tell me what the main heading says on the page."
+  },
+  {
+   "id": "a6a6f65b-255f-42f7-a7ff-128d523c53af",
+   "task": "browser-toast-nopa-write-lock",
+   "kind": "per_task",
+   "llm_traces": 58,
+   "created_at": "2026-09-01T15:52:04.050Z",
+   "goal_head": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site\n\nOperational constraints "
+  },
+  {
+   "id": "144f7ea6-0b7e-40dc-87d6-e1279dc33632",
+   "task": "claude-code-agent",
+   "kind": "per_task",
+   "llm_traces": 3,
+   "created_at": "2026-09-09T00:37:41.645Z",
+   "goal_head": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every numbe"
+  },
+  {
+   "id": "e2681fe6-478d-431d-aa9c-f63d8ab1554b",
+   "task": "cuda-kernel-github-top100-code-agent",
+   "kind": "per_task",
+   "llm_traces": 24,
+   "created_at": "2026-09-04T23:58:29.374Z",
+   "goal_head": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel "
+  },
+  {
+   "id": "6564e474-cc3e-4927-8a78-8790bde3496b",
+   "task": "demo-fleet-alpha",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-08T19:37:14.173Z",
+   "goal_head": "DEMO fleet concurrency probe alpha: call attempt_completion with result READY and stop. Do not use other tools."
+  },
+  {
+   "id": "565ba062-956e-407e-9c8e-ed27f06d5e26",
+   "task": "demo-fleet-beta",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-08T19:38:10.147Z",
+   "goal_head": "DEMO fleet concurrency probe beta: call attempt_completion with result READY and stop. Do not use other tools."
+  },
+  {
+   "id": "f3b85e27-d063-43da-bb7d-cf5f05e3fdf0",
+   "task": "demo-fleet-gamma",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-08T19:37:14.904Z",
+   "goal_head": "DEMO fleet concurrency probe gamma: call attempt_completion with result READY and stop. Do not use other tools."
+  },
+  {
+   "id": "d3458538-4789-4195-a38f-23385544b6f1",
+   "task": "files-in-sub-agents",
+   "kind": "per_task",
+   "llm_traces": 22,
+   "created_at": "2026-09-01T13:27:38.174Z",
+   "goal_head": "Create 4 color variants of the attached image: red, blue, green, and yellow tinted versions. Spawn 4 general-purpose age"
+  },
+  {
+   "id": "87ef68ee-58e8-4bea-8dbb-bbc7eb49181c",
+   "task": "gate-kyc-card-mint",
+   "kind": "per_task",
+   "llm_traces": 7,
+   "created_at": "2026-09-01T14:29:57.144Z",
+   "goal_head": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to htt"
+  },
+  {
+   "id": "e89736b5-8ecc-4fab-b0d8-ee71f2f17d89",
+   "task": "gate-source-connect-gmail",
+   "kind": "per_task",
+   "llm_traces": 8,
+   "created_at": "2026-09-01T14:33:59.774Z",
+   "goal_head": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task expli"
+  },
+  {
+   "id": "de61af9d-c585-4614-b97a-e0918ea93160",
+   "task": "gate-subscription-card-mint",
+   "kind": "per_task",
+   "llm_traces": 7,
+   "created_at": "2026-09-01T13:33:45.970Z",
+   "goal_head": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to htt"
+  },
+  {
+   "id": "036ca06c-3e52-44be-bc60-acfa77f0b57e",
+   "task": "gate-subscription-card-mint-admin-bypass",
+   "kind": "per_task",
+   "llm_traces": 20,
+   "created_at": "2026-09-01T10:51:04.323Z",
+   "goal_head": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to htt"
+  },
+  {
+   "id": "53675f89-ce9f-496e-ac64-d052df2720a4",
+   "task": "gate-subscription-free-credit",
+   "kind": "per_task",
+   "llm_traces": 2,
+   "created_at": "2026-09-01T14:35:26.421Z",
+   "goal_head": "Summarize what Rose can do in one sentence. This task intentionally starts from a benchmark account whose free credits a"
+  },
+  {
+   "id": "3e804b61-5c51-463a-a3ba-4384a1107b71",
+   "task": "gate-subscription-webhook-resume",
+   "kind": "per_task",
+   "llm_traces": 19,
+   "created_at": "2026-09-01T10:59:11.764Z",
+   "goal_head": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to htt"
+  },
+  {
+   "id": "f9caca30-9126-47f8-9102-9aac3d187cf3",
+   "task": "grep-explore-stress",
+   "kind": "big",
+   "llm_traces": 136,
+   "created_at": "2026-09-01T05:02:13.932Z",
+   "goal_head": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_"
+  },
+  {
+   "id": "1aafa8e6-c4ad-46f2-8fc1-d3d7603421ab",
+   "task": "image-handling",
+   "kind": "per_task",
+   "llm_traces": 12,
+   "created_at": "2026-09-05T06:26:20.303Z",
+   "goal_head": "Make this image completely red-tinted (apply a red color overlay to the entire image)."
+  },
+  {
+   "id": "763fa2d5-cb07-46cb-826e-50c50a85031e",
+   "task": "message-person",
+   "kind": "per_task",
+   "llm_traces": 12,
+   "created_at": "2026-07-27T04:37:43.955Z",
+   "goal_head": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email."
+  },
+  {
+   "id": "2d1ef194-4052-44c0-87a6-6fad5ce14fb2",
+   "task": "message-person-agent-sms",
+   "kind": "per_task",
+   "llm_traces": 22,
+   "created_at": "2026-09-01T14:31:37.720Z",
+   "goal_head": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from"
+  },
+  {
+   "id": "1ac2b21a-80de-4f1e-9e8a-fcae8586cd07",
+   "task": "minted-agent-accounts-x-post",
+   "kind": "per_task",
+   "llm_traces": 23,
+   "created_at": "2026-08-22T04:08:22.682Z",
+   "goal_head": "Make a post on X.com that says, Hello World\n\nUse the already signed-in X session in the browser if one is available. Do "
+  },
+  {
+   "id": "87e11759-2fc3-4eb1-8044-b81725116168",
+   "task": "parallel-tool-calls",
+   "kind": "per_task",
+   "llm_traces": 4,
+   "created_at": "2026-09-09T00:33:50.254Z",
+   "goal_head": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cos"
+  },
+  {
+   "id": "064b5bdd-3ce9-4152-a7df-b1e048ee79d7",
+   "task": "people-search-criteria",
+   "kind": "per_task",
+   "llm_traces": 32,
+   "created_at": "2026-09-01T15:33:09.226Z",
+   "goal_head": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in th"
+  },
+  {
+   "id": "d44c8470-e2a0-476e-a801-8f6200c84e79",
+   "task": "people-search-targeted",
+   "kind": "per_task",
+   "llm_traces": 16,
+   "created_at": "2026-09-01T15:35:10.182Z",
+   "goal_head": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current tit"
+  },
+  {
+   "id": "9b9b7b01-63ab-49fe-bb97-8b9ab765b610",
+   "task": "phone-call-client-intake",
+   "kind": "per_task",
+   "llm_traces": 10,
+   "created_at": "2026-09-01T15:36:32.838Z",
+   "goal_head": "Call our new client at +16199153156 exactly once and collect their full name and complete mailing address for our record"
+  },
+  {
+   "id": "953c5d05-c4d0-41bd-a9ac-76692e115f29",
+   "task": "phone-call-ivr-dtmf",
+   "kind": "per_task",
+   "llm_traces": 10,
+   "created_at": "2026-09-02T18:18:37.982Z",
+   "goal_head": "Call Rose Test Logistics at +16199153156 exactly once and track package 2451338820. Navigate the automated phone menu us"
+  },
+  {
+   "id": "3ae580e9-b1f5-4520-9b13-404ec1c3aca4",
+   "task": "phone-call-payment",
+   "kind": "per_task",
+   "llm_traces": 10,
+   "created_at": "2026-09-01T15:39:08.919Z",
+   "goal_head": "Call Rose Test Florist at +14159416744 exactly once and order a dozen red roses with delivery. Do not call back or place"
+  },
+  {
+   "id": "634e6d24-c25a-4f07-aced-9b45d83bc49f",
+   "task": "plaid-transactions-dead-subscriptions",
+   "kind": "per_task",
+   "llm_traces": 42,
+   "created_at": "2026-09-01T14:36:37.067Z",
+   "goal_head": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose re"
+  },
+  {
+   "id": "0a55da16-f622-46da-bc09-2d974fac7e91",
+   "task": "plaid-transactions-doordash-count",
+   "kind": "per_task",
+   "llm_traces": 56,
+   "created_at": "2026-09-01T11:22:09.391Z",
+   "goal_head": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 20"
+  },
+  {
+   "id": "a19892a8-651e-42a7-bd9c-0b1f13083336",
+   "task": "plaid-transactions-monthly-spend",
+   "kind": "per_task",
+   "llm_traces": 18,
+   "created_at": "2026-09-03T08:05:14.867Z",
+   "goal_head": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRu"
+  },
+  {
+   "id": "319b39d0-a50c-44da-8da5-c22c1afc8725",
+   "task": "planner-memory-blackbox-1788921424-188147-31070",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:37:11.415Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889214"
+  },
+  {
+   "id": "7c488d13-d779-4923-821b-7fd654126293",
+   "task": "planner-memory-blackbox-1788921668-208628-13116",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:41:15.868Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889216"
+  },
+  {
+   "id": "572c7f71-5d73-426c-bd0a-147be6e84e71",
+   "task": "planner-memory-blackbox-1788921801-218966-17332",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:43:28.465Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889218"
+  },
+  {
+   "id": "b2c7b464-4499-4790-871e-be5b329579d9",
+   "task": "planner-memory-blackbox-1788922170-250441-29187",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:49:38.366Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889221"
+  },
+  {
+   "id": "58cb5850-7159-4cf7-b39f-6d8572b6bdb1",
+   "task": "planner-memory-blackbox-1788922345-262652-11131",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:52:31.996Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889223"
+  },
+  {
+   "id": "2e348e67-cbe8-4e52-baed-d23ba44bf092",
+   "task": "planner-memory-blackbox-1788922429-268281-16657",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:53:56.724Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889224"
+  },
+  {
+   "id": "a4168bf1-1ff8-4eb3-b4b2-bcfec84d68d1",
+   "task": "planner-memory-blackbox-1788922488-273783-3808",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T02:54:56.135Z",
+   "goal_head": "Order a 16oz iced vanilla bean shakerato with oat milk for pickup from Blue Bottle Coffee at the Ferry Building 17889224"
+  },
+  {
+   "id": "9888cdb2-ca13-4708-8c4d-871705b03443",
+   "task": "response-schema-non-goal-feedback",
+   "kind": "per_task",
+   "llm_traces": 26,
+   "created_at": "2026-09-01T19:36:46.855Z",
+   "goal_head": "Research the current official population estimates for Tokyo and New York City. Spawn exactly two explore agents in para"
+  },
+  {
+   "id": "2464eb7e-79af-40a6-aece-bf17e934323b",
+   "task": "single-creator-arm",
+   "kind": "big",
+   "llm_traces": 134,
+   "created_at": "2026-09-01T14:44:13.205Z",
+   "goal_head": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection "
+  },
+  {
+   "id": "5a444bb2-6adb-48b8-9ad8-fd976428980c",
+   "task": "spawn-sub-agents",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T00:33:50.253Z",
+   "goal_head": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_age"
+  },
+  {
+   "id": "b199bae5-a87d-455f-870b-03d711fddf24",
+   "task": "summary-site-no-filetype",
+   "kind": "per_task",
+   "llm_traces": 8,
+   "created_at": "2026-09-03T02:09:17.617Z",
+   "goal_head": "Make me a site for a fictional coffee shop called Beam Roast. Include a hero title with the shop name and a short About "
+  },
+  {
+   "id": "169f437a-073d-4877-b193-7c913c8869ed",
+   "task": "test-mass-agent-run-0",
+   "kind": "per_task",
+   "llm_traces": 0,
+   "created_at": "2026-09-09T00:40:49.044Z",
+   "goal_head": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the to"
+  },
+  {
+   "id": "4b31a0e1-6a9a-416d-8402-6a90a53c8b24",
+   "task": "user-data-prod-grep",
+   "kind": "per_task",
+   "llm_traces": 16,
+   "created_at": "2026-09-03T02:53:14.533Z",
+   "goal_head": "Run a real prod-data validation of my synced user documents using only local-data Grep through spawned explore agents.\n\n"
+  },
+  {
+   "id": "47a026fd-bc3f-4289-9ea6-ae465a930ef4",
+   "task": "wait-for-trigger",
+   "kind": "per_task",
+   "llm_traces": 10,
+   "created_at": "2026-09-01T12:55:44.512Z",
+   "goal_head": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediat"
+  },
+  {
+   "id": "b447f0cf-0fa4-46f3-ae56-f7751e667d15",
+   "task": "whatsapp-history-recall",
+   "kind": "per_task",
+   "llm_traces": 18,
+   "created_at": "2026-09-01T13:03:03.191Z",
+   "goal_head": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most cont"
+  },
+  {
+   "id": "3177c388-0584-4bb3-bf83-f63e2bb741f2",
+   "task": "grep-explore-stress",
+   "kind": "big",
+   "llm_traces": 148,
+   "created_at": "2026-09-01T00:53:51.449Z",
+   "goal_head": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_"
+  },
+  {
+   "id": "9d891946-55fd-4def-bb3b-4a6da05a5c4f",
+   "task": "single-creator-arm",
+   "kind": "big",
+   "llm_traces": 96,
+   "created_at": "2026-09-01T04:52:13.874Z",
+   "goal_head": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection "
+  },
+  {
+   "id": "89a0d15f-17aa-4db8-a4bf-0a66b1dac22d",
+   "task": "grep-explore-stress",
+   "kind": "big",
+   "llm_traces": 94,
+   "created_at": "2026-09-01T04:49:39.544Z",
+   "goal_head": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_"
+  },
+  {
+   "id": "ed424654-778f-4f1b-851e-a089692bdd5f",
+   "task": "grep-explore-stress",
+   "kind": "big",
+   "llm_traces": 94,
+   "created_at": "2026-09-01T01:24:17.030Z",
+   "goal_head": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_"
+  },
+  {
+   "id": "75f518ae-6dc2-4f2a-8bd1-e6ce61528842",
+   "task": "grep-explore-stress",
+   "kind": "big",
+   "llm_traces": 86,
+   "created_at": "2026-08-31T23:37:24.019Z",
+   "goal_head": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_"
+  },
+  {
+   "id": "9ba001b4-84e3-4d65-8742-cc935b463ec9",
+   "task": "people-search-criteria",
+   "kind": "big",
+   "llm_traces": 86,
+   "created_at": "2026-07-23T01:35:38.259Z",
+   "goal_head": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in th"
+  },
+  {
+   "id": "c633bd70-0385-48a7-82b5-907295014680",
+   "task": "agent-payment-idempotent-abandonment",
+   "kind": "big",
+   "llm_traces": 86,
+   "created_at": "2026-09-03T03:50:33.769Z",
+   "goal_head": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against https://pour-webcast-voted-newly.try"
+  }
+ ]
+}

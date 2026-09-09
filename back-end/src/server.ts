@@ -55,6 +55,7 @@ import benchmarksRouter from './domains/benchmarks/routes';
 import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
+import plannerMemoryRouter from './domains/planner-memory/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -541,6 +542,7 @@ app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
+app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history table (planner RAG)
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

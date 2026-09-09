@@ -56,6 +56,20 @@ export function applyWorldModelModeInheritance(
   body.world_model_mode = normalizeWorldModelMode(parentWorldModelMode);
 }
 
+/** A sub-agent inherits planner memory from its parent unless explicitly set. */
+export function applyMemoryInheritance(
+  body: CreateAgentBody,
+  parentMemoryEnabled: boolean | null | undefined
+): void {
+  if (
+    body.memory_enabled === undefined &&
+    body.parent_agent_id !== undefined &&
+    typeof parentMemoryEnabled === 'boolean'
+  ) {
+    body.memory_enabled = parentMemoryEnabled;
+  }
+}
+
 /** Simulation is authoritative; never let real-provider cache reads bypass WMH. */
 export function disableFastModeForWorldModel(body: CreateAgentBody): void {
   if (isNonRealWorldModelMode(body.world_model_mode)) body.fast_mode_cache_enabled = false;

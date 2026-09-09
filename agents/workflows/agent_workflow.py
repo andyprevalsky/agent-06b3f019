@@ -48,11 +48,11 @@ with workflow.unsafe.imports_passed_through():
         resolve_fast_cache_goal_activity,
         update_agent_status,
     )
-    from helpers.context_compaction import build_context_compaction_metadata
     from helpers.completion_summary_contract import (
         is_ablated_completion_summary,
         is_raw_tool_envelope,
     )
+    from helpers.context_compaction import build_context_compaction_metadata
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
     from helpers.generation_handoff import should_handoff_to_generation
@@ -621,6 +621,7 @@ class AgentWorkflow:
         # goal that varies run to run). All cache keying threads this, never self.goal.
         self.fast_cache_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
+        self.memory_enabled: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
         # Independent of DEMO cache replay (self.fast_mode_cache_enabled).
         self.provider_fast_mode: bool = True
@@ -841,6 +842,8 @@ class AgentWorkflow:
             self.context_gates = {
                 str(key): value for key, value in state["context_gates"].items() if isinstance(value, bool)
             }
+        if isinstance(state.get("memory_enabled"), bool):
+            self.memory_enabled = state["memory_enabled"]
         self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
@@ -1058,6 +1061,7 @@ class AgentWorkflow:
             "iteration_offset": self.iteration_offset,
             "max_iterations": self.max_iterations,
             "context_gates": dict(self.context_gates),
+            "memory_enabled": bool(getattr(self, "memory_enabled", False)),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
                 "paused_by_parent": self._paused_by_parent,
@@ -1453,6 +1457,7 @@ class AgentWorkflow:
         fast_mode_cache_enabled: bool = False,  # Temporal arg: Fast Mode *button* (LLM speed)
         resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
         world_model_mode: str = "real",  # Per-agent provider/environment execution mode
+        memory_enabled: bool = False,  # Planner memory: get_memories fork from the finalized-run history
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -1483,6 +1488,7 @@ class AgentWorkflow:
         self.provider_fast_mode = bool(fast_mode_cache_enabled)
         self.fast_mode_cache_enabled = is_demo_cache_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
+        self.memory_enabled = bool(memory_enabled)
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"

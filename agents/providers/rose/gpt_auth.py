@@ -394,6 +394,7 @@ def build_codex_responses_body(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -429,6 +430,13 @@ def build_codex_responses_body(
     }
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
+    # Context-only tools legalize forked tool history without being callable:
+    # declared alongside structured output with tool_choice "none".
+    declared_context = _responses_tools(context_tools)
+    if declared_context:
+        responses_tools = [*(responses_tools or []), *declared_context]
+        if not tools:
+            body["tool_choice"] = "none"
     if responses_tools:
         body["tools"] = responses_tools
     if response_format:
@@ -452,6 +460,7 @@ async def gpt_auth_complete(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -469,6 +478,7 @@ async def gpt_auth_complete(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
@@ -557,6 +567,7 @@ async def openai_api_key_complete(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -575,6 +586,7 @@ async def openai_api_key_complete(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,

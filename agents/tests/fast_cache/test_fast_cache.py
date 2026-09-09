@@ -227,26 +227,39 @@ def test_world_model_scope_partitions_simulated_runs(monkeypatch):
     assert normalize.build_key("llm", "goal", "detail") != sim_key
 
 
-def test_canonical_messages_ignore_planner_reference_plans_churn():
-    """Retrieved reference plans drift as the archive grows; they must not key planner replays."""
+def test_canonical_messages_ignore_planner_memory_fork_churn():
+    """Retrieved memories drift as the history table grows; they must not key planner replays."""
 
-    def request(reference_block: str):
+    def request(memory_block: str):
         return {
             "messages": [
                 {"role": "system", "content": "static planner prompt"},
                 {"role": "user", "content": "GOAL: same goal\n\nPlan this goal into tasks."},
-                {"role": "user", "content": reference_block},
+                {
+                    "role": "assistant",
+                    "content": "Checking memories of similar past runs before planning.",
+                    "tool_calls": [
+                        {
+                            "id": "call_getmem_abc",
+                            "type": "function",
+                            "function": {"name": "get_memories", "arguments": '{"query": "same goal", "k": 3}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_getmem_abc", "name": "get_memories", "content": memory_block},
             ]
         }
 
-    with_alpha = request("# Reference Plans\n\n## Reference 1 — similarity 0.80\nGoal: alpha\n- 0 [reasoning] a")
-    with_beta = request("# Reference Plans\n\n## Reference 1 — similarity 0.61\nGoal: beta\n- 0 [spawn_browser_agent] b")
+    with_alpha = request("# Memories of similar past runs\n\n## Memory 1 — PASSED — 2026-09-01 — similarity 0.80\nGoal: alpha")
+    with_beta = request("# Memories of similar past runs\n\n## Memory 1 — PASSED — 2026-09-03 — similarity 0.61\nGoal: beta")
     assert normalize.canonical_messages(with_alpha) == normalize.canonical_messages(with_beta)
     assert normalize.position_request_fingerprint({**with_alpha, "pool": "rose-1-ultra"}) == (
         normalize.position_request_fingerprint({**with_beta, "pool": "rose-1-ultra"})
     )
     # A genuinely different user turn still changes the key.
-    assert normalize.canonical_messages(with_alpha) != normalize.canonical_messages(request("unrelated user turn"))
+    different = request("# Memories of similar past runs\n\nGoal: alpha")
+    different["messages"][1] = {"role": "user", "content": "unrelated user turn"}
+    assert normalize.canonical_messages(with_alpha) != normalize.canonical_messages(different)
 
 
 def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_churn():

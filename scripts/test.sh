@@ -475,6 +475,13 @@ if $SMOKE; then
     fi
     SMOKE_TASK_QUEUE="navi-agent-tasks-${CONDUCTOR_WORKSPACE_NAME}"
     bg_suite "Smoke Benchmarks" bash -c "cd agents && source venv/bin/activate && TEMPORAL_TASK_QUEUE=$SMOKE_TASK_QUEUE ALLOW_TEMPORAL_CLEANUP=true python benchmarks/run_benchmark.py --suite smoke --port $PORT --ci --parallel"
+    # Planner memory A/B: real planner LLM calls, memory off vs on, on 30+
+    # scenarios derived from archived runs (agents/benchmarks/memory_scenarios.json).
+    # Runs against the same local backend; never archives its planner calls.
+    bg_suite "Planner Memory Scenarios (real LLM)" bash -c "cd agents && source venv/bin/activate && TRACE_ARCHIVE_ENABLED=0 python benchmarks/run_memory_scenarios.py --port $PORT --no-open"
+    # Memory compressor on real completed transcripts (one per benchmark task + the
+    # largest completed runs); generic transcript-grounded assertions, reads R2.
+    bg_suite "Planner Memory Compressor (real LLM)" bash -c "cd agents && source venv/bin/activate && TRACE_ARCHIVE_ENABLED=0 python benchmarks/run_memory_compressor_bench.py"
     bg_suite "Frontend Semantic (Playwright)" bash -c "cd front-end && BACKEND_PORT=$SEMANTIC_BACKEND_PORT FRONTEND_PORT=$SEMANTIC_FRONTEND_PORT bash scripts/run-semantic-tests.sh"
     # Steel cloud-browser load-time gate through a real bot wall (Cloudflare
     # Turnstile + reCAPTCHA on order.toasttab.com). Ratchets median time-to-

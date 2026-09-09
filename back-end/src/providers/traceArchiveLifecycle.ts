@@ -1,4 +1,5 @@
 import { createLogger } from './logger';
+import { upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
 import {
   type EncryptedArtifactMetadata,
@@ -468,6 +469,27 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
       refs,
       input.benchmarkTaskName
     );
+    // History table stays in lockstep with the archive: the row is written in
+    // the same finalize that published the bundle (idempotent upsert), so
+    // planner memory never references a bundle that does not exist and never
+    // misses one that does.
+    if (manifest !== null) {
+      const run = encryptedRunMetadata(endFixture);
+      const benchmarkResult = benchmarkResultFromInput(input);
+      await upsertPlannerMemoryFromRun({
+        rootAgentId: input.rootAgentId,
+        userId: endFixture.user_id,
+        goal: typeof run.root_goal === 'string' ? run.root_goal : '',
+        benchmarkTaskName: input.benchmarkTaskName ?? null,
+        rootStatus: typeof run.root_status === 'string' ? run.root_status : null,
+        passed: typeof benchmarkResult?.passed === 'boolean' ? benchmarkResult.passed : null,
+        worldModelMode: normalizedWorldModelMode(input.worldModelMode),
+        agentCreatedAt:
+          typeof run.root_created_at === 'string' || run.root_created_at instanceof Date
+            ? run.root_created_at
+            : null,
+      });
+    }
     log.info('Trace archive finalized', {
       root_agent_id: input.rootAgentId,
       manifest_ref: manifest?.ref ?? null,

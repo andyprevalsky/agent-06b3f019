@@ -471,8 +471,39 @@ def _enforce_planner_context_budget(messages: list[dict[str, Any]]) -> list[dict
     return [goal, notice] + kept_reversed
 
 
+def _planner_tool_declarations(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Assistant tool declarations persisted in message metadata -> OpenAI-shape tool_calls."""
+    metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+    calls: list[dict[str, Any]] = []
+    for call in metadata.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("tool")
+        call_id = call.get("tool_call_id")
+        if not isinstance(name, str) or not name or not isinstance(call_id, str) or not call_id:
+            continue
+        arguments = {k: v for k, v in call.items() if k not in ("tool", "tool_call_id")}
+        calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": _compact_planner_context_text(json.dumps(arguments, default=str, ensure_ascii=False)),
+                },
+            }
+        )
+    return calls
+
+
 def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract conversation context and user messages for the planner.
+
+    Tool history keeps its real roles: assistant declarations become
+    ``tool_calls`` and their results become ``role: tool`` messages paired by
+    tool_call_id (providers that declare no tools flatten these to text, see
+    ``flatten_tool_history_to_text``). Undeclared TOOL/SYSTEM rows are
+    workflow notices and are passed as ``[SYSTEM]:`` user text.
 
     Args:
         context: The workflow context (list of message dicts).
@@ -482,6 +513,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     """
     user_messages: list[str] = []
     base_messages: list[dict[str, Any]] = []
+    declared_calls: dict[str, str] = {}
 
     for msg in context:
         if is_internal_subagent_message(msg):
@@ -491,6 +523,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         text = msg.get("text", "")
         message_id = msg.get("message_id")
         text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
+        metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -507,15 +540,40 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
             except Exception:
                 pass  # Fall through to normal text handling
 
+        if role == "ASSISTANT":
+            tool_calls = _planner_tool_declarations(msg)
+            if not text and not tool_calls:
+                continue
+            assistant: dict[str, Any] = {"role": "assistant", "content": _compact_planner_text(role, text)}
+            if tool_calls:
+                assistant["tool_calls"] = tool_calls
+                for call in tool_calls:
+                    declared_calls[call["id"]] = call["function"]["name"]
+            base_messages.append(assistant)
+            continue
+
         if not text:
             continue
         if role == "USER":
             base_messages.append({"role": "user", "content": _compact_planner_text(role, text)})
-        elif role == "ASSISTANT":
-            base_messages.append({"role": "assistant", "content": _compact_planner_text(role, text)})
-        elif role in ("TOOL", "SYSTEM"):
-            text = _compact_planner_context_text(text)
-            base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
+        elif role == "TOOL":
+            tool_call_id = str(metadata.get("toolCallId") or "")
+            content = _compact_planner_context_text(text)
+            if metadata.get("title"):
+                content = f"{metadata['title']}: {content}"
+            if tool_call_id and tool_call_id in declared_calls:
+                base_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": declared_calls[tool_call_id],
+                        "content": content,
+                    }
+                )
+            else:
+                base_messages.append({"role": "user", "content": f"[SYSTEM]: {content}"})
+        elif role == "SYSTEM":
+            base_messages.append({"role": "user", "content": f"[SYSTEM]: {_compact_planner_context_text(text)}"})
 
     # Prepend goal message
     goal = user_messages[0] if user_messages else DEFAULT_GOAL
@@ -572,6 +630,7 @@ async def run_planner_attempt(
         getattr(workflow_instance, "fast_cache_goal", None)
         or getattr(workflow_instance, "goal", None),
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
+        bool(getattr(workflow_instance, "memory_enabled", False)),  # Planner memory (get_memories fork)
     ]
 
     # Schema generation is now done synchronously at workflow startup so the

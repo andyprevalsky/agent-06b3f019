@@ -18,6 +18,7 @@ import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle'
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
+  applyMemoryInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
@@ -89,6 +90,7 @@ async function startDirectWorkflow(
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
+    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
@@ -160,9 +162,14 @@ async function resolveSubAgentBenchmarkFlag(
   // Only inherit benchmark (and mode flags) from a parent the caller owns —
   // otherwise any UUID would escalate into SMS/WhatsApp transport mocking.
   const parent = await repo.findAgent(body.parent_agent_id, userId);
-  if (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) {
+  if (
+    body.fast_mode_cache_enabled === undefined ||
+    body.world_model_mode === undefined ||
+    body.memory_enabled === undefined
+  ) {
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
+    applyMemoryInheritance(body, parent?.memoryEnabled);
   }
   return !isBenchmark && parent?.isBenchmark === true ? true : isBenchmark;
 }
@@ -214,6 +221,7 @@ export async function createAgent(
     priceLimitCents: resolvePriceLimitCents(body.price_limit_cents),
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
+    memoryEnabled: body.memory_enabled,
     worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
     isBenchmark: benchmarkFlag,
@@ -242,6 +250,7 @@ export async function createAgent(
     status_message: agent.agent.statusMessage,
     temporal_workflow_id: workflowId,
     fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
+    memory_enabled: agent.agent.memoryEnabled,
     world_model_mode: agent.agent.worldModelMode,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,

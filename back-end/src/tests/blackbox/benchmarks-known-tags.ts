@@ -27,6 +27,7 @@ export const KNOWN_TAGS = [
   'single-arm',
   'scale',
   'batch',
+  'fleet-concurrency',
   'needs-auth',
   'auth',
   'auth-anon',
@@ -59,6 +60,10 @@ export const KNOWN_TAGS = [
   'source',
   'response-schema',
   'regression',
+  // Planner-memory A/B tasks terminate after validating the emitted plan.
+  'planner',
+  'memory',
+  'plan-only',
   // Ecommerce / real-world task category slices (see tasks.json).
   'ecommerce',
   'purchase',

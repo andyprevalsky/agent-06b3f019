@@ -88,6 +88,7 @@ export async function startSubAgentWorkflow(
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
     ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
+    ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
     rejectDuplicateWorkflowId: true,
   };
   const execution = await executeDescendantWorkflowStart(

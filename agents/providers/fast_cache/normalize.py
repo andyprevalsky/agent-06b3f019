@@ -71,7 +71,8 @@ _SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 _USER_CONTEXT_PREFIX = "# User Context"
 # Planner reference plans (RAG over the trace archive) are injected as a user
 # message; the retrieved set drifts as the archive grows, so it must not key replays.
-_REFERENCE_PLANS_PREFIX = "# Reference Plans"
+_MEMORY_TOOL_NAME = "get_memories"
+_MEMORY_RESULT_PREFIX = "# Memories of similar past runs"
 _VOLATILE_OBJECT_FIELDS = {
     "agent_id",
     "agentid",
@@ -326,10 +327,8 @@ def _canonicalize_dynamic_user_context(text: str) -> str:
     return f"{_USER_CONTEXT_PREFIX}\n<dynamic-user-context>"
 
 
-def _canonicalize_dynamic_reference_plans(text: str) -> str:
-    if not text.lstrip().startswith(_REFERENCE_PLANS_PREFIX):
-        return text
-    return f"{_REFERENCE_PLANS_PREFIX}\n<dynamic-reference-plans>"
+def _canonicalize_dynamic_memories(text: Any) -> str:
+    return f"{_MEMORY_RESULT_PREFIX}\n<dynamic-memories>"
 
 
 def _canonicalize_package_manager_output(text: str) -> str:
@@ -903,13 +902,11 @@ def canonical_messages(messages: Any) -> str:
                 ):
                     out[k] = val.split(_SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0] + _SYSTEM_PROMPT_DYNAMIC_BOUNDARY
                     continue
-                if (
-                    lk == "content"
-                    and v.get("role") == "user"
-                    and isinstance(val, str)
-                    and val.lstrip().startswith(_REFERENCE_PLANS_PREFIX)
-                ):
-                    out[k] = _canonicalize_dynamic_reference_plans(val)
+                # Planner memory fork: the retrieved memories depend on the live
+                # history table, not on the trajectory, so the tool result must not
+                # perturb the fingerprint (same goal → same key with or without hits).
+                if lk == "content" and v.get("role") == "tool" and v.get("name") == _MEMORY_TOOL_NAME:
+                    out[k] = _canonicalize_dynamic_memories(val)
                     continue
                 # Collapse large base64/image payloads — they're stable but huge.
                 if lk in ("image_url", "data", "source") and isinstance(val, (str, dict)):

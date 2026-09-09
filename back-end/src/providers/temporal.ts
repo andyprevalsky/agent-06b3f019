@@ -235,6 +235,7 @@ export interface StartAgentWorkflowParams {
     shared_files?: boolean;
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
+  memoryEnabled?: boolean; // Optional: planner memory (get_memories fork); arg #19, only sent when true
   worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   workflowId?: string; // Optional preclaimed generation-specific workflow ID
   resumeState?: WorkflowResumeState; // Durable state captured before deployment replacement
@@ -348,6 +349,13 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
   }
   if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {
     args.push(params.worldModelMode);
+  }
+  // Planner memory is #19. Only sent when on so every existing start stays
+  // byte-identical; when on, #17/#18 are filled with their defaults first.
+  if (params.memoryEnabled === true) {
+    if (args.length < 17) args.push(params.resumeState ?? null);
+    if (args.length < 18) args.push(params.worldModelMode ?? 'real');
+    args.push(true);
   }
   return args;
 }
