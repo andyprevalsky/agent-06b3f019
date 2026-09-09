@@ -108,6 +108,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-opus-4-7":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-opus-4-8":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-fable-5":    {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
+    "claude-fable-5-1":  {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
     "claude-haiku-4.5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     "claude-haiku-4-5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
 }

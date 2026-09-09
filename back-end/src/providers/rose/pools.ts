@@ -11,6 +11,9 @@
 
 export type PoolName = 'rose-1-mini' | 'rose-1-lite' | 'rose-1-ultra' | 'rose-1-browser-use';
 
+/** DAG / approval param-populator always uses ultra, even when the parent agent is lite. */
+export const PARAM_POPULATOR_MODEL = 'rose-labs/rose-1-ultra';
+
 export interface PoolSpec {
   name: PoolName;
   /** Anthropic model ID used when a Claude OAuth token is supplied. */
@@ -37,21 +40,18 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
-    claudeAuthModel: 'claude-fable-5',
+    claudeAuthModel: 'claude-fable-5-1',
     gptAuthModel: 'gpt-5.6-sol',
-    // Anthropic dropped from the waterfall: opus-4.8 was both the most
-    // expensive layer ($5/$25 per M) and scored below the models beneath it
-    // (AA intelligence 57.3 vs sol 60.9). Sol leads — highest-scoring model in
-    // the registry on all three AA indices — and kimi-k3 backs it with a
-    // different vendor so one OpenAI-side outage can't drain the waterfall.
+    // claudeAuth is fable 5.1. OpenRouter fable 5.1 is $10/$50 per M vs sol
+    // $2/$10, so the paid waterfall stays sol -> kimi.
     waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
-    claudeAuthModel: 'claude-fable-5',
+    claudeAuthModel: 'claude-fable-5-1',
     gptAuthModel: 'gpt-5.6-sol',
-    // Same reordering as rose-1-ultra; both layers must stay vision-capable
-    // (see VISION_MODELS in agents/providers/rose/transforms.py).
+    // Same claudeAuth + waterfall as rose-1-ultra; both waterfall layers must
+    // stay vision-capable (see VISION_MODELS in agents/providers/rose/transforms.py).
     waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
   },
 };

@@ -85,6 +85,29 @@ function normalizeReasoningEffort(effort?: string): string {
   return effort ?? DEFAULT_REASONING_EFFORT;
 }
 
+function modelRejectsForcedToolChoice(model: string): boolean {
+  // Official Claude API IDs are claude-fable-5-1 / claude-mythos-5-1.
+  // OpenRouter uses a dot (claude-fable-5.1). Do not match leftover Fable 5.
+  const canonical = model.toLowerCase().replace(/\./g, '-');
+  return canonical.includes('claude-fable-5-1') || canonical.includes('claude-mythos-5-1');
+}
+
+function downgradeForcedToolChoiceIfUnsupported(
+  body: Record<string, unknown>,
+  model: string
+): void {
+  if (!modelRejectsForcedToolChoice(model)) return;
+  const tc = body.tool_choice as Record<string, unknown> | undefined;
+  if (!tc || (tc.type !== 'any' && tc.type !== 'tool')) return;
+  const downgraded: Record<string, unknown> = { type: 'auto' };
+  if (tc.type === 'tool') {
+    // Named required_tool used to mean "call this once". Keep that contract
+    // when Fable 5.1 forces the downgrade to auto.
+    downgraded.disable_parallel_tool_use = true;
+  }
+  body.tool_choice = downgraded;
+}
+
 function supportsAnthropicFastMode(model: string): boolean {
   return ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].includes(model);
 }
@@ -253,6 +276,12 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
 
   addToolCacheBreakpoint(body);
 
+  // Fable 5.1 / Mythos 5.1 reject forced tool_choice (400). Official API ID
+  // is claude-fable-5-1. Run this before the thinking conflict so a named
+  // required_tool still becomes auto + disable_parallel_tool_use instead of
+  // a bare auto from the thinking fallback.
+  downgradeForcedToolChoiceIfUnsupported(body, opts.poolSpec.claudeAuthModel);
+
   // Anthropic rejects `thinking` together with a forced (`any`/`tool`)
   // tool_choice. Two resolutions, depending on which constraint matters more:
   //   - Tools synthesized from response_format: structured output requires
@@ -268,7 +297,7 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     }
   }
 
-  // Set effort AFTER applyAnthropicToolConfig (which may drop output_config
+  // Set effort AFTER applyAnthropicToolConfig (which may drop output_config)
   // for json_schema reasons) — effort is always valid regardless of tool mode.
   const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
   oc.effort = normalizeReasoningEffort(opts.effort);

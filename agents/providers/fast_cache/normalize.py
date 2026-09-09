@@ -931,6 +931,31 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
     return build_key("llm", goal, f"{normalize_call_site(call_site)}:c:{sha256(canonical_messages(messages))[:32]}")
 
 
+# claudeAuth pin bumps inside a family must not bust Fast Mode exact keys.
+# Live routing still uses the real id (claude-fable-5-1); only the fingerprint
+# stays on the family pin that wrote the July / Sep-8 warm cache.
+_CLAUDE_AUTH_MODEL_FINGERPRINT_ALIASES = {
+    "claude-fable-5-1": "claude-fable-5",
+}
+
+
+def stable_pool_contract_for_fingerprint(pool_contract: Any) -> Any:
+    """Return a pool_contract whose claudeAuth pin is cache-stable.
+
+    Waterfall / gptAuth changes still participate. A fable 5 → 5.1 pin must
+    keep hitting the exact ``p:N:c:`` row; otherwise get-position falls back
+    to the oldest sibling blob and DAG param-population can replay for_each
+    onto an explore node.
+    """
+    if not isinstance(pool_contract, dict):
+        return pool_contract
+    model = pool_contract.get("claude_auth_model")
+    alias = _CLAUDE_AUTH_MODEL_FINGERPRINT_ALIASES.get(model) if isinstance(model, str) else None
+    if alias is None:
+        return pool_contract
+    return {**pool_contract, "claude_auth_model": alias}
+
+
 def _user_messages_for_position_fingerprint(messages: Any) -> list[Any]:
     """All user-role turns for position LLM keys.
 
@@ -974,7 +999,7 @@ def position_request_fingerprint(request: Any) -> str:
 
     material: dict[str, Any] = {
         "pool": request.get("pool"),
-        "pool_contract": request.get("pool_contract"),
+        "pool_contract": stable_pool_contract_for_fingerprint(request.get("pool_contract")),
         "static_messages": static_messages,
         "user_messages": _user_messages_for_position_fingerprint(messages),
         "tools": request.get("tools"),
@@ -1111,7 +1136,7 @@ def oai_demo_position_request_fingerprint(request: Any) -> str:
 
     material: dict[str, Any] = {
         "pool": request.get("pool"),
-        "pool_contract": request.get("pool_contract"),
+        "pool_contract": stable_pool_contract_for_fingerprint(request.get("pool_contract")),
         "static_messages": static_messages,
         "tools": request.get("tools"),
         "tool_choice": request.get("tool_choice"),

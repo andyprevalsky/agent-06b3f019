@@ -5976,8 +5976,8 @@ async def call_llm_activity(
         extra_user_message: Optional user message appended after building messages.
             Used for param population — prompts the LLM to call a specific tool
             without changing system prompt/tools (preserves cache prefix).
-        required_tool: If set, validates the LLM called this tool. Raises ValueError
-            if the tool is not in the response.
+        required_tool: If set, validates the LLM called this tool exactly once.
+            Raises if the tool is missing, mixed, or returned more than once.
         skip_cache_write: If True, skips the automatic trailing message cache
             breakpoint. Explicit prefix markers are preserved.
         force_backend_context: If True, bypasses process-global pending context

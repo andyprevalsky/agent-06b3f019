@@ -62,6 +62,7 @@ const SONNET_5_PRICE_CHANGE_AT = Date.parse('2026-09-01T00:00:00.000Z');
 // rather than combining usage changes with old provider price changes.
 const MODEL_RATES: Record<string, ModelRates> = {
   'claude-fable-5': anthropic(10, 50),
+  'claude-fable-5-1': anthropic(10, 50),
   'claude-opus-4.8': anthropic(5, 25),
   'claude-opus-4-8': anthropic(5, 25),
   'claude-opus-4.7': anthropic(5, 25),
