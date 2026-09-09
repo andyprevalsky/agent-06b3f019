@@ -2095,7 +2095,7 @@ stale_hub_replacement_finalize_contract() {  # <original-owner-file>
         || fail "replacement Hub never published exact live ownership"
     replacement_pid="$(cloudbench_tracked_owner_value "$replacement_owner" pid)"
     replacement_start="$(cloudbench_tracked_owner_value "$replacement_owner" pid_start)"
-    [ "$replacement_start" != "$original_start" ] \
+    [ "$replacement_pid:$replacement_start" != "$original_pid:$original_start" ] \
         || fail "replacement Hub did not establish a distinct PID birth"
 
     owner_token=11111111111111111111111111111111
