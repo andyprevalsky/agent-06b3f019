@@ -7,14 +7,15 @@ must hit live production (same contract as /deploy Step 13c).
 Exit codes:
   0 — every named task exists and is production_only (names printed, one per line)
   1 — valid catalog, but the batch is not an all-production_only set (or empty)
-  2 — catalog unavailable / invalid JSON (must fail closed, never look like 1)
+  2 — unknown task or invalid catalog (must fail closed, never look like 1)
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
+
+from cloudbench_catalog import CatalogError, index_unified_catalog
 
 # Task names travel through bash word-splitting boundaries; keep the catalog
 # contract restricted to shell-safe tokens (no whitespace / glob metacharacters).
@@ -59,18 +60,10 @@ def main(argv: list[str]) -> int:
         )
         return 2
     try:
-        catalog = json.loads(catalog_path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        by_name = index_unified_catalog(catalog_path)
+    except CatalogError as exc:
         print(f"❌ production-only helper: catalog unreadable ({exc})", file=sys.stderr)
         return 2
-    if not isinstance(catalog, list):
-        print("❌ production-only helper: catalog must be a JSON array", file=sys.stderr)
-        return 2
-    by_name = {
-        row.get("name"): row
-        for row in catalog
-        if isinstance(row, dict) and isinstance(row.get("name"), str)
-    }
     for name in by_name:
         if not _task_name_ok(name):
             print(
@@ -78,8 +71,13 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-    if any(name not in by_name for name in tasks):
-        return 1
+    missing = [name for name in tasks if name not in by_name]
+    if missing:
+        print(
+            f"❌ production-only helper: unknown benchmark task(s): {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return 2
     if not all(by_name[name].get("production_only") is True for name in tasks):
         return 1
     for name in tasks:

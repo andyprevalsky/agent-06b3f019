@@ -5492,6 +5492,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
     assert calls.read_text().splitlines() == [
         "volumes destroy vol_vp2q8xeydwjm79w4 -a bench-app --yes",
         "volumes list -a bench-app --json",
+        "volumes list -a bench-app --json",
     ]
     assert ledger.with_suffix(".log").read_text().splitlines() == [
         "clone name=cloudbench-ff94c207ec984ab8922dfc65 source=871535c0322758 status=1 attempt=1/1",
@@ -5600,8 +5601,8 @@ grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || ex
         assert result.returncode == 0, f"{list_mode}: {result.stderr}{result.stdout}"
         log = calls.read_text()
         assert "destroy-before-record" not in log
-        assert log.count("volumes destroy vol_exactowned -a bench-app --yes") == 3
-        assert log.count("volumes list -a bench-app --json") == 3
+        assert log.count("volumes destroy vol_exactowned -a bench-app --yes") == 6
+        assert log.count("volumes list -a bench-app --json") == 6
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
