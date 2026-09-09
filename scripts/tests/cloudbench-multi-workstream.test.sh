@@ -1977,6 +1977,174 @@ if payload.get("owner_token") != os.environ["OWNER_TOKEN"]:
         || fail "$label POST reached an endpoint without replacement ownership identity"
 }
 
+write_reconciled_provider_audit() {  # <audit> <owner-file> <owner-token> <run-id>
+    local audit="$1" owner_file="$2" owner_token="$3" run_id="$4"
+    local name machine_id source_id
+    local names=(cloudbench-retired-hub-a cloudbench-retired-hub-b)
+    local machine_ids=(a11ce000000001 a11ce000000002)
+    local source_ids=(aaaa0000000001 aaaa0000000001)
+    mkdir -p "$audit/expected-fresh" "$audit/fresh" "$audit/by-machine-id" \
+        "$audit/pool-handoffs" "$audit/claims" \
+        "$WS_A/.context/fleet/runs/$run_id" || return 1
+    : > "$audit/owned-clones.ids"
+    : > "$audit/owned-clones.names"
+    for index in "${!names[@]}"; do
+        name="${names[$index]}"
+        machine_id="${machine_ids[$index]}"
+        source_id="${source_ids[$index]}"
+        cat > "$audit/expected-fresh/$name" <<EOF
+clone_name=$name
+source_machine_id=$source_id
+EOF
+        cat > "$audit/fresh/$name" <<EOF
+version=1
+fleet_owner_token=$owner_token
+run_id=$run_id
+app=${FLEET_BENCH_APP}
+clone_name=$name
+source=fresh-clone
+source_machine_id=$source_id
+machine_id=$machine_id
+volume_id=vol_$machine_id
+disposition=destroyed-verified-absent
+EOF
+        printf '%s\n' "$name" > "$audit/by-machine-id/$machine_id"
+    done
+    cat > "$audit/meta" <<EOF
+version=1
+fleet_owner_token=$owner_token
+run_id=$run_id
+app=${FLEET_BENCH_APP}
+workspace_root=$WS_A
+status=incomplete
+hub_disposition=retained-exact-owner-transfer-required
+hub_owner_file=$owner_file
+hub_owner_token=$(cloudbench_tracked_owner_value "$owner_file" owner_token)
+hub_pid=$(cloudbench_tracked_owner_value "$owner_file" pid)
+hub_pid_start=$(cloudbench_tracked_owner_value "$owner_file" pid_start)
+hub_argv_sha256=$(cloudbench_tracked_owner_value "$owner_file" argv_sha256)
+EOF
+}
+
+finalize_reconciled_provider_audit() {  # <audit> <owner-file> <run-id>
+    local audit="$1" owner_file="$2" run_id="$3"
+    (
+        registry_meta_value() {
+            sed -n "s/^${2}=//p" "$1" 2>/dev/null | head -1
+        }
+        eval "$(FLEET_SRC="$WS_A/scripts/run-bench-fleet" python3 - <<'PY'
+from pathlib import Path
+import os
+
+text = Path(os.environ["FLEET_SRC"]).read_text()
+start = text.index("fleet_audit_finalize_provider_teardown() {")
+end = text.index("\nfleet_audit_finalize_recovered_registry() {", start)
+print(text[start:end])
+PY
+)"
+        FLEET_TEARDOWN_OWNERSHIP_DIR="$audit"
+        OWNED_CLONES_FILE="$audit/owned-clones.ids"
+        OWNED_CLONE_NAMES_FILE="$audit/owned-clones.names"
+        FLEET_OWNER_TOKEN="$(sed -n 's/^fleet_owner_token=//p' "$audit/meta")"
+        RUN_ID="$run_id"
+        APP="$FLEET_BENCH_APP"
+        POOL_CLAIMS_DIR="$audit/claims"
+        GIT_COMMON_DIR="$SANDBOX/.git"
+        ROOT_DIR="$WS_A"
+        RUNS_ROOT="$WS_A/.context/fleet/runs"
+        FLEET_DIR="$RUNS_ROOT/$run_id"
+        CENTRAL_HUB_OWNER_FILE="$owner_file"
+        DASH_BASE="$HUB_PORT_A"
+        PROVISION_POOL=""
+        FLEET_AUDIT_SHARED_ONLY=0
+        FLEET_AUDIT_SHARED_ONLY_REASON=""
+        fleet_audit_finalize_provider_teardown
+    )
+}
+
+stale_hub_replacement_finalize_contract() {  # <original-owner-file>
+    local original_owner="$1" original_pid original_start replacement_owner
+    local replacement_pid replacement_start deadline audit owner_token
+    local reused_owner reused_token reused_birth reused_audit
+    original_pid="$(cloudbench_tracked_owner_value "$original_owner" pid)"
+    original_start="$(cloudbench_tracked_owner_value "$original_owner" pid_start)"
+    cloudbench_terminate_central_hub_owner "$HUB_PORT_A" \
+        "$WS_A/.context/fleet/runs" "$WS_A" "$original_owner" 5 \
+        || fail "could not retire the original exact Hub fixture"
+    wait "$original_pid" 2>/dev/null || true
+    untrack_test_hub_pid "$original_pid"
+    ! cloudbench_pid_matches_start "$original_pid" "$original_start" \
+        || fail "retired Hub fixture still has its original PID birth"
+
+    hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
+        || fail "could not launch the replacement Hub fixture"
+    replacement_owner=""
+    deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        for candidate in "$WS_A/.context/fleet/runs/_hub"/agent-link-server."$HUB_PORT_A".*.owner; do
+            [ -f "$candidate" ] && [ "$candidate" != "$original_owner" ] || continue
+            if cloudbench_central_hub_owner_matches "$HUB_PORT_A" \
+                "$WS_A/.context/fleet/runs" "$WS_A" "$candidate"; then
+                replacement_owner="$candidate"
+                break 2
+            fi
+        done
+        sleep 0.05
+    done
+    [ -n "$replacement_owner" ] \
+        || fail "replacement Hub never published exact live ownership"
+    replacement_pid="$(cloudbench_tracked_owner_value "$replacement_owner" pid)"
+    replacement_start="$(cloudbench_tracked_owner_value "$replacement_owner" pid_start)"
+    [ "$replacement_start" != "$original_start" ] \
+        || fail "replacement Hub did not establish a distinct PID birth"
+
+    owner_token=11111111111111111111111111111111
+    audit="$TMP_ROOT/stale-hub-replacement-audit"
+    write_reconciled_provider_audit "$audit" "$original_owner" "$owner_token" \
+        stale-hub-replacement || fail "could not seed reconciled provider audit"
+    finalize_reconciled_provider_audit "$audit" "$original_owner" \
+        stale-hub-replacement \
+        || fail "provider teardown must finalize after its exact Hub birth retires"
+    [ "$(sed -n 's/^hub_disposition=//p' "$audit/meta")" \
+        = "retired-exact-owner-verified-absent" ] \
+        || fail "retired Hub birth was not terminalized in the provider audit"
+    [ -z "$(find "$audit/claims" -mindepth 1 -print -quit)" ] \
+        || fail "retired-Hub provider audit unexpectedly retained a pool claim"
+    cloudbench_central_hub_owner_matches "$HUB_PORT_A" \
+        "$WS_A/.context/fleet/runs" "$WS_A" "$replacement_owner" \
+        || fail "provider finalization disturbed the replacement Hub"
+
+    # Simulate numeric PID reuse explicitly: the stale authority names the
+    # replacement PID/PGID but an earlier birth. The birth mismatch must retire
+    # only that historical authority and must never signal the live process.
+    reused_token=22222222222222222222222222222222
+    reused_birth="Mon Jan 1 00:00:00 2001"
+    reused_owner="$WS_A/.context/fleet/runs/_hub/agent-link-server.$HUB_PORT_A.$reused_token.owner"
+    sed \
+        -e "s/^owner_token=.*/owner_token=$reused_token/" \
+        -e "s/^pid_start=.*/pid_start=$reused_birth/" \
+        "$replacement_owner" > "$reused_owner"
+    chmod a-w "$reused_owner"
+    ! cloudbench_pid_matches_start "$replacement_pid" "$reused_birth" \
+        || fail "numeric PID-reuse fixture did not establish a birth mismatch"
+    reused_audit="$TMP_ROOT/reused-hub-pid-audit"
+    write_reconciled_provider_audit "$reused_audit" "$reused_owner" "$reused_token" \
+        reused-hub-pid || fail "could not seed reused-PID provider audit"
+    finalize_reconciled_provider_audit "$reused_audit" "$reused_owner" reused-hub-pid \
+        || fail "provider teardown must retire a reused numeric PID by birth identity"
+    [ "$(sed -n 's/^hub_disposition=//p' "$reused_audit/meta")" \
+        = "retired-exact-owner-verified-absent" ] \
+        || fail "reused numeric PID authority was not terminalized by birth"
+    cloudbench_pid_matches_start "$replacement_pid" "$replacement_start" \
+        || fail "reused-PID finalization signaled the live replacement process"
+    cloudbench_central_hub_owner_matches "$HUB_PORT_A" \
+        "$WS_A/.context/fleet/runs" "$WS_A" "$replacement_owner" \
+        || fail "reused-PID finalization changed the live replacement endpoint"
+    chmod u+w "$reused_owner"
+    rm -f "$reused_owner"
+    echo "PASS: retired exact Hub births do not block provider teardown or disturb replacements"
+}
+
 pending_hub_cleanup_contract() {
     local contract_root="$TMP_ROOT/pending-hub-contract"
     local ws="$contract_root/pending-hub-workspace"
@@ -2209,6 +2377,11 @@ kill -0 "$hub_a_pid" 2>/dev/null \
     || fail "PID-reuse hub refusal must leave the live owner untouched"
 mv -f "$hub_owner_a.saved" "$hub_owner_a"
 chmod a-w "$hub_owner_a"
+
+stale_hub_replacement_finalize_contract "$hub_owner_a"
+if [ "${CLOUDBENCH_TEST_STALE_HUB_REPLACEMENT_SELF_TEST:-0}" = "1" ]; then
+    exit 0
+fi
 
 if [ "${CLOUDBENCH_TEST_RESET_HUB_SELF_TEST:-0}" = "1" ]; then
     old_hub_pid="$hub_a_pid"
