@@ -9474,6 +9474,82 @@ case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} 
     assert all("Kernel" not in line and "Steel" not in line for line in psql_lines)
 
 
+@pytest.mark.parametrize(
+    ("database_container", "database_volume"),
+    (
+        ("victoria-db-exact-zero", ""),
+        ("", "victoria-pgdata-exact-zero"),
+        ("victoria-db-exact-zero", "victoria-pgdata-other-zero"),
+        ("victoria-db-wrong-zero", "victoria-pgdata-wrong-zero"),
+    ),
+    ids=(
+        "container-only",
+        "volume-only",
+        "mismatched-labels",
+        "wrong-database-suffix",
+    ),
+)
+def test_zero_allocation_rejects_ambiguous_legacy_database_identity(
+    tmp_path: Path,
+    database_container: str,
+    database_volume: str,
+) -> None:
+    """Legacy labels cannot widen an exact root query to an ambiguous database."""
+    context = tmp_path / "repo" / ".context" / "cloudbench"
+    context.mkdir(parents=True)
+    services = context / "services.json"
+    services.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_mode": True,
+                "worktree": str(tmp_path / "repo"),
+                "status": "stopped",
+                "database": {
+                    "container": database_container,
+                    "volume": database_volume,
+                    "owned_by_run_sh": True,
+                    "use_system_postgres": True,
+                    "name": "victoria_bench_exact_zero",
+                    "runtime_port": 5432,
+                },
+            }
+        )
+        + "\n"
+    )
+    receipt = tmp_path / "zero-allocation.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(GUEST_RECOVERY_SCRIPT),
+            "prove-zero-allocation",
+            "--machine-id",
+            "deadbeef000020",
+            "--guest-run-token",
+            "zero-allocated-token",
+            "--services",
+            str(services),
+            "--run-json",
+            str(context / "run.json"),
+            "--backend-log",
+            str(context / "logs" / "backend.log"),
+            "--quiescence-receipt",
+            str(tmp_path / "quiescence.json"),
+            "--receipt",
+            str(receipt),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert (
+        result.stderr
+        == "ERROR: services evidence has no exact isolated stopped database identity\n"
+    )
+    assert not receipt.exists()
+
+
 def test_system_postgres_services_manifest_omits_inactive_docker_identity(
     tmp_path: Path,
 ) -> None:
