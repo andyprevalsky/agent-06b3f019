@@ -13271,7 +13271,10 @@ def test_script_snapshot_cleanup_uses_sealed_self_identity(tmp_path: Path) -> No
     cleanup = _extract_fleet_function(fleet, "cleanup_owned_script_snapshot() {")
     snapshot = tmp_path / f"cloudbench-scripts.{'a' * 32}"
     snapshot.mkdir()
-    captured = tmp_path / "cleanup-args"
+    shutil.copy2(SCRIPT_SNAPSHOT_OWNER, snapshot / SCRIPT_SNAPSHOT_OWNER.name)
+    ps_shim = tmp_path / "ps"
+    ps_shim.write_text("#!/usr/bin/env bash\nprintf 'drifted-birth\\n'\n")
+    ps_shim.chmod(0o755)
     result = subprocess.run(
         [
             "bash",
@@ -13283,17 +13286,20 @@ CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_TOKEN={"a" * 32}
 CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID_START=sealed-birth
 SCRIPT_SNAPSHOT_OWNER_HELPER=cloudbench-script-snapshot.py
 SCRIPT_SNAPSHOT_ALLOW_TRANSFER=0
-script_snapshot_current_pid_start() {{ printf 'drifted-birth\\n'; }}
-python3() {{ printf '%s\\n' "$*" > "$CAPTURED"; return 0; }}
+script_snapshot_current_pid_start() {{ ps -p $$ -o lstart=; }}
+printf '{{"owner_pid": %s, "owner_pid_start": "sealed-birth", "state": "armed", "token": "%s", "version": 1}}\\n' \
+  "$$" "$CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_TOKEN" \
+  > "$CLOUDBENCH_SCRIPT_SNAPSHOT/.cloudbench-script-snapshot-owner.json"
 {cleanup}
 cleanup_owned_script_snapshot
-grep -Fq -- '--pid-start sealed-birth' "$CAPTURED"
+test ! -e "$CLOUDBENCH_SCRIPT_SNAPSHOT"
 """,
         ],
         env={
             **os.environ,
             "SNAPSHOT": str(snapshot),
-            "CAPTURED": str(captured),
+            "TMPDIR": str(tmp_path),
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
         },
         text=True,
         capture_output=True,

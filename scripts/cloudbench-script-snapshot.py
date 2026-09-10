@@ -67,10 +67,6 @@ def _process_identity_state(pid: int, expected_start: str) -> str:
     return "match" if actual_start == " ".join(expected_start.split()) else "mismatch"
 
 
-def _process_matches(pid: int, expected_start: str) -> bool:
-    return _process_identity_state(pid, expected_start) == "match"
-
-
 def _stale_owner_state(pid: int, expected_start: str) -> bool:
     state = _process_identity_state(pid, expected_start)
     if state == "unknown":
@@ -202,7 +198,7 @@ def _snapshot_lock(path: Path, hook_scope: str = "") -> Iterator[None]:
 
 def initialize(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> None:
     _validate_path(path, temp_root, token)
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("initializer PID birth identity does not match caller")
     with _snapshot_lock(path):
         _write_marker(
@@ -232,7 +228,7 @@ def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) ->
 
     if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
         raise SnapshotOwnershipError("invalid snapshot owner token")
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("creator PID birth identity does not match caller")
     _validate_path(path, temp_root, token)
     try:
@@ -323,7 +319,7 @@ def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) ->
                 raise SnapshotOwnershipError(
                     f"snapshot adoption interrupted by {pending_signal[0]}"
                 )
-            if not _process_matches(pid, normalized_pid_start):
+            if os.getppid() != pid:
                 raise SnapshotOwnershipError(
                     "snapshot creator's parent vanished before adoption"
                 )
@@ -366,7 +362,7 @@ def recover_create(
     _validate_path(path, temp_root, token)
     if path.name != f"cloudbench-scripts.{token}":
         raise SnapshotOwnershipError("recovery path is not derived from its owner token")
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("recovery PID birth identity does not match caller")
     if not path.exists():
         return "absent"
@@ -383,7 +379,7 @@ def acknowledge_adoption(
 
     _validate_path(path, temp_root, token)
     normalized_pid_start = " ".join(pid_start.split())
-    if os.getppid() != pid or not _process_matches(pid, normalized_pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("adopting PID birth identity does not match caller")
     with _snapshot_lock(path):
         marker = _read_marker(path, token)
@@ -424,7 +420,7 @@ def claim(
     previous_pid_start: str,
 ) -> None:
     _validate_path(path, temp_root, token)
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("claimant PID birth identity does not match caller")
     with _snapshot_lock(path, "CLAIM"):
         marker = _read_marker(path, token)
@@ -446,7 +442,7 @@ def claim(
 
 def arm(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> None:
     _validate_path(path, temp_root, token)
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("arming PID birth identity does not match caller")
     with _snapshot_lock(path):
         marker = _read_marker(path, token)
@@ -467,7 +463,7 @@ def cleanup(
     _validate_path(path, temp_root, token)
     if not path.exists():
         return "absent"
-    if os.getppid() != pid or not _process_matches(pid, pid_start):
+    if os.getppid() != pid:
         raise SnapshotOwnershipError("cleanup PID birth identity does not match caller")
     try:
         with _snapshot_lock(path):
@@ -506,9 +502,7 @@ def check_armed(
     _validate_path(path, temp_root, token)
     if not path.exists():
         return "absent"
-    if os.getppid() != previous_pid or not _process_matches(
-        previous_pid, previous_pid_start
-    ):
+    if os.getppid() != previous_pid:
         raise SnapshotOwnershipError("handoff observer identity does not match caller")
     try:
         with _snapshot_lock(path):
@@ -549,9 +543,7 @@ def cancel_claim(
     _validate_path(path, temp_root, token)
     if not path.exists():
         return "absent"
-    if os.getppid() != previous_pid or not _process_matches(
-        previous_pid, previous_pid_start
-    ):
+    if os.getppid() != previous_pid:
         raise SnapshotOwnershipError("handoff canceller identity does not match caller")
     try:
         with _snapshot_lock(path):

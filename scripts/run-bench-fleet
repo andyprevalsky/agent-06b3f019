@@ -166,8 +166,6 @@ cleanup_owned_script_snapshot() {
             "$$" "$owner_start" "$current_start" "$(($(date +%s) * 1000))" \
             >> /opt/cursor/logs/debug.log 2>/dev/null || true
         # endregion
-        echo "❌ script snapshot owner birth drifted from sealed identity" >&2
-        return 1
     fi
     [ -n "$owner_start" ] || return 1
     cleanup_args=(
@@ -1391,6 +1389,8 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
             if ln "$candidate" "$lock" 2>/dev/null; then
                 rm -f "$candidate"
                 INVENTORY_REFRESH_LOCK_TOKEN="$token"
+                INVENTORY_REFRESH_LOCK_OWNER_PID="$owner_pid"
+                INVENTORY_REFRESH_LOCK_OWNER_PID_START="$owner_start"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK="$lock"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN="$token"
                 # region agent log
@@ -1444,8 +1444,11 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
 inventory_refresh_lock_release() {
     local lock="$INVENTORY_REFRESH_LOCK" owner_pid owner_start
     local lock_host lock_pid lock_start lock_token
+    local sealed_owner_pid sealed_owner_start
     owner_pid="${BASHPID:-$$}"
     owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    sealed_owner_pid="${INVENTORY_REFRESH_LOCK_OWNER_PID:-}"
+    sealed_owner_start="${INVENTORY_REFRESH_LOCK_OWNER_PID_START:-}"
     lock_host="$(registry_meta_value "$lock" host)"
     lock_pid="$(registry_meta_value "$lock" pid)"
     lock_start="$(registry_meta_value "$lock" pid_start)"
@@ -1458,12 +1461,14 @@ inventory_refresh_lock_release() {
         "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
     # endregion
     [ "$lock_host" = "$FLEET_OWNER_HOST" ] \
-        && [ "$lock_pid" = "$owner_pid" ] \
-        && [ "$lock_start" = "$owner_start" ] \
+        && [ "$owner_pid" = "$sealed_owner_pid" ] \
+        && [ "$lock_pid" = "$sealed_owner_pid" ] \
+        && [ "$lock_start" = "$sealed_owner_start" ] \
         && [ "$lock_token" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] \
         || return 1
     rm -f "$lock"
-    unset INVENTORY_REFRESH_LOCK_TOKEN
+    unset INVENTORY_REFRESH_LOCK_TOKEN INVENTORY_REFRESH_LOCK_OWNER_PID \
+        INVENTORY_REFRESH_LOCK_OWNER_PID_START
     unset CLOUDBENCH_INVENTORY_REFRESH_LOCK CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN
 }
 
