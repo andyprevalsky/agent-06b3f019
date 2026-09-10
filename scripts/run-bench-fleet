@@ -6347,6 +6347,16 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
+        # region agent log
+        CLOUDBENCH_DEBUG_STATE_EVIDENCE="$state_evidence" \
+            CLOUDBENCH_DEBUG_STATE_KIND="$state_kind" \
+            CLOUDBENCH_DEBUG_STATE_DRIVER="$state_driver" \
+            CLOUDBENCH_DEBUG_STATE_DESCENDANTS="$state_descendants" \
+            CLOUDBENCH_DEBUG_STATE_REASON="$state_reason" \
+            CLOUDBENCH_DEBUG_STATE_BENCH="$bench" \
+            CLOUDBENCH_DEBUG_STATE_MACHINE="$machine_id" \
+            python3 -c 'import json,os,time; p=json.load(open(os.environ["CLOUDBENCH_DEBUG_STATE_EVIDENCE"])); open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"M,N,O","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"exact guest recovery state branch","data":{"bench":os.environ["CLOUDBENCH_DEBUG_STATE_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_STATE_MACHINE"],"kind":os.environ["CLOUDBENCH_DEBUG_STATE_KIND"],"driver":os.environ["CLOUDBENCH_DEBUG_STATE_DRIVER"],"descendants":os.environ["CLOUDBENCH_DEBUG_STATE_DESCENDANTS"],"reason":os.environ["CLOUDBENCH_DEBUG_STATE_REASON"],"servicesStatus":p.get("services_status"),"liveServiceCount":len(p.get("live_service_pids",[])),"backendClosed":p.get("backend_closed"),"runWithinLimit":p.get("run_json",{}).get("within_limit"),"backendWithinLimit":p.get("backend_log",{}).get("within_limit")},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
+        # endregion
         if [ "$quiescence_status" -ne 0 ]; then
             if [ "$state_kind" = "active" ]; then
                 cloudbench_fetch_guest_evidence status_code \
