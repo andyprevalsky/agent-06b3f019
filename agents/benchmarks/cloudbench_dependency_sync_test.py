@@ -7744,7 +7744,7 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
 def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
     tmp_path: Path,
 ) -> None:
-    """Only exact absence retires ownership; accepted pending stays distinct."""
+    """Exact absence, retained terminal deletion, and transition stay distinct."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -7754,8 +7754,8 @@ def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
         )
     )
     cases = {
-        "pending_destroy": (75, 6),
-        "destroyed": (75, 6),
+        "pending_destroy": (74, 1),
+        "destroyed": (74, 1),
         "exact-absent": (0, 1),
         "created": (75, 6),
         "restoring": (75, 6),
@@ -8157,7 +8157,9 @@ FLY() {{
   return 99
 }}
 {reap_helpers}
-reap_volume vol_exact
+reap_status=0
+reap_volume vol_exact || reap_status=$?
+[ "$reap_status" -eq 74 ] || exit 90
 """
     postcondition_result = subprocess.run(
         ["bash", "-c", postcondition_script],
@@ -8170,8 +8172,6 @@ reap_volume vol_exact
     assert postcondition_result.returncode == 0, postcondition_result.stderr + postcondition_result.stdout
     postcondition_log = postcondition_calls.read_text().splitlines()
     assert postcondition_log == [
-        "volumes destroy vol_exact -a bench-app --yes",
-        "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
         "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
@@ -12091,12 +12091,28 @@ ln -s "$OUTSIDE" "$RECORD"
 if recover_registry_audit_only_fresh "$REGISTRY"; then exit 33; fi
 [ ! -e "$UNEXPECTED" ] || exit 34
 
+# Provider-retained deletion is an idempotent terminal state that may strengthen
+# to exact absence, but exact absence can never weaken back to retained identity.
+fleet_audit_update_registry_clone "$REGISTRY" "$CLONE" "$MACHINE" "$VOLUME" \
+  destroyed-provider-retained || exit 42
+[ "$(registry_meta_value "$FRESH" disposition)" = destroyed-provider-retained ] || exit 43
+retained_audit="$(sha256sum "$FRESH" | awk '{{print $1}}')"
+fleet_audit_update_registry_clone "$REGISTRY" "$CLONE" "$MACHINE" "$VOLUME" \
+  destroyed-provider-retained || exit 44
+[ "$(sha256sum "$FRESH" | awk '{{print $1}}')" = "$retained_audit" ] || exit 45
+fleet_audit_update_registry_clone "$REGISTRY" "$CLONE" "$MACHINE" "$VOLUME" \
+  destroyed-verified-absent || exit 46
+[ "$(registry_meta_value "$FRESH" disposition)" = destroyed-verified-absent ] || exit 47
+if fleet_audit_update_registry_clone "$REGISTRY" "$CLONE" "$MACHINE" "$VOLUME" \
+  destroyed-provider-retained; then
+  exit 48
+fi
+[ "$(registry_meta_value "$FRESH" disposition)" = destroyed-verified-absent ] || exit 49
+
 # A terminal audit can never be moved backwards into owned, even when the
 # registry identity itself is exact.
 rm -f "$RECORD"
 printf 'name=%s\nid=%s\nvolume_id=%s\n' "$CLONE" "$MACHINE" "$VOLUME" > "$RECORD"
-sed 's/^disposition=owned$/disposition=destroyed-verified-absent/' "$FRESH" > "$FRESH.tmp"
-mv "$FRESH.tmp" "$FRESH"
 if registry_record_machine_identity "$RECORD" "$CLONE" "$MACHINE" "$VOLUME"; then
   exit 36
 fi

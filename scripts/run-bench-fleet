@@ -1802,7 +1802,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     # so no count of app-wide list absences is a deletion receipt. Poll this
     # exact ID instead and retire ownership only from an exact-ID not-found
     # response. Provider-visible pending_destroy/destroyed states still have an
-    # exact object and therefore retain teardown ownership.
+    # exact object, but they are provider-terminal deletion receipts rather than
+    # absence receipts: Fly intentionally retains soft-deleted identity while
+    # billing and attachment have already ended.
     destroy_capture="$(mktemp "${TMPDIR:-/tmp}/cloudbench-volume-destroy.XXXXXX")" || {
         echo "  ❌ could not allocate bounded response capture for volume $vol; retaining exact ownership" >&2
         return 1
@@ -1854,7 +1856,18 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         fi
         if [ "$lifecycle_rc" -eq 0 ]; then
             case "$state" in
-                created|restoring|waiting_for_detach|scheduling_destroy|recovering|pending_destroy|destroyed) ;;
+                pending_destroy|destroyed)
+                    if [ "$destroy_rc" -eq 0 ]; then
+                        # region agent log
+                        printf '{"hypothesisId":"D","location":"scripts/run-bench-fleet:reap_volume","message":"provider-retained terminal deletion receipt","data":{"volume":"%s","state":"%s","attempt":%s},"timestamp":%s}\n' \
+                            "$vol" "$state" "$i" "$(($(date +%s) * 1000))" \
+                            >> /opt/cursor/logs/debug.log 2>/dev/null || true
+                        # endregion
+                        rm -f "$destroy_capture"
+                        return 74
+                    fi
+                    ;;
+                created|restoring|waiting_for_detach|scheduling_destroy|recovering) ;;
                 *) lifecycle_ambiguous=1 ;;
             esac
         else
@@ -1864,12 +1877,12 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     done
     rm -f "$destroy_capture"
     # Return a distinct non-success state when every mutation was accepted and
-    # every exact lifecycle read remained valid, but provider disappearance has
-    # not converged. Callers performing teardown still fail closed and retain
-    # ownership. Clone provisioning alone may spend its next bounded attempt
-    # because this exact volume remains durably keyed to the current owner.
-    # Neither this state nor a provider-visible terminal lifecycle retires the
-    # owner; only the exact not-found receipt above does.
+    # every exact lifecycle read remained valid, but the volume is still in a
+    # billable/attachable or transitional state. Callers performing teardown
+    # still fail closed and retain ownership. Clone provisioning alone may spend
+    # its next bounded attempt because this exact volume remains durably keyed
+    # to the current owner. Provider-retained terminal deletion returns 74 above;
+    # only exact not-found returns 0.
     if [ "$destroy_accepted" -eq 1 ] && [ "$destroy_ambiguous" -eq 0 ] \
         && [ "$lifecycle_ambiguous" -eq 0 ]; then
         # region agent log
@@ -2178,7 +2191,7 @@ fleet_audit_record_fresh_clone() {  # <clone-name> <source-id-or-empty> <machine
     case "$id" in *[!0-9a-f]*) return 1 ;; esac
     case "$volume_id" in *[!a-zA-Z0-9_-]*) return 1 ;; esac
     case "$disposition" in
-        ownership-pending|owned|transfer-pending-stopped|destroyed-verified-absent|not-allocated-verified|transferred-to-pool-stopped) ;;
+        ownership-pending|owned|transfer-pending-stopped|destroyed-verified-absent|destroyed-provider-retained|not-allocated-verified|transferred-to-pool-stopped) ;;
         *) return 1 ;;
     esac
     [ -d "${record%/*}" ] && [ ! -L "${record%/*}" ] \
@@ -2217,14 +2230,14 @@ fleet_audit_record_fresh_clone() {  # <clone-name> <source-id-or-empty> <machine
     [ -n "$source_id" ] || return 1
     case "$disposition:$id:$volume_id" in
         ownership-pending::|not-allocated-verified::) ;;
-        owned:*:*|destroyed-verified-absent:*:*) [ -n "$volume_id" ] || return 1 ;;
+        owned:*:*|destroyed-verified-absent:*:*|destroyed-provider-retained:*:*) [ -n "$volume_id" ] || return 1 ;;
         transfer-pending-stopped:*:*|transferred-to-pool-stopped:*:*)
             [ -n "$id" ] && [ -n "$volume_id" ] || return 1 ;;
         *) return 1 ;;
     esac
     if [ "$record_existed" = "1" ]; then
         case "$prior_disposition:$disposition" in
-            ownership-pending:owned|ownership-pending:not-allocated-verified|ownership-pending:destroyed-verified-absent|owned:owned|owned:destroyed-verified-absent|owned:transfer-pending-stopped|transfer-pending-stopped:transferred-to-pool-stopped|transfer-pending-stopped:destroyed-verified-absent|destroyed-verified-absent:destroyed-verified-absent|not-allocated-verified:not-allocated-verified|transferred-to-pool-stopped:transferred-to-pool-stopped|transferred-to-pool-stopped:destroyed-verified-absent) ;;
+            ownership-pending:owned|ownership-pending:not-allocated-verified|ownership-pending:destroyed-verified-absent|ownership-pending:destroyed-provider-retained|owned:owned|owned:destroyed-verified-absent|owned:destroyed-provider-retained|owned:transfer-pending-stopped|transfer-pending-stopped:transferred-to-pool-stopped|transfer-pending-stopped:destroyed-verified-absent|transfer-pending-stopped:destroyed-provider-retained|destroyed-provider-retained:destroyed-provider-retained|destroyed-provider-retained:destroyed-verified-absent|destroyed-verified-absent:destroyed-verified-absent|not-allocated-verified:not-allocated-verified|transferred-to-pool-stopped:transferred-to-pool-stopped|transferred-to-pool-stopped:destroyed-verified-absent|transferred-to-pool-stopped:destroyed-provider-retained) ;;
             *) return 1 ;;
         esac
     else
@@ -2328,7 +2341,10 @@ if machine_id and not re.fullmatch(r"[0-9a-f]+", machine_id):
     raise SystemExit(1)
 if volume_id and not re.fullmatch(r"[A-Za-z0-9_-]+", volume_id):
     raise SystemExit(1)
-if disposition not in {"owned", "destroyed-verified-absent", "not-allocated-verified"}:
+if disposition not in {
+    "owned", "destroyed-verified-absent", "destroyed-provider-retained",
+    "not-allocated-verified",
+}:
     raise SystemExit(1)
 if disposition == "owned" and not volume_id:
     raise SystemExit(1)
@@ -2436,11 +2452,32 @@ try:
                 "ownership-pending", "owned"
             }:
                 raise SystemExit(1)
+            allowed_transitions = {
+                ("ownership-pending", "owned"),
+                ("ownership-pending", "not-allocated-verified"),
+                ("ownership-pending", "destroyed-verified-absent"),
+                ("ownership-pending", "destroyed-provider-retained"),
+                ("owned", "owned"),
+                ("owned", "destroyed-verified-absent"),
+                ("owned", "destroyed-provider-retained"),
+                ("transfer-pending-stopped", "destroyed-verified-absent"),
+                ("transfer-pending-stopped", "destroyed-provider-retained"),
+                ("transferred-to-pool-stopped", "destroyed-verified-absent"),
+                ("transferred-to-pool-stopped", "destroyed-provider-retained"),
+                ("destroyed-provider-retained", "destroyed-provider-retained"),
+                ("destroyed-provider-retained", "destroyed-verified-absent"),
+                ("destroyed-verified-absent", "destroyed-verified-absent"),
+                ("not-allocated-verified", "not-allocated-verified"),
+            }
+            if (prior["disposition"], disposition) not in allowed_transitions:
+                raise SystemExit(1)
             machine_id = machine_id or prior["machine_id"]
             volume_id = volume_id or prior["volume_id"]
             if disposition == "not-allocated-verified" and (machine_id or volume_id):
                 raise SystemExit(1)
-            if disposition == "destroyed-verified-absent" and not volume_id:
+            if disposition in {
+                "destroyed-verified-absent", "destroyed-provider-retained",
+            } and not volume_id:
                 raise SystemExit(1)
             if machine_id:
                 try:
@@ -3014,7 +3051,10 @@ for path in (audit / "fresh").iterdir():
         or fields["app"] != app or fields["source"] != "fresh-clone"
         or not re.fullmatch(r"[0-9a-f]+", fields["source_machine_id"])
         or expected_records.get(name) != fields["source_machine_id"]
-        or disposition not in {"destroyed-verified-absent", "not-allocated-verified", "transferred-to-pool-stopped"}
+        or disposition not in {
+            "destroyed-verified-absent", "destroyed-provider-retained",
+            "not-allocated-verified", "transferred-to-pool-stopped",
+        }
     ):
         raise SystemExit(1)
     if disposition == "not-allocated-verified":
@@ -3022,7 +3062,9 @@ for path in (audit / "fresh").iterdir():
             raise SystemExit(1)
     elif disposition == "transferred-to-pool-stopped" and (not machine_id or not volume_id):
         raise SystemExit(1)
-    elif disposition == "destroyed-verified-absent" and not volume_id:
+    elif disposition in {
+        "destroyed-verified-absent", "destroyed-provider-retained",
+    } and not volume_id:
         raise SystemExit(1)
     if volume_id and not re.fullmatch(r"[A-Za-z0-9_-]+", volume_id):
         raise SystemExit(1)
@@ -4324,7 +4366,7 @@ recover_registry_audit_only_fresh() {  # <v2-registry> [exact]; repair audit-bef
             || return 1
         disposition="$(registry_meta_value "$fresh" disposition)"
         case "$disposition" in
-            destroyed-verified-absent|not-allocated-verified|transferred-to-pool-stopped)
+            destroyed-verified-absent|destroyed-provider-retained|not-allocated-verified|transferred-to-pool-stopped)
                 continue
                 ;;
             transfer-pending-stopped)
@@ -4476,7 +4518,7 @@ PY
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|forced>
     local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2"
     local record clone_name id volume_id resolved details detail_status state
-    local actual_name runner_count cleanup_status unresolved=0
+    local actual_name runner_count cleanup_status terminal_disposition unresolved=0
     local legacy_batch_status=0 registry_version
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
@@ -4513,13 +4555,16 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 # inventory unrelated Machines and cannot strengthen identity.
                 echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
                 if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                terminal_disposition=""
+                [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
                 if [ "$cleanup_status" -eq 75 ]; then
                     unresolved=1
                     continue
                 fi
-                [ "$cleanup_status" -eq 0 ] || return 1
+                [ -n "$terminal_disposition" ] || return 1
                 fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
-                    destroyed-verified-absent || return 1
+                    "$terminal_disposition" || return 1
                 rm -f "$record"
                 continue
             fi
@@ -4535,13 +4580,16 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                         # sufficient cleanup authority; global inventory is not.
                         echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
                         if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                        terminal_disposition=""
+                        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+                        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
                         if [ "$cleanup_status" -eq 75 ]; then
                             unresolved=1
                             continue
                         fi
-                        [ "$cleanup_status" -eq 0 ] || return 1
+                        [ -n "$terminal_disposition" ] || return 1
                         fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
-                            destroyed-verified-absent || return 1
+                            "$terminal_disposition" || return 1
                         rm -f "$record"
                         continue
                     fi
@@ -4598,13 +4646,16 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 continue
             fi
             if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            terminal_disposition=""
+            [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+            [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
             if [ "$cleanup_status" -eq 75 ]; then
                 unresolved=1
                 continue
             fi
-            [ "$cleanup_status" -eq 0 ] || return 1
+            [ -n "$terminal_disposition" ] || return 1
             fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
-                destroyed-verified-absent || return 1
+                "$terminal_disposition" || return 1
             rm -f "$record"
             continue
         fi
@@ -4647,22 +4698,18 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
             echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
         fi
         if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+        terminal_disposition=""
+        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
         if [ "$cleanup_status" -eq 75 ]; then
             unresolved=1
             continue
         fi
-        [ "$cleanup_status" -eq 0 ] || return 1
-        # Machine inventory can disappear before its volume destroy becomes
-        # visible. The durable per-owner volume ID is the exact retry authority;
-        # never fall back to an app-global unattached-volume sweep.
-        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
-        if [ "$cleanup_status" -eq 75 ]; then
-            unresolved=1
-            continue
-        fi
-        [ "$cleanup_status" -eq 0 ] || return 1
+        [ -n "$terminal_disposition" ] || return 1
+        # reap_machine already carries the exact Volume through its terminal
+        # lifecycle. A second destroy/read loop cannot strengthen that receipt.
         fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
-            destroyed-verified-absent || return 1
+            "$terminal_disposition" || return 1
         rm -f "$record"
     done
     [ "$unresolved" = "0" ]
@@ -5163,6 +5210,7 @@ recover_one_exact_pool_claim() {  # <claim> <owner-token> <host> <pid> <pid-star
     local claim_path="$1" expected_token="$2" expected_host="$3" expected_pid="$4"
     local expected_start="$5" id="${1##*/}" transfer_state volume_id ledger
     local st presence mounted claim_digest disposition recorded_baseline current_baseline
+    local cleanup_status terminal_disposition
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ -f "$claim_path" ] && [ ! -L "$claim_path" ] || return 1
     claim_digest="$(cloudbench_env_sha256 "$claim_path")" || return 1
@@ -5206,16 +5254,21 @@ recover_one_exact_pool_claim() {  # <claim> <owner-token> <host> <pid> <pid-star
     if [ ! -f "$ledger" ] || [ -z "$current_baseline" ] \
         || [ "$recorded_baseline" != "$current_baseline" ]; then
         [ "$(cloudbench_env_sha256 "$claim_path")" = "$claim_digest" ] || return 1
-        reap_machine "$id" "" "$volume_id" || {
+        cleanup_status=0
+        reap_machine "$id" "" "$volume_id" || cleanup_status=$?
+        terminal_disposition=""
+        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+        if [ -z "$terminal_disposition" ]; then
             echo "❌ dead-claimed pool machine $id could not be destroyed during baseline recovery" >&2
             return 1
-        }
+        fi
         if grep -Fxq "$id" "$ledger" 2>/dev/null; then
             pool_ledger_remove_id_from "$ledger" "$id" || return 1
         fi
         if [ -n "$transfer_state" ]; then
             fleet_audit_update_recovered_transfer "$claim_path" \
-                destroyed-verified-absent || return 1
+                "$terminal_disposition" || return 1
         else
             fleet_audit_update_recovered_pool_machine "$claim_path" \
                 destroyed-removed-from-pool || return 1
@@ -5290,13 +5343,18 @@ recover_one_exact_pool_claim() {  # <claim> <owner-token> <host> <pid> <pid-star
         # volume is still cleanup authority; only provider-confirmed absence of
         # both resources plus ledger removal permits a destroyed disposition.
         [ "$(cloudbench_env_sha256 "$claim_path")" = "$claim_digest" ] || return 1
-        reap_volume "$volume_id" || return 1
+        cleanup_status=0
+        reap_volume "$volume_id" || cleanup_status=$?
+        terminal_disposition=""
+        [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
+        [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
+        [ -n "$terminal_disposition" ] || return 1
         if grep -Fxq "$id" "$ledger" 2>/dev/null; then
             pool_ledger_remove_id_from "$ledger" "$id" || return 1
         fi
         if [ -n "$transfer_state" ]; then
             fleet_audit_update_recovered_transfer "$claim_path" \
-                destroyed-verified-absent || return 1
+                "$terminal_disposition" || return 1
         else
             fleet_audit_update_recovered_pool_machine "$claim_path" \
                 destroyed-removed-from-pool || return 1
@@ -6883,7 +6941,8 @@ for record in (audit / "fresh").iterdir():
         or expected.get(clone_name) != value["source_machine_id"]
         or value["disposition"] not in {
             "ownership-pending", "owned", "transfer-pending-stopped",
-            "destroyed-verified-absent", "not-allocated-verified",
+            "destroyed-verified-absent", "destroyed-provider-retained",
+            "not-allocated-verified",
             "transferred-to-pool-stopped",
         }
         or (machine_id and re.fullmatch(r"[0-9a-f]+", machine_id) is None)
@@ -7157,7 +7216,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
-    local storage_deadline preallocation_failure reap_status
+    local storage_deadline preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
     # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
@@ -7223,9 +7282,12 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                     "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
                 # endregion
                 case "$reap_status" in
-                    0)
+                    0|74)
+                        terminal_disposition=destroyed-verified-absent
+                        [ "$reap_status" -eq 74 ] \
+                            && terminal_disposition=destroyed-provider-retained
                         fleet_audit_update_fresh_clone "$target_name" "" "$target_volume" \
-                            destroyed-verified-absent || return 1
+                            "$terminal_disposition" || return 1
                         fleet_registry_release_name "$target_name" || return 1
                         grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
                         mv "$names_ledger.tmp" "$names_ledger"
@@ -7274,9 +7336,10 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         # a genuinely late-appearing clone is never orphaned.
         #
         # Skip the absent→not-allocated-verified transition when this attempt
-        # already cleaned via the owned-volume path (insufficient-resources after
-        # volume create → destroyed-verified-absent). That disposition cannot
-        # legally move to not-allocated-verified; re-auditing here used to abort
+        # already terminalized via the owned-volume path (insufficient-resources
+        # after volume create). Neither exact-absent nor provider-retained
+        # deletion can legally move to not-allocated-verified; re-auditing here
+        # used to abort
         # the retry loop after attempt 1 and surface as "unresolved clone name"
         # / "provisioning failed (no machine)" under capacity pressure.
         if [ -z "$target_id" ] && [ -z "$target_volume" ]; then
@@ -7347,13 +7410,17 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 if machine_storage_failed "$target_id"; then
                     printf 'clone id=%s snapshot storage entered terminal failed state\n' \
                         "$target_id" >> "$diagnostic_log"
-                    if ! reap_machine "$target_id" "" "$target_volume"; then
+                    reap_status=0
+                    reap_machine "$target_id" "" "$target_volume" || reap_status=$?
+                    terminal_disposition=destroyed-verified-absent
+                    [ "$reap_status" -eq 74 ] \
+                        && terminal_disposition=destroyed-provider-retained
+                    if [ "$reap_status" -ne 0 ] && [ "$reap_status" -ne 74 ]; then
                         echo "❌ failed snapshot clone $target_id could not be reaped; retaining ownership and refusing another allocation" >&2
                         return 1
                     fi
-                    reap_volume "$target_volume" || return 1
                     fleet_audit_update_fresh_clone "$target_name" "$target_id" "$target_volume" \
-                        destroyed-verified-absent || return 1
+                        "$terminal_disposition" || return 1
                     fleet_registry_release_id "$target_id" || return 1
                     grep -Fxv "$target_id" "$ledger" > "$ledger.tmp.$$" 2>/dev/null || true
                     mv "$ledger.tmp.$$" "$ledger"
@@ -7715,6 +7782,7 @@ pool_transfer_claim_registry_contains_id() {  # <claim-path> <machine-id>
 
 reconcile_current_pool_transfer_claims() {
     local claim_path id clone_name record disposition volume_id claim_digest
+    local cleanup_status terminal_disposition
     for claim_path in "$POOL_CLAIMS_DIR"/*; do
         [ -f "$claim_path" ] || continue
         [ "$(registry_meta_value "$claim_path" transfer_state)" = "pending" ] || continue
@@ -7739,12 +7807,20 @@ reconcile_current_pool_transfer_claims() {
                 "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" || return 1
             continue
         fi
-        case "$disposition" in owned|transfer-pending-stopped|destroyed-verified-absent) ;; *) return 1 ;; esac
-        reap_machine "$id" "" "$volume_id" || return 1
+        case "$disposition" in
+            owned|transfer-pending-stopped|destroyed-provider-retained|destroyed-verified-absent) ;;
+            *) return 1 ;;
+        esac
+        cleanup_status=0
+        reap_machine "$id" "" "$volume_id" || cleanup_status=$?
+        terminal_disposition=destroyed-verified-absent
+        [ "$cleanup_status" -eq 74 ] \
+            && terminal_disposition=destroyed-provider-retained
+        [ "$cleanup_status" -eq 0 ] || [ "$cleanup_status" -eq 74 ] || return 1
         pool_ledger_remove_id "$id" || return 1
-        if [ "$disposition" != "destroyed-verified-absent" ]; then
+        if [ "$disposition" != "$terminal_disposition" ]; then
             fleet_audit_update_fresh_clone "$clone_name" "$id" "$volume_id" \
-                destroyed-verified-absent || return 1
+                "$terminal_disposition" || return 1
         fi
         pool_claim_release_exact "$claim_path" "$claim_digest" "$FLEET_OWNER_TOKEN" \
             "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" || return 1
@@ -8511,7 +8587,7 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}"
     local id claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
-    local claim_digest
+    local claim_digest machine_reap_status
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
     ec="$result_ec"
     export -n machines 2>/dev/null || true
@@ -8607,8 +8683,16 @@ cleanup() {
                 }
                 pool_volume_id="$(registry_meta_value \
                     "$FLEET_TEARDOWN_OWNERSHIP_DIR/pool/$id" volume_id)"
-                if [ -n "$pool_volume_id" ] \
-                    && reap_machine "$id" "" "$pool_volume_id"; then
+                machine_reap_status=1
+                if [ -n "$pool_volume_id" ]; then
+                    if reap_machine "$id" "" "$pool_volume_id"; then
+                        machine_reap_status=0
+                    else
+                        machine_reap_status=$?
+                    fi
+                fi
+                if [ "$machine_reap_status" -eq 0 ] \
+                    || [ "$machine_reap_status" -eq 74 ]; then
                     if pool_ledger_remove_id "$id" \
                         && fleet_audit_record_pool_machine "$id" "$pool_volume_id" \
                             destroyed-removed-from-pool \
@@ -9908,7 +9992,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_log="$1/worker-$2.cleanup.log"
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
     local claim_token claim_line claim_pid claim_owner claim_started
-    local machine_reap_status=-1
+    local machine_reap_status=-1 terminal_disposition
     claim_token="$self_pid.$(date +%s).$RANDOM"
     local now age attempt=0 claimed=0
     local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
@@ -9975,7 +10059,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
             machine_reap_status=0
         else
             machine_reap_status=$?
-            rc=1
+            [ "$machine_reap_status" -eq 74 ] || rc=1
         fi
     fi
     # region agent log
@@ -9983,9 +10067,13 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         CLOUDBENCH_DEBUG_REAP_STATUS="$machine_reap_status" CLOUDBENCH_DEBUG_CLEANUP_STATUS="$rc" \
         python3 -c 'import json,os,time; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"C,D","location":"scripts/run-bench-fleet:cleanup_failed_worker","message":"failed worker machine cleanup result","data":{"machine":os.environ["CLOUDBENCH_DEBUG_MACHINE"],"volume":os.environ["CLOUDBENCH_DEBUG_VOLUME"],"machineReapStatus":int(os.environ["CLOUDBENCH_DEBUG_REAP_STATUS"]),"cleanupStatus":int(os.environ["CLOUDBENCH_DEBUG_CLEANUP_STATUS"])},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
     # endregion
-    [ "$rc" = "0" ] && reap_volume "$volume_id" || rc=1
+    terminal_disposition=destroyed-verified-absent
+    [ "$machine_reap_status" -eq 74 ] \
+        && terminal_disposition=destroyed-provider-retained
+    # reap_machine already carries the exact Volume through its terminal
+    # lifecycle. A second destroy/read loop cannot strengthen that receipt.
     [ "$rc" = "0" ] \
-        && fleet_audit_update_fresh_clone_by_id "$cleanup_wid" destroyed-verified-absent \
+        && fleet_audit_update_fresh_clone_by_id "$cleanup_wid" "$terminal_disposition" \
         || rc=1
     [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
 
