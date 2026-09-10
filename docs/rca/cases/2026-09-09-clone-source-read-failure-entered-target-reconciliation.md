@@ -45,6 +45,9 @@ sources:
   - commit 78fb850cc
   - commit 1fa5a12fc
   - commit 9c8e414d9
+  - commit 59a52e554
+  - commit 7af3750c2
+  - commit c400e3600
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -986,6 +989,52 @@ explicit zero-proof attempt. Exact database and root/tree queries remain bounded
 to one owner-recorded guest and one root tree; there is no inventory, sweep,
 fan-in, global poller, shared row, lock, channel, or subscription.
 
+## Thirteenth recurrence on 2026-09-10
+
+The full dependency-sync suite intermittently failed
+`test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack` after
+the authenticated `/shutdown-health` endpoint returned HTTP 204. The exact
+cleanup status was `clean`, the token-bound acknowledgement matched, but
+`cloudbench-driver.state` was still `running`. A later focused pass recorded
+the boot supervisor publishing `exited`, proving that terminal state was
+delayed rather than permanently absent.
+
+The critical path was:
+
+driver receives shutdown → runner completes canonical cleanup → driver
+publishes exact cleanup acknowledgement → driver trap returns → boot supervisor
+reaps the driver and appends terminal evidence → boot atomically publishes
+`driver.state=exited` → status service reports terminal shutdown.
+
+The first bad boundary was `scripts/cloudbench-status-server.py`: both repeated
+`POST /shutdown` and `GET /shutdown-health` returned 204 from the cleanup token
+alone, before the independent driver lifecycle reached `exited`. This allowed
+the controller to treat a still-running exact guest as terminal. The deepest
+owned cause is the same lifecycle-contract inconsistency as the seventh
+recurrence: cleanup completion and driver termination are distinct evidence,
+but the status service collapsed them into one terminal response.
+
+The deterministic pre-fix command was
+`bash scripts/tests/cloudbench-status-service-shutdown.test.sh`. Its exact-token
+driver published the cleanup acknowledgement and remained live in
+`state=running`; repeated POST returned 204 with
+`cleanup acknowledgement terminalized POST for a running driver`. Before the
+test was ordered to check POST first, the same fixture failed GET with
+`cleanup acknowledgement terminalized a running driver (HTTP 204)`.
+Instrumentation recorded `driverState=running` at the 204 boundary.
+
+The status service now returns 202 while an exact acknowledgement coexists with
+`booting` or `running`, 503 for an invalid acknowledged state, and 204 only when
+the exact token and `driver.state=exited` both hold. One shared state reader is
+used by POST, shutdown health, and driver health. The unchanged production boot
+regression and deterministic status-service regression pass; post-fix logs
+record `running` followed by `exited`, with 204 only at the latter. The complete
+dependency-sync and multi-workstream lifecycle suites pass.
+
+At 10,000 agents this adds one O(1) local state-file read per shutdown request.
+It adds no provider inventory, polling loop, shared row, lock, channel,
+subscription, or cross-agent fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1075,6 +1124,11 @@ zero-allocation proof rooted in each exact run's durable run/backend evidence.
 They prohibited absence assumptions, weakened exact-owner semantics, changes to
 task definitions/timeouts/concurrency, and touching out-of-owner resources; they
 retained ownership of the precise live rerun.
+
+For the thirteenth recurrence, the user required every surfaced lifecycle
+failure to be fixed, an unchanged failing-before/passing-after regression,
+full relevant suites, no timeout or benchmark-definition changes, and terminal
+semantics that remain bounded and exact-owner scoped.
 
 ## Reusable lesson
 

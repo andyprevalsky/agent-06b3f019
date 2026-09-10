@@ -20,8 +20,12 @@ tags:
   - process-identity
 sources:
   - commit e9ce394585db709669f6bae68e578a85624bb434
+  - commit fe99d86f6
+  - commit 6e95c1e6e
+  - commit 6b01c7483
   - fleet run 20260909-170812-4093151
   - fleet run 20260909-170832-4093685
+  - fleet run capability-stability-20260910105116-2670724
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -101,6 +105,41 @@ comparison, no per-agent query, channel, poller, lock, provider call, or shared
 mutable row. Nested canaries share one read-only sealed bundle while one process
 retains cleanup ownership.
 
+## Recurrence on 2026-09-10
+
+Capability proof `capability-stability-20260910105116-2670724` reached failed
+canary cleanup and again printed
+`script snapshot owner birth drifted from sealed identity`. This time the
+nested-owner normalization was already present; the remaining cleanup path
+still re-read its own formatted birth at EXIT and allowed that fresh value to
+override the PID birth sealed in the owner marker and environment.
+
+The unchanged pre-fix command was:
+
+`agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_script_snapshot_cleanup_uses_sealed_self_identity`.
+
+It held marker PID, token, and sealed birth constant, changed only the fresh
+EXIT-time `ps` value to `drifted-birth`, and failed before invoking guarded
+cleanup. After the fix, NDJSON recorded the intentional mismatch while the
+helper received the sealed birth, matched the exact marker/caller PID, and
+removed the snapshot.
+
+The first implementation removed every helper-side birth probe. The full
+dependency suite then failed
+`test_script_snapshot_unknown_transferee_identity_never_authorizes_deletion`:
+with a live claimant whose second identity probe was unreadable, cleanup
+returned `transferred`. Instrumentation proved the only probe targeted the
+claimant and succeeded because the current observer probe had been removed.
+The corrected fix trusts sealed identity only for exact self cleanup. Claim,
+arm, transfer, and handoff boundaries still verify current PID birth, and an
+unknown transferee remains fail-closed. The focused four-test set and complete
+lifecycle suite pass.
+
+This is a recurrence because the earlier guard established sealed PID-birth
+ownership but left one second source of self identity at cleanup. At 10,000
+agents the correction remains O(1) per snapshot boundary with no provider call,
+global scan, shared lock, channel, subscription, or fan-in.
+
 ## Human feedback
 
 The user required runtime evidence plus an unchanged red/green owning-boundary
@@ -108,6 +147,11 @@ repro, a general nested-control ownership fix that preserves immutable execution
 and the ownership guard, permanent coverage in the existing cloudbench/fleet
 path, no paid fleet rerun, removal of all debug instrumentation, and no commit
 or push. The parent owns the exact live fleet outcome proof.
+
+For the recurrence, the user required exact live evidence, a deterministic
+birth-drift regression, preservation of unknown-transferee fail-closed safety,
+no benchmark/timeout/concurrency changes, full lifecycle verification, and
+instrumentation retention until the exact acceptance proof is confirmed.
 
 ## Reusable lesson
 
