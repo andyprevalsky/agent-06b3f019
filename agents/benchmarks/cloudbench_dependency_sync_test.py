@@ -8588,6 +8588,249 @@ recover_exact_stale_fleet_owner {owner}
     assert calls.read_text().splitlines()[:2] == ["audit-recovery", "provider-reap"]
 
 
+def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
+    tmp_path: Path,
+) -> None:
+    """Fallback reads the retained guest's real /data layout before proxy release."""
+    fleet = FLEET_SCRIPT.read_text()
+    signatures = (
+        "registry_meta_value() {",
+        "fleet_registry_build_guest_recovery_plan() {",
+        "cloudbench_fsync_directory() {",
+        "cloudbench_publish_guest_shutdown_confirmation() {",
+        "cloudbench_confirm_guest_shutdowns() {",
+        "cloudbench_recover_guest_cleanup_receipts() {",
+        "cleanup_stale_owner_recovery_proxies() {",
+        "fleet_recovery_reconnect_guest_shutdowns() {",
+    )
+    extracted = []
+    for signature in signatures:
+        if signature == "fleet_registry_build_guest_recovery_plan() {":
+            start = fleet.index(signature)
+            end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+            extracted.append(fleet[start:end])
+        else:
+            extracted.append(_extract_fleet_function(fleet, signature))
+    functions = "\n".join(extracted)
+
+    owner = "6b" * 16
+    retained_run_id = "20260910-021331-1465409"
+    bench = "polar-odysseys-b1bd700090c2"
+    machine_id = "deadbeef000019"
+    clone_name = "cloudbench-retained-owner"
+    guest_token = "retained-guest-token"
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    workspace_root = tmp_path / "rose-polar-streak-main"
+    runs_root = (
+        workspace_root
+        / ".context"
+        / "fleet"
+        / "capability-stability-proof"
+        / "capability-stability-20260910021331-1465395"
+        / "runs"
+    )
+    output = runs_root / retained_run_id / bench
+    output.mkdir(parents=True)
+    (output / ".cid").write_text(f"clone {machine_id}\n")
+    (output / "status-proxy.port").write_text("19813\n")
+    (clones / clone_name).write_text(
+        f"name={clone_name}\nid={machine_id}\nvolume_id=vol_retained_owner\n"
+    )
+    (clones / "cloudbench-volume-only").write_text(
+        "name=cloudbench-volume-only\nvolume_id=vol_retained_only\n"
+    )
+    (registry / "meta").write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=99999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        f"run_id={retained_run_id}\n"
+        f"workspace_root={workspace_root}\n"
+        f"runs_root={runs_root}\n"
+        f"audit_dir={tmp_path / 'audits' / owner}\n"
+        f"owned_ids_file={tmp_path / 'audits' / owner / 'owned-clones.ids'}\n"
+        f"owned_names_file={tmp_path / 'audits' / owner / 'owned-clones.names'}\n"
+        "cleanup_policy=retain\n"
+    )
+    (registry / "guest-cleanup-unconfirmed").touch()
+    helper = tmp_path / "exact-cleanup-helper"
+    helper.write_text(
+        """#!/usr/bin/env bash
+set -eu
+command="$1"
+shift
+receipt=""
+run_json=""
+backend_log=""
+quiescence=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --receipt) receipt="$2"; shift 2 ;;
+    --run-json) run_json="$2"; shift 2 ;;
+    --backend-log) backend_log="$2"; shift 2 ;;
+    --quiescence-receipt) quiescence="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$command" in
+  cleanup-provider-sessions)
+    [ -s "$run_json" ] && [ -s "$backend_log" ] && [ -s "$quiescence" ]
+    printf '{"kind":"fixture-exact-provider-cleanup"}\n' > "$receipt"
+    ;;
+  validate-recovery-receipt)
+    [ -s "$receipt" ]
+    ;;
+  *) exit 97 ;;
+esac
+"""
+    )
+    helper.chmod(0o755)
+    guest_helper = tmp_path / "guest-recovery-helper"
+    guest_helper.write_text("#!/usr/bin/env python3\n")
+    calls = tmp_path / "calls"
+    authorized = tmp_path / "authorized"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_REGISTRY_PUBLISHED=0
+KEEP_CLONES=0
+RUN_ID=outer-controller-run
+CLOUDBENCH_BARRIER_TOKEN=outer-controller-token
+CLOUDBENCH_CHILD_TERM_SECONDS=1
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(helper))}
+GUEST_RECOVERY_HELPER={shlex.quote(str(guest_helper))}
+AUTOSCALER_PORT_LEASE_HELPER=/unused
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
+CALLS={shlex.quote(str(calls))}
+AUTHORIZED={shlex.quote(str(authorized))}
+_agent_stale_owner_debug_log() {{ :; }}
+registry_machine_details() {{ printf 'started {clone_name} fdaa::119\\n'; }}
+machine_guest_recovery_configuration() {{
+  printf 'retained-barrier-token\\t{guest_token}\\t8011\\n'
+}}
+claim_recovery_status_proxy_ports() {{ printf '62019\\n' > "$1"; }}
+release_recovery_status_proxy_ports() {{ printf 'release\\n' >> "$CALLS"; }}
+start_data_plane_proxy() {{
+  sleep 60 &
+  printf -v "$5" '%s' "$!"
+}}
+cloudbench_terminate_and_wait() {{
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+FLY() {{ printf 'fly %s\\n' "$*" >> "$CALLS"; }}
+curl() {{
+  local method=GET output_file="" authorization="" maximum="" url="" arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      -X) method="$1"; shift ;;
+      -o) output_file="$1"; shift ;;
+      -H)
+        case "$1" in Authorization:*) authorization="$1" ;; esac
+        shift
+        ;;
+      --max-filesize) maximum="$1"; shift ;;
+      http://*) url="$arg" ;;
+    esac
+  done
+  printf 'curl method=%s auth=%s max=%s url=%s\\n' \
+    "$method" "$authorization" "$maximum" "$url" >> "$CALLS"
+  case "$url" in
+    */shutdown) printf 500 ;;
+    */cloudbench-interrupt-cleanup-{guest_token}.status)
+      [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
+      [ "$maximum" = 65536 ] || {{ printf 413; return; }}
+      printf 404
+      ;;
+    */cloudbench-guest-quiescence-{guest_token}.json)
+      [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
+      [ "$maximum" = 1048576 ] || {{ printf 413; return; }}
+      printf '{{"schema_version":"cloudbench-guest-quiescence-v1"}}\\n' > "$output_file"
+      printf 200
+      ;;
+    */repo/.context/cloudbench/run.json)
+      [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
+      [ "$maximum" = 536870912 ] || {{ printf 413; return; }}
+      printf '{{"tasks":[{{"name":"{bench}","agent_id":"11111111-2222-4333-8444-555555555555"}}]}}\\n' > "$output_file"
+      printf 200
+      ;;
+    */repo/.context/cloudbench/logs/backend.log)
+      [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
+      [ "$maximum" = 536870912 ] || {{ printf 413; return; }}
+      printf 'exact root 11111111-2222-4333-8444-555555555555 sessionId=kernel-session-exact\\n' > "$output_file"
+      printf 200
+      ;;
+    *) printf 404 ;;
+  esac
+}}
+fleet_registry_confirm_guest_teardown() {{
+  [ "$(cat {shlex.quote(str(output / 'guest-shutdown.confirmed'))})" = {retained_run_id} ] || return 96
+  touch "$AUTHORIZED"
+}}
+{functions}
+
+fleet_recovery_reconnect_guest_shutdowns {shlex.quote(str(registry))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert authorized.exists()
+    assert (output / "guest-cleanup.quiescence.json").is_file()
+    assert (output / "guest-cleanup.run.json").is_file()
+    assert (output / "guest-cleanup.backend.log").is_file()
+    assert not list(output.glob("guest-cleanup.*.tmp.*"))
+    call_lines = calls.read_text().splitlines()
+    assert any(
+        line.endswith(f"/cloudbench-interrupt-cleanup-{guest_token}.status")
+        for line in call_lines
+    )
+    assert any(
+        line.endswith(f"/cloudbench-guest-quiescence-{guest_token}.json")
+        for line in call_lines
+    )
+    assert all(
+        f"/repo/.context/cloudbench/cloudbench-interrupt-cleanup-{guest_token}.status"
+        not in line
+        for line in call_lines
+    )
+    assert all(
+        f"/data/cloudbench-guest-quiescence-{guest_token}.json" not in line
+        for line in call_lines
+    )
+    evidence_fetches = [
+        line
+        for line in call_lines
+        if line.startswith("curl ") and "/shutdown" not in line
+    ]
+    assert evidence_fetches
+    assert all(
+        "auth=Authorization: Bearer retained-barrier-token" in line
+        for line in evidence_fetches
+    )
+    assert call_lines[-1] == "release"
+
+
 def test_runner_cleanup_receipt_recovery_rejects_incomplete_evidence(
     tmp_path: Path,
 ) -> None:
