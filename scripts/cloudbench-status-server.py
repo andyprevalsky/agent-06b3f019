@@ -79,6 +79,7 @@ def main() -> int:
         f"/cloudbench-interrupt-cleanup-{run_token}.status": MAX_RECOVERY_RECEIPT_BYTES,
         f"/cloudbench-guest-quiescence-{run_token}.json": MAX_RECOVERY_STATE_BYTES,
         f"/cloudbench-guest-state-{run_token}.json": MAX_RECOVERY_STATE_BYTES,
+        f"/cloudbench-zero-allocation-{run_token}.json": MAX_RECOVERY_STATE_BYTES,
         "/repo/.context/cloudbench/run.json": MAX_RECOVERY_RUN_BYTES,
         "/repo/.context/cloudbench/logs/backend.log": MAX_RECOVERY_RUN_BYTES,
     }

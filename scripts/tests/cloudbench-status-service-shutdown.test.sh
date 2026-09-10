@@ -77,6 +77,8 @@ printf '{"state":"quiesced"}\n' \
     > "$tmp/cloudbench-guest-quiescence-$run_token.json"
 printf '{"state":"active"}\n' \
     > "$tmp/cloudbench-guest-state-$run_token.json"
+printf '{"root_disposition":"database-absent"}\n' \
+    > "$tmp/cloudbench-zero-allocation-$run_token.json"
 printf '{"tasks":[]}\n' > "$tmp/repo/.context/cloudbench/run.json"
 printf 'bounded backend evidence\n' \
     > "$tmp/repo/.context/cloudbench/logs/backend.log"
@@ -84,6 +86,7 @@ recovery_paths=(
     "/cloudbench-interrupt-cleanup-$run_token.status"
     "/cloudbench-guest-quiescence-$run_token.json"
     "/cloudbench-guest-state-$run_token.json"
+    "/cloudbench-zero-allocation-$run_token.json"
     "/repo/.context/cloudbench/run.json"
     "/repo/.context/cloudbench/logs/backend.log"
 )

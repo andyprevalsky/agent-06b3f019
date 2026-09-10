@@ -27,6 +27,7 @@ SAFE_AGENT = re.compile(
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RUNNER_FIELDS = {"version", "token", "state"}
 SCHEMA = "cloudbench-guest-cleanup-recovery-v1"
+ZERO_QUERY_SCHEMA = "cloudbench-guest-zero-allocation-v1"
 
 
 class CleanupEvidenceError(RuntimeError):
@@ -271,7 +272,7 @@ def steel_response_sessions(text: str) -> list[str]:
     return session_ids
 
 
-def parse_session_evidence(path: Path, root_agent_id: str) -> tuple[dict[str, list[str]], str]:
+def read_backend_evidence(path: Path, root_agent_id: str) -> tuple[str, str]:
     payload = read_bytes(path)
     try:
         text = ANSI.sub("", payload.decode("utf-8"))
@@ -279,43 +280,102 @@ def parse_session_evidence(path: Path, root_agent_id: str) -> tuple[dict[str, li
         raise CleanupEvidenceError("backend log is not UTF-8") from error
     if root_agent_id not in text:
         raise CleanupEvidenceError("backend log is not bound to the exact root agent")
+    return text, sha256_bytes(payload)
 
+
+def collect_session_evidence(
+    text: str,
+) -> tuple[dict[str, list[str]], int, int]:
     sessions: dict[str, set[str]] = {"kernel": set(), "steel": set()}
+    allocation_event_count = 0
     kernel_markers = (
         "Created Kernel browser session",
         "Reset restored Kernel profile tabs",
         "Failed to evict invalid Kernel session",
     )
     for marker in kernel_markers:
-        for session_id in kernel_marker_sessions(text, marker):
+        marker_sessions = kernel_marker_sessions(text, marker)
+        allocation_event_count += len(marker_sessions)
+        for session_id in marker_sessions:
             add_session(sessions, "kernel", session_id)
-    for match in re.finditer(
+    kernel_failures = list(
+        re.finditer(
         r"Kernel session ([A-Za-z0-9_-]+) failed (?:tab reset|CDP validation)",
         text,
-    ):
+        )
+    )
+    allocation_event_count += len(kernel_failures)
+    for match in kernel_failures:
         add_session(sessions, "kernel", match.group(1))
 
     for line in text.splitlines():
         if "Created Steel session:" not in line:
             continue
+        allocation_event_count += 1
         entry = json_log_entry(line)
         message = str(entry.get("message", "")) if entry is not None else line
         match = re.search(r"Created Steel session:\s*([A-Za-z0-9_-]+)", message)
         if match is None:
             raise CleanupEvidenceError("Created Steel session evidence omitted an exact session id")
         add_session(sessions, "steel", match.group(1))
-    for session_id in steel_response_sessions(text):
+    steel_sessions = steel_response_sessions(text)
+    allocation_event_count += len(steel_sessions)
+    for session_id in steel_sessions:
         add_session(sessions, "steel", session_id)
+    allocation_event_count += sum(
+        text.count(marker)
+        for marker in (
+            "Creating Steel browser session",
+            "Session creation attempt ",
+        )
+    )
 
     parsed = {
         provider: sorted(provider_sessions)
         for provider, provider_sessions in sessions.items()
     }
+    mutation_count = len(
+        re.findall(
+            r"\bmodel=BrowserSession\b[^\n]*\boperation="
+            r"(?:create|update|updateMany|upsert|delete|deleteMany)\b",
+            text,
+        )
+    )
+    return parsed, allocation_event_count, mutation_count
+
+
+def parse_session_evidence(path: Path, root_agent_id: str) -> tuple[dict[str, list[str]], str]:
+    text, payload_sha = read_backend_evidence(path, root_agent_id)
+    parsed, _, _ = collect_session_evidence(text)
     if not parsed["kernel"] and not parsed["steel"]:
         raise CleanupEvidenceError(
             "durable backend evidence contains no exact provider session identity"
         )
-    return parsed, sha256_bytes(payload)
+    return parsed, payload_sha
+
+
+def parse_active_root_agent(text: str) -> str:
+    lines = text.splitlines()
+    create_indices = [
+        index
+        for index, line in enumerate(lines)
+        if "[HTTP] POST /api/agents -> 201" in line
+    ]
+    if not create_indices:
+        raise CleanupEvidenceError("active backend evidence has no successful root creation")
+    first_create = create_indices[0]
+    next_create = create_indices[1] if len(create_indices) > 1 else len(lines)
+    candidates: list[str] = []
+    for line in lines[first_create + 1 : next_create]:
+        match = re.search(r"\bpath=/api/agents/([0-9a-f-]{36})(?:\b|/)", line, re.IGNORECASE)
+        if match is None:
+            continue
+        candidate = match.group(1).lower()
+        if SAFE_AGENT.fullmatch(candidate) is not None:
+            candidates.append(candidate)
+    if not candidates:
+        raise CleanupEvidenceError("active backend evidence has no exact root agent boundary")
+    return candidates[0]
 
 
 def validate_quiescence(
@@ -414,6 +474,301 @@ def publish_manifest(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
+def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    exact_identity = identity(args)
+    payload = read_bytes(Path(args.backend_log))
+    try:
+        text = ANSI.sub("", payload.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise CleanupEvidenceError("backend log is not UTF-8") from error
+    root_agent_id = parse_active_root_agent(text)
+    sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
+    if not sessions["kernel"] and not sessions["steel"]:
+        raise CleanupEvidenceError(
+            "active backend evidence contains no exact provider session identity"
+        )
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-active-exact-manifest",
+        **exact_identity,
+        "root_agent_id": root_agent_id,
+        "sessions": sessions,
+        "evidence": {
+            "backend_log_sha256": sha256_bytes(payload),
+            "allocation_event_count": allocation_event_count,
+            "browser_session_mutation_count": mutation_count,
+        },
+    }
+
+
+def publish_active_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = active_provider_manifest(args)
+    path = Path(args.manifest)
+    if not validate_existing(path, manifest):
+        atomic_json(path, manifest)
+    return manifest
+
+
+def parse_stopped_machine_status(
+    path: Path,
+    machine_id: str,
+    clone_name: str,
+) -> str:
+    payload = read_bytes(path, maximum=1024 * 1024)
+    try:
+        text = ANSI.sub("", payload.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise CleanupEvidenceError("exact Machine status is not UTF-8") from error
+    lines = text.splitlines()
+    top_ids = [
+        line.split(":", 1)[1].strip()
+        for line in lines
+        if line.startswith("Machine ID:")
+    ]
+    top_states = [
+        line.split(":", 1)[1].strip()
+        for line in lines
+        if line.startswith("State:")
+    ]
+    vm_headers = [index for index, line in enumerate(lines) if line.strip() == "VM"]
+    if len(vm_headers) != 1:
+        raise CleanupEvidenceError("exact Machine status has no canonical VM section")
+    start = vm_headers[0] + 1
+    end = next(
+        (
+            index
+            for index in range(start, len(lines))
+            if lines[index].strip() == "Event Logs"
+        ),
+        len(lines),
+    )
+    pairs: dict[str, str] = {}
+    separators: set[str] = set()
+    for line in lines[start:end]:
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"\s*([^=│]+?)\s*(=|│)\s*(.*?)\s*", line)
+        if match is None:
+            raise CleanupEvidenceError("exact Machine status VM row is malformed")
+        key, separator, value = match.groups()
+        if key in pairs:
+            raise CleanupEvidenceError("exact Machine status VM field is duplicated")
+        pairs[key] = value
+        separators.add(separator)
+    if (
+        top_ids != [machine_id]
+        or top_states != ["stopped"]
+        or len(separators) != 1
+        or pairs.get("ID") != machine_id
+        or pairs.get("State") != "stopped"
+        or pairs.get("Name") != clone_name
+    ):
+        raise CleanupEvidenceError("exact Machine is not proven stopped")
+    return sha256_bytes(payload)
+
+
+def stopped_machine_proof(args: argparse.Namespace) -> dict[str, Any]:
+    exact_identity = identity(args)
+    manifest = read_json_object(Path(args.manifest))
+    if manifest != active_provider_manifest(args):
+        raise CleanupEvidenceError("active provider manifest no longer matches sealed evidence")
+    if SAFE_NAME.fullmatch(args.clone_name) is None:
+        raise CleanupEvidenceError("unsafe exact clone name")
+    status_sha = parse_stopped_machine_status(
+        Path(args.machine_status),
+        args.machine_id,
+        args.clone_name,
+    )
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "machine-stopped-proof",
+        **exact_identity,
+        "clone_name": args.clone_name,
+        "state": "stopped",
+        "machine_status_sha256": status_sha,
+        "manifest_sha256": canonical_digest(manifest),
+    }
+
+
+def publish_stopped_machine_proof(args: argparse.Namespace) -> int:
+    value = stopped_machine_proof(args)
+    path = Path(args.stopped_proof)
+    if not validate_existing(path, value):
+        atomic_json(path, value)
+    return 0
+
+
+def validate_stopped_machine_proof(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+) -> str:
+    proof = read_json_object(Path(args.stopped_proof))
+    expected = stopped_machine_proof(args)
+    if proof != expected or proof.get("manifest_sha256") != canonical_digest(manifest):
+        raise CleanupEvidenceError("exact Machine stopped proof is invalid")
+    return canonical_digest(proof)
+
+
+def validate_complete_backend_lifecycle(text: str) -> None:
+    lines = [line for line in text.splitlines() if line.strip()]
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if "[Server] Server started" in line
+    ]
+    shutdowns = [
+        index
+        for index, line in enumerate(lines)
+        if "[Server] SIGTERM received, closing server..." in line
+    ]
+    if (
+        len(starts) != 1
+        or len(shutdowns) != 1
+        or starts[0] >= shutdowns[0]
+        or shutdowns[0] != len(lines) - 1
+    ):
+        raise CleanupEvidenceError(
+            "backend evidence has no complete single-server lifecycle boundary"
+        )
+
+
+def validate_zero_query_proof(
+    args: argparse.Namespace,
+    root_agent_id: str,
+    run_sha: str,
+    backend_sha: str,
+    quiescence_sha: str,
+) -> tuple[dict[str, Any], str]:
+    query_path = Path(args.zero_query_proof)
+    query = read_json_object(query_path, maximum=1024 * 1024)
+    required = {
+        "schema_version",
+        "version",
+        "machine_id",
+        "guest_run_token",
+        "root_agent_id",
+        "root_disposition",
+        "database_name",
+        "database_state",
+        "tree_agent_ids",
+        "browser_sessions",
+        "services_sha256",
+        "run_json_sha256",
+        "backend_log_sha256",
+        "quiescence_receipt_sha256",
+    }
+    quiescence = read_json_object(Path(args.quiescence_receipt), maximum=1024 * 1024)
+    tree = query.get("tree_agent_ids")
+    sessions = query.get("browser_sessions")
+    disposition = query.get("root_disposition")
+    database_state = query.get("database_state")
+    if (
+        set(query) != required
+        or query.get("schema_version") != ZERO_QUERY_SCHEMA
+        or query.get("version") != 1
+        or query.get("machine_id") != args.machine_id
+        or query.get("guest_run_token") != args.guest_run_token
+        or query.get("root_agent_id") != root_agent_id
+        or disposition
+        not in {
+            "database-absent",
+            "root-absent",
+            "root-already-deleted",
+            "deleted-exact-tree",
+        }
+        or database_state not in {"absent", "present"}
+        or not isinstance(query.get("database_name"), str)
+        or SAFE_NAME.fullmatch(query["database_name"]) is None
+        or not isinstance(tree, list)
+        or len(tree) != len(set(tree))
+        or any(
+            not isinstance(agent_id, str) or SAFE_AGENT.fullmatch(agent_id) is None
+            for agent_id in tree
+        )
+        or sessions != []
+        or query.get("services_sha256") != quiescence.get("services_sha256")
+        or query.get("run_json_sha256") != run_sha
+        or query.get("backend_log_sha256") != backend_sha
+        or query.get("quiescence_receipt_sha256") != quiescence_sha
+        or (
+            disposition == "database-absent"
+            and (database_state != "absent" or tree)
+        )
+        or (
+            disposition == "root-absent"
+            and (database_state != "present" or tree)
+        )
+        or (
+            disposition in {"root-already-deleted", "deleted-exact-tree"}
+            and (
+                database_state != "present"
+                or root_agent_id not in tree
+            )
+        )
+    ):
+        raise CleanupEvidenceError(
+            "zero-allocation query proof is not exact, positive, and root-bound"
+        )
+    return query, sha256_bytes(read_bytes(query_path, maximum=1024 * 1024))
+
+
+def zero_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    exact_identity = identity(args)
+    root_agent_id, run_sha = parse_run_identity(Path(args.run_json), args.bench)
+    text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
+    validate_complete_backend_lifecycle(text)
+    sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
+    if sessions["kernel"] or sessions["steel"] or allocation_event_count != 0:
+        raise CleanupEvidenceError(
+            "complete backend evidence contains provider allocation events"
+        )
+    if mutation_count != 0:
+        raise CleanupEvidenceError(
+            "complete backend evidence contains BrowserSession mutations"
+        )
+    quiescence_sha = validate_quiescence(
+        Path(args.quiescence_receipt),
+        args.machine_id,
+        args.guest_run_token,
+        run_sha,
+        backend_sha,
+    )
+    query, query_sha = validate_zero_query_proof(
+        args,
+        root_agent_id,
+        run_sha,
+        backend_sha,
+        quiescence_sha,
+    )
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-zero-manifest",
+        **exact_identity,
+        "root_agent_id": root_agent_id,
+        "sessions": {"kernel": [], "steel": []},
+        "evidence": {
+            "run_json_sha256": run_sha,
+            "backend_log_sha256": backend_sha,
+            "quiescence_receipt_sha256": quiescence_sha,
+            "zero_query_proof_sha256": query_sha,
+            "services_sha256": query["services_sha256"],
+            "allocation_event_count": allocation_event_count,
+            "browser_session_mutation_count": mutation_count,
+        },
+    }
+
+
+def publish_zero_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    manifest = zero_provider_manifest(args)
+    path = Path(args.manifest)
+    if not validate_existing(path, manifest):
+        atomic_json(path, manifest)
+    return manifest
+
+
 def load_env_value(name: str, paths: tuple[Path, ...]) -> str:
     inherited = os.environ.get(name, "").strip()
     if inherited:
@@ -488,7 +843,11 @@ def provider_request(provider: str, session_id: str, env_paths: tuple[Path, ...]
     return status, sha256_bytes(response_body)
 
 
-def validate_provider_receipt(receipt: dict[str, Any], manifest: dict[str, Any]) -> bool:
+def validate_provider_receipt(
+    receipt: dict[str, Any],
+    manifest: dict[str, Any],
+    stopped_proof_sha256: str | None = None,
+) -> bool:
     expected_fields = {
         "schema_version",
         "version",
@@ -503,6 +862,8 @@ def validate_provider_receipt(receipt: dict[str, Any], manifest: dict[str, Any])
         "manifest_sha256",
         "results",
     }
+    if stopped_proof_sha256 is not None:
+        expected_fields.add("stopped_machine_proof_sha256")
     if (
         set(receipt) != expected_fields
         or receipt.get("schema_version") != SCHEMA
@@ -511,6 +872,10 @@ def validate_provider_receipt(receipt: dict[str, Any], manifest: dict[str, Any])
     ):
         return False
     if receipt.get("manifest_sha256") != canonical_digest(manifest):
+        return False
+    if stopped_proof_sha256 is not None and (
+        receipt.get("stopped_machine_proof_sha256") != stopped_proof_sha256
+    ):
         return False
     for field in (
         "fleet_owner_token",
@@ -553,12 +918,20 @@ def validate_provider_receipt(receipt: dict[str, Any], manifest: dict[str, Any])
     return observed == expected
 
 
-def cleanup_provider_sessions(args: argparse.Namespace) -> int:
-    manifest = publish_manifest(args)
+def cleanup_manifest_sessions(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    *,
+    stopped_proof_sha256: str | None = None,
+) -> int:
     receipt_path = Path(args.receipt)
     if receipt_path.exists() or receipt_path.is_symlink():
         existing = read_json_object(receipt_path)
-        if not validate_provider_receipt(existing, manifest):
+        if not validate_provider_receipt(
+            existing,
+            manifest,
+            stopped_proof_sha256,
+        ):
             raise CleanupEvidenceError("existing provider receipt is not exact and complete")
         return 0
 
@@ -584,8 +957,113 @@ def cleanup_provider_sessions(args: argparse.Namespace) -> int:
         "manifest_sha256": canonical_digest(manifest),
         "results": results,
     }
-    if not validate_provider_receipt(receipt, manifest):
+    if stopped_proof_sha256 is not None:
+        receipt["stopped_machine_proof_sha256"] = stopped_proof_sha256
+    if not validate_provider_receipt(
+        receipt,
+        manifest,
+        stopped_proof_sha256,
+    ):
         raise CleanupEvidenceError("provider cleanup results are incomplete")
+    atomic_json(receipt_path, receipt)
+    return 0
+
+
+def cleanup_provider_sessions(args: argparse.Namespace) -> int:
+    return cleanup_manifest_sessions(args, publish_manifest(args))
+
+
+def cleanup_sealed_provider_sessions(args: argparse.Namespace) -> int:
+    manifest = read_json_object(Path(args.manifest))
+    if manifest != active_provider_manifest(args):
+        raise CleanupEvidenceError(
+            "active provider manifest no longer matches sealed evidence"
+        )
+    stopped_proof_sha256 = validate_stopped_machine_proof(args, manifest)
+    return cleanup_manifest_sessions(
+        args,
+        manifest,
+        stopped_proof_sha256=stopped_proof_sha256,
+    )
+
+
+def validate_zero_receipt(
+    receipt: dict[str, Any],
+    manifest: dict[str, Any],
+) -> bool:
+    expected_fields = {
+        "schema_version",
+        "version",
+        "kind",
+        "fleet_owner_token",
+        "fleet_run_id",
+        "bench",
+        "machine_id",
+        "output_dir",
+        "guest_run_token",
+        "root_agent_id",
+        "manifest_sha256",
+        "zero_query_proof_sha256",
+        "allocation_event_count",
+        "browser_session_mutation_count",
+    }
+    evidence = manifest.get("evidence")
+    if (
+        set(receipt) != expected_fields
+        or receipt.get("schema_version") != SCHEMA
+        or receipt.get("version") != 1
+        or receipt.get("kind") != "provider-zero-allocated"
+        or not isinstance(evidence, dict)
+        or receipt.get("manifest_sha256") != canonical_digest(manifest)
+        or receipt.get("zero_query_proof_sha256")
+        != evidence.get("zero_query_proof_sha256")
+        or receipt.get("allocation_event_count")
+        != evidence.get("allocation_event_count")
+        or receipt.get("browser_session_mutation_count")
+        != evidence.get("browser_session_mutation_count")
+        or receipt.get("allocation_event_count") != 0
+        or receipt.get("browser_session_mutation_count") != 0
+    ):
+        return False
+    return all(
+        receipt.get(field) == manifest.get(field)
+        for field in (
+            "fleet_owner_token",
+            "fleet_run_id",
+            "bench",
+            "machine_id",
+            "output_dir",
+            "guest_run_token",
+            "root_agent_id",
+        )
+    )
+
+
+def recover_zero_allocation(args: argparse.Namespace) -> int:
+    manifest = publish_zero_manifest(args)
+    receipt_path = Path(args.receipt)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        if not validate_zero_receipt(read_json_object(receipt_path), manifest):
+            raise CleanupEvidenceError(
+                "existing zero-allocation receipt is not exact and positive"
+            )
+        return 0
+    evidence = manifest["evidence"]
+    receipt: dict[str, Any] = {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-zero-allocated",
+        **identity(args),
+        "root_agent_id": manifest["root_agent_id"],
+        "manifest_sha256": canonical_digest(manifest),
+        "zero_query_proof_sha256": evidence["zero_query_proof_sha256"],
+        "allocation_event_count": evidence["allocation_event_count"],
+        "browser_session_mutation_count": evidence[
+            "browser_session_mutation_count"
+        ],
+    }
+    if not validate_zero_receipt(receipt, manifest):
+        raise CleanupEvidenceError("zero-allocation receipt is incomplete")
     atomic_json(receipt_path, receipt)
     return 0
 
@@ -621,23 +1099,77 @@ def validate_recovery_receipt(args: argparse.Namespace) -> int:
             raise CleanupEvidenceError("runner recovery receipt is not exact and positive")
         return 0
 
+    if receipt.get("kind") == "provider-zero-allocated":
+        if not all(
+            (
+                args.manifest,
+                args.run_json,
+                args.backend_log,
+                args.quiescence_receipt,
+                args.zero_query_proof,
+            )
+        ):
+            raise CleanupEvidenceError(
+                "zero-allocation receipt requires its complete exact evidence"
+            )
+        manifest = read_json_object(Path(args.manifest))
+        if manifest != zero_provider_manifest(args):
+            raise CleanupEvidenceError(
+                "zero-allocation manifest no longer matches exact durable evidence"
+            )
+        if not validate_zero_receipt(receipt, manifest):
+            raise CleanupEvidenceError(
+                "zero-allocation receipt is not exact and positive"
+            )
+        return 0
+
     if receipt.get("kind") != "provider-exact-cleanup":
         raise CleanupEvidenceError("recovery receipt kind is unsupported")
-    if not all(
-        (
-            args.manifest,
-            args.run_json,
-            args.backend_log,
-            args.quiescence_receipt,
-        )
-    ):
+    if not args.manifest:
         raise CleanupEvidenceError(
-            "provider recovery receipt requires its exact manifest and durable evidence"
+            "provider recovery receipt requires its exact manifest"
         )
     manifest = read_json_object(Path(args.manifest))
-    if manifest != provider_manifest(args):
-        raise CleanupEvidenceError("provider manifest no longer matches exact durable evidence")
-    if not validate_provider_receipt(receipt, manifest):
+    stopped_proof_sha256: str | None = None
+    if manifest.get("kind") == "provider-exact-manifest":
+        if not all(
+            (
+                args.run_json,
+                args.backend_log,
+                args.quiescence_receipt,
+            )
+        ):
+            raise CleanupEvidenceError(
+                "provider receipt requires its exact quiescence evidence"
+            )
+        if manifest != provider_manifest(args):
+            raise CleanupEvidenceError(
+                "provider manifest no longer matches exact durable evidence"
+            )
+    elif manifest.get("kind") == "provider-active-exact-manifest":
+        if not all(
+            (
+                args.backend_log,
+                args.clone_name,
+                args.machine_status,
+                args.stopped_proof,
+            )
+        ):
+            raise CleanupEvidenceError(
+                "active provider receipt requires its exact stopped-Machine evidence"
+            )
+        if manifest != active_provider_manifest(args):
+            raise CleanupEvidenceError(
+                "active provider manifest no longer matches exact durable evidence"
+            )
+        stopped_proof_sha256 = validate_stopped_machine_proof(args, manifest)
+    else:
+        raise CleanupEvidenceError("provider manifest kind is unsupported")
+    if not validate_provider_receipt(
+        receipt,
+        manifest,
+        stopped_proof_sha256,
+    ):
         raise CleanupEvidenceError("provider recovery receipt is not exact and complete")
     return 0
 
@@ -664,6 +1196,28 @@ def add_optional_provider_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--backend-log")
     parser.add_argument("--quiescence-receipt")
     parser.add_argument("--manifest")
+    parser.add_argument("--clone-name")
+    parser.add_argument("--machine-status")
+    parser.add_argument("--stopped-proof")
+    parser.add_argument("--zero-query-proof")
+
+
+def add_active_provider_arguments(parser: argparse.ArgumentParser) -> None:
+    add_identity_arguments(parser)
+    parser.add_argument("--backend-log", required=True)
+    parser.add_argument("--manifest", required=True)
+
+
+def add_stopped_provider_arguments(parser: argparse.ArgumentParser) -> None:
+    add_active_provider_arguments(parser)
+    parser.add_argument("--clone-name", required=True)
+    parser.add_argument("--machine-status", required=True)
+    parser.add_argument("--stopped-proof", required=True)
+
+
+def add_zero_provider_arguments(parser: argparse.ArgumentParser) -> None:
+    add_provider_arguments(parser)
+    parser.add_argument("--zero-query-proof", required=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -678,11 +1232,27 @@ def parse_args() -> argparse.Namespace:
     manifest = subparsers.add_parser("build-provider-manifest")
     add_provider_arguments(manifest)
 
+    active_manifest = subparsers.add_parser("build-active-provider-manifest")
+    add_active_provider_arguments(active_manifest)
+
+    stopped_proof = subparsers.add_parser("publish-stopped-machine-proof")
+    add_stopped_provider_arguments(stopped_proof)
+
     cleanup = subparsers.add_parser("cleanup-provider-sessions")
     add_provider_arguments(cleanup)
     cleanup.add_argument("--receipt", required=True)
     cleanup.add_argument("--agents-env", required=True)
     cleanup.add_argument("--backend-env", required=True)
+
+    sealed_cleanup = subparsers.add_parser("cleanup-sealed-provider-sessions")
+    add_stopped_provider_arguments(sealed_cleanup)
+    sealed_cleanup.add_argument("--receipt", required=True)
+    sealed_cleanup.add_argument("--agents-env", required=True)
+    sealed_cleanup.add_argument("--backend-env", required=True)
+
+    zero = subparsers.add_parser("recover-zero-allocation")
+    add_zero_provider_arguments(zero)
+    zero.add_argument("--receipt", required=True)
 
     validate = subparsers.add_parser("validate-recovery-receipt")
     add_identity_arguments(validate)
@@ -698,8 +1268,17 @@ def main() -> int:
     if args.command == "build-provider-manifest":
         publish_manifest(args)
         return 0
+    if args.command == "build-active-provider-manifest":
+        publish_active_manifest(args)
+        return 0
+    if args.command == "publish-stopped-machine-proof":
+        return publish_stopped_machine_proof(args)
     if args.command == "cleanup-provider-sessions":
         return cleanup_provider_sessions(args)
+    if args.command == "cleanup-sealed-provider-sessions":
+        return cleanup_sealed_provider_sessions(args)
+    if args.command == "recover-zero-allocation":
+        return recover_zero_allocation(args)
     if args.command == "validate-recovery-receipt":
         return validate_recovery_receipt(args)
     raise CleanupEvidenceError("unknown cleanup command")

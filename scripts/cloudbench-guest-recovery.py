@@ -11,14 +11,21 @@ import os
 import re
 import socket
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 SAFE_MACHINE = re.compile(r"[0-9a-f]+")
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
+SAFE_AGENT = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+SAFE_DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 SCHEMA = "cloudbench-guest-quiescence-v1"
 STATE_SCHEMA = "cloudbench-guest-state-v1"
+ZERO_SCHEMA = "cloudbench-guest-zero-allocation-v1"
 
 
 class GuestRecoveryError(RuntimeError):
@@ -696,6 +703,482 @@ def describe_state(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_json_object(path: Path, *, maximum: int) -> tuple[dict[str, Any], bytes]:
+    payload = read_bytes(path, maximum=maximum)
+    try:
+        value = json.loads(payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GuestRecoveryError(f"malformed exact guest JSON evidence: {path}") from error
+    if not isinstance(value, dict):
+        raise GuestRecoveryError(f"exact guest JSON evidence is not an object: {path}")
+    return value, payload
+
+
+def parse_zero_run(path: Path) -> tuple[str, str]:
+    value, payload = read_json_object(path, maximum=512 * 1024 * 1024)
+    tasks = value.get("tasks")
+    if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
+        raise GuestRecoveryError("run evidence is not bound to exactly one benchmark")
+    root_agent_id = tasks[0].get("agent_id")
+    if (
+        not isinstance(root_agent_id, str)
+        or SAFE_AGENT.fullmatch(root_agent_id) is None
+    ):
+        raise GuestRecoveryError("run evidence has no exact root agent")
+    return root_agent_id.lower(), hashlib.sha256(payload).hexdigest()
+
+
+def validate_zero_backend(path: Path, root_agent_id: str) -> tuple[str, str]:
+    payload = read_bytes(path, maximum=512 * 1024 * 1024)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise GuestRecoveryError("backend evidence is not UTF-8") from error
+    lines = [line for line in text.splitlines() if line.strip()]
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if "[Server] Server started" in line
+    ]
+    shutdowns = [
+        index
+        for index, line in enumerate(lines)
+        if "[Server] SIGTERM received, closing server..." in line
+    ]
+    if (
+        root_agent_id not in text.lower()
+        or len(starts) != 1
+        or len(shutdowns) != 1
+        or starts[0] >= shutdowns[0]
+        or shutdowns[0] != len(lines) - 1
+    ):
+        raise GuestRecoveryError(
+            "backend evidence has no complete exact-root lifecycle boundary"
+        )
+    provider_markers = (
+        "Created Kernel browser session",
+        "Reset restored Kernel profile tabs",
+        "Failed to evict invalid Kernel session",
+        "Created Steel session:",
+        "Steel Session:",
+        "Creating Steel browser session",
+        "Session creation attempt ",
+    )
+    if any(marker in text for marker in provider_markers) or re.search(
+        r"Kernel session [A-Za-z0-9_-]+ failed (?:tab reset|CDP validation)",
+        text,
+    ):
+        raise GuestRecoveryError(
+            "complete backend evidence contains provider allocation events"
+        )
+    if re.search(
+        r"\bmodel=BrowserSession\b[^\n]*\boperation="
+        r"(?:create|update|updateMany|upsert|delete|deleteMany)\b",
+        text,
+    ):
+        raise GuestRecoveryError(
+            "complete backend evidence contains BrowserSession mutations"
+        )
+    return text, hashlib.sha256(payload).hexdigest()
+
+
+def parse_zero_services(path: Path) -> tuple[str, int, str]:
+    value, payload = read_json_object(path, maximum=1024 * 1024)
+    database = value.get("database")
+    expected_repo = path.parent.parent.parent
+    if (
+        not path.is_absolute()
+        or path.resolve() != path
+        or not plain_directory(expected_repo)
+        or value.get("schema_version") != 1
+        or value.get("benchmark_mode") is not True
+        or value.get("worktree") != str(expected_repo)
+        or value.get("status") != "stopped"
+        or not isinstance(database, dict)
+        or database.get("owned_by_run_sh") is not True
+        or database.get("use_system_postgres") is not True
+        or database.get("container") != ""
+        or database.get("volume") != ""
+    ):
+        raise GuestRecoveryError(
+            "services evidence has no exact isolated stopped database identity"
+        )
+    database_name = database.get("name")
+    runtime_port = database.get("runtime_port")
+    if (
+        not isinstance(database_name, str)
+        or SAFE_DATABASE.fullmatch(database_name) is None
+        or not isinstance(runtime_port, int)
+        or isinstance(runtime_port, bool)
+        or not 1 <= runtime_port <= 65_535
+    ):
+        raise GuestRecoveryError("services evidence has an unsafe database identity")
+    return database_name, runtime_port, hashlib.sha256(payload).hexdigest()
+
+
+def validate_zero_quiescence(
+    path: Path,
+    *,
+    machine_id: str,
+    guest_run_token: str,
+    services_sha256: str,
+    run_json_sha256: str,
+    backend_log_sha256: str,
+) -> str:
+    value, payload = read_json_object(path, maximum=1024 * 1024)
+    required_fields = {
+        "schema_version",
+        "version",
+        "state",
+        "machine_id",
+        "guest_run_token",
+        "reason",
+        "driver_state",
+        "driver_pid",
+        "driver_process_state",
+        "stopped_service_pids",
+        "backend_port",
+        "services_sha256",
+        "run_json_sha256",
+        "backend_log_sha256",
+    }
+    if (
+        set(value) != required_fields
+        or value.get("schema_version") != SCHEMA
+        or value.get("version") != 1
+        or value.get("state") != "quiesced"
+        or value.get("machine_id") != machine_id
+        or value.get("guest_run_token") != guest_run_token
+        or value.get("reason") != "driver-exited-services-stopped"
+        or value.get("driver_state") != "exited"
+        or value.get("driver_pid") is not None
+        or value.get("driver_process_state") is not None
+        or value.get("services_sha256") != services_sha256
+        or value.get("run_json_sha256") != run_json_sha256
+        or value.get("backend_log_sha256") != backend_log_sha256
+    ):
+        raise GuestRecoveryError(
+            "quiescence evidence does not bind the exact stopped database/run"
+        )
+    return hashlib.sha256(payload).hexdigest()
+
+
+def run_exact_psql(
+    command: str,
+    *,
+    database: str,
+    port: int,
+    sql: str,
+) -> str:
+    if (
+        not Path(command).is_absolute()
+        or not regular_file(Path(command))
+        or not os.access(command, os.X_OK)
+    ):
+        raise GuestRecoveryError("exact psql command is unavailable")
+    environment = os.environ.copy()
+    environment["PGPASSWORD"] = "postgres"
+    try:
+        result = subprocess.run(
+            [
+                command,
+                "-X",
+                "-q",
+                "-A",
+                "-t",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                "localhost",
+                "-p",
+                str(port),
+                "-U",
+                "postgres",
+                "-d",
+                database,
+                "-c",
+                sql,
+            ],
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise GuestRecoveryError("exact root-bound database query failed") from error
+    if result.returncode != 0:
+        raise GuestRecoveryError("exact root-bound database query failed")
+    return result.stdout.strip()
+
+
+def root_tree_query_sql(root_agent_id: str) -> str:
+    return f"""
+WITH RECURSIVE tree AS (
+  SELECT id, "parentAgentId", "deletedAt"
+  FROM "Agent"
+  WHERE id = '{root_agent_id}'
+  UNION
+  SELECT child.id, child."parentAgentId", child."deletedAt"
+  FROM "Agent" child
+  JOIN tree parent ON child."parentAgentId" = parent.id
+)
+SELECT json_build_object(
+  'root_exists', EXISTS(
+    SELECT 1 FROM "Agent" WHERE id = '{root_agent_id}'
+  ),
+  'root_deleted', COALESCE((
+    SELECT "deletedAt" IS NOT NULL FROM "Agent" WHERE id = '{root_agent_id}'
+  ), false),
+  'tree_agent_ids', COALESCE((
+    SELECT json_agg(id ORDER BY id) FROM tree
+  ), '[]'::json),
+  'browser_sessions', COALESCE((
+    SELECT json_agg(
+      json_build_object(
+        'agent_id', session."agentId",
+        'session_id', session."sessionId",
+        'provider', session.provider
+      )
+      ORDER BY session."sessionId"
+    )
+    FROM "BrowserSession" session
+    WHERE session."agentId" IN (SELECT id FROM tree)
+  ), '[]'::json)
+)::text;
+""".strip()
+
+
+def parse_root_tree_query(payload: str, root_agent_id: str) -> dict[str, Any]:
+    lines = [line for line in payload.splitlines() if line.strip()]
+    if len(lines) != 1:
+        raise GuestRecoveryError("exact root-bound database query is not canonical")
+    try:
+        value = json.loads(lines[0])
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise GuestRecoveryError("exact root-bound database query is malformed") from error
+    if not isinstance(value, dict) or set(value) != {
+        "root_exists",
+        "root_deleted",
+        "tree_agent_ids",
+        "browser_sessions",
+    }:
+        raise GuestRecoveryError("exact root-bound database query has the wrong shape")
+    tree = value.get("tree_agent_ids")
+    sessions = value.get("browser_sessions")
+    if (
+        not isinstance(value.get("root_exists"), bool)
+        or not isinstance(value.get("root_deleted"), bool)
+        or not isinstance(tree, list)
+        or any(
+            not isinstance(agent_id, str) or SAFE_AGENT.fullmatch(agent_id) is None
+            for agent_id in tree
+        )
+        or len(tree) != len(set(tree))
+        or not isinstance(sessions, list)
+        or (value["root_exists"] and root_agent_id not in tree)
+        or (not value["root_exists"] and tree)
+    ):
+        raise GuestRecoveryError("exact root-bound database result is inconsistent")
+    if sessions:
+        raise GuestRecoveryError(
+            "exact root tree contains provider-backed BrowserSession rows"
+        )
+    return value
+
+
+def delete_exact_agent_tree(
+    command: str,
+    *,
+    database_name: str,
+    runtime_port: int,
+    root_agent_id: str,
+) -> None:
+    sql = f"""
+WITH RECURSIVE tree AS (
+  SELECT id FROM "Agent" WHERE id = '{root_agent_id}'
+  UNION
+  SELECT child.id
+  FROM "Agent" child
+  JOIN tree parent ON child."parentAgentId" = parent.id
+)
+UPDATE "Agent"
+SET "deletedAt" = COALESCE("deletedAt", NOW())
+WHERE id IN (SELECT id FROM tree);
+""".strip()
+    run_exact_psql(
+        command,
+        database=database_name,
+        port=runtime_port,
+        sql=sql,
+    )
+
+
+def prove_zero_allocation(args: argparse.Namespace) -> int:
+    if (
+        SAFE_MACHINE.fullmatch(args.machine_id) is None
+        or SAFE_TOKEN.fullmatch(args.guest_run_token) is None
+        or not Path(args.receipt).is_absolute()
+        or not plain_directory(Path(args.receipt).parent)
+    ):
+        raise GuestRecoveryError("unsafe exact zero-allocation identity")
+    services_path = Path(args.services)
+    run_json_path = Path(args.run_json)
+    backend_log_path = Path(args.backend_log)
+    quiescence_path = Path(args.quiescence_receipt)
+    database_name, runtime_port, services_sha = parse_zero_services(services_path)
+    root_agent_id, run_sha = parse_zero_run(run_json_path)
+    _, backend_sha = validate_zero_backend(backend_log_path, root_agent_id)
+    quiescence_sha = validate_zero_quiescence(
+        quiescence_path,
+        machine_id=args.machine_id,
+        guest_run_token=args.guest_run_token,
+        services_sha256=services_sha,
+        run_json_sha256=run_sha,
+        backend_log_sha256=backend_sha,
+    )
+    proof_base: dict[str, Any] = {
+        "schema_version": ZERO_SCHEMA,
+        "version": 1,
+        "machine_id": args.machine_id,
+        "guest_run_token": args.guest_run_token,
+        "root_agent_id": root_agent_id,
+        "database_name": database_name,
+        "services_sha256": services_sha,
+        "run_json_sha256": run_sha,
+        "backend_log_sha256": backend_sha,
+        "quiescence_receipt_sha256": quiescence_sha,
+    }
+    receipt_path = Path(args.receipt)
+    if receipt_path.exists() or receipt_path.is_symlink():
+        existing, _ = read_json_object(receipt_path, maximum=1024 * 1024)
+        if (
+            set(existing)
+            != {
+                *proof_base,
+                "root_disposition",
+                "database_state",
+                "tree_agent_ids",
+                "browser_sessions",
+            }
+            or any(existing.get(key) != value for key, value in proof_base.items())
+        ):
+            raise GuestRecoveryError(
+                "existing zero-allocation proof has the wrong exact owner"
+            )
+        tree = existing.get("tree_agent_ids")
+        disposition = existing.get("root_disposition")
+        database_state = existing.get("database_state")
+        if (
+            disposition not in {
+                "database-absent",
+                "root-absent",
+                "root-already-deleted",
+                "deleted-exact-tree",
+            }
+            or database_state not in {"absent", "present"}
+            or not isinstance(tree, list)
+            or any(
+                not isinstance(agent_id, str)
+                or SAFE_AGENT.fullmatch(agent_id) is None
+                for agent_id in tree
+            )
+            or len(tree) != len(set(tree))
+            or existing.get("browser_sessions") != []
+            or (
+                disposition == "database-absent"
+                and (database_state != "absent" or tree)
+            )
+            or (
+                disposition == "root-absent"
+                and (database_state != "present" or tree)
+            )
+            or (
+                disposition in {"root-already-deleted", "deleted-exact-tree"}
+                and (database_state != "present" or root_agent_id not in tree)
+            )
+        ):
+            raise GuestRecoveryError(
+                "existing zero-allocation proof is not positive and exact"
+            )
+        return 0
+
+    catalog_sql = (
+        "SELECT datname FROM pg_database "
+        f"WHERE datname = '{database_name}';"
+    )
+    catalog_result = run_exact_psql(
+        args.psql_command,
+        database="postgres",
+        port=runtime_port,
+        sql=catalog_sql,
+    )
+    catalog_rows = [row for row in catalog_result.splitlines() if row.strip()]
+    if not catalog_rows:
+        proof = {
+            **proof_base,
+            "root_disposition": "database-absent",
+            "database_state": "absent",
+            "tree_agent_ids": [],
+            "browser_sessions": [],
+        }
+        atomic_json(receipt_path, proof)
+        return 0
+    if catalog_rows != [database_name]:
+        raise GuestRecoveryError("exact isolated database lookup is ambiguous")
+
+    query_sql = root_tree_query_sql(root_agent_id)
+    before = parse_root_tree_query(
+        run_exact_psql(
+            args.psql_command,
+            database=database_name,
+            port=runtime_port,
+            sql=query_sql,
+        ),
+        root_agent_id,
+    )
+    if not before["root_exists"]:
+        disposition = "root-absent"
+        final = before
+    elif before["root_deleted"]:
+        disposition = "root-already-deleted"
+        final = before
+    else:
+        delete_exact_agent_tree(
+            args.psql_command,
+            database_name=database_name,
+            runtime_port=runtime_port,
+            root_agent_id=root_agent_id,
+        )
+        final = parse_root_tree_query(
+            run_exact_psql(
+                args.psql_command,
+                database=database_name,
+                port=runtime_port,
+                sql=query_sql,
+            ),
+            root_agent_id,
+        )
+        if (
+            not final["root_exists"]
+            or not final["root_deleted"]
+            or final["tree_agent_ids"] != before["tree_agent_ids"]
+        ):
+            raise GuestRecoveryError(
+                "exact root tree did not reach an idempotently deleted state"
+            )
+        disposition = "deleted-exact-tree"
+    proof = {
+        **proof_base,
+        "root_disposition": disposition,
+        "database_state": "present",
+        "tree_agent_ids": final["tree_agent_ids"],
+        "browser_sessions": [],
+    }
+    atomic_json(receipt_path, proof)
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -718,6 +1201,15 @@ def parse_args() -> argparse.Namespace:
     state.add_argument("--machine-id", required=True)
     state.add_argument("--guest-run-token", required=True)
     state.add_argument("--receipt", required=True)
+    zero = subparsers.add_parser("prove-zero-allocation")
+    zero.add_argument("--machine-id", required=True)
+    zero.add_argument("--guest-run-token", required=True)
+    zero.add_argument("--services", required=True)
+    zero.add_argument("--run-json", required=True)
+    zero.add_argument("--backend-log", required=True)
+    zero.add_argument("--quiescence-receipt", required=True)
+    zero.add_argument("--receipt", required=True)
+    zero.add_argument("--psql-command", default="/usr/bin/psql")
     return parser.parse_args()
 
 
@@ -727,6 +1219,8 @@ def main() -> int:
         return quiesce(args)
     if args.command == "describe-state":
         return describe_state(args)
+    if args.command == "prove-zero-allocation":
+        return prove_zero_allocation(args)
     raise GuestRecoveryError("unknown guest recovery command")
 
 
