@@ -4476,7 +4476,7 @@ PY
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|forced>
     local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2"
     local record clone_name id volume_id resolved details detail_status state
-    local actual_name runner_count unresolved=0
+    local actual_name runner_count cleanup_status unresolved=0
     local legacy_batch_status=0 registry_version
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
@@ -4512,7 +4512,12 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 # already complete authority; resolving its clone name would
                 # inventory unrelated Machines and cannot strengthen identity.
                 echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
-                reap_volume "$volume_id" || return 1
+                if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                if [ "$cleanup_status" -eq 75 ]; then
+                    unresolved=1
+                    continue
+                fi
+                [ "$cleanup_status" -eq 0 ] || return 1
                 fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
                     destroyed-verified-absent || return 1
                 rm -f "$record"
@@ -4529,7 +4534,12 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                         # Its provider-returned ID in this exact-owner record is
                         # sufficient cleanup authority; global inventory is not.
                         echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
-                        reap_volume "$volume_id" || return 1
+                        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+                        if [ "$cleanup_status" -eq 75 ]; then
+                            unresolved=1
+                            continue
+                        fi
+                        [ "$cleanup_status" -eq 0 ] || return 1
                         fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
                             destroyed-verified-absent || return 1
                         rm -f "$record"
@@ -4587,7 +4597,12 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 unresolved=1
                 continue
             fi
-            reap_volume "$volume_id" || return 1
+            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+            if [ "$cleanup_status" -eq 75 ]; then
+                unresolved=1
+                continue
+            fi
+            [ "$cleanup_status" -eq 0 ] || return 1
             fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
                 destroyed-verified-absent || return 1
             rm -f "$record"
@@ -4631,11 +4646,21 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         else
             echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
         fi
-        reap_machine "$id" "" "$volume_id" || return 1
+        if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+        if [ "$cleanup_status" -eq 75 ]; then
+            unresolved=1
+            continue
+        fi
+        [ "$cleanup_status" -eq 0 ] || return 1
         # Machine inventory can disappear before its volume destroy becomes
         # visible. The durable per-owner volume ID is the exact retry authority;
         # never fall back to an app-global unattached-volume sweep.
-        reap_volume "$volume_id" || return 1
+        if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
+        if [ "$cleanup_status" -eq 75 ]; then
+            unresolved=1
+            continue
+        fi
+        [ "$cleanup_status" -eq 0 ] || return 1
         fleet_audit_update_registry_clone "$registry" "$clone_name" "$id" "$volume_id" \
             destroyed-verified-absent || return 1
         rm -f "$record"
