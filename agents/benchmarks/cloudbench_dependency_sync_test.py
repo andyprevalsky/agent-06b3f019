@@ -5998,6 +5998,167 @@ grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || ex
         assert log.count("volumes show vol_exactowned -a bench-app --json") == 6
 
 
+def test_clone_retries_after_accepted_destroy_outlives_confirmation_window(
+    tmp_path: Path,
+) -> None:
+    """An accepted asynchronous destroy must not consume the clone retry budget.
+
+    Fly may accept every exact destroy request while the volume remains visible
+    through the bounded confirmation window. The exact owner must stay durable,
+    but a later bounded clone attempt may proceed; only authoritative exact-ID
+    absence can retire the first attempt's ownership.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+            "registry_meta_value() {",
+            "fleet_registry_record_name() {",
+            "fleet_registry_record_volume() {",
+            "fleet_registry_release_name() {",
+            "clone_failure_definitively_unallocated() {",
+            "clone_failure_owned_volume_id() {",
+            "clone_machine_target() {",
+        )
+    )
+    registry = tmp_path / "registry"
+    (registry / "clones").mkdir(parents=True)
+    ledger = tmp_path / "owned.ids"
+    calls = tmp_path / "calls"
+    clone_count = tmp_path / "clone-count"
+    show_count = tmp_path / "show-count"
+    uuid_count = tmp_path / "uuid-count"
+    audit = tmp_path / "audit"
+    for path in (calls, clone_count, show_count, uuid_count, audit):
+        path.write_text("0\n" if path != calls and path != audit else "")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=683e47df5094d8
+WARM_VOLUME_ID=vol_warm
+SNAP_ID=vs_D7yODvl0BVgi9JajQpkR
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+LEDGER={shlex.quote(str(ledger))}
+CALLS={shlex.quote(str(calls))}
+CLONE_COUNT={shlex.quote(str(clone_count))}
+SHOW_COUNT={shlex.quote(str(show_count))}
+UUID_COUNT={shlex.quote(str(uuid_count))}
+AUDIT={shlex.quote(str(audit))}
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=2
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_RETRY_MAX_SECONDS=0
+sleep() {{ :; }}
+fly_with_timeout() {{ shift; FLY "$@"; }}
+python3() {{
+  case "$*" in
+    *uuid.uuid4*)
+      count="$(cat "$UUID_COUNT")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$UUID_COUNT"
+      if [ "$count" = 1 ]; then
+        printf '%s\n' 111111111111111111111111
+      else
+        printf '%s\n' 222222222222222222222222
+      fi ;;
+    *) command python3 "$@" ;;
+  esac
+}}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machine clone")
+      count="$(cat "$CLONE_COUNT")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$CLONE_COUNT"
+      if [ "$count" = 1 ]; then
+        printf "%s\n" \
+          'Cloning Machine 683e47df5094d8 into region iad' \
+          'Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR' \
+          'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
+          "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_delayed123' (Request ID: 01M25KWX15X1CHQWYRCE2BM64G-lax)" >&2
+        return 1
+      fi
+      printf '%s\n' 'Machine feedface000002 has been created...'
+      return 0 ;;
+    "volumes destroy")
+      [ "$3" = vol_delayed123 ] || return 99
+      printf '%s\n' 'Destroyed volume ID: vol_delayed123 name: cloudbench_data'
+      return 0 ;;
+    "volumes show")
+      [ "$3" = vol_delayed123 ] || return 98
+      count="$(cat "$SHOW_COUNT")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$SHOW_COUNT"
+      if [ "$count" -le 6 ]; then
+        printf '%s\n' '{{"id":"vol_delayed123","state":"created"}}'
+        return 0
+      fi
+      printf '%s\n' \
+        'Error: failed retrieving volume: failed to get volume vol_delayed123: volume not found (Request ID: fixture)' >&2
+      return 1 ;;
+  esac
+  return 97
+}}
+fleet_audit_record_fresh_clone() {{
+  printf 'record %s %s %s %s %s\n' "$@" >> "$AUDIT"
+}}
+fleet_audit_update_fresh_clone() {{
+  printf 'update %s %s %s %s\n' "$@" >> "$AUDIT"
+}}
+fleet_registry_record_id() {{ return 0; }}
+machine_id_for_clone_name() {{
+  printf 'machine-name-reconciliation %s\n' "$1" >> "$CALLS"
+  return 1
+}}
+registry_resolve_name() {{
+  printf 'registry-name-reconciliation %s\n' "$1" >> "$CALLS"
+  return 1
+}}
+machine_volume_id() {{
+  [ "$1" = feedface000002 ] && printf '%s' vol_success123
+}}
+machine_storage_ready() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+worker_ledger_lock_acquire() {{ return 0; }}
+worker_ledger_lock_release() {{ return 0; }}
+{functions}
+clone_rc=0
+target="$(clone_machine_target "$LEDGER")" || clone_rc=$?
+[ "$clone_rc" -eq 0 ] || exit 90
+[ "$target" = feedface000002 ] || exit 91
+first_record="$FLEET_REGISTRY_DIR/clones/cloudbench-111111111111111111111111"
+[ -f "$first_record" ] || exit 92
+[ "$(registry_meta_value "$first_record" volume_id)" = vol_delayed123 ] || exit 93
+absence_rc=0
+volume_inventory_contains_id vol_delayed123 >/dev/null || absence_rc=$?
+[ "$absence_rc" -eq 1 ] || exit 94
+[ -f "$first_record" ] || exit 95
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    call_log = calls.read_text().splitlines()
+    assert sum(call.startswith("machine clone ") for call in call_log) == 2
+    assert call_log.count("volumes destroy vol_delayed123 -a bench-app --yes") == 6
+    assert call_log.count("volumes show vol_delayed123 -a bench-app --json") == 7
+    assert not any("name-reconciliation" in call for call in call_log)
+    diagnostic_lines = ledger.with_suffix(".log").read_text().splitlines()
+    destroy_lines = [line for line in diagnostic_lines if "volume destroy attempt" in line]
+    assert len(destroy_lines) == 6
+    assert all("rc=0 response=Destroyed volume ID: vol_delayed123" in line for line in destroy_lines)
+    assert "update cloudbench-111111111111111111111111  vol_delayed123 owned" in audit.read_text()
+    assert "destroyed-verified-absent" not in audit.read_text()
+
+
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     fleet = FLEET_SCRIPT.read_text()
     pool_function = _extract_fleet_function(fleet, "provision_pool_slot() {")
