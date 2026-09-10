@@ -146,6 +146,11 @@ for _ in $(seq 1 100); do
 done
 [ -s "$tmp/cloudbench-driver-clean-$run_token.ack" ] \
     || fail "driver did not publish its cleanup acknowledgement"
+acknowledged_post="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown")"
+[ "$acknowledged_post" = 202 ] \
+    || fail "cleanup acknowledgement terminalized POST for a running driver (HTTP $acknowledged_post)"
 pre_exit_code="$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $auth_token" \
     "http://127.0.0.1:$port/shutdown-health")"
