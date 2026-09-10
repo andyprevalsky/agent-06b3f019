@@ -3023,32 +3023,100 @@ def test_build_openrouter_body_uses_logical_sequence_for_sticky_routing():
     assert body["session_id"] == sequence_id
 
 
-def test_build_openrouter_body_leaves_gemini_prompt_caching_implicit():
-    """Keep Gemini's growing append-only prefix eligible for implicit caching.
+def _gemini_completed_tool_messages():
+    return [
+        {"role": "system", "content": "stable rules"},
+        {"role": "user", "content": "stable task goal"},
+        {
+            "role": "assistant",
+            "content": "researching",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": '{"query":"facts"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "x" * 21_000,
+        },
+    ]
 
-    The captured parallel-tool-calls requests start with a short system + user
-    prefix, then grow through append-only assistant/tool turns. Gemini 2.5+
-    can cache that shared prefix implicitly. The captured run forced its only
-    explicit breakpoint onto the short opening pair and observed zero reads.
-    """
-    body = build_openrouter_body(
+
+def test_build_openrouter_body_pins_large_gemini_completed_tool_prefix():
+    """Gemini keeps one fixed explicit marker as append-only history grows."""
+    sequence_id = "agent:parent:task:explore-a:call:explore_agent"
+    messages = _gemini_completed_tool_messages()
+    original_messages = json.loads(json.dumps(messages))
+    first_body = build_openrouter_body(
         model="google/gemini-3.6-flash",
-        messages=[
-            {"role": "system", "content": "stable rules"},
-            {"role": "user", "content": "stable task goal"},
-            {"role": "assistant", "content": "append-only work"},
-            {"role": "tool", "content": "large append-only result"},
-        ],
+        messages=messages,
         tools=[{"type": "function", "function": {"name": "web_search"}}],
         tool_choice="auto",
         response_format=None,
         temperature=None,
         max_tokens=None,
         seed=None,
-        cache_namespace="agent:parent:task:explore-a:call:explore_agent",
+        cache_namespace=sequence_id,
+    )
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": "continuing",
+                "tool_calls": [
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": '{"query":"more"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-2", "content": "new result"},
+        ]
+    )
+    second_body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=messages,
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace=sequence_id,
     )
 
-    assert "cache_control" not in json.dumps(body["messages"])
+    first_marker = first_body["messages"][3]["content"][-1]["cache_control"]
+    second_marker = second_body["messages"][3]["content"][-1]["cache_control"]
+    assert first_marker == second_marker == {"type": "ephemeral"}
+    assert json.dumps(first_body["messages"]).count('"cache_control"') == 1
+    assert json.dumps(second_body["messages"]).count('"cache_control"') == 1
+    assert first_body["messages"] == second_body["messages"][:4]
+    assert first_body["session_id"] == second_body["session_id"] == sequence_id
+    assert original_messages == messages[:4], "outbound cache transforms mutated the caller's nested history"
+
+
+def test_build_openrouter_body_keeps_gemini_2_5_explicit():
+    body = build_openrouter_body(
+        model="google/gemini-2.5-flash",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "stable task goal"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-2.5-sequence",
+    )
+
+    assert "cache_control" in json.dumps(body["messages"])
 
 
 def test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini():
@@ -3061,6 +3129,7 @@ def test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini():
                 "content": [{"type": "text", "text": "large stable reference", "cache_control": marker}],
             },
             {"role": "user", "content": "question"},
+            *_gemini_completed_tool_messages()[2:],
         ],
         tools=None,
         tool_choice=None,
@@ -3072,6 +3141,24 @@ def test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini():
     )
 
     assert body["messages"][0]["content"][0]["cache_control"] == marker
+    assert json.dumps(body["messages"]).count('"cache_control"') == 1
+
+
+def test_build_openrouter_body_skip_cache_write_suppresses_synthesized_gemini_marker():
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=_gemini_completed_tool_messages(),
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-sequence",
+        skip_cache_write=True,
+    )
+
+    assert "cache_control" not in json.dumps(body["messages"])
 
 
 def test_build_openrouter_body_retains_explicit_model_breakpoints():
@@ -6629,12 +6716,20 @@ async def run_all_tests():
         test_build_openrouter_body_uses_logical_sequence_for_sticky_routing,
     )
     r.record(
-        "openrouter_body_gemini_implicit_prompt_cache",
-        test_build_openrouter_body_leaves_gemini_prompt_caching_implicit,
+        "openrouter_body_gemini_fixed_completed_tool_prefix",
+        test_build_openrouter_body_pins_large_gemini_completed_tool_prefix,
+    )
+    r.record(
+        "openrouter_body_gemini_2_5_explicit_prompt_cache",
+        test_build_openrouter_body_keeps_gemini_2_5_explicit,
     )
     r.record(
         "openrouter_body_gemini_caller_cache_breakpoint",
         test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini,
+    )
+    r.record(
+        "openrouter_body_gemini_skip_cache_write",
+        test_build_openrouter_body_skip_cache_write_suppresses_synthesized_gemini_marker,
     )
     r.record(
         "openrouter_body_explicit_model_cache_breakpoint",

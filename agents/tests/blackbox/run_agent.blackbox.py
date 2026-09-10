@@ -1826,6 +1826,32 @@ async def test_verifier_usage_preserves_cache_sequence_identity():
     assert all(call["cache_sequence_id"] == "verifier-sequence" for call in verifier_calls)
 
 
+async def test_verifier_usage_does_not_invent_cache_sequence_identity():
+    """One-shot verifier usage must not pollute the execute cache group."""
+    usage_calls = []
+
+    async def capture_usage(_tokens_in, _tokens_out, _model, **metadata):
+        usage_calls.append(metadata)
+
+    await _run_single_iteration(
+        [{"tool": "web_search", "query": "x"}],
+        [("web_search", "tc-1", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        verifier_score=0.3,
+        verifier_usage={
+            "prompt_tokens": 5,
+            "completion_tokens": 6,
+            "total_tokens": 11,
+        },
+        on_tokens_override=capture_usage,
+    )
+
+    verifier_calls = [call for call in usage_calls if call["call_site"].startswith("verifier_")]
+    assert verifier_calls
+    assert all(call["cache_sequence_id"] is None for call in verifier_calls)
+
+
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
     """A schema-complete child dispatches completion without another LLM call."""
     import providers.fast_cache.context as fast_cache_context
@@ -2405,6 +2431,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_usage_preserves_cache_sequence_identity",
         test_verifier_usage_preserves_cache_sequence_identity,
+    )
+    await r.record_async(
+        "verifier_usage_does_not_invent_cache_sequence_identity",
+        test_verifier_usage_does_not_invent_cache_sequence_identity,
     )
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)

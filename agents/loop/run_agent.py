@@ -2191,7 +2191,11 @@ async def run_agent(
                             gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                             compute_token_used=v_usage.get("compute_token_used"),
                             from_fast_cache=v_usage.get("from_fast_cache", False),
-                            cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
+                            # Do not label a one-shot verifier as the execute
+                            # conversation unless that exact namespace reached
+                            # the provider. The benchmark repeatability metric
+                            # groups by this identity.
+                            cache_sequence_id=v_usage.get("cache_sequence_id"),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -2497,7 +2501,7 @@ async def run_agent(
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
-                        cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
+                        cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")

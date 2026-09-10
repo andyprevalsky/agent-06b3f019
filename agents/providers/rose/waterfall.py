@@ -98,10 +98,9 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
 DEFAULT_REASONING_EFFORT = "xhigh"
 
 
-def _uses_implicit_gemini_prompt_cache(model: str) -> bool:
-    """Return whether the supported Gemini generation has implicit caching."""
-    normalized = model.lower()
-    return normalized.startswith(("google/gemini-2.5", "google/gemini-3"))
+def _uses_explicit_gemini_prompt_cache(model: str) -> bool:
+    """Return whether OpenRouter requires an explicit Gemini breakpoint."""
+    return model.lower().startswith("google/gemini-")
 
 
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
@@ -131,6 +130,7 @@ def build_openrouter_body(
     provider_fast_mode: bool = True,
     effort: Optional[str] = None,
     cache_namespace: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
@@ -143,17 +143,15 @@ def build_openrouter_body(
     # history reaches a provider with no functionDeclarations — a deterministic
     # 400 on Google (see flatten_tool_history_to_text).
     openrouter_tools = _openrouter_tools(tools)
-    gemini_implicit_cache = _uses_implicit_gemini_prompt_cache(model)
+    gemini_explicit_cache = _uses_explicit_gemini_prompt_cache(model)
     body: Dict[str, Any] = {
         "model": model,
         "messages": transform_messages_for_openai(
             messages,
             tools_declared=bool(openrouter_tools),
             cache_opening_user=bool(cache_namespace),
-            # Gemini 2.5+ caches stable, growing message prefixes implicitly.
-            # An explicit marker makes its short opening block the only cache
-            # candidate, so longer append-only turns never become reusable.
-            inject_cache_breakpoints=not gemini_implicit_cache,
+            inject_cache_breakpoints=not skip_cache_write,
+            cache_completed_tool_prefix=gemini_explicit_cache,
         ),
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -202,6 +200,7 @@ async def waterfall_complete(
     idle_timeout_s: Optional[float] = None,
     exclude_anthropic_family: bool = False,
     cache_namespace: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -266,6 +265,7 @@ async def waterfall_complete(
             provider_fast_mode=provider_fast_mode,
             effort=effort,
             cache_namespace=cache_namespace,
+            skip_cache_write=skip_cache_write,
         )
         emitted_user_visible = False
         try:

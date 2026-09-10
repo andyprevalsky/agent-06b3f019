@@ -1634,6 +1634,7 @@ class RoseClient:
                     idle_timeout_s=idle_timeout_s,
                     exclude_anthropic_family=_exclude_anthropic_family,
                     cache_namespace=cache_namespace,
+                    skip_cache_write=skip_cache_write,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)
