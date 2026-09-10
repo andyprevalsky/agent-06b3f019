@@ -8664,33 +8664,23 @@ def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
     (registry / "guest-cleanup-unconfirmed").touch()
     helper = tmp_path / "exact-cleanup-helper"
     helper.write_text(
-        """#!/usr/bin/env bash
-set -eu
-command="$1"
-shift
-receipt=""
-run_json=""
-backend_log=""
-quiescence=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --receipt) receipt="$2"; shift 2 ;;
-    --run-json) run_json="$2"; shift 2 ;;
-    --backend-log) backend_log="$2"; shift 2 ;;
-    --quiescence-receipt) quiescence="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-case "$command" in
-  cleanup-provider-sessions)
-    [ -s "$run_json" ] && [ -s "$backend_log" ] && [ -s "$quiescence" ]
-    printf '{"kind":"fixture-exact-provider-cleanup"}\n' > "$receipt"
-    ;;
-  validate-recovery-receipt)
-    [ -s "$receipt" ]
-    ;;
-  *) exit 97 ;;
-esac
+        """#!/usr/bin/env python3
+from pathlib import Path
+import sys
+
+command = sys.argv[1]
+arguments = dict(zip(sys.argv[2::2], sys.argv[3::2], strict=True))
+receipt = Path(arguments["--receipt"])
+if command == "cleanup-provider-sessions":
+    for name in ("--run-json", "--backend-log", "--quiescence-receipt"):
+        if not Path(arguments[name]).is_file():
+            raise SystemExit(96)
+    receipt.write_text('{"kind":"fixture-exact-provider-cleanup"}\\n')
+elif command == "validate-recovery-receipt":
+    if not receipt.is_file():
+        raise SystemExit(95)
+else:
+    raise SystemExit(97)
 """
     )
     helper.chmod(0o755)
