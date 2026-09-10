@@ -341,6 +341,34 @@ def _post_run_bundle(
                 },
             )
             # endregion
+            recovered_visible_run = False
+            visibility_error = None
+            run_id = str(body.get("run_id") or "")
+            if required and live and retryable and run_id:
+                try:
+                    verify_run_visible(run_id, timeout=min(timeout, 5.0))
+                    recovered_visible_run = True
+                except HubVisibilityError as verify_exc:
+                    visibility_error = str(verify_exc)
+                # region agent log
+                _agent_debug_log(
+                    "A,B",
+                    "agents/benchmarks/hub_upload.py:_post_run_bundle:reconcile",
+                    "Hub upload ambiguous outcome reconciled",
+                    {
+                        "runId": run_id,
+                        "attempt": attempt,
+                        "visible": recovered_visible_run,
+                        "visibilityError": visibility_error,
+                    },
+                )
+                # endregion
+            if recovered_visible_run:
+                print(
+                    f"✅ benchmark Hub upload attempt {attempt} committed before "
+                    "its response timed out; continuing from verified visibility"
+                )
+                return True
             if required and retryable and attempt < max_attempts:
                 delay = min(2 ** (attempt - 1), 4)
                 print(
