@@ -18,7 +18,10 @@ require_text() {
 
 [ -f "$HELPER_SRC" ] || fail "cloud benchmark env helper is missing"
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"' \
+  'DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"' \
+  "cloud benchmark data root must retain its persistent default"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-$DATA_DIR/cloudbench-cache/victoria-seed.dump}"' \
   "cloud benchmark seed-dump freshness proof must retain its persistent default"
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
