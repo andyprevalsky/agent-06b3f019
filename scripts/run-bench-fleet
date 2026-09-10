@@ -1854,7 +1854,7 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         fi
         if [ "$lifecycle_rc" -eq 0 ]; then
             case "$state" in
-                created|restoring|scheduling_destroy|recovering|pending_destroy|destroyed) ;;
+                created|restoring|waiting_for_detach|scheduling_destroy|recovering|pending_destroy|destroyed) ;;
                 *) lifecycle_ambiguous=1 ;;
             esac
         else
