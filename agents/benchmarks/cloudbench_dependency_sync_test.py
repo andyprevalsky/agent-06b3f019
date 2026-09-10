@@ -1663,6 +1663,7 @@ cloudbench_env_value() { return 0; }
     try:
         startup_deadline = time.monotonic() + 15
         driver_health = 0
+        bench_log = data_dir / "bench.log"
         while time.monotonic() < startup_deadline:
             if boot.poll() is not None:
                 break
@@ -1670,12 +1671,12 @@ cloudbench_env_value() { return 0; }
                 driver_health = request("/driver-health")
             except (OSError, urllib.error.URLError):
                 driver_health = 0
-            if driver_health == 204:
+            log_text = bench_log.read_text() if bench_log.exists() else ""
+            if driver_health == 204 and "Agent created: root-agent" in log_text:
                 break
             time.sleep(0.05)
-        bench_log = data_dir / "bench.log"
-        assert driver_health == 204, (
-            f"actual boot/driver did not become healthy; boot={boot.poll()} "
+        assert driver_health == 204 and "Agent created: root-agent" in log_text, (
+            f"actual boot/driver runner did not become active; boot={boot.poll()} "
             f"log={bench_log.read_text() if bench_log.exists() else '<missing>'}"
         )
 
