@@ -15,10 +15,10 @@ USAGE:
 """
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import structlog
@@ -88,17 +88,28 @@ _FAN_IN_SYNTHESIS_RE = re.compile(
     r"rank(?:ing)? (?:all|the)|deduplicat\w*"
     r")\b"
 )
+_FAN_IN_DERIVATION_RE = re.compile(
+    r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,1000}\b(?:based on|from|using)\b"
+)
+_FAN_IN_ARTIFACT_RE = re.compile(
+    r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,200}"
+    r"\b(?:calendar|creators?|hooks?|openings?|ranking|report|scripts?|strategy)\b"
+)
 
 
 def is_fan_in_synthesis_goal(goal: str) -> bool:
     """True when a DAG goal looks like merge/consolidate/finalize synthesis.
 
-    Keyword-only — callers that rewrite execution must also require fan-in
-    evidence (non-empty ``depends_on``) so ordinary goals like
-    ``Implement merge sort`` / ``Finalize the OAuth flow`` stay on the
-    general_purpose spawn path and keep its ``output_schema`` contract.
+    Callers that rewrite execution must also require fan-in evidence (non-empty
+    ``depends_on``). Besides explicit synthesis verbs, recognize artifact
+    derivations such as "create ... using ..." and "select ... based on ...";
+    these consume prior task results and should stay in the parent.
     """
-    return bool(_FAN_IN_SYNTHESIS_RE.search(goal or ""))
+    return bool(
+        _FAN_IN_SYNTHESIS_RE.search(goal or "")
+        or _FAN_IN_DERIVATION_RE.search(goal or "")
+        or _FAN_IN_ARTIFACT_RE.search(goal or "")
+    )
 
 
 def maybe_rewrite_recursive_gp_synthesis_task(task: "DAGTask") -> bool:
@@ -166,6 +177,19 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
             f"LLM expected {actual_tool} type {expected_type}, got {tool_call.get('type')} for task {task.index}"
         )
     return tool_call
+
+
+def _deterministic_cached_contract_repair(actual_tool: str, task: "DAGTask") -> Optional[Dict[str, Any]]:
+    """Repair a stale cached explore alias without making a live LLM call.
+
+    Explore aliases require only the planned goal and discriminator, both of
+    which are already authoritative in the DAG. Other aliases need fields the
+    plan does not necessarily carry, so they continue through the bounded
+    corrective prompt path.
+    """
+    if actual_tool != "spawn_agent" or task.tool_name != "spawn_explore_agent":
+        return None
+    return {"tool": "spawn_agent", "type": "explore", "goal": task.goal}
 
 
 def _build_param_population_message(
@@ -991,7 +1015,9 @@ async def _execute_single_task(
 
             async def populate_params() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 contract_error: Optional[str] = None
+                bypass_position_fallback = False
                 for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
+                    result: Dict[str, Any] = {}
                     try:
                         # A successful activity consumes the shared pending context
                         # before local alias validation runs. Restore the identical
@@ -1005,6 +1031,13 @@ async def _execute_single_task(
                             planned_tool_name=task.tool_name,
                             contract_error=contract_error,
                         )
+                        if bypass_position_fallback:
+                            # A positional Fast Mode result can belong to a
+                            # different DAG node at the same trajectory step.
+                            # After strict validation rejects such a replay,
+                            # keep exact lookup available for the corrective
+                            # prompt but do not replay the same foreign slot.
+                            attempt_llm_args[27] = None
                         result = await execute_activity(
                             call_llm_activity,
                             args=attempt_llm_args,
@@ -1024,6 +1057,18 @@ async def _execute_single_task(
                         )
                         if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
                             raise
+                        cached_contract_failure = isinstance(exc, ParamPopulationContractError) and bool(
+                            (result.get("usage") or {}).get("from_fast_cache")
+                        )
+                        if cached_contract_failure:
+                            deterministic_repair = _deterministic_cached_contract_repair(actual_tool, task)
+                            if deterministic_repair is not None:
+                                return result, _select_param_tool_call(
+                                    [deterministic_repair],
+                                    actual_tool,
+                                    task,
+                                )
+                            bypass_position_fallback = True
                         contract_error = extract_error_message(exc)
                         workflow.logger.warning(
                             f"[DAG] Param population contract failed "

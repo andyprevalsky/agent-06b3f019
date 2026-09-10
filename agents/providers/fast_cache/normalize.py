@@ -715,8 +715,9 @@ OAI_DEMO_CACHE_SOURCE_NAME = "Aman Gottumukkala"
 OAI_DEMO_CACHE_DISPLAY_NAME = "Andy Prevalsky"
 
 
-def _is_oai_demo_bound_child_goal(blob: str) -> bool:
+def is_oai_demo_bound_child_goal(text: str | None) -> bool:
     """Child prefix alone is not enough — require a DEMO identity binding."""
+    blob = str(text or "")
     if OAI_DEMO_CHILD_GOAL_PREFIX not in blob:
         return False
     return (
@@ -730,7 +731,7 @@ def _is_oai_demo_bound_child_goal(blob: str) -> bool:
 def is_oai_demo_goal_text(text: str | None) -> bool:
     """True for mass-agent DEMO root, window, or identity-bound child goals."""
     blob = str(text or "")
-    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob or _is_oai_demo_bound_child_goal(blob)
+    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob or is_oai_demo_bound_child_goal(blob)
 
 
 def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:

@@ -555,7 +555,8 @@ class RoseClient:
         recorded for future Fast Mode runs.
         """
         from providers.fast_cache import client as _fc
-        from providers.fast_cache.context import current_context
+        from providers.fast_cache.context import cache_writes_disabled, current_context
+        from providers.fast_cache.rose_cache import FastCacheLookupError
         from providers.fast_cache.rose_cache import (
             accumulate_chunk as _fc_accumulate,
         )
@@ -612,7 +613,7 @@ class RoseClient:
             stored: Any = None
             hit_key: Any = None
             try:
-                from providers.fast_cache.rose_cache import FastCacheLookupError, lookup_llm_cache
+                from providers.fast_cache.rose_cache import lookup_llm_cache
 
                 stored, hit_key = await lookup_llm_cache(
                     ctx, call_site, _fc_request_key_material(kwargs)
@@ -628,7 +629,8 @@ class RoseClient:
                 stored, hit_key = None, None
                 lookup_failed = True
             if stored is not None:
-                if hit_key and hit_key != key and ctx.should_write:
+                can_promote_alias = str(call_site or "").strip() != "dag_param_populator"
+                if hit_key and hit_key != key and ctx.should_write and can_promote_alias:
                     # Migrate demo-era / drifted keys onto the current fingerprint
                     # so subsequent runs hit without the alias path.
                     try:
@@ -736,6 +738,11 @@ class RoseClient:
             # which left spawn-sub-agents explore/execute stuck in attempt_completion
             # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
+
+        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+            raise FastCacheLookupError(
+                f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
+            )
 
         structured_response_model = kwargs.get("response_model") is not None
         acc = _fc_empty()

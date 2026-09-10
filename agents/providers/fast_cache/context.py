@@ -22,6 +22,16 @@ WRITE_THROUGH_USER_IDS = {
 }
 
 
+def cache_writes_disabled() -> bool:
+    """Return whether this process is in authoritative read-only cache mode."""
+    return os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 @dataclass
 class FastCacheContext:
     # `enabled` is the DEMO-prompt cache read/replay switch. Independent of the
@@ -45,6 +55,8 @@ class FastCacheContext:
 
     @property
     def should_write(self) -> bool:
+        if cache_writes_disabled():
+            return False
         return self.enabled if self.write_enabled is None else self.write_enabled
 
     @property
@@ -95,7 +107,6 @@ def is_enabled() -> bool:
 
 
 def write_through_enabled_for_user(user_id: Optional[str]) -> bool:
-    flag = os.environ.get("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "").strip().lower()
-    if flag in {"1", "true", "yes", "on"}:
+    if cache_writes_disabled():
         return False
     return bool(user_id) and user_id in WRITE_THROUGH_USER_IDS

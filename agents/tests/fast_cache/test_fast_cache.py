@@ -2321,6 +2321,84 @@ def test_get_error_falls_through_to_live(monkeypatch):
     asyncio.run(body())
 
 
+def _foreign_dag_param_payload() -> Dict[str, Any]:
+    return {
+        "actual_model": "fast-mode-replay",
+        "pool_name": "rose-1-ultra",
+        "request_id": "foreign-dag-node",
+        "content": "",
+        "content_chunks": [],
+        "reasoning": "",
+        "tool_calls": [
+            {
+                "id": "call-foreign",
+                "name": "spawn_agent",
+                "arguments": '{"type":"for_each","goal":"analyze every creator","items":["a"]}',
+            }
+        ],
+        "codex_reasoning_items": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+
+
+def test_dag_param_positional_candidate_is_not_rekeyed(mem, monkeypatch):
+    """A foreign DAG-node candidate must not poison the exact request key."""
+    foreign = _foreign_dag_param_payload()
+
+    async def foreign_position(*_args, **_kwargs):
+        return foreign, "fastmode:v42:llm:goal:dag_param_populator:p:1:c:foreign"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", foreign_position)
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
+        rose = FakeRose(_full_stream())
+        chunks = await _drain(
+            rose_cache.cached_complete(rose, call_site="dag_param_populator", pool="rose-1-ultra")
+        )
+        assert rose.calls == 0
+        assert next(chunk for chunk in chunks if chunk.kind == "tool_call").data["name"] == "spawn_agent"
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
+def test_rose_client_dag_param_positional_candidate_is_not_promoted(mem, monkeypatch):
+    """The production cache notch also leaves foreign DAG candidates unpromoted."""
+    from providers.rose.client import RoseClient
+
+    foreign = _foreign_dag_param_payload()
+
+    async def foreign_position(*_args, **_kwargs):
+        return foreign, "fastmode:v42:llm:goal:dag_param_populator:p:1:c:foreign"
+
+    monkeypatch.setattr(rose_cache.cache_client, "cache_get_position_fallback", foreign_position)
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="g", base_step=1, write_enabled=True))
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "populate params"}],
+                call_site="dag_param_populator",
+            )
+        )
+        assert live_calls["n"] == 0
+        assert next(chunk for chunk in chunks if chunk.kind == "tool_call").data["name"] == "spawn_agent"
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
+
+
 def test_get_error_on_allowlisted_bench_does_not_go_live(monkeypatch):
     """Mass-agent Fast Mode must not bill live LLM when get-position times out.
 
@@ -2414,6 +2492,21 @@ def test_write_through_disabled_by_isolated_shared_cache_flag(monkeypatch):
     monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
     assert write_through_enabled_for_user("1f85ff25-6e29-4c1b-8739-f917bd101a30") is False
     assert write_through_enabled_for_user("43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9") is False
+    assert FastCacheContext(enabled=True, goal="benchmark", write_enabled=True).should_write is False
+
+
+def test_shared_cache_disable_flag_blocks_all_cache_writes(mem, monkeypatch):
+    """Benchmark read-only mode wins over contexts that request writes."""
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal="ordinary goal", write_enabled=True))
+        rose = FakeRose(_full_stream())
+        await _drain(rose_cache.cached_complete(rose, call_site="execute_loop", pool="rose-1-ultra"))
+        assert rose.calls == 1
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
 
 
 def test_oai_demo_root_goal_hash_constant():
@@ -3027,6 +3120,23 @@ def _july_gp_child_goal() -> str:
     )
 
 
+def test_july_gp_execute_classifier_requires_bound_per_creator_goal():
+    """Creator names inside synthesis prompts must not force a live GP path."""
+    synthesis_goals = [
+        'Build a 12-week calendar from [{"name":"Andrew Huberman"}, {"name":"Chris Williamson"}].',
+        "Create reusable content hooks from the Andrew Huberman and Eric Topol analyses.",
+        "Select exactly 20 creators, including Chris Williamson, for weekly engagement.",
+    ]
+
+    for goal in synthesis_goals:
+        assert rose_cache.is_july_gp_execute_site(SimpleNamespace(goal=goal), "execute_loop") is False
+
+    assert rose_cache.is_july_gp_execute_site(
+        SimpleNamespace(goal=_july_gp_child_goal()),
+        "execute_loop",
+    ) is True
+
+
 def _july_web_search_payload() -> Dict[str, Any]:
     return {
         "actual_model": "fast-mode-replay",
@@ -3174,6 +3284,47 @@ def test_july_gp_execute_miss_does_not_cold_passthrough(mem):
 
     asyncio.run(july_goes_live())
     asyncio.run(tokyo_still_stubs())
+
+
+def test_read_only_benchmark_clean_miss_never_calls_provider(mem, monkeypatch):
+    """A missing shared-cache row fails closed before any live benchmark spend."""
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setenv("FAST_MODE_CACHE_DISABLE_WRITE_THROUGH", "1")
+
+    async def body():
+        bench = _soft_complete_bench_goal()
+        set_context(
+            FastCacheContext(
+                enabled=True,
+                goal=_july_gp_child_goal(),
+                base_step=1,
+                root_goal=bench,
+            )
+        )
+        client = RoseClient(openrouter_key="test-key")
+        live_calls = {"n": 0}
+
+        async def fake_impl(**_kwargs):
+            live_calls["n"] += 1
+            for chunk in _full_stream():
+                yield chunk
+
+        monkeypatch.setattr(client, "_complete_impl", fake_impl)
+        with pytest.raises(FastCacheLookupError, match="Strict read-only benchmark cache miss"):
+            await _drain(
+                client.complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "go"}],
+                    call_site="execute_loop",
+                    agent_id="agent-july-gp",
+                )
+            )
+        assert live_calls["n"] == 0
+        assert mem.set_calls == 0
+
+    asyncio.run(body())
 
 
 def test_rose_client_july_gp_execute_retry_replays_not_stub(mem, monkeypatch):

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import random
 import re
@@ -5073,11 +5074,43 @@ def _structured_response_satisfies_schema(
     return True
 
 
-def _completed_child_task_structured_response(
+_COMPLETED_CHILD_SYNTHETIC_PREFIX = "completed-child-attempt-completion-"
+
+
+def _completed_child_handoff_identity(tool_call_id: Any) -> str:
+    """Return a stable, non-reversible identity for a completed child call."""
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return ""
+    return hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
+    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX):
+        return None
+    suffix = tool_call_id[len(_COMPLETED_CHILD_SYNTHETIC_PREFIX) :]
+    match = re.match(r"^([0-9a-f]{16})-", suffix)
+    return match.group(1) if match else None
+
+
+def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
+    if (
+        metadata.get("toolName") != "attempt_completion"
+        or metadata.get("toolStatus") != "FINISHED"
+        or metadata.get("verifierMessage") is not True
+    ):
+        return False
+    title = str(metadata.get("title") or "")
+    if "Verifier rejected" in title:
+        return True
+    progress_match = re.search(r"Progress:\s*(\d+(?:\.\d+)?)%", title)
+    return bool(progress_match and float(progress_match.group(1)) < 100.0)
+
+
+def _completed_child_task_structured_handoff(
     context: List[Dict[str, Any]],
     response_schema: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Return a completed child task's structured output when it covers the schema.
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Return a completed child's structured output and source tool-call id.
 
     This is deliberately narrow: only finished child task completion messages
     from tools that already ran their own verifier qualify. The parent verifier
@@ -5087,7 +5120,17 @@ def _completed_child_task_structured_response(
     if not context or not response_schema:
         return None
 
-    synthetic_completion_seen = False
+    rejected_synthetic_call_ids = {
+        str(metadata.get("toolCallId"))
+        for message in context
+        if isinstance(message, dict)
+        and isinstance((metadata := message.get("metadata")), dict)
+        and _is_rejected_completion_feedback(metadata)
+        and str(metadata.get("toolCallId") or "").startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX)
+    }
+    rejected_child_identities: set[str] = set()
+    rejected_legacy_handoffs = 0
+    activated_rejections: set[str] = set()
     for message in reversed(context):
         if not isinstance(message, dict):
             continue
@@ -5095,19 +5138,22 @@ def _completed_child_task_structured_response(
         if not isinstance(metadata, dict):
             continue
         tool_calls = metadata.get("tool_calls")
-        if isinstance(tool_calls, list) and any(
-            isinstance(tool_call, dict)
-            and tool_call.get("tool") == "attempt_completion"
-            and str(tool_call.get("tool_call_id") or "").startswith(
-                "completed-child-attempt-completion-"
-            )
-            for tool_call in tool_calls
-        ):
-            # A rejected synthetic completion must be one-shot. Continue
-            # scanning so a newer completed child (encountered before this
-            # marker in reverse order) can still trigger its own handoff, but
-            # do not synthesize the same older child again.
-            synthetic_completion_seen = True
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict) or tool_call.get("tool") != "attempt_completion":
+                    continue
+                synthetic_call_id = str(tool_call.get("tool_call_id") or "")
+                if synthetic_call_id not in rejected_synthetic_call_ids or synthetic_call_id in activated_rejections:
+                    continue
+                activated_rejections.add(synthetic_call_id)
+                rejected_identity = _synthetic_completion_handoff_identity(synthetic_call_id)
+                if rejected_identity:
+                    rejected_child_identities.add(rejected_identity)
+                else:
+                    # Older persisted handoffs did not encode their child id.
+                    # In reverse order each such marker belongs to the first
+                    # qualifying child before it, so skip exactly that child.
+                    rejected_legacy_handoffs += 1
         tool_name = metadata.get("toolName")
         if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
             continue
@@ -5121,11 +5167,25 @@ def _completed_child_task_structured_response(
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
             structured_response = structured_response["output"]
         if _structured_response_satisfies_schema(structured_response, response_schema):
-            if synthetic_completion_seen:
-                return None
-            return structured_response
+            child_tool_call_id = str(metadata.get("toolCallId") or "")
+            child_identity = _completed_child_handoff_identity(child_tool_call_id)
+            if child_identity and child_identity in rejected_child_identities:
+                continue
+            if rejected_legacy_handoffs:
+                rejected_legacy_handoffs -= 1
+                continue
+            return structured_response, child_tool_call_id
 
     return None
+
+
+def _completed_child_task_structured_response(
+    context: List[Dict[str, Any]],
+    response_schema: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a completed child task's schema-covering structured output."""
+    handoff = _completed_child_task_structured_handoff(context, response_schema)
+    return handoff[0] if handoff else None
 
 
 def _build_verifier_response_model(
@@ -5559,11 +5619,13 @@ async def check_progress(
             try:
                 from providers.fast_cache.client import resolve_agent_fast_mode as _resolve_fm
 
-                _e, _g, _w, _r, resolved_root_goal = await _resolve_fm(agent_id)
+                _e, _g, _w, _r, resolved_root_goal, provider_fast_mode = await _resolve_fm(agent_id)
                 if resolved_root_goal:
                     root_goal = resolved_root_goal
             except Exception:
-                pass
+                provider_fast_mode = True
+        else:
+            provider_fast_mode = True
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
@@ -5571,6 +5633,7 @@ async def check_progress(
                 base_step=fast_mode_step,
                 write_enabled=fast_cache_should_write,
                 root_goal=root_goal,
+                provider_fast_mode=provider_fast_mode,
             )
         )
 

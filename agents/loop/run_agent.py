@@ -32,7 +32,8 @@ from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
     LLMStructuredOutputError,
-    _completed_child_task_structured_response,
+    _completed_child_handoff_identity,
+    _completed_child_task_structured_handoff,
     _pending_llm_context,
     _structured_response_ready_for_infra_soft_accept,
     build_llm_messages,
@@ -791,8 +792,11 @@ async def run_agent(
         # normal verifier and completion persistence still run without paying
         # for (or depending on) an LLM to repeat an action we already know.
         completed_child_output = None
+        completed_child_tool_call_id = ""
         if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
-            completed_child_output = _completed_child_task_structured_response(context, response_schema)
+            completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
+            if completed_child_handoff:
+                completed_child_output, completed_child_tool_call_id = completed_child_handoff
         completion_instruction = None
         # Keep the provider-visible tool schema stable across turns. The
         # completion instruction tells the model what to do and required_tool
@@ -1107,7 +1111,11 @@ async def run_agent(
         llm_response_accepted = False
         try:
             if completed_child_output is not None:
-                synthetic_tool_call_id = f"completed-child-attempt-completion-{_safe_uuid4()}"
+                child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
+                identity_segment = f"{child_identity}-" if child_identity else ""
+                synthetic_tool_call_id = (
+                    f"completed-child-attempt-completion-{identity_segment}{_safe_uuid4()}"
+                )
                 result = type(
                     "CompletedChildAction",
                     (),

@@ -668,6 +668,42 @@ async def test_execute_dag_alias_resolution_spawn_explore():
     assert early["metadata"]["fullGoal"] == "Explore stuff"
 
 
+async def test_execute_dag_repairs_stale_cached_explore_alias_without_live_retry():
+    """A stale cached for_each slot cannot force an explore node into a live call."""
+    plan_data = {
+        "tasks": [{"goal": "Research platform benchmarks", "tool_name": "spawn_explore_agent"}],
+        "dependencies": {},
+    }
+    recorded = []
+    activity_calls = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, dict(params), tool_call_id))
+        return {"message": "spawned"}
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=lambda _args: [
+            {
+                "tool": "spawn_agent",
+                "type": "for_each",
+                "goal": "analyze every creator",
+                "items": ["a"],
+            }
+        ],
+        param_usage={"from_fast_cache": True},
+        execute_activity_calls=activity_calls,
+    )
+
+    assert result["status"] == "completed"
+    param_calls = [call for call in activity_calls if call["args"] and call["args"][8] == "dag_param_populator"]
+    assert len(param_calls) == 1
+    assert [(name, params["type"], params["goal"]) for name, params, _id in recorded] == [
+        ("spawn_agent", "explore", "Research platform benchmarks")
+    ]
+
+
 async def test_execute_dag_wait_for_emits_early_wait_chip():
     """wait_for emits a pre-param-populator IN_PROGRESS using the final tool_call_id."""
     plan_data = {
@@ -746,6 +782,7 @@ async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
 
     prompts = []
     recorded = []
+    activity_calls = []
 
     def param_tool_calls(args):
         prompt = args[10]
@@ -772,6 +809,8 @@ async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
         plan_data,
         execute_tool_impl=execute_tool,
         param_tool_calls=param_tool_calls,
+        param_usage={"from_fast_cache": True},
+        execute_activity_calls=activity_calls,
     )
 
     assert result["status"] == "completed"
@@ -779,6 +818,8 @@ async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
     assert "outer planned alias `spawn_general_purpose_agent`" in prompts[0]
     assert "expected spawn_agent type general_purpose, got explore" in prompts[1]
     assert prompts[0] != prompts[1]
+    param_calls = [call for call in activity_calls if call["args"] and call["args"][8] == "dag_param_populator"]
+    assert [call["args"][27] for call in param_calls] == [0, None]
     assert len(recorded) == 1
     assert recorded[0][0] == "spawn_agent"
     assert recorded[0][1]["type"] == "general_purpose"
@@ -1111,6 +1152,9 @@ def test_fan_in_synthesis_goal_detection():
         "Consolidate the complete evidence returned by tasks 0 through 4 into a final candidate universe."
     )
     assert is_fan_in_synthesis_goal("Merge ranked results and produce the final artifact")
+    assert is_fan_in_synthesis_goal("Create the 90-day content calendar using the 50 per-creator analyses.")
+    assert is_fan_in_synthesis_goal("Generate 30 hook-tested openings using the ranked research.")
+    assert is_fan_in_synthesis_goal("Select the 20 creators Andy should engage with weekly.")
     assert not is_fan_in_synthesis_goal("Search GitHub for CUDA kernel repositories")
     # Keyword hits alone are not enough for rewrite; still detectable as wording.
     assert is_fan_in_synthesis_goal("Implement merge sort")
@@ -1128,6 +1172,23 @@ def test_rewrite_recursive_gp_synthesis_task_to_reasoning():
     )
     assert maybe_rewrite_recursive_gp_synthesis_task(task) is True
     assert task.tool_name == "reasoning"
+
+    for index, goal in enumerate(
+        (
+            "Create the 90-day content calendar using the 50 per-creator analyses.",
+            "Generate 30 hook-tested video script openings using the completed research.",
+            "Select the 20 creators Andy should engage with weekly.",
+        ),
+        start=7,
+    ):
+        derived = DAGTask(
+            index=index,
+            goal=goal,
+            tool_name="spawn_general_purpose_agent",
+            depends_on=[2],
+        )
+        assert maybe_rewrite_recursive_gp_synthesis_task(derived) is True
+        assert derived.tool_name == "reasoning"
 
     keep = DAGTask(
         index=1,
@@ -1199,6 +1260,10 @@ async def run_all_tests():
         test_execute_dag_tool_llm_activity_args_match_signature,
     )
     await r.record_async("execute_dag_alias_resolution_spawn_explore", test_execute_dag_alias_resolution_spawn_explore)
+    await r.record_async(
+        "execute_dag_repairs_stale_cached_explore_alias_without_live_retry",
+        test_execute_dag_repairs_stale_cached_explore_alias_without_live_retry,
+    )
     await r.record_async("execute_dag_wait_for_emits_early_wait_chip", test_execute_dag_wait_for_emits_early_wait_chip)
     await r.record_async(
         "execute_dag_general_purpose_spawn_emits_subagent_placeholder",

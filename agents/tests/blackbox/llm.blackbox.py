@@ -3807,6 +3807,54 @@ def _soft_complete_bench_goal() -> str:
     return next(t["prompt"] for t in tasks if t["name"] == "test-mass-agent-run-0")
 
 
+async def test_check_progress_propagates_resolved_fast_cache_tree_context():
+    """Verifier activities retain the tree root goal and provider speed mode."""
+    from helpers.llm import check_progress
+    from providers.fast_cache.context import current_context, set_context
+
+    child_goal = "Select exactly 20 creators"
+    root_goal = _soft_complete_bench_goal()
+    seen_contexts = []
+
+    async def fake_call_llm_verifier(*_args, **_kwargs):
+        ctx = current_context()
+        seen_contexts.append(
+            (
+                ctx.goal if ctx else None,
+                ctx.root_goal if ctx else None,
+                ctx.provider_fast_mode if ctx else None,
+            )
+        )
+        return (
+            {"score": 1.0, "reasoning": "complete"},
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm._call_llm_verifier", fake_call_llm_verifier),
+            patch(
+                "providers.fast_cache.client.resolve_agent_fast_mode",
+                AsyncMock(return_value=(True, child_goal, True, "root-agent", root_goal, False)),
+            ),
+        ):
+            result = await check_progress(
+                context=[{"role": "USER", "text": child_goal, "timestamp": "2024-01-01T00:00:00Z"}],
+                verifier_system_prompt="VERIFY",
+                call_site="verifier_execute",
+                agent_id="child-agent",
+                fast_mode_cache_enabled=True,
+                fast_mode_goal=child_goal,
+                fast_mode_step=1,
+            )
+    finally:
+        set_context(None)
+
+    assert result["score"] == 1.0
+    assert seen_contexts == [(child_goal, root_goal, False)]
+
+
 async def test_check_progress_disables_fast_cache_read_after_verifier_parse_failure():
     """Verifier retries should not replay the same invalid cached response repeatedly."""
     from helpers.llm import check_progress
@@ -4227,6 +4275,69 @@ def test_completed_code_task_rejects_failed_placeholder_structured_response():
         if success_value is not None:
             metadata["success"] = success_value
         assert _completed_child_task_structured_response([{"role": "TOOL", "metadata": metadata}], schema) is None
+
+
+def test_rejected_completed_child_handoff_is_scoped_to_source_child():
+    """A verifier rejection skips its child, without hiding an older valid one."""
+    from helpers.llm import (
+        _completed_child_handoff_identity,
+        _completed_child_task_structured_handoff,
+    )
+
+    schema = {"fields": [{"name": "answer", "type": "str", "required": True}]}
+
+    def completed_child(tool_call_id, answer):
+        return {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": tool_call_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": {"answer": answer},
+            },
+        }
+
+    newer_child_id = "browser-newer"
+    synthetic_id = f"completed-child-attempt-completion-{_completed_child_handoff_identity(newer_child_id)}-synthetic"
+    synthetic_marker = {
+        "role": "ASSISTANT",
+        "metadata": {
+            "tool_calls": [
+                {
+                    "tool": "attempt_completion",
+                    "tool_call_id": synthetic_id,
+                }
+            ]
+        },
+    }
+    base_context = [
+        completed_child("browser-older", "older valid answer"),
+        completed_child(newer_child_id, "newer rejected answer"),
+        synthetic_marker,
+    ]
+
+    # While that synthetic completion is being verified, its declaration is
+    # present but no verifier feedback exists yet. It must still fast-accept
+    # the newest child rather than call the verifier model unnecessarily.
+    assert _completed_child_task_structured_handoff(base_context, schema) == (
+        {"answer": "newer rejected answer"},
+        newer_child_id,
+    )
+
+    rejected_feedback = {
+        "role": "TOOL",
+        "metadata": {
+            "toolCallId": synthetic_id,
+            "toolName": "attempt_completion",
+            "toolStatus": "FINISHED",
+            "title": "⚖️ Verifier rejected (40%) — continue task",
+            "verifierMessage": True,
+        },
+    }
+    assert _completed_child_task_structured_handoff([*base_context, rejected_feedback], schema) == (
+        {"answer": "older valid answer"},
+        "browser-older",
+    )
 
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
@@ -8089,9 +8200,17 @@ async def run_all_tests():
         "completed_code_task_rejects_failed_placeholder_structured_response",
         test_completed_code_task_rejects_failed_placeholder_structured_response,
     )
+    r.record(
+        "rejected_completed_child_handoff_is_scoped_to_source_child",
+        test_rejected_completed_child_handoff_is_scoped_to_source_child,
+    )
     await r.record_async(
         "check_progress_accepts_completed_browser_task_structured_response",
         test_check_progress_accepts_completed_browser_task_structured_response,
+    )
+    await r.record_async(
+        "check_progress_propagates_resolved_fast_cache_tree_context",
+        test_check_progress_propagates_resolved_fast_cache_tree_context,
     )
     await r.record_async(
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
