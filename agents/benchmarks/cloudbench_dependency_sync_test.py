@@ -4089,12 +4089,19 @@ while {{ kill -0 "$runner_pid" 2>/dev/null || kill -0 "$grandchild" 2>/dev/null;
 
 def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     cloud = CLOUD_SCRIPT.read_text()
+    environment_helpers = ENV_HELPER_SCRIPT.read_text()
     accepted = _extract_fleet_function(
-        cloud, "status_proxy_lifecycle_response_accepted() {"
+        environment_helpers, "cloudbench_status_proxy_lifecycle_response_accepted() {"
     )
-    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    starter = _extract_fleet_function(
+        environment_helpers, "cloudbench_start_data_plane_proxy() {"
+    )
     transport = _extract_fleet_function(cloud, "status_proxy_transport_healthy() {")
     ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+    accepted_wrapper = _extract_fleet_function(
+        cloud, "status_proxy_lifecycle_response_accepted() {"
+    )
+    starter_wrapper = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
 
     assert "204|410|425" in accepted
     assert "CLOUDBENCH_DATA_PROXY_READY_TIMEOUT" in starter
@@ -4113,15 +4120,17 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))"' in cloud
     assert "start_leased_data_plane_proxy" in ensure
     assert "ensure_status_proxy >/dev/null 2>&1 || true" in cloud
+    assert "cloudbench_status_proxy_lifecycle_response_accepted" in accepted_wrapper
+    assert "cloudbench_start_data_plane_proxy" in starter_wrapper
 
 
 def test_data_plane_proxy_waits_for_accepted_lifecycle_response(tmp_path: Path) -> None:
     """A live proxy PID is not ready until the remote status service answers HTTP."""
     cloud = CLOUD_SCRIPT.read_text()
-    accepted = _extract_fleet_function(
+    accepted_wrapper = _extract_fleet_function(
         cloud, "status_proxy_lifecycle_response_accepted() {"
     )
-    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    starter_wrapper = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
     leased_starter = _extract_fleet_function(
         cloud, "start_leased_data_plane_proxy() {"
     )
@@ -4222,8 +4231,9 @@ ReusableServer(("127.0.0.1", int(sys.argv[1])), ProxyHandler).serve_forever()
     local_port = local_reservation.getsockname()[1]
     local_reservation.close()
     script = f"""set -u
-{accepted}
-{starter}
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{accepted_wrapper}
+{starter_wrapper}
 {leased_starter}
 {transport_health}
 {ensure}
@@ -4320,13 +4330,10 @@ fi
 def test_backend_data_plane_proxy_keeps_process_readiness_contract(tmp_path: Path) -> None:
     """Generic backend tunnels need process readiness, not status lifecycle."""
     cloud = CLOUD_SCRIPT.read_text()
-    terminator = _extract_fleet_function(
-        ENV_HELPER_SCRIPT.read_text(), "cloudbench_terminate_and_wait() {"
-    )
-    accepted = _extract_fleet_function(
+    accepted_wrapper = _extract_fleet_function(
         cloud, "status_proxy_lifecycle_response_accepted() {"
     )
-    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    starter_wrapper = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
     attempts = tmp_path / "attempts"
     proxy_log = tmp_path / "proxy.log"
     script = f"""set -u
@@ -4340,9 +4347,9 @@ flyctl() {{
   while :; do sleep 1; done
 }}
 curl() {{ printf 000; return 0; }}
-{terminator}
-{accepted}
-{starter}
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{accepted_wrapper}
+{starter_wrapper}
 proxy_pid=""
 cleanup() {{
   cloudbench_terminate_and_wait 1 "${{proxy_pid:-}}"
@@ -7709,13 +7716,13 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_exact_recovery_classifies_cleanup_unconfirmed_owner_as_quarantined(
+def test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers(
     tmp_path: Path,
 ) -> None:
     """A canonical owner is not malformed merely because cleanup is unconfirmed.
 
-    Exact cancellation recovery must retain every resource and durable handle
-    until guest teardown is acknowledged, without crossing any reaper boundary.
+    Exact cancellation recovery must enter the guest acknowledgement boundary
+    and retain every durable handle when that boundary cannot prove teardown.
     """
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
@@ -7757,15 +7764,21 @@ def test_exact_recovery_classifies_cleanup_unconfirmed_owner_as_quarantined(
     (clones / volume_only_name).write_text(
         f"name={volume_only_name}\nvolume_id=vol_volume_only\n"
     )
-    unexpected = tmp_path / "unexpected-recovery-call"
+    guest_recovery_call = tmp_path / "guest-recovery-call"
+    unexpected = tmp_path / "unexpected-reaper-call"
 
     script = f"""set -uo pipefail
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
 FLEET_OWNER_HOST=test-host
+GUEST_RECOVERY_CALL={shlex.quote(str(guest_recovery_call))}
 UNEXPECTED={shlex.quote(str(unexpected))}
 _agent_stale_owner_debug_log() {{ :; }}
+fleet_recovery_reconnect_guest_shutdowns() {{
+  touch "$GUEST_RECOVERY_CALL"
+  return 1
+}}
 recover_registry_audit_only_fresh() {{ touch "$UNEXPECTED"; return 99; }}
 reap_registry_clones() {{ touch "$UNEXPECTED"; return 99; }}
 recover_exact_pool_claims() {{ touch "$UNEXPECTED"; return 99; }}
@@ -7795,8 +7808,10 @@ recover_exact_stale_fleet_owner {owner} || recovery_status=$?
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "cleanup is quarantined pending guest acknowledgement" in result.stderr
+    assert "reconnecting exact owned guests" in result.stdout
     assert "registry identity is unsafe" not in result.stderr
+    assert guest_recovery_call.exists()
+    assert not unexpected.exists()
     assert (registry / "guest-cleanup-unconfirmed").exists()
     records = list(clones.iterdir())
     assert len(records) == 10
@@ -8049,6 +8064,158 @@ recover_exact_stale_fleet_owner {owner}
     ]
     assert not (registry / "guest-cleanup-unconfirmed").exists()
     assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
+
+
+def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
+    tmp_path: Path,
+) -> None:
+    """Exact stale-owner cleanup must never inventory or resolve neighboring Machines."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "machine_volume_id_from_json() {",
+            "machine_volume_id() {",
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+            "reap_machine() {",
+            "registry_meta_value() {",
+            "registry_resolve_name() {",
+            "registry_machine_details() {",
+            "registry_record_is_stale_phantom() {",
+            "registry_record_is_stale_pre_volume_id() {",
+            "reap_registry_clones() {",
+        )
+    )
+    owner = "7b" * 16
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    machine_id = "deadbeef000001"
+    machine_volume = "vol_owned_machine"
+    volume_only = "vol_owned_only"
+    machine_name = "cloudbench-owned-machine"
+    volume_name = "cloudbench-owned-volume-only"
+    (registry / "meta").write_text("version=2\n")
+    (clones / machine_name).write_text(
+        f"name={machine_name}\nid={machine_id}\nvolume_id={machine_volume}\n"
+    )
+    (clones / volume_name).write_text(
+        f"name={volume_name}\nvolume_id={volume_only}\n"
+    )
+    calls = tmp_path / "provider-calls"
+    destroyed_machine = tmp_path / "machine-destroyed"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
+REGISTRY={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+DESTROYED_MACHINE={shlex.quote(str(destroyed_machine))}
+WARM_ID=feedface000001
+WARM_VOLUME_ID=vol_warm_source
+sleep() {{ :; }}
+fleet_audit_update_registry_clone() {{ :; }}
+registry_record_machine_identity() {{ return 99; }}
+registry_retire_absent_stale_pre_volume_records() {{ return 0; }}
+registry_runner_count() {{ return 99; }}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machines list")
+      printf 'FORBIDDEN_NEIGHBOR_INVENTORY\\n' >> "$CALLS"
+      return 98
+      ;;
+    "machine status")
+      [ "$3" = {machine_id} ] || return 97
+      if [ -e "$DESTROYED_MACHINE" ]; then
+        printf "Error: machine %s was not found in app '%s'\\n" "$3" "$APP" >&2
+        return 1
+      fi
+      cat <<'STATUS'
+Machine ID: {machine_id}
+Instance ID: fixture
+State: started
+HostStatus: ok
+
+VM
+  ID            = {machine_id}
+  Instance ID   = fixture
+  State         = started
+  Image         = fixture
+  Name          = {machine_name}
+  Private IP    = fdaa::101
+  Region        = iad
+  Process Group =
+  CPU Kind      = shared
+  vCPUs         = 2
+  Memory        = 4096
+  Created       = fixture
+  Updated       = fixture
+  Entrypoint    =
+  Command       =
+  Volume        = {machine_volume}
+STATUS
+      ;;
+    "machine destroy")
+      [ "$4" = {machine_id} ] || return 96
+      : > "$DESTROYED_MACHINE"
+      ;;
+    "machine stop")
+      return 0
+      ;;
+    "volumes destroy")
+      case "$3" in {machine_volume}|{volume_only}) ;; *) return 95 ;; esac
+      ;;
+    "volumes show")
+      case "$3" in {machine_volume}|{volume_only}) ;; *) return 94 ;; esac
+      printf '{{"id":"%s","state":"pending_destroy"}}\\n' "$3"
+      ;;
+    *) return 93 ;;
+  esac
+}}
+{functions}
+
+reap_registry_clones "$REGISTRY" forced || exit 90
+[ ! -e "$REGISTRY/clones/{machine_name}" ] || exit 91
+[ ! -e "$REGISTRY/clones/{volume_name}" ] || exit 92
+! grep -q 'FORBIDDEN_NEIGHBOR_INVENTORY' "$CALLS" || exit 93
+! grep -q 'neighbor' "$CALLS" || exit 94
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    call_lines = calls.read_text().splitlines()
+    assert any(
+        line.startswith(f"machine status {machine_id} ") for line in call_lines
+    )
+    assert all("machines list" not in line for line in call_lines)
+    assert all(
+        machine_id in line
+        or machine_volume in line
+        or volume_only in line
+        or line.startswith("machine stop")
+        for line in call_lines
+    )
+
+
+def test_exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index('if [ "$RECOVER_STALE_ONLY" = "1" ]; then', fleet.index("# ── One controller lock"))
+    end = fleet.index("\nfi\n", start) + len("\nfi\n")
+    recovery_entrypoint = fleet[start:end]
+
+    assert "machines list" not in recovery_entrypoint
+    assert "reap_orphaned_fleet_proxies" not in recovery_entrypoint
+    assert "resolve_exact_recovery_warm_identity" in recovery_entrypoint
 
 
 def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
@@ -15680,10 +15847,16 @@ def test_cloud_runner_avoids_live_run_port_collisions() -> None:
     than reconstructing the preferred value.
     """
     cloud = CLOUD_SCRIPT.read_text()
+    environment_helpers = ENV_HELPER_SCRIPT.read_text()
     assert 'claim_local_port "$LOCAL_DASH_PORT" LOCAL_DASH_PORT' in cloud
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
-    assert "return 98" in _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    assert "return 98" in _extract_fleet_function(
+        environment_helpers, "cloudbench_start_data_plane_proxy() {"
+    )
+    assert "cloudbench_start_data_plane_proxy" in _extract_fleet_function(
+        cloud, "start_data_plane_proxy() {"
+    )
     assert "release_local_port_lease" in _extract_fleet_function(cloud, "start_leased_data_plane_proxy() {")
     assert "release_local_port_leases" in _extract_fleet_function(cloud, "stop_on_exit() {")
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
