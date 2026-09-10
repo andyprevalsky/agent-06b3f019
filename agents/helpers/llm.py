@@ -2823,6 +2823,7 @@ async def call_llm_structured_streaming(
                     "messages": messages,
                     "response_model": response_model,
                     "tool_choice": tool_choice,
+                    "context_tools": context_tools,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "seed": model_seed,

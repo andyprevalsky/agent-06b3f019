@@ -1032,6 +1032,7 @@ def position_request_fingerprint(request: Any) -> str:
         "static_messages": static_messages,
         "user_messages": _user_messages_for_position_fingerprint(messages),
         "tools": request.get("tools"),
+        "context_tools": request.get("context_tools"),
         "tool_choice": request.get("tool_choice"),
         "temperature": request.get("temperature"),
         "max_tokens": request.get("max_tokens"),

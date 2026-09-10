@@ -938,6 +938,7 @@ def transform_messages_for_openai(
     *,
     tools_declared: bool = True,
     cache_opening_user: bool = False,
+    inject_cache_breakpoints: bool = True,
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR, Anthropic-via-OR).
@@ -946,7 +947,7 @@ def transform_messages_for_openai(
     first — see `flatten_tool_history_to_text` for the Gemini 400 it avoids.
     Defaults to True so existing callers keep today's behavior.
 
-    cache_control placement contract (waterfall path, OpenRouter-targeted):
+    cache_control placement contract (explicit-cache waterfall models):
 
     - We mark the trailing block of the FIRST system message as a cache
       breakpoint (idempotent — preserves any caller-supplied breakpoints).
@@ -954,20 +955,19 @@ def transform_messages_for_openai(
       ``cache_opening_user`` also marks the FIRST user message. That opening
       turn is stable for an append-only agent conversation and extends short
       system prompts past provider minimums.
-    - We do NOT mark the last user message. Different OR providers interpret
-      the last cache_control marker differently:
-        * Anthropic accepts multiple breakpoints and picks the longest
-          matching prefix.
-        * Gemini-via-OR treats the LAST cache_control as the cache key —
-          marking a per-call dynamic tail there makes every call's cache key
-          unique, defeating the cache. The first user turn remains stable.
-      Marking the stable opening prefix gives both providers a usable cache
-      key without trading one off against the other.
+    - We do NOT mark the last user message. Explicit-cache providers such as
+      Anthropic accept multiple breakpoints and pick the longest matching
+      prefix, so the stable opening turn is reusable while the conversation
+      tail remains dynamic.
 
     Callers that want additional breakpoints (e.g. message_person stacks a
     static-rules block + a per-user voice block in one system message)
     should set cache_control explicitly on the relevant content blocks
     before calling — those markers are preserved here.
+
+    ``inject_cache_breakpoints=False`` leaves caller-supplied markers intact
+    but does not synthesize new ones. It is used for Gemini 2.5+ waterfall
+    models, whose append-only message prefixes are cached implicitly.
     """
     source = messages if tools_declared else flatten_tool_history_to_text(messages)
     out: List[Dict[str, Any]] = []
@@ -1005,12 +1005,17 @@ def transform_messages_for_openai(
     first_user_seen = False
     for m in out:
         if m.get("role") == "system":
-            if not first_system_seen:
+            if inject_cache_breakpoints and not first_system_seen:
                 _add_openrouter_cache_breakpoint(m)
-                first_system_seen = True
             else:
                 _strip_system_prompt_boundary(m)
-        elif cache_opening_user and m.get("role") == "user" and not first_user_seen:
+            first_system_seen = True
+        elif (
+            inject_cache_breakpoints
+            and cache_opening_user
+            and m.get("role") == "user"
+            and not first_user_seen
+        ):
             _add_openrouter_cache_breakpoint(m)
             first_user_seen = True
         elif m.get("role") == "assistant":

@@ -98,6 +98,12 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
 DEFAULT_REASONING_EFFORT = "xhigh"
 
 
+def _uses_implicit_gemini_prompt_cache(model: str) -> bool:
+    """Return whether the supported Gemini generation has implicit caching."""
+    normalized = model.lower()
+    return normalized.startswith(("google/gemini-2.5", "google/gemini-3"))
+
+
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     """Normalize effort for OpenRouter reasoning.effort.
 
@@ -137,12 +143,17 @@ def build_openrouter_body(
     # history reaches a provider with no functionDeclarations — a deterministic
     # 400 on Google (see flatten_tool_history_to_text).
     openrouter_tools = _openrouter_tools(tools)
+    gemini_implicit_cache = _uses_implicit_gemini_prompt_cache(model)
     body: Dict[str, Any] = {
         "model": model,
         "messages": transform_messages_for_openai(
             messages,
             tools_declared=bool(openrouter_tools),
             cache_opening_user=bool(cache_namespace),
+            # Gemini 2.5+ caches stable, growing message prefixes implicitly.
+            # An explicit marker makes its short opening block the only cache
+            # candidate, so longer append-only turns never become reusable.
+            inject_cache_breakpoints=not gemini_implicit_cache,
         ),
         "stream": True,
         "stream_options": {"include_usage": True},

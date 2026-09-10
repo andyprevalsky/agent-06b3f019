@@ -303,6 +303,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
         "tools": complete_kwargs.get("tools"),
+        "context_tools": complete_kwargs.get("context_tools"),
         "tool_choice": complete_kwargs.get("tool_choice"),
         "temperature": complete_kwargs.get("temperature"),
         "max_tokens": complete_kwargs.get("max_tokens"),

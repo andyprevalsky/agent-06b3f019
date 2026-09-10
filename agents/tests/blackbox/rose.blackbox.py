@@ -1006,12 +1006,11 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert msgs[1]["content"] == "hello"
 
 
-def test_transform_messages_for_openai_marks_stable_conversation_prefix():
-    """Gemini's final explicit breakpoint must include the stable opening turn.
+def test_transform_messages_for_openai_marks_explicit_cache_conversation_prefix():
+    """Explicit-cache providers may include the stable opening turn.
 
-    Explore-agent system prompts are smaller than Gemini's cache minimum, while
-    the opening user goal remains byte-identical across the task's later turns.
-    The mutable conversation tail must remain outside that breakpoint.
+    The opening user goal remains byte-identical across an agent task's later
+    turns. The mutable conversation tail must remain outside the breakpoint.
     """
     msgs = [
         {"role": "system", "content": "stable rules"},
@@ -3022,6 +3021,76 @@ def test_build_openrouter_body_uses_logical_sequence_for_sticky_routing():
     )
 
     assert body["session_id"] == sequence_id
+
+
+def test_build_openrouter_body_leaves_gemini_prompt_caching_implicit():
+    """Keep Gemini's growing append-only prefix eligible for implicit caching.
+
+    The captured parallel-tool-calls requests start with a short system + user
+    prefix, then grow through append-only assistant/tool turns. Gemini 2.5+
+    can cache that shared prefix implicitly. The captured run forced its only
+    explicit breakpoint onto the short opening pair and observed zero reads.
+    """
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "stable task goal"},
+            {"role": "assistant", "content": "append-only work"},
+            {"role": "tool", "content": "large append-only result"},
+        ],
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="agent:parent:task:explore-a:call:explore_agent",
+    )
+
+    assert "cache_control" not in json.dumps(body["messages"])
+
+
+def test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini():
+    marker = {"type": "ephemeral"}
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "large stable reference", "cache_control": marker}],
+            },
+            {"role": "user", "content": "question"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-sequence",
+    )
+
+    assert body["messages"][0]["content"][0]["cache_control"] == marker
+
+
+def test_build_openrouter_body_retains_explicit_model_breakpoints():
+    body = build_openrouter_body(
+        model="anthropic/claude-haiku-4.5",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "task goal"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="anthropic-sequence",
+    )
+
+    assert "cache_control" in json.dumps(body["messages"])
 
 
 TOOL_HISTORY_MESSAGES = [
@@ -6449,7 +6518,7 @@ async def run_all_tests():
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
     r.record(
         "openai_messages_stable_conversation_cache_prefix",
-        test_transform_messages_for_openai_marks_stable_conversation_prefix,
+        test_transform_messages_for_openai_marks_explicit_cache_conversation_prefix,
     )
     r.record(
         "openai_messages_tool_call_type_discriminator",
@@ -6558,6 +6627,18 @@ async def run_all_tests():
     r.record(
         "openrouter_body_logical_sequence_sticky_routing",
         test_build_openrouter_body_uses_logical_sequence_for_sticky_routing,
+    )
+    r.record(
+        "openrouter_body_gemini_implicit_prompt_cache",
+        test_build_openrouter_body_leaves_gemini_prompt_caching_implicit,
+    )
+    r.record(
+        "openrouter_body_gemini_caller_cache_breakpoint",
+        test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini,
+    )
+    r.record(
+        "openrouter_body_explicit_model_cache_breakpoint",
+        test_build_openrouter_body_retains_explicit_model_breakpoints,
     )
     r.record(
         "named_tool_choice_degrades_only_for_google",

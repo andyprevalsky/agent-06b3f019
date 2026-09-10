@@ -1056,6 +1056,39 @@ def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
     assert ctx.llm_key("execute_loop", changed_request) != original_key
 
 
+def test_llm_request_key_separates_context_tool_schemas():
+    """Declared-only tools shape provider validity and must partition replay."""
+    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    base = {
+        "pool": "rose-1-ultra",
+        "context_tools": [
+            {
+                "name": "history_tool",
+                "description": "Legalizes native history",
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+            }
+        ],
+    }
+    reordered = {
+        "pool": "rose-1-ultra",
+        "context_tools": [
+            {
+                "input_schema": {"properties": {"query": {"type": "string"}}, "type": "object"},
+                "description": "Legalizes native history",
+                "name": "history_tool",
+            }
+        ],
+    }
+    changed = {
+        **base,
+        "context_tools": [{**base["context_tools"][0], "name": "different_history_tool"}],
+    }
+
+    base_key = ctx.llm_key("planner", rose_cache.request_key_material(base))
+    assert ctx.llm_key("planner", rose_cache.request_key_material(reordered)) == base_key
+    assert ctx.llm_key("planner", rose_cache.request_key_material(changed)) != base_key
+
+
 def test_fable_51_pool_contract_shares_fable_5_fingerprint():
     """claudeAuth 5 → 5.1 must not miss the warm exact key (mass-agent p:1)."""
     shared = {

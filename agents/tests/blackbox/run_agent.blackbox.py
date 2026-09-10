@@ -1741,6 +1741,11 @@ async def test_completed_code_child_dispatches_parent_completion_without_llm():
 
 async def test_rejected_completed_child_handoff_returns_control_to_llm():
     """A rejected synthetic completion is not replayed forever."""
+    cache_steps = []
+
+    async def record_cache_step(_agent_id, step):
+        cache_steps.append(step)
+
     response_schema = {
         "fields": [
             {"name": "purchase_completed", "type": "bool", "required": True},
@@ -1772,22 +1777,27 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
         llm_calls += 1
         return [{"tool": "web_search", "query": "correct the rejected handoff"}]
 
-    result, _, executed = await _run_single_iteration(
-        [],
-        [],
-        skip_verification=False,
-        initial_context=context,
-        response_schema=response_schema,
-        verifier_score=0.4,
-        verifier_reasoning="The parent still needs corrective work.",
-        verifier_structured_response=child_result,
-        llm_tool_calls_factory=corrective_llm_turn,
-        max_iterations=2,
-    )
+    with patch(
+        "providers.fast_cache.client.ensure_position_context",
+        new=AsyncMock(side_effect=record_cache_step),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [],
+            [],
+            skip_verification=False,
+            initial_context=context,
+            response_schema=response_schema,
+            verifier_score=0.4,
+            verifier_reasoning="The parent still needs corrective work.",
+            verifier_structured_response=child_result,
+            llm_tool_calls_factory=corrective_llm_turn,
+            max_iterations=2,
+        )
 
     assert result["status"] == "max_iterations"
     assert llm_calls == 1
     assert [item["tool_name"] for item in executed] == ["attempt_completion", "web_search"]
+    assert cache_steps == [1], "the synthetic completion must not consume a provider-cache position"
 
 
 async def test_verifier_usage_preserves_cache_sequence_identity():

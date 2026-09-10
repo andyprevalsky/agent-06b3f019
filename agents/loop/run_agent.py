@@ -1503,7 +1503,8 @@ async def run_agent(
                     logger.info("Agent paused after cost check")
                     return _paused_after_cost_result()
 
-            fast_cache_llm_position = fast_cache_step
+            if completed_child_output is None:
+                fast_cache_llm_position = fast_cache_step
 
             # Persist + broadcast own tokens after each LLM call. Descendant
             # subtree totals have their own durable maps in AgentWorkflow.
