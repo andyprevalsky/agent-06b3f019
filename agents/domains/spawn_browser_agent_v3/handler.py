@@ -5122,6 +5122,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                 cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
                 from_fast_cache=bool(usage.get("from_fast_cache")),
+                cache_sequence_id=usage.get("cache_sequence_id"),
             )
             action = dict(llm_result.get("action") or {})
             action_name = str(action.get("action") or "")
@@ -7408,6 +7409,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                     cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
                     from_fast_cache=bool(usage.get("from_fast_cache")),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
                 )
 
             except asyncio.TimeoutError:
@@ -7722,6 +7724,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             classifier_usage.get("cache_creation_input_tokens") or 0
                         ),
                         from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                        cache_sequence_id=classifier_usage.get("cache_sequence_id"),
                     )
                 if auth_guard_page_challenged:
                     challenge_guard_reason = (
@@ -8526,6 +8529,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 classifier_usage.get("cache_creation_input_tokens") or 0
                             ),
                             from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                            cache_sequence_id=classifier_usage.get("cache_sequence_id"),
                         )
 
                 await _finalize_browser_recovery_action_result(
@@ -8644,6 +8648,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         cache_read_input_tokens=int(v_usage.get("cache_read_input_tokens") or 0),
                         cache_creation_input_tokens=int(v_usage.get("cache_creation_input_tokens") or 0),
                         from_fast_cache=bool(v_usage.get("from_fast_cache")),
+                        cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
 
                     score = progress_result.get("score", 0.0)
@@ -9584,6 +9589,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     cache_read_input_tokens=int(fv_usage.get("cache_read_input_tokens") or 0),
                     cache_creation_input_tokens=int(fv_usage.get("cache_creation_input_tokens") or 0),
                     from_fast_cache=bool(fv_usage.get("from_fast_cache")),
+                    cache_sequence_id=fv_usage.get("cache_sequence_id"),
                 )
                 if final_progress.get("structured_response") is not None:
                     latest_structured_response = final_progress["structured_response"]

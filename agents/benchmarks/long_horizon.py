@@ -53,7 +53,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "zero_live_spend",
     "no_nested_general_purpose",
     "no_synthetic_agent_skip_messages",
-    "principal_user_andy",
+    "plan_shape",
+        "principal_user_andy",
     "agent_task_title",
     "root_deliverable_markers",
     "tree_agent_status",
@@ -135,6 +136,8 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
         raise ValueError(f"{item_id}: environment.mode must be one of {sorted(ENVIRONMENT_MODES)}")
     for field in ("db_fixtures", "base_images", "services", "secrets", "live_targets"):
         _require_string_list(env, field, item_id, allow_empty=True)
+    if "memory_fixtures" in env:
+        _require_string_list(env, "memory_fixtures", item_id, allow_empty=True)
     if not isinstance(env.get("context_notes"), str) or not env["context_notes"].strip():
         raise ValueError(f"{item_id}: environment.context_notes must be a non-empty string")
     if mode == "live" and env.get("db_fixtures"):

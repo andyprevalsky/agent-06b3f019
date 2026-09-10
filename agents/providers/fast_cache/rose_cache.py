@@ -22,8 +22,12 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
 import structlog
 
 from providers.fast_cache import client as cache_client
-from providers.fast_cache.context import current_context
-from providers.fast_cache.normalize import is_oai_demo_goal_text, rewrite_oai_demo_display_names
+from providers.fast_cache.context import cache_writes_disabled, current_context
+from providers.fast_cache.normalize import (
+    is_oai_demo_bound_child_goal,
+    is_oai_demo_goal_text,
+    rewrite_oai_demo_display_names,
+)
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
 
@@ -299,6 +303,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "pool_contract": pool_contract,
         "messages": complete_kwargs.get("messages"),
         "tools": complete_kwargs.get("tools"),
+        "context_tools": complete_kwargs.get("context_tools"),
         "tool_choice": complete_kwargs.get("tool_choice"),
         "temperature": complete_kwargs.get("temperature"),
         "max_tokens": complete_kwargs.get("max_tokens"),
@@ -572,7 +577,8 @@ def is_july_gp_execute_site(ctx: Any, call_site: str) -> bool:
         return False
     from domains.spawn_agent.oai_demo_july import july_gp_goal_hash_for_goal
 
-    return bool(july_gp_goal_hash_for_goal(getattr(ctx, "goal", None) or ""))
+    goal = getattr(ctx, "goal", None) or ""
+    return is_oai_demo_bound_child_goal(goal) and bool(july_gp_goal_hash_for_goal(goal))
 
 
 def _payload_tool_name(stored: Any) -> str:
@@ -905,7 +911,12 @@ async def cached_complete(
             stored, hit_key = None, None
             lookup_failed = True
         if stored is not None:
-            if hit_key and hit_key != key and ctx.should_write:
+            # Positional DAG parameter rows are only candidates until the DAG
+            # executor validates their alias/type contract. Rekeying here
+            # would turn a foreign node's candidate into a durable exact hit,
+            # so a corrective retry could never escape it.
+            can_rekey = (call_site or "").strip() != "dag_param_populator"
+            if hit_key and hit_key != key and ctx.should_write and can_rekey:
                 try:
                     await cache_client.cache_set(key, "llm", ctx.goal_hash, stored)
                 except Exception as exc:
@@ -1000,6 +1011,11 @@ async def cached_complete(
         # trajectory_prior_exists and abort with attempt_completion stubs
         # (spawn-sub-agents smoke timeout).
         logger.info("llm.cache.write_only", call_site=call_site, key=key)
+
+    if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+        raise FastCacheLookupError(
+            f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
+        )
 
     # Live path: prefer _complete_impl so we do not re-enter RoseClient.complete's
     # Fast Mode notch (would double-count miss / soft_complete and double-write).

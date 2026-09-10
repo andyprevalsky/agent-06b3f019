@@ -38,6 +38,7 @@ function optionalAgentCreateFields(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
@@ -64,6 +65,7 @@ function optionalAgentCreateFields(params: {
     ...(params.fastModeCacheEnabled !== undefined
       ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
       : {}),
+    ...(params.memoryEnabled !== undefined ? { memoryEnabled: params.memoryEnabled } : {}),
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
   };
@@ -108,6 +110,7 @@ export interface CreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
   isBenchmark?: boolean;
@@ -204,6 +207,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  memoryEnabled?: boolean;
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;

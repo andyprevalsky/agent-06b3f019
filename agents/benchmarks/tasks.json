@@ -5230,4 +5230,173 @@
     ],
     "group": "rose-bench"
   }
+,
+  {
+    "name": "planner-memory-blue-bottle-off",
+    "title": "Blue Bottle planner A/B \u2014 memory OFF",
+    "description": "Planner-phase A/B for planner memory on the Blue Bottle pickup goal: the accepted plan is the deliverable (plan-only terminal).",
+    "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "set_plan"
+    ],
+    "tags": [
+      "planner",
+      "memory",
+      "plan-only"
+    ],
+    "group": "daily",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "expected_approval_count": null,
+    "expected_attention_kind": null,
+    "success_on_payment_card_request": false,
+    "expected_tool_counts": null,
+    "tool_count_scope": "root",
+    "start_phase": "plan",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "memory_fixtures": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Memory OFF baseline. Same prompt as browser-blue-bottle-challenge-recovery, planner phase only. Expected plan: explore (find the ordering page) -> browser (order, guest checkout, stop at payment). This arm proves the task-skip is caused by memory, not by the prompt."
+    },
+    "evaluators": [
+      {
+        "id": "planner-memory-blue-bottle-off-plan-shape",
+        "method": "static_check",
+        "criteria": [
+          "Without memory the planner follows the retrieval-to-execution invariant: an explore task discovers the ordering page before the browser task",
+          "Exactly one browser session is planned"
+        ],
+        "checks": [
+          {
+            "type": "plan_shape",
+            "require_tools": [
+              "spawn_explore_agent",
+              "spawn_browser_agent"
+            ]
+          },
+          {
+            "type": "plan_shape",
+            "count": {
+              "spawn_browser_agent": 1
+            }
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Memory OFF baseline. Same prompt as browser-blue-bottle-challenge-recovery, planner phase only. Expected plan: explore (find the ordering page) -> browser (order, guest checkout, stop at payment). This arm proves the task-skip is caused by memory, not by the prompt.",
+    "source": [
+      "feature:planner-memory",
+      "prod-agent:1cba6647-b233-42f2-aafe-40fd6729494b",
+      "task:browser-blue-bottle-challenge-recovery"
+    ],
+    "memory": "off",
+    "success_on_plan": true
+  },
+  {
+    "name": "planner-memory-blue-bottle-on",
+    "title": "Blue Bottle planner A/B \u2014 memory ON",
+    "description": "Planner-phase A/B for planner memory on the Blue Bottle pickup goal: the accepted plan is the deliverable (plan-only terminal).",
+    "prompt": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "set_plan"
+    ],
+    "tags": [
+      "planner",
+      "memory",
+      "plan-only"
+    ],
+    "group": "daily",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "expected_approval_count": null,
+    "expected_attention_kind": null,
+    "success_on_payment_card_request": false,
+    "expected_tool_counts": null,
+    "tool_count_scope": "root",
+    "start_phase": "plan",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "memory_fixtures": [
+        "blue-bottle-ferry-pickup-v1"
+      ],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Memory ON arm. The fixture is the compressed critical path of the passing run 1cba6647 (2026-09-03). Expected plan: a single browser task that opens the known ordering host directly; the explore step present in the OFF arm is skipped (strictly fewer tasks)."
+    },
+    "evaluators": [
+      {
+        "id": "planner-memory-blue-bottle-on-plan-shape",
+        "method": "static_check",
+        "criteria": [
+          "With memory the discovery step is skipped: no explore task",
+          "Exactly one browser session goes straight to the known ordering host"
+        ],
+        "checks": [
+          {
+            "type": "plan_shape",
+            "no_tools": [
+              "spawn_explore_agent"
+            ]
+          },
+          {
+            "type": "plan_shape",
+            "count": {
+              "spawn_browser_agent": 1
+            },
+            "any_goal_contains": {
+              "tool_name": "spawn_browser_agent",
+              "any": [
+                "order.online",
+                "bluebottlecoffee.com"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "no",
+    "label_eval": "Memory ON arm. The fixture is the compressed critical path of the passing run 1cba6647 (2026-09-03). Expected plan: a single browser task that opens the known ordering host directly; the explore step present in the OFF arm is skipped (strictly fewer tasks).",
+    "source": [
+      "feature:planner-memory",
+      "prod-agent:1cba6647-b233-42f2-aafe-40fd6729494b",
+      "task:browser-blue-bottle-challenge-recovery"
+    ],
+    "memory": "on",
+    "success_on_plan": true
+  }
 ]

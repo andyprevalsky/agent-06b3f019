@@ -220,6 +220,7 @@ export async function findExecutionModeFlagsByIds(agentIds: string[], userId?: s
       id: true,
       fastModeCacheEnabled: true,
       worldModelMode: true,
+      memoryEnabled: true,
       isBenchmark: true,
     },
   });

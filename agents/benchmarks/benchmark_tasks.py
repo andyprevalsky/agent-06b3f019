@@ -99,6 +99,8 @@ class BenchmarkTask:
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing
     world_surface: Optional[str] = None  # "live" or "simulated"; binary world-model surface, independent of DB fixtures
     fast_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode
+    memory: Optional[str] = None  # Planner memory: "on" forks get_memories into the planner; "off"/None = off (default off)
+    success_on_plan: bool = False  # Plan-phase A/B: terminal success once set_plan lands (plan_shape checks run on the plan)
     anti_bot: Optional[str] = None  # "yes" or "no"; daily reporting can aggregate Anti-Bot score
     label_eval: Optional[str] = None  # Human-readable summary of the benchmark pass condition
     label_notes: Optional[str] = None  # Human-readable cleanup/review notes
@@ -186,6 +188,7 @@ def _default_environment() -> dict:
         "db_fixtures": [],
         "base_images": [DEFAULT_BASE_IMAGE],
         "live_fixtures": [],
+        "memory_fixtures": [],
         "services": [],
         "secrets": [],
         "live_targets": [],
@@ -233,6 +236,12 @@ def _load_tasks() -> List[BenchmarkTask]:
             # live-world task mutate its DB merely because it uses a live URL.
             if t.environment.get("live_fixtures") is None:
                 t.environment["live_fixtures"] = resolve_live_fixtures(t.environment)
+            if t.environment.get("memory_fixtures") is None:
+                t.environment["memory_fixtures"] = []
+        if t.memory not in (None, "on", "off"):
+            raise ValueError(f"Benchmark task '{t.name}' has invalid memory={t.memory!r} (expected 'on' or 'off')")
+        if t.environment.get("memory_fixtures") and t.memory != "on":
+            raise ValueError(f"Benchmark task '{t.name}' declares memory_fixtures but memory is not 'on'")
         if t.sub_agent_count is not None:
             apply_sub_agent_count(t, t.sub_agent_count)
         if t.name in SMOKE_TIMEOUT_CAPS:

@@ -1,6 +1,7 @@
 """Blackbox tests for set-plan domain."""
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -406,20 +407,37 @@ def test_build_planner_messages_empty_context():
 
 
 def test_build_planner_messages_tool_and_system_roles():
-    """TOOL/SYSTEM messages are included as user role with prefix."""
+    """Declared tool calls keep native roles; system rows remain user notices."""
     from domains.set_plan.service import build_planner_messages
 
     context = [
         {"role": "USER", "text": "Goal"},
-        {"role": "TOOL", "text": "Result"},
+        {
+            "role": "ASSISTANT",
+            "text": "Delegating research",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "call-1",
+                        "type": "explore",
+                        "goal": "Research example",
+                    },
+                ]
+            },
+        },
+        {"role": "TOOL", "text": "Result", "metadata": {"toolCallId": "call-1", "title": "Research"}},
         {"role": "SYSTEM", "text": "Note"},
     ]
     base_messages, _ = build_planner_messages(context)
-    # goal + 3 messages
-    assert len(base_messages) == 4
-    # Find the TOOL message
-    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
-    assert tool_msg["role"] == "user"
+    # goal + user + assistant call + tool result + system notice
+    assert len(base_messages) == 5
+    assistant_msg = next(m for m in base_messages if m["role"] == "assistant")
+    assert assistant_msg["tool_calls"][0]["function"]["name"] == "spawn_agent"
+    tool_msg = next(m for m in base_messages if m["role"] == "tool")
+    assert tool_msg["tool_call_id"] == "call-1"
+    assert tool_msg["name"] == "spawn_agent"
+    assert tool_msg["content"] == "Research: Result"
     system_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
     assert system_msg["role"] == "user"
 
@@ -475,7 +493,7 @@ def test_build_planner_messages_compacts_long_tool_context():
     ]
 
     base_messages, _ = build_planner_messages(context)
-    tool_msg = next(m for m in base_messages if "[TOOL]" in m["content"])
+    tool_msg = next(m for m in base_messages if "[SYSTEM]" in m["content"])
 
     assert len(tool_msg["content"]) < len(long_text)
     assert len(tool_msg["content"]) < PLANNER_CONTEXT_FULL_TEXT_LIMIT
@@ -503,6 +521,97 @@ def test_build_planner_messages_compacts_large_tool_outputs():
     assert user_messages == ["Compare cities"]
     assert any("planner context compacted" in m["content"].lower() for m in base_messages)
     assert any("omega" in m["content"] for m in base_messages)
+
+
+def test_build_planner_messages_keeps_large_tool_arguments_valid_json():
+    """Persisted native arguments stay parseable after planner compaction."""
+    from domains.set_plan.service import PLANNER_CONTEXT_FULL_TEXT_LIMIT, build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Delegate a research task"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "large-args",
+                        "type": "explore",
+                        "goal": 'Research "quoted" material\n' * 2_000,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Research completed",
+            "metadata": {"toolCallId": "large-args", "toolName": "spawn_agent"},
+        },
+    ]
+
+    messages, _ = build_planner_messages(context)
+    declaration = next(message for message in messages if message.get("tool_calls"))
+    arguments = declaration["tool_calls"][0]["function"]["arguments"]
+    decoded = json.loads(arguments)
+    assert len(arguments) <= PLANNER_CONTEXT_FULL_TEXT_LIMIT
+    assert "_rose_compacted_arguments" in decoded
+
+
+def test_build_planner_messages_filters_non_planner_tools_and_repairs_pairs():
+    """Execute-only and duplicate calls never reach native planner history."""
+    from domains.set_plan.service import build_planner_messages
+
+    context = [
+        {"role": "USER", "text": "Plan this"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "wait_for", "tool_call_id": "execute-only", "seconds": 1},
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "valid-call",
+                        "type": "explore",
+                        "goal": "research",
+                    },
+                ]
+            },
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "duplicate replay",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "valid-call",
+                        "type": "explore",
+                        "goal": "again",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "research complete",
+            "metadata": {"toolCallId": "valid-call", "toolName": "spawn_agent"},
+        },
+        {
+            "role": "TOOL",
+            "text": "wait complete",
+            "metadata": {"toolCallId": "execute-only", "toolName": "wait_for"},
+        },
+    ]
+
+    messages, _ = build_planner_messages(context)
+    calls = [call for message in messages for call in message.get("tool_calls", [])]
+    assert [call["id"] for call in calls] == ["valid-call"]
+    assert all(call["function"]["name"] != "wait_for" for call in calls)
+    tool_rows = [message for message in messages if message.get("role") == "tool"]
+    assert [message["tool_call_id"] for message in tool_rows] == ["valid-call"]
+    assert any("wait complete" in str(message.get("content")) for message in messages)
 
 
 def test_build_planner_messages_skips_empty_text():
@@ -794,6 +903,14 @@ async def run_all_tests():
         "build_planner_messages_compacts_long_tool_context", test_build_planner_messages_compacts_long_tool_context
     )
     r.record("build_planner_messages_compacts_tool_outputs", test_build_planner_messages_compacts_large_tool_outputs)
+    r.record(
+        "build_planner_messages_valid_large_arguments",
+        test_build_planner_messages_keeps_large_tool_arguments_valid_json,
+    )
+    r.record(
+        "build_planner_messages_filters_and_pairs_tools",
+        test_build_planner_messages_filters_non_planner_tools_and_repairs_pairs,
+    )
     r.record("build_planner_messages_empty_text", test_build_planner_messages_skips_empty_text)
     r.record("build_planner_messages_no_http", test_build_planner_messages_no_outbound_http)
     r.record("no_outbound_http_calls", test_no_outbound_http_calls)

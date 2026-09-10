@@ -98,6 +98,11 @@ def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
 DEFAULT_REASONING_EFFORT = "xhigh"
 
 
+def _uses_explicit_gemini_prompt_cache(model: str) -> bool:
+    """Return whether OpenRouter requires an explicit Gemini breakpoint."""
+    return model.lower().startswith("google/gemini-")
+
+
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     """Normalize effort for OpenRouter reasoning.effort.
 
@@ -124,6 +129,8 @@ def build_openrouter_body(
     seed: Optional[int],
     provider_fast_mode: bool = True,
     effort: Optional[str] = None,
+    cache_namespace: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
@@ -136,10 +143,15 @@ def build_openrouter_body(
     # history reaches a provider with no functionDeclarations — a deterministic
     # 400 on Google (see flatten_tool_history_to_text).
     openrouter_tools = _openrouter_tools(tools)
+    gemini_explicit_cache = _uses_explicit_gemini_prompt_cache(model)
     body: Dict[str, Any] = {
         "model": model,
         "messages": transform_messages_for_openai(
-            messages, tools_declared=bool(openrouter_tools)
+            messages,
+            tools_declared=bool(openrouter_tools),
+            cache_opening_user=bool(cache_namespace),
+            inject_cache_breakpoints=not skip_cache_write,
+            cache_completed_tool_prefix=gemini_explicit_cache,
         ),
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -159,6 +171,12 @@ def build_openrouter_body(
         body["seed"] = seed
     if provider_fast_mode:
         body["speed"] = "fast"
+    if cache_namespace:
+        # OpenRouter otherwise derives sticky routing from message hashes and
+        # only activates it after a cache hit. Agent loops already own one
+        # stable, sibling-isolated sequence ID; reuse it so the first successful
+        # turn pins later turns to the endpoint holding the warm provider cache.
+        body["session_id"] = cache_namespace
     return body
 
 
@@ -181,6 +199,8 @@ async def waterfall_complete(
     per_step_timeout_s: float = _PER_STEP_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
     exclude_anthropic_family: bool = False,
+    cache_namespace: Optional[str] = None,
+    skip_cache_write: bool = False,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -244,6 +264,8 @@ async def waterfall_complete(
             seed=seed,
             provider_fast_mode=provider_fast_mode,
             effort=effort,
+            cache_namespace=cache_namespace,
+            skip_cache_write=skip_cache_write,
         )
         emitted_user_visible = False
         try:

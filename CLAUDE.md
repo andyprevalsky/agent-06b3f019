@@ -471,6 +471,39 @@ In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP 
   live in `src/providers/`. Grepping the old path silently returns nothing, which
   is how a whole authentication path was missed during an RCA.
 
+## Planner Memory (trajectory RAG over finalized runs)
+
+`call_planner_llm_activity` retrieves compressed memories of past runs with similar goals and forks a native
+`get_memories` tool call + tool result onto the END of the planner context (never into the system prompt), so the
+cached prefix (tools + static system prompt + conversation) is byte-identical with or without hits. Per-agent
+`memory_enabled` (create body / `Agent.memoryEnabled`, sub-agents inherit) gates it; benchmarks default it off.
+Code: `agents/providers/planner_memory/`, backend `src/domains/planner-memory/` + `src/providers/plannerMemoryStore.ts`.
+
+- **History table = the RAG corpus.** `PlannerMemory` gets one row per finalized root bundle, written in the same
+  archive finalize that publishes the R2 manifest (`traceArchiveLifecycle.finalizeAgentOnce`), so table and archive
+  never drift (cemented by `back-end/src/tests/blackbox/planner-memory.blackbox.ts`). `criticalPath` is a TTL-free
+  cache: the first planner that retrieves an uncompressed row reads the bundle, runs the compressor once (`compressor.py`,
+  prompt capped at 100 lines by test), and PATCHes it back. No cron, no index build.
+- **Retrieval:** one indexed Postgres query (`to_tsvector` GIN + `pg_trgm`) → in-process scoring (`retrieval.py`,
+  `RetrievalConfig` = strategy + absolute cutoff chosen by `agents/benchmarks/memory_retrieval_bench.py` on the frozen
+  labels in `agents/benchmarks/fixtures/memory/retrieval-labels.json`). Returning 0 or 1 memories is normal.
+- **Tool history is native:** the planner declares a constant declared-only toolset (plan-phase tools +
+  `get_memories`, `planner_context_tools()`); structured output keeps `output_config`, `tool_choice` is `none`. The
+  waterfall (no declarations) flattens the fork to text via `flatten_tool_history_to_text`. `build_planner_messages`
+  keeps real assistant `tool_calls` / `role: tool` pairs (no `[TOOL]:` flattening).
+- **Proof (real planner LLM calls):** `cd agents && python benchmarks/run_memory_scenarios.py --port N` runs
+  `agents/benchmarks/memory_scenarios.json` (31 scenarios from archived runs + 2 negative controls, fit/held-out split)
+  memory off vs on and writes `.context/memory-dashboard/index.html` with the exact injected context per scenario.
+  Registered in `scripts/test.sh` (smoke tier) together with `benchmarks/run_memory_compressor_bench.py`, which runs the
+  compressor on real completed transcripts (`memory_compressor_cases.json`: one per task + the largest runs, up to
+  10k messages) with generic transcript-grounded assertions (tool names, URLs, no PII, bounds). Catalog A/B:
+  `planner-memory-blue-bottle-off` / `-on` (`start_phase: plan`, `success_on_plan`, `plan_shape` static checks,
+  `environment.memory_fixtures`). Backfill history rows after deploy: `python scripts/backfill_planner_memory.py --stats`
+  then `--backend <prod url>`; only completed runs are ever retrieved or compressed.
+- **Fixtures:** `python scripts/build_memory_fixture.py --name <n> --bundle-id <root_agent_id>...` compresses real
+  bundles into `agents/benchmarks/fixtures/memory/<n>.json`; `run_benchmark.py` loads them into the local stack's
+  history table (internal PUT) for `memory: "on"` tasks. Global kill switch: `PLANNER_MEMORY_ENABLED=0`.
+
 ## Production Logs (Render)
 
 Fetch backend prod logs via Render API:

@@ -118,6 +118,10 @@ const createAgentBaseSchema = z.object({
   // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
+  // Planner memory: retrieve compressed past trajectories for similar goals and
+  // fork a get_memories tool call into the planner context. Own first-class
+  // flag (not a context gate). Default off; sub-agents inherit their parent's.
+  memory_enabled: z.boolean().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),

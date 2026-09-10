@@ -125,6 +125,7 @@ async function startReplacementWorkflow(
       depth: agent.depth,
       priceLimitCents: agent.priceLimitCents,
       fastModeCacheEnabled: agent.fastModeCacheEnabled,
+      memoryEnabled: agent.memoryEnabled,
       worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
       startPhase: 'resume',
       ...(claim.resumeState.max_iterations !== null

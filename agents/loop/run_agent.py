@@ -32,7 +32,8 @@ from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
     LLMStructuredOutputError,
-    _completed_child_task_structured_response,
+    _completed_child_handoff_identity,
+    _completed_child_task_structured_handoff,
     _pending_llm_context,
     _structured_response_ready_for_infra_soft_accept,
     build_llm_messages,
@@ -787,13 +788,15 @@ async def run_agent(
         # A browser/code child has already run its own verifier before emitting
         # a terminal structured_response. When that response covers every
         # parent output field, the parent verifier has a deterministic fast
-        # path for accepting it. Require attempt_completion on the handoff turn
-        # so the normal verifier and completion persistence still run. Keep the
-        # full tool schema stable across turns for provider prompt-cache reuse;
-        # required_tool enforces the only legal response at runtime.
+        # path for accepting it. Synthesize attempt_completion below so the
+        # normal verifier and completion persistence still run without paying
+        # for (or depending on) an LLM to repeat an action we already know.
         completed_child_output = None
+        completed_child_tool_call_id = ""
         if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
-            completed_child_output = _completed_child_task_structured_response(context, response_schema)
+            completed_child_handoff = _completed_child_task_structured_handoff(context, response_schema)
+            if completed_child_handoff:
+                completed_child_output, completed_child_tool_call_id = completed_child_handoff
         completion_instruction = None
         # Keep the provider-visible tool schema stable across turns. The
         # completion instruction tells the model what to do and required_tool
@@ -1107,7 +1110,33 @@ async def run_agent(
         # a later failure in accounting/broadcast must NOT refund the iteration.
         llm_response_accepted = False
         try:
-            if is_inside_temporal_activity:
+            if completed_child_output is not None:
+                child_identity = _completed_child_handoff_identity(completed_child_tool_call_id)
+                identity_segment = f"{child_identity}-" if child_identity else ""
+                synthetic_tool_call_id = (
+                    f"completed-child-attempt-completion-{identity_segment}{_safe_uuid4()}"
+                )
+                result = type(
+                    "CompletedChildAction",
+                    (),
+                    {
+                        "response": "",
+                        "tool_calls": [{"tool": "attempt_completion"}],
+                        "codex_reasoning_items": [],
+                    },
+                )()
+                usage = {}
+                detected_tools_ordered = [
+                    ("attempt_completion", synthetic_tool_call_id, _safe_now().timestamp())
+                ]
+                llm_response_accepted = True
+                logger.info(
+                    "run_agent.completed_child_dispatches_completion",
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    tool_call_id=synthetic_tool_call_id,
+                )
+            elif is_inside_temporal_activity:
                 # Inside activity (browser agent) - call LLM directly with streaming callback
                 sequence = [0]
                 last_text = [""]
@@ -1448,10 +1477,16 @@ async def run_agent(
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
 
             # Account the successful provider attempt. Semantically rejected
-            # attempts were already accounted before their retries above.
+            # attempts were already accounted before their retries above. A
+            # deterministic child-completion handoff did not call a provider,
+            # so it must not emit a synthetic zero-token billing event.
             exclude_anthropic_family_on_llm_retry = False
             bypass_fast_mode_cache_on_llm_retry = False
-            if await _account_llm_usage(usage, label="accepted attempt"):
+            paused_after_provider_cost = completed_child_output is None and await _account_llm_usage(
+                usage,
+                label="accepted attempt",
+            )
+            if paused_after_provider_cost:
                 # External PAUSE between LLM acceptance and tool dispatch must
                 # not discard already-returned tool_calls. Dropping a forced
                 # attempt_completion here leaves the agent ACTIVE after a
@@ -1468,7 +1503,8 @@ async def run_agent(
                     logger.info("Agent paused after cost check")
                     return _paused_after_cost_result()
 
-            fast_cache_llm_position = fast_cache_step
+            if completed_child_output is None:
+                fast_cache_llm_position = fast_cache_step
 
             # Persist + broadcast own tokens after each LLM call. Descendant
             # subtree totals have their own durable maps in AgentWorkflow.
@@ -2155,7 +2191,11 @@ async def run_agent(
                             gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                             compute_token_used=v_usage.get("compute_token_used"),
                             from_fast_cache=v_usage.get("from_fast_cache", False),
-                            cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
+                            # Do not label a one-shot verifier as the execute
+                            # conversation unless that exact namespace reached
+                            # the provider. The benchmark repeatability metric
+                            # groups by this identity.
+                            cache_sequence_id=v_usage.get("cache_sequence_id"),
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -2461,7 +2501,7 @@ async def run_agent(
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
-                        cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
+                        cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")

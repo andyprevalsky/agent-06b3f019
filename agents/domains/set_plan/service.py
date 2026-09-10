@@ -25,7 +25,7 @@ from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from helpers.context_scope import is_internal_subagent_message
 from tools.prompts import TOOL_PROMPTS
-from utils.tool_schemas import EXECUTE_PHASE_TOOLS, TOOL_MODELS
+from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
 
 PLANNER_CONTEXT_FULL_TEXT_LIMIT = 6000
 PLANNER_CONTEXT_HEAD_CHARS = 3000
@@ -55,6 +55,33 @@ def _compact_planner_context_text(text: str) -> str:
         + f"\n\n[Planner context shortened: {omitted} chars omitted from middle of {len(text)} total chars.]\n\n"
         + text[-PLANNER_CONTEXT_TAIL_CHARS:]
     )
+
+
+def _serialize_planner_tool_arguments(arguments: dict[str, Any]) -> str:
+    """Return valid, bounded JSON for a persisted assistant tool declaration."""
+    serialized = json.dumps(arguments, default=str, ensure_ascii=False)
+    if len(serialized) <= PLANNER_CONTEXT_FULL_TEXT_LIMIT:
+        return serialized
+
+    # Tool-call arguments must remain parseable JSON. Truncating the serialized
+    # object directly produces an invalid function.arguments value, so retain a
+    # bounded head/tail summary as a string value and serialize a new object.
+    summary = _compact_planner_context_text(serialized)
+    while True:
+        compacted = json.dumps({"_rose_compacted_arguments": summary}, ensure_ascii=False)
+        if len(compacted) <= PLANNER_CONTEXT_FULL_TEXT_LIMIT:
+            return compacted
+        # Escaped quotes/control characters can make the JSON encoding longer
+        # than the source string. Reduce deterministically until the encoded
+        # wrapper itself satisfies the provider boundary.
+        overflow = len(compacted) - PLANNER_CONTEXT_FULL_TEXT_LIMIT
+        keep = max(64, len(summary) - overflow - 32)
+        if keep >= len(summary):
+            keep = max(64, len(summary) - 64)
+        head = max(1, int(keep * 0.75))
+        tail = max(1, keep - head)
+        summary = summary[:head] + "\n[... compacted ...]\n" + summary[-tail:]
+
 
 PLANNER_MESSAGE_CHAR_LIMITS = {
     "USER": 16_000,
@@ -433,11 +460,7 @@ def _compact_planner_text(role: str, text: str) -> str:
     head_len = max(1, int(limit * 0.75))
     tail_len = max(1, limit - head_len)
     omitted = len(text) - head_len - tail_len
-    return (
-        f"{text[:head_len]}\n\n"
-        f"[... planner context compacted {omitted} chars ...]\n\n"
-        f"{text[-tail_len:]}"
-    )
+    return f"{text[:head_len]}\n\n[... planner context compacted {omitted} chars ...]\n\n{text[-tail_len:]}"
 
 
 def _enforce_planner_context_budget(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -471,8 +494,44 @@ def _enforce_planner_context_budget(messages: list[dict[str, Any]]) -> list[dict
     return [goal, notice] + kept_reversed
 
 
+def _planner_tool_declarations(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Assistant tool declarations persisted in message metadata -> OpenAI-shape tool_calls."""
+    metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+    calls: list[dict[str, Any]] = []
+    for call in metadata.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        name = call.get("tool")
+        call_id = call.get("tool_call_id")
+        if not isinstance(name, str) or not name or not isinstance(call_id, str) or not call_id:
+            continue
+        # Only plan-phase calls may survive as native history. Execute-only
+        # declarations (for example wait_for) are not present in the planner's
+        # tool boundary and would make Anthropic reject the replayed history.
+        if name not in PLAN_PHASE_TOOLS:
+            continue
+        arguments = {k: v for k, v in call.items() if k not in ("tool", "tool_call_id")}
+        calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": _serialize_planner_tool_arguments(arguments),
+                },
+            }
+        )
+    return calls
+
+
 def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     """Extract conversation context and user messages for the planner.
+
+    Tool history keeps its real roles: assistant declarations become
+    ``tool_calls`` and their results become ``role: tool`` messages paired by
+    tool_call_id (providers that declare no tools flatten these to text, see
+    ``flatten_tool_history_to_text``). Undeclared TOOL/SYSTEM rows are
+    workflow notices and are passed as ``[SYSTEM]:`` user text.
 
     Args:
         context: The workflow context (list of message dicts).
@@ -482,6 +541,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     """
     user_messages: list[str] = []
     base_messages: list[dict[str, Any]] = []
+    declared_calls: dict[str, str] = {}
 
     for msg in context:
         if is_internal_subagent_message(msg):
@@ -491,6 +551,7 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
         text = msg.get("text", "")
         message_id = msg.get("message_id")
         text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
+        metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
 
         if role == "USER" and text:
             user_messages.append(text)
@@ -507,21 +568,63 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
             except Exception:
                 pass  # Fall through to normal text handling
 
+        if role == "ASSISTANT":
+            tool_calls = _planner_tool_declarations(msg)
+            unique_tool_calls: list[dict[str, Any]] = []
+            for call in tool_calls:
+                call_id = call["id"]
+                if call_id in declared_calls:
+                    continue
+                declared_calls[call_id] = call["function"]["name"]
+                unique_tool_calls.append(call)
+            tool_calls = unique_tool_calls
+            if not text and not tool_calls:
+                continue
+            assistant: dict[str, Any] = {"role": "assistant", "content": _compact_planner_text(role, text)}
+            if tool_calls:
+                assistant["tool_calls"] = tool_calls
+            base_messages.append(assistant)
+            continue
+
         if not text:
             continue
         if role == "USER":
             base_messages.append({"role": "user", "content": _compact_planner_text(role, text)})
-        elif role == "ASSISTANT":
-            base_messages.append({"role": "assistant", "content": _compact_planner_text(role, text)})
-        elif role in ("TOOL", "SYSTEM"):
-            text = _compact_planner_context_text(text)
-            base_messages.append({"role": "user", "content": f"[{role}]: {text}"})
+        elif role == "TOOL":
+            tool_call_id = str(metadata.get("toolCallId") or "")
+            content = _compact_planner_context_text(text)
+            if metadata.get("title"):
+                content = f"{metadata['title']}: {content}"
+            if tool_call_id and tool_call_id in declared_calls:
+                base_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": declared_calls[tool_call_id],
+                        "content": content,
+                    }
+                )
+            else:
+                base_messages.append({"role": "user", "content": f"[SYSTEM]: {content}"})
+        elif role == "SYSTEM":
+            base_messages.append({"role": "user", "content": f"[SYSTEM]: {_compact_planner_context_text(text)}"})
 
     # Prepend goal message
     goal = user_messages[0] if user_messages else DEFAULT_GOAL
     base_messages.insert(0, {"role": "user", "content": f"GOAL: {goal}\n\nPlan this goal into tasks."})
 
-    return _enforce_planner_context_budget(base_messages), user_messages
+    # Budget trimming can split a native tool-use/result pair. Repair after the
+    # trim so provider history contains no orphan or duplicate tool-call IDs.
+    from helpers.llm import _ensure_tool_result_pairing
+
+    bounded = _enforce_planner_context_budget(base_messages)
+    repaired = _ensure_tool_result_pairing(bounded)
+    repaired = [
+        message
+        for message in repaired
+        if not (message.get("role") == "assistant" and not message.get("content") and not message.get("tool_calls"))
+    ]
+    return repaired, user_messages
 
 
 async def run_planner_attempt(
@@ -569,9 +672,9 @@ async def run_planner_attempt(
         getattr(workflow_instance, "fast_mode_cache_enabled", False),
         # Prefer the durable Agent-row goal (fast_cache_goal) so chat-escalation
         # refined workflow input goals do not open a fresh empty cache namespace.
-        getattr(workflow_instance, "fast_cache_goal", None)
-        or getattr(workflow_instance, "goal", None),
+        getattr(workflow_instance, "fast_cache_goal", None) or getattr(workflow_instance, "goal", None),
         attempt,  # Fast Mode position step — planner attempt index (deterministic across runs)
+        bool(getattr(workflow_instance, "memory_enabled", False)),  # Planner memory (get_memories fork)
     ]
 
     # Schema generation is now done synchronously at workflow startup so the
