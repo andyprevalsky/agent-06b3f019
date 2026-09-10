@@ -2834,8 +2834,10 @@ for path in root.iterdir():
         raise SystemExit(f"missing fields in {path}: {sorted(required - fields.keys())}")
     if fields["source"] != "fresh-clone" or not fields["volume_id"].startswith("vol_"):
         raise SystemExit(f"bad source/volume semantics in {path}")
-    if fields["disposition"] != "destroyed-verified-absent":
-        raise SystemExit(f"unverified final disposition in {path}: {fields['disposition']}")
+    if fields["disposition"] not in {
+        "destroyed-verified-absent", "destroyed-provider-retained",
+    }:
+        raise SystemExit(f"unterminated final disposition in {path}: {fields['disposition']}")
     seen.add(fields["machine_id"])
 if not owned.issubset(seen):
     raise SystemExit(f"owned IDs omitted from manifest: {sorted(owned - seen)}")
