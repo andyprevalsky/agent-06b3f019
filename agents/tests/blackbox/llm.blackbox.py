@@ -4339,6 +4339,25 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         "browser-older",
     )
 
+    # Non-polling loops append the same verifier result locally without the
+    # persistence-only verifierMessage marker. Its score title still scopes the
+    # rejection to this synthetic handoff.
+    local_rejected_feedback = {
+        "role": "TOOL",
+        "metadata": {
+            "toolCallId": synthetic_id,
+            "toolName": "attempt_completion",
+            "toolStatus": "FINISHED",
+            "title": "Progress: 40%",
+        },
+    }
+    assert _completed_child_task_structured_handoff(
+        [*base_context, local_rejected_feedback], schema
+    ) == (
+        {"answer": "older valid answer"},
+        "browser-older",
+    )
+
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
     """Parent execute verifier accepts a finished browser child structured response without an LLM call."""

@@ -5096,7 +5096,6 @@ def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
     if (
         metadata.get("toolName") != "attempt_completion"
         or metadata.get("toolStatus") != "FINISHED"
-        or metadata.get("verifierMessage") is not True
     ):
         return False
     title = str(metadata.get("title") or "")
