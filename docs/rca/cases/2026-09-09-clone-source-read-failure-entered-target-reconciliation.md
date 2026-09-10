@@ -10,11 +10,9 @@ first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine
 symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "unresolved clone name 'cloudbench-…'; inspect with: flyctl machines list"
-  - "Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "exact stale-owner registry identity is unsafe"
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
-  - "could not verify owned fleet machine deadbeef000001"
 tags:
   - cloudbench
   - fly-io
@@ -26,7 +24,6 @@ sources:
   - commit 65cb5c022656ed028d7031bfb57bb8ad12e002ac
   - fleet run 20260909-215629-914100
   - fleet run 20260910-002414-1221609
-  - fleet owner 03596f65144d485f8a667fc31f7e3cc6
   - fleet run 20260910-021331-1465409
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
