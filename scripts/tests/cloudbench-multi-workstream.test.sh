@@ -3022,6 +3022,12 @@ assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
 fi
 
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ]; then
+    hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
+        "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
+        || fail "focused exact-recovery test Hub failed its pending-owner launch handshake"
+fi
+
 # Cooperative predeploy cancellation walks only the poller/waiter descendant
 # tree; the paid controller has already been reparented into its own session.
 # Drive a controller that ignores TERM after crossing provider allocation. The
