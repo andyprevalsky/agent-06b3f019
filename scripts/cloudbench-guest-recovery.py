@@ -913,7 +913,7 @@ def run_exact_psql(
 
 
 def root_tree_query_sql(root_agent_id: str) -> str:
-    return f"""
+    statement = f"""
 WITH RECURSIVE tree AS (
   SELECT id, "parentAgentId", "deletedAt"
   FROM "Agent"
@@ -947,6 +947,7 @@ SELECT json_build_object(
   ), '[]'::json)
 )::text;
 """.strip()
+    return " ".join(statement.split())
 
 
 def parse_root_tree_query(payload: str, root_agent_id: str) -> dict[str, Any]:
