@@ -1679,21 +1679,13 @@ print(volume_ids[0])
 }
 
 machine_status_exact_read() {  # <machine-id>; 0=exact status, 1=exactly absent, 2=unsafe read
-    local id="$1" output status has_equals_rows=0 has_table_rows=0
+    local id="$1" output status
     case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
     if output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
         status=0
     else
         status=$?
     fi
-    case "$output" in *" = "*) has_equals_rows=1 ;; esac
-    case "$output" in *" │ "*) has_table_rows=1 ;; esac
-    # region agent log
-    _agent_stale_owner_debug_log H13 scripts/run-bench-fleet:machine_status_exact_read \
-        "captured exact Machine status transport and render contract" \
-        machineId "$id" providerStatus "$status" outputBytes "${#output}" \
-        hasEqualsRows "$has_equals_rows" hasTableRows "$has_table_rows"
-    # endregion
     if [ "$status" -eq 0 ]; then
         printf '%s\n' "$output"
         return 0
@@ -5410,31 +5402,6 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
     done
 }
 
-_agent_stale_owner_debug_log() {  # <hypothesis> <location> <message> [key value...]
-    python3 - "$@" <<'PY' >/dev/null 2>&1 || true
-import json
-import sys
-import time
-
-hypothesis, location, message, *fields = sys.argv[1:]
-data = dict(zip(fields[::2], fields[1::2]))
-with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as handle:
-    handle.write(
-        json.dumps(
-            {
-                "hypothesisId": hypothesis,
-                "location": location,
-                "message": message,
-                "data": data,
-                "timestamp": int(time.time() * 1000),
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
-PY
-}
-
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
     python3 - "$registry" "$plan" "$APP" <<'PY'
@@ -6044,10 +6011,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                         validate-recovery-receipt "${validation_args[@]}" \
                     && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
                     recovered=$((recovered + 1))
-                    # region agent log
-                    _agent_stale_owner_debug_log H19 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-                        "validated exact private runner cleanup receipt" bench "$bench" machineId "$machine_id"
-                    # endregion
                     continue
                 fi
                 echo "❌ [$bench] private runner cleanup receipt is malformed or mismatched" >&2
@@ -6079,10 +6042,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                     validate-recovery-receipt "${validation_args[@]}" \
                 && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
                 recovered=$((recovered + 1))
-                # region agent log
-                _agent_stale_owner_debug_log H21 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-                    "validated exact provider cleanup receipt" bench "$bench" machineId "$machine_id"
-                # endregion
                 continue
             fi
             echo "❌ [$bench] stopped exact Machine has no complete sealed cleanup transition" >&2
@@ -6129,12 +6088,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
-        # region agent log
-        _agent_stale_owner_debug_log H23 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-            "captured exact guest process state before fallback validation" \
-            bench "$bench" machineId "$machine_id" state "$state_kind" \
-            driverState "$state_driver" descendants "$state_descendants"
-        # endregion
         if [ "$quiescence_status" -ne 0 ]; then
             if [ "$state_kind" = "active" ]; then
                 cloudbench_fetch_guest_evidence status_code \
@@ -6194,10 +6147,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                         validate-recovery-receipt "${validation_args[@]}" \
                     && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
                     recovered=$((recovered + 1))
-                    # region agent log
-                    _agent_stale_owner_debug_log H21 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-                        "validated exact provider cleanup receipt" bench "$bench" machineId "$machine_id"
-                    # endregion
                     continue
                 fi
                 echo "❌ [$bench] stopped exact Machine provider cleanup is incomplete" >&2
@@ -6235,10 +6184,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             failed=1
             continue
         fi
-        # region agent log
-        _agent_stale_owner_debug_log H20 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-            "sealed exact guest quiescence and durable run evidence" bench "$bench" machineId "$machine_id"
-        # endregion
 
         if python3 "$EXACT_SESSION_CLEANUP_HELPER" cleanup-provider-sessions \
                 "${identity_args[@]}" \
@@ -6253,10 +6198,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 validate-recovery-receipt "${validation_args[@]}" \
             && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
             recovered=$((recovered + 1))
-            # region agent log
-            _agent_stale_owner_debug_log H21 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-                "validated exact provider cleanup receipt" bench "$bench" machineId "$machine_id"
-            # endregion
             continue
         fi
 
@@ -6290,11 +6231,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         failed=1
     done
 
-    # region agent log
-    _agent_stale_owner_debug_log H22 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
-        "completed fail-closed exact guest receipt recovery" guestCount "${#recovery_benches[@]}" \
-        recoveredCount "$recovered" status "$failed"
-    # endregion
     [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
 }
 
@@ -6390,14 +6326,6 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             *) cleanup_stale_owner_recovery_proxies || true; return 1 ;;
         esac
     done < "$STALE_OWNER_RECOVERY_PLAN_FILE"
-    # region agent log
-    _agent_stale_owner_debug_log H6 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
-        "validated exact stale-owner guest recovery mapping" guestCount "$guest_count"
-    # endregion
-    # region agent log
-    _agent_stale_owner_debug_log H12 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
-        "validated live exact-ID Machine status and shutdown configuration" guestCount "$guest_count"
-    # endregion
     if [ "$guest_count" -gt 0 ]; then
         [ -n "$barrier_token" ] || {
             cleanup_stale_owner_recovery_proxies || true
@@ -6463,10 +6391,6 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             CHILD_BENCH+=("${recovery_benches[$recovery_index]}")
         done
         exec 18<&-
-        # region agent log
-        _agent_stale_owner_debug_log H7 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
-            "reconnected exact stale-owner status proxies" proxyCount "${#STALE_OWNER_RECOVERY_PROXY_PIDS[@]}"
-        # endregion
     else
         CHILD_OUT=()
         CHILD_BENCH=()
@@ -6491,11 +6415,6 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             fi
         done
     fi
-    # region agent log
-    _agent_stale_owner_debug_log H8 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
-        "completed token-bound stale-owner shutdown health contract" guestCount "$guest_count" \
-        status "$shutdown_status"
-    # endregion
     if [ "$shutdown_status" -ne 0 ]; then
         echo "🧭 top-level guest acknowledgement unavailable; validating exact durable cleanup receipts"
         if cloudbench_recover_guest_cleanup_receipts "$registry"; then
@@ -6526,11 +6445,6 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
         return 1
     fi
-    # region agent log
-    _agent_stale_owner_debug_log H9 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
-        "durably authorized exact stale-owner provider teardown" cleanupState \
-        "$(fleet_registry_cleanup_state "$registry" "$(registry_meta_value "$meta" cleanup_policy)")"
-    # endregion
     FLEET_REGISTRY_DIR="$save_registry"
     FLEET_REGISTRY_PUBLISHED="$save_published"
     KEEP_CLONES="$save_keep"
@@ -6686,10 +6600,6 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             return 1
         fi
     fi
-    # region agent log
-    _agent_stale_owner_debug_log H10 scripts/run-bench-fleet:recover_exact_stale_fleet_owner \
-        "entered exact provider reaper after durable guest authorization" cleanupState "$cleanup_state"
-    # endregion
     # The supervising waiter already proved the entire controller process group
     # drained. Unlike generic successor recovery, this exact cancellation path
     # must not preserve a remote runner: cancellation explicitly owns and reaps
@@ -7796,11 +7706,6 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
         WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $2}')"
         [ -n "$WARM_ID" ] && [ -n "$WARM_VOLUME_ID" ] || recovery_status=1
     fi
-    # region agent log
-    _agent_stale_owner_debug_log H11 scripts/run-bench-fleet:exact-recovery-entrypoint \
-        "resolved warm-source guard from exact owner audit and exact-ID config" \
-        status "$recovery_status"
-    # endregion
     if [ "$recovery_status" = "0" ] \
         && ! recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN"; then
         recovery_status=1

@@ -191,11 +191,6 @@ cleanup_ack_present=0
 [ -s "$CLEANUP_ACK_FILE" ] && cleanup_ack_present=1
 printf '[boot %s] driver cleanup evidence interrupt_status=%s cleanup_ack=%s\n' \
     "$(date -u +%H:%M:%S)" "$interrupt_status_present" "$cleanup_ack_present" >> "$LOG"
-# region agent log
-mkdir -p /opt/cursor/logs 2>/dev/null || true
-printf '{"hypothesisId":"H18","location":"scripts/cloudbench-boot.sh:driver-exit","message":"captured durable cleanup evidence at driver exit","data":{"driverStatus":%s,"interruptStatusPresent":%s,"cleanupAckPresent":%s},"timestamp":%s}\n' \
-    "$driver_rc" "$interrupt_status_present" "$cleanup_ack_present" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-# endregion
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
 # `exited` is the terminal evidence seal consumed by the controller. Publish it

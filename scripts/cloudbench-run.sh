@@ -150,7 +150,7 @@ STACK_PID=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary state_clean=0 token_matches=0
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
@@ -159,14 +159,8 @@ publish_cleanup_ack() {
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
-        [ "$cleanup_state" = "clean" ] && state_clean=1
         [ "$cleanup_token" = "$CLOUDBENCH_RUN_TOKEN" ] && token_matches=1
         log "benchmark root cleanup evidence: state=${cleanup_state:-missing} token_match=$token_matches"
-        # region agent log
-        mkdir -p /opt/cursor/logs 2>/dev/null || true
-        printf '{"hypothesisId":"H17","location":"scripts/cloudbench-run.sh:publish_cleanup_ack","message":"evaluated runner cleanup evidence before guest ack","data":{"stateClean":%s,"tokenMatches":%s},"timestamp":%s}\n' \
-            "$state_clean" "$token_matches" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-        # endregion
         case "$cleanup_state:$token_matches" in
             pending:1|clean:1|failed:1)
                 cleanup_status_temporary="${INTERRUPT_CLEANUP_STATUS_FILE}.tmp.$$"
@@ -232,18 +226,8 @@ request_graceful_shutdown() {
                 signal_process_group="$(awk '$1 == "NSpgid:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
             fi
             log "benchmark signal target evidence: pid=$ACTIVE_COMMAND_PID pgid=$signal_process_group ignored=$signal_ignored_mask caught=$signal_caught_mask"
-            # region agent log
-            mkdir -p /opt/cursor/logs 2>/dev/null || true
-            printf '{"hypothesisId":"H15","location":"scripts/cloudbench-run.sh:request_graceful_shutdown-target","message":"captured benchmark signal disposition before interrupt","data":{"ignoredMask":"%s","caughtMask":"%s","processGroup":"%s"},"timestamp":%s}\n' \
-                "$signal_ignored_mask" "$signal_caught_mask" "$signal_process_group" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-            # endregion
             kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || signal_rc=$?
             log "benchmark cancellation signal dispatched: pid=$ACTIVE_COMMAND_PID signal=INT status=$signal_rc"
-            # region agent log
-            mkdir -p /opt/cursor/logs 2>/dev/null || true
-            printf '{"hypothesisId":"H15","location":"scripts/cloudbench-run.sh:request_graceful_shutdown","message":"dispatched interrupt to active benchmark process","data":{"signalStatus":%s},"timestamp":%s}\n' \
-                "$signal_rc" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-            # endregion
         fi
         return
     fi

@@ -8078,7 +8078,6 @@ FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
 FLEET_OWNER_HOST=test-host
 GUEST_RECOVERY_CALL={shlex.quote(str(guest_recovery_call))}
 UNEXPECTED={shlex.quote(str(unexpected))}
-_agent_stale_owner_debug_log() {{ :; }}
 fleet_recovery_reconnect_guest_shutdowns() {{
   touch "$GUEST_RECOVERY_CALL"
   return 1
@@ -8129,7 +8128,6 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     """Exact recovery must prove every configured guest ack before provider reap."""
     fleet = FLEET_SCRIPT.read_text()
     signatures = (
-        "_agent_stale_owner_debug_log() {",
         "machine_status_exact_read() {",
         "machine_config_exact_read() {",
         "registry_machine_details() {",
@@ -8448,7 +8446,6 @@ def test_pre_fix_guest_runner_receipt_authorizes_exact_reaper(
     """
     fleet = FLEET_SCRIPT.read_text()
     signatures = (
-        "_agent_stale_owner_debug_log() {",
         "registry_meta_value() {",
         "fleet_registry_cleanup_state() {",
         "registry_owner_alive() {",
@@ -8750,7 +8747,6 @@ STALE_OWNER_RECOVERY_PLAN_FILE=""
 STALE_OWNER_RECOVERY_PORTS_FILE=""
 CALLS={shlex.quote(str(calls))}
 AUTHORIZED={shlex.quote(str(authorized))}
-_agent_stale_owner_debug_log() {{ :; }}
 registry_machine_details() {{ printf 'started {clone_name} fdaa::119\\n'; }}
 machine_guest_recovery_configuration() {{
   printf 'retained-barrier-token\\t{guest_token}\\t8011\\n'
@@ -9191,7 +9187,6 @@ recovery_guest_tokens=({shlex.quote(guest_token)})
 recovery_proxy_ports=(62019)
 recovery_outputs=({shlex.quote(str(output))})
 recovery_machine_states=(started)
-_agent_stale_owner_debug_log() {{ :; }}
 FLY() {{
   case "$1 $2" in
     "ssh console")
@@ -10205,7 +10200,6 @@ STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
 STALE_OWNER_RECOVERY_PLAN_FILE=""
 STALE_OWNER_RECOVERY_PORTS_FILE=""
-_agent_stale_owner_debug_log() {{ :; }}
 registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
 fleet_registry_build_guest_recovery_plan() {{
   printf 'guest\tbench-owned\t{clone_name}\t{machine_id}\tvol_owned\t%s\t61001\n' \

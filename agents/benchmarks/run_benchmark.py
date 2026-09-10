@@ -220,29 +220,6 @@ def _finalize_interrupt_cleanup_status() -> None:
         f"state={state} started={_INTERRUPT_CLEANUP_STARTED} "
         f"completed={_INTERRUPT_CLEANUP_COMPLETED}"
     )
-    # region agent log
-    try:
-        Path("/opt/cursor/logs").mkdir(parents=True, exist_ok=True)
-        with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
-            debug_log.write(
-                json.dumps(
-                    {
-                        "hypothesisId": "H14",
-                        "location": "agents/benchmarks/run_benchmark.py:finalize-interrupt-cleanup",
-                        "message": "published run-level interrupt cleanup verdict",
-                        "data": {
-                            "state": state,
-                            "started": _INTERRUPT_CLEANUP_STARTED,
-                            "completed": _INTERRUPT_CLEANUP_COMPLETED,
-                        },
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-    # endregion
 
 
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
@@ -12635,31 +12612,6 @@ async def run_single_task(
         duration = time.time() - start
         interrupt_cleanup_started = _begin_interrupt_cleanup()
         cancelled_agent_deleted = False
-        # region agent log
-        try:
-            Path("/opt/cursor/logs").mkdir(parents=True, exist_ok=True)
-            with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
-                debug_log.write(
-                    json.dumps(
-                        {
-                            "hypothesisId": "H14",
-                            "location": "agents/benchmarks/run_benchmark.py:run_single_task-cancel",
-                            "message": "runner received cancellation with cleanup contract environment",
-                            "data": {
-                                "task": task.name,
-                                "hasAgent": bool(agent_id),
-                                "keepFailedAgents": keep_failed_agents,
-                                "statusFileConfigured": bool(os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE")),
-                                "tokenConfigured": bool(os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_TOKEN")),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # endregion
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
         if realtime_monitor:
             await realtime_monitor.stop()
@@ -12723,28 +12675,6 @@ async def run_single_task(
         print(
             f"    Interrupt cleanup evidence: agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
-        # region agent log
-        try:
-            with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
-                debug_log.write(
-                    json.dumps(
-                        {
-                            "hypothesisId": "H16",
-                            "location": "agents/benchmarks/run_benchmark.py:run_single_task-cancel-exit",
-                            "message": "runner cancellation handler reached task exit",
-                            "data": {
-                                "task": task.name,
-                                "hasAgent": bool(agent_id),
-                                "deleteConfirmed": cancelled_agent_deleted,
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-        # endregion
         return TaskResult(
             name=task.name,
             passed=False,
