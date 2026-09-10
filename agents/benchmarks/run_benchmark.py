@@ -53,10 +53,6 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from helpers.completion_summary_contract import (
-    has_fast_mode_summary_marker,
-    is_ablated_completion_summary,
-)
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -67,11 +63,6 @@ from benchmarks.benchmark_tasks import (
     get_tasks_by_tag,
     get_timeout_floor,
     list_all_tasks,
-)
-from benchmarks.polar_catalog import (
-    is_polar_bench_task,
-    polar_browser_step_budget,
-    polar_wall_clock_disabled,
 )
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import (
@@ -95,10 +86,10 @@ from benchmarks.logs import (
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
-    tree_child_transcript_count,
     stop_fly_log_collector,
     stop_supabase_realtime_collector,
     subscribe_supabase_realtime_agent,
+    tree_child_transcript_count,
 )
 from benchmarks.phone_callee import (
     PhoneCalleeSession,
@@ -107,9 +98,14 @@ from benchmarks.phone_callee import (
     phone_search_text,
     resolve_callee_prompt,
 )
+from benchmarks.polar_catalog import (
+    is_polar_bench_task,
+    polar_browser_step_budget,
+    polar_wall_clock_disabled,
+)
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
-from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
+from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
 )
@@ -128,6 +124,10 @@ from benchmarks.world_model_harness import (
 from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
+)
+from helpers.completion_summary_contract import (
+    has_fast_mode_summary_marker,
+    is_ablated_completion_summary,
 )
 from tests.e2e.test_helpers import (
     authenticate,
@@ -162,11 +162,7 @@ def _interrupt_cleanup_contract() -> tuple[Path, str] | None:
     if not status_file and not token:
         return None
     path = Path(status_file)
-    if (
-        not status_file
-        or not path.is_absolute()
-        or re.fullmatch(r"[A-Za-z0-9._-]+", token) is None
-    ):
+    if not status_file or not path.is_absolute() or re.fullmatch(r"[A-Za-z0-9._-]+", token) is None:
         raise RuntimeError("invalid benchmark interrupt-cleanup contract")
     return path, token
 
@@ -179,9 +175,7 @@ def _publish_interrupt_cleanup_status(state: str) -> None:
         raise ValueError(f"invalid interrupt-cleanup state: {state}")
     status_file, token = contract
     status_file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = status_file.with_name(
-        f".{status_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    )
+    temporary = status_file.with_name(f".{status_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("x", encoding="utf-8") as handle:
             handle.write("version=1\n")
@@ -205,10 +199,7 @@ def _begin_interrupt_cleanup() -> bool:
         return False
     _INTERRUPT_CLEANUP_STARTED += 1
     _publish_interrupt_cleanup_status("pending")
-    print(
-        "    Benchmark interrupt cleanup status: "
-        f"state=pending started={_INTERRUPT_CLEANUP_STARTED}"
-    )
+    print(f"    Benchmark interrupt cleanup status: state=pending started={_INTERRUPT_CLEANUP_STARTED}")
     return True
 
 
@@ -1043,17 +1034,57 @@ _PROSE_ABBREVIATIONS = {
 # abbreviations are conventionally rendered. That guard keeps ordinary lowercase
 # words like "in", "or", "me", "hi", "ok" from being rewritten as states.
 _US_STATE_ABBREVIATIONS = {
-    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california",
-    "co": "colorado", "ct": "connecticut", "de": "delaware", "fl": "florida", "ga": "georgia",
-    "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
-    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
-    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
-    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
-    "nj": "new jersey", "nm": "new mexico", "ny": "new york", "nc": "north carolina",
-    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
-    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota", "tn": "tennessee",
-    "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
-    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+    "al": "alabama",
+    "ak": "alaska",
+    "az": "arizona",
+    "ar": "arkansas",
+    "ca": "california",
+    "co": "colorado",
+    "ct": "connecticut",
+    "de": "delaware",
+    "fl": "florida",
+    "ga": "georgia",
+    "hi": "hawaii",
+    "id": "idaho",
+    "il": "illinois",
+    "in": "indiana",
+    "ia": "iowa",
+    "ks": "kansas",
+    "ky": "kentucky",
+    "la": "louisiana",
+    "me": "maine",
+    "md": "maryland",
+    "ma": "massachusetts",
+    "mi": "michigan",
+    "mn": "minnesota",
+    "ms": "mississippi",
+    "mo": "missouri",
+    "mt": "montana",
+    "ne": "nebraska",
+    "nv": "nevada",
+    "nh": "new hampshire",
+    "nj": "new jersey",
+    "nm": "new mexico",
+    "ny": "new york",
+    "nc": "north carolina",
+    "nd": "north dakota",
+    "oh": "ohio",
+    "ok": "oklahoma",
+    "or": "oregon",
+    "pa": "pennsylvania",
+    "ri": "rhode island",
+    "sc": "south carolina",
+    "sd": "south dakota",
+    "tn": "tennessee",
+    "tx": "texas",
+    "ut": "utah",
+    "vt": "vermont",
+    "va": "virginia",
+    "wa": "washington",
+    "wv": "west virginia",
+    "wi": "wisconsin",
+    "wy": "wyoming",
+    "dc": "district of columbia",
     "pr": "puerto rico",
 }
 
@@ -1208,7 +1239,6 @@ _SHORTHAND_MERCHANT_IDENTITY = re.compile(
 # fixed connector vocabulary "via|on|through|by|/", which no prompt or tool schema teaches;
 # free-form merchant strings are now matched with prose_tokens_contain (see above).
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
-
 
 
 def _browser_action_scope(metadata: dict) -> Optional[tuple[str, str]]:
@@ -1774,11 +1804,7 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
             blobs.append(structured)
             continue
         message_text = message.get("message")
-        if (
-            metadata.get("action_type") == "task_complete"
-            and isinstance(message_text, str)
-            and message_text.strip()
-        ):
+        if metadata.get("action_type") == "task_complete" and isinstance(message_text, str) and message_text.strip():
             blobs.append({"browser_result_text": message_text})
     return json.dumps(blobs, default=str) if blobs else ""
 
@@ -1829,9 +1855,7 @@ def _missing_final_findings(findings: List[str], haystack: str) -> List[str]:
     still fails.
     """
     return [
-        finding
-        for finding in missing_call_findings(findings, haystack)
-        if not prose_contains_phrase(haystack, finding)
+        finding for finding in missing_call_findings(findings, haystack) if not prose_contains_phrase(haystack, finding)
     ]
 
 
@@ -2159,11 +2183,10 @@ def _inject_benchmark_prompt_secrets(goal: str) -> str:
     if "{GITHUB_DISPATCH_TOKEN}" in goal:
         token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
         if not token:
-            raise ValueError(
-                "GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder"
-            )
+            raise ValueError("GITHUB_DISPATCH_TOKEN is required for this benchmark prompt placeholder")
         goal = goal.replace("{GITHUB_DISPATCH_TOKEN}", token)
     return goal
+
 
 def _doordash_food_plan_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
@@ -2224,9 +2247,7 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
     if manifest and manifest.get("benchmark_goal"):
         cached_checkout = manifest.get("checkout_manifest")
         checkout = (
-            cached_checkout.strip()
-            if isinstance(cached_checkout, str) and cached_checkout.strip()
-            else file_checkout
+            cached_checkout.strip() if isinstance(cached_checkout, str) and cached_checkout.strip() else file_checkout
         )
         return {
             "execute_prompt": str(manifest["benchmark_goal"]),
@@ -2272,12 +2293,10 @@ def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
     if frozen.get("checkout_manifest"):
         sections.append(
             "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "
-            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n"
-            + frozen["checkout_manifest"]
+            "99 Ranch line must be satisfied or manifest-allowed omitted/substituted):\n" + frozen["checkout_manifest"]
         )
     sections.append(
-        "Authoritative execute manifest text (same source the agent received):\n"
-        + frozen["execute_prompt"]
+        "Authoritative execute manifest text (same source the agent received):\n" + frozen["execute_prompt"]
     )
     return "\n\n".join(sections)
 
@@ -2317,19 +2336,12 @@ def _doordash_food_plan_supplemental_cart_evidence(data: dict) -> str:
         lowered = text.lower()
         if "result:" not in text:
             continue
-        if (
-            "×" in text
-            or "in cart" in lowered
-            or "ground beef" in lowered
-            or "safeway" in lowered
-        ):
+        if "×" in text or "in cart" in lowered or "ground beef" in lowered or "safeway" in lowered:
             snippets.append(f"Browser cart evaluate dump:\n{text[:20000]}")
 
     if not snippets:
         return ""
     return "\n\n---\n\n".join(snippets)
-
-
 
 
 def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
@@ -2584,9 +2596,7 @@ async def delete_agent(base_url: str, agent_id: str) -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.delete(f"{base_url}/api/agents/{agent_id}", headers=headers)
         if response.status_code != 204:
-            raise RuntimeError(
-                f"Failed to delete agent {agent_id}: HTTP {response.status_code}"
-            )
+            raise RuntimeError(f"Failed to delete agent {agent_id}: HTTP {response.status_code}")
 
 
 async def get_tool_usage(base_url: str, agent_id: str) -> dict:
@@ -2766,14 +2776,8 @@ async def _wait_for_expected_payment_lifecycle(
         # empty snapshot as a successful terminal state.
         expected_lifecycle = task.expected_payment_lifecycle or {}
         expected_purchase = expected_lifecycle.get("purchase")
-        missing_expected_purchase = (
-            isinstance(expected_purchase, dict) and not isinstance(purchase, dict)
-        )
-        if (
-            status not in retryable_statuses
-            and not compensation_pending
-            and not missing_expected_purchase
-        ):
+        missing_expected_purchase = isinstance(expected_purchase, dict) and not isinstance(purchase, dict)
+        if status not in retryable_statuses and not compensation_pending and not missing_expected_purchase:
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
@@ -3071,9 +3075,7 @@ async def _simulate_subscription_checkout_webhook(base_url: str, user_id: str) -
             content=payload.encode(),
         )
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Simulated subscription webhook failed ({response.status_code}): {response.text[:300]}"
-        )
+        raise RuntimeError(f"Simulated subscription webhook failed ({response.status_code}): {response.text[:300]}")
 
 
 async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
@@ -4014,10 +4016,7 @@ async def poll_agent(
                 data["_benchmark"]["step_budget_reached"] = True
                 data["_benchmark"]["browser_steps"] = used_steps
                 data["_benchmark"]["browser_step_budget"] = step_budget
-                print(
-                    f"    🧭 Browser step budget reached: {used_steps}/{step_budget} "
-                    f"— pausing for polar judge"
-                )
+                print(f"    🧭 Browser step budget reached: {used_steps}/{step_budget} — pausing for polar judge")
                 try:
                     await pause_agent(base_url, agent_id)
                     data = await get_agent(base_url, agent_id)
@@ -4510,9 +4509,7 @@ async def poll_agent(
                                         **data.get("_benchmark", {}),
                                         "subscription_webhook_simulated": True,
                                     }
-                                    print(
-                                        f"    ✅ Simulated subscription webhook after gate {req_id[:8]}"
-                                    )
+                                    print(f"    ✅ Simulated subscription webhook after gate {req_id[:8]}")
                                     continue
                                 print(f"    ✅ Expected gate observed {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
@@ -5009,11 +5006,7 @@ def evaluate_task(
     # stops on max steps, then rubrics — not a wall-clock fail).
     if status != "COMPLETED":
         benchmark_state = data.get("_benchmark", {}) if isinstance(data, dict) else {}
-        if (
-            status == "PAUSED"
-            and benchmark_state.get("step_budget_reached") is True
-            and is_polar_bench_task(task)
-        ):
+        if status == "PAUSED" and benchmark_state.get("step_budget_reached") is True and is_polar_bench_task(task):
             pass
         else:
             return False, f"Agent status: {status} (expected COMPLETED)"
@@ -5248,10 +5241,7 @@ def _should_delete_cancelled_agent(keep_failed_agents: bool) -> bool:
     """Owner interruption overrides diagnostic retention, never explicit audit retention."""
     if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
         return False
-    return (
-        not keep_failed_agents
-        or os.environ.get("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT") == "true"
-    )
+    return not keep_failed_agents or os.environ.get("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT") == "true"
 
 
 def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
@@ -5262,9 +5252,7 @@ def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
     return normalized.startswith("timeout after") or "tree stalled" in normalized
 
 
-_BROWSER_TERMINAL_ACTION_TYPES = frozenset(
-    {"task_complete", "session_paused", "write_lock_rejected"}
-)
+_BROWSER_TERMINAL_ACTION_TYPES = frozenset({"task_complete", "session_paused", "write_lock_rejected"})
 
 
 def _agent_messages_have_browser_terminal(messages: Optional[List[dict]]) -> bool:
@@ -5310,14 +5298,10 @@ def _recording_attachment_ready(metadata: dict) -> bool:
     if isinstance(view_url, str) and view_url.strip():
         return True
     view_urls = metadata.get("recording_view_urls")
-    if isinstance(view_urls, list) and any(
-        isinstance(url, str) and url.strip() for url in view_urls
-    ):
+    if isinstance(view_urls, list) and any(isinstance(url, str) and url.strip() for url in view_urls):
         return True
     file_pointer = metadata.get("recording_file_pointer")
-    return isinstance(file_pointer, dict) and bool(
-        file_pointer.get("storage_path") or file_pointer.get("id")
-    )
+    return isinstance(file_pointer, dict) and bool(file_pointer.get("storage_path") or file_pointer.get("id"))
 
 
 def _agent_messages_have_browser_recording_ready(
@@ -5355,9 +5339,7 @@ def _agent_messages_ready_for_browser_hub_archive(
     messages: Optional[List[dict]],
 ) -> bool:
     """Terminal chip close + playable recording — both required for hub FE links."""
-    return _agent_messages_have_browser_terminal(
-        messages
-    ) and _agent_messages_have_browser_recording_ready(messages)
+    return _agent_messages_have_browser_terminal(messages) and _agent_messages_have_browser_recording_ready(messages)
 
 
 def _agent_messages_ready_for_durable_browser_evidence(
@@ -5394,9 +5376,7 @@ def _agent_messages_ready_for_durable_browser_evidence(
             browser_task_ids.add(task_id)
         if action_type == "task_complete":
             completed_task_ids.add(task_id)
-    return browser_task_ids.issubset(completed_task_ids) and (
-        _agent_messages_have_browser_recording_ready(messages)
-    )
+    return browser_task_ids.issubset(completed_task_ids) and (_agent_messages_have_browser_recording_ready(messages))
 
 
 async def _refresh_agent_after_pause_for_browser_terminal(
@@ -5406,9 +5386,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
     *,
     timeout_seconds: float = 60.0,
     poll_interval_seconds: float = 2.0,
-    readiness_check: Callable[[Optional[List[dict]]], bool] = (
-        _agent_messages_ready_for_browser_hub_archive
-    ),
+    readiness_check: Callable[[Optional[List[dict]]], bool] = (_agent_messages_ready_for_browser_hub_archive),
 ) -> dict:
     """Re-fetch agent messages after pause so hub archives include browser terminals.
 
@@ -5430,15 +5408,9 @@ async def _refresh_agent_after_pause_for_browser_terminal(
             print(f"    ⚠ Browser-terminal refresh failed: {refresh_error}")
             continue
         if readiness_check(latest.get("messages")):
-            print(
-                f"    ✓ Browser terminal messages landed after pause "
-                f"({len(latest.get('messages') or [])} messages)"
-            )
+            print(f"    ✓ Browser terminal messages landed after pause ({len(latest.get('messages') or [])} messages)")
             return latest
-    print(
-        "    ⚠ Timed out waiting for browser terminal messages after pause; "
-        "archiving latest snapshot anyway"
-    )
+    print("    ⚠ Timed out waiting for browser terminal messages after pause; archiving latest snapshot anyway")
     return latest
 
 
@@ -5481,9 +5453,7 @@ async def _seal_payment_abandonment_browser_for_archive(
         **(refreshed_benchmark if isinstance(refreshed_benchmark, dict) else {}),
         **(source_benchmark if isinstance(source_benchmark, dict) else {}),
     }
-    if not _agent_messages_ready_for_durable_browser_evidence(
-        refreshed.get("messages")
-    ):
+    if not _agent_messages_ready_for_durable_browser_evidence(refreshed.get("messages")):
         return (
             refreshed,
             "Payment-abandonment browser did not reach terminal state with a recording before Hub archive",
@@ -6137,16 +6107,13 @@ def _run_subscription_webhook_resume_fixture(task_name: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            "gate-subscription-webhook fixture failed for "
-            f"{task_name}: {(result.stderr or result.stdout).strip()}"
+            f"gate-subscription-webhook fixture failed for {task_name}: {(result.stderr or result.stdout).strip()}"
         )
     manifest = _parse_last_json_line(result.stdout)
     customer_id = str(manifest.get("stripe_customer_id") or "").strip()
     user_id = str(manifest.get("user_id") or "").strip()
     if customer_id == "" or user_id == "":
-        raise RuntimeError(
-            f"gate-subscription-webhook fixture returned incomplete manifest: {manifest}"
-        )
+        raise RuntimeError(f"gate-subscription-webhook fixture returned incomplete manifest: {manifest}")
     _subscription_webhook_stripe_customers[user_id] = customer_id
     return manifest
 
@@ -6963,9 +6930,7 @@ async def _refresh_local_compute_tokens_for_run(
         return
     if _anthropic_family_excluded():
         if require_claude_code:
-            raise RuntimeError(
-                "Claude Code tasks cannot run when ROSE_EXCLUDE_ANTHROPIC_FAMILY is set"
-            )
+            raise RuntimeError("Claude Code tasks cannot run when ROSE_EXCLUDE_ANTHROPIC_FAMILY is set")
         if not _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
             required_token_types=("gpt",),
@@ -8599,9 +8564,7 @@ async def run_minted_agent_account_task(
     # minted realms still clear by default. Override either path with
     # BENCHMARK_MINTED_CLEAR_EXISTING_AUTH.
     clear_existing_auth = (
-        _minted_x_clear_existing_auth_enabled()
-        if target_realm == "x.com"
-        else _minted_clear_existing_auth_enabled()
+        _minted_x_clear_existing_auth_enabled() if target_realm == "x.com" else _minted_clear_existing_auth_enabled()
     )
     phone_evidence_since = datetime.now(timezone.utc)
     identity_was_present = _local_agent_identity_present_for_user(USER_ID)
@@ -8700,9 +8663,7 @@ async def run_minted_agent_account_task(
             prompt=_x_post_prompt(),
             approval_handling=task.approval_handling or "auto_approve",
             expected_attention_kind=task.expected_attention_kind or "write_lock",
-            expected_approval_count=(
-                task.expected_approval_count if task.expected_approval_count is not None else 1
-            ),
+            expected_approval_count=(task.expected_approval_count if task.expected_approval_count is not None else 1),
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -9208,10 +9169,7 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
     goal = str(node.get("goal") or "")
     agent_type = "general_purpose" if goal.startswith("You are analyzing ONE creator") else node.get("agent_type")
     has_real_work = (
-        collected_count >= 2
-        or research_tool_count >= 1
-        or explore_spawn_count >= 1
-        or sum(tool_counts.values()) >= 1
+        collected_count >= 2 or research_tool_count >= 1 or explore_spawn_count >= 1 or sum(tool_counts.values()) >= 1
     )
     completion_cards = _completion_cards_from_messages(messages)
     completion_card = completion_cards[-1] if completion_cards else {}
@@ -9252,11 +9210,7 @@ def _child_tool_counts_from_root_messages(messages: list) -> dict[str, dict[str,
         counts = metadata.get("childToolCounts") or metadata.get("child_tool_counts")
         if not sub_id or not isinstance(counts, dict):
             continue
-        normalized = {
-            str(name): int(count or 0)
-            for name, count in counts.items()
-            if int(count or 0) > 0
-        }
+        normalized = {str(name): int(count or 0) for name, count in counts.items() if int(count or 0) > 0}
         if normalized:
             out[str(sub_id)] = normalized
     return out
@@ -9403,10 +9357,7 @@ def _text_presents_aman_as_user(text: str) -> bool:
         return False
     # Historical July schema keys / phrase leftovers are not Aman-as-principal.
     if "opportunities_for_aman" in blob or "opportunities for aman" in blob:
-        cleaned = (
-            blob.replace("opportunities_for_aman", " ")
-            .replace("opportunities for aman", " ")
-        )
+        cleaned = blob.replace("opportunities_for_aman", " ").replace("opportunities for aman", " ")
         if "aman gottumukkala" not in cleaned and "aman's" not in cleaned:
             return False
         blob = cleaned
@@ -9437,8 +9388,7 @@ def _principal_user_andy_check(data: dict) -> tuple[bool, str]:
         completion_summary = _root_deliverable_blob(data)[:240]
     first_level = compact.get("first_level_gps") if isinstance(compact.get("first_level_gps"), list) else []
     gps_mention_andy = any(
-        _text_mentions_andy(str(gp.get("goal") or ""))
-        or bool(gp.get("mentions_andy"))
+        _text_mentions_andy(str(gp.get("goal") or "")) or bool(gp.get("mentions_andy"))
         for gp in first_level
         if isinstance(gp, dict)
     )
@@ -9459,7 +9409,10 @@ def _judge_source_trees(data: dict) -> list[dict]:
     """Return every raw tree source; validators may need evidence from either one."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
     trees: list[dict] = []
-    for candidate in (raw.get("tree"), (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else None):
+    for candidate in (
+        raw.get("tree"),
+        (data.get("logs") or {}).get("tree") if isinstance(data.get("logs"), dict) else None,
+    ):
         if isinstance(candidate, dict) and candidate:
             trees.append(candidate)
     return trees
@@ -9492,11 +9445,7 @@ def _judge_source_tree(data: dict) -> dict:
 def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
-    compact = {
-        key: value
-        for key, value in raw.items()
-        if key not in {"tree", "all_agents", "first_level_gps"}
-    }
+    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps"}}
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -9647,6 +9596,7 @@ _AGENTIC_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
         },
     ]
 }
+
 
 def _declared_agentic_evaluator_evidence(data: dict) -> dict[str, Any]:
     """Build a full trajectory bundle for an agentic Codex judge."""
@@ -9937,11 +9887,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
                 }
             )
     agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
-    judge_user_id = (
-        agent.get("userId")
-        or agent.get("user_id")
-        or _current_benchmark_user_id()
-    )
+    judge_user_id = agent.get("userId") or agent.get("user_id") or _current_benchmark_user_id()
     claude_auth = await _benchmark_judge_claude_auth_kwargs(judge_user_id)
     gpt_auth = await _benchmark_judge_gpt_auth_kwargs(judge_user_id)
     return await check_progress(
@@ -10123,9 +10069,7 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
             parents[right_root] = left_root
 
     messages = data.get("messages", []) or []
-    skipped_browser_ids = _skipped_browser_spawn_ids(
-        [message for message in messages if isinstance(message, dict)]
-    )
+    skipped_browser_ids = _skipped_browser_spawn_ids([message for message in messages if isinstance(message, dict)])
     for message in messages:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
@@ -10320,9 +10264,7 @@ def _has_later_web_fetch_recovery(messages: list, start_index: int) -> bool:
     return False
 
 
-_RECOVERABLE_EXPLORE_TOOLS = frozenset(
-    {"web_fetch", "web_search", "grep", "people_search"}
-)
+_RECOVERABLE_EXPLORE_TOOLS = frozenset({"web_fetch", "web_search", "grep", "people_search"})
 
 
 def _has_later_explore_tool_recovery(messages: list, start_index: int) -> bool:
@@ -10542,14 +10484,7 @@ def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
     """
     parts: list[str] = []
     if isinstance(message, dict):
-        parts.append(
-            str(
-                message.get("text")
-                or message.get("message")
-                or message.get("content")
-                or ""
-            )
-        )
+        parts.append(str(message.get("text") or message.get("message") or message.get("content") or ""))
     for key in ("error", "title", "detail", "details", "message"):
         value = candidate.get(key)
         if isinstance(value, str) and value:
@@ -10581,15 +10516,10 @@ def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[d
     blob = _message_failure_text(message, candidate).lower()
     if "cannot humanize" in blob and "no coordinates available" in blob:
         return True
-    return (
-        "no node found for given backend id" in blob
-        or "no node with given id found" in blob
-    )
+    return "no node found for given backend id" in blob or "no node with given id found" in blob
 
 
-def _is_intermediate_evaluate_hard_recovery_failure(
-    candidate: dict, message: Optional[dict] = None
-) -> bool:
+def _is_intermediate_evaluate_hard_recovery_failure(candidate: dict, message: Optional[dict] = None) -> bool:
     """Frozen-renderer hard-recovery ERRORs are intentional supervisor noise, not tool failures.
 
     When the page renderer freezes (`renderer_main_thread_blocked`), any action
@@ -10667,9 +10597,7 @@ def _explore_reject_loop_failures(data: dict, *, min_rejects: int = 2) -> list[s
             metadata = _message_tool_meta(message)
             tool_name = str(metadata.get("toolName") or metadata.get("tool_name") or "")
             title = str(metadata.get("title") or "")
-            task_id = str(
-                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
-            )
+            task_id = str(metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or "")
             if not task_id:
                 continue
             stats = by_task.setdefault(task_id, {"rejects": 0, "research": 0})
@@ -10715,9 +10643,7 @@ def _explore_chip_summary_failures(data: dict, *, min_chars: int = 200) -> list[
             metadata = _message_tool_meta(message)
             if str(metadata.get("agentType") or "") != "explore":
                 continue
-            task_id = str(
-                metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or ""
-            )
+            task_id = str(metadata.get("taskId") or metadata.get("subAgentId") or metadata.get("agentId") or "")
             if not task_id:
                 continue
             stats = by_task.setdefault(task_id, {"research": 0, "best": 0})
@@ -10886,7 +10812,6 @@ def _completion_cards_from_messages(messages: list) -> list[dict]:
     return summaries
 
 
-
 def _task_declares_static_check(task: BenchmarkTask, check_type: str) -> bool:
     """Return True when any declared static_check evaluator includes check_type."""
     return any(
@@ -10963,9 +10888,7 @@ def _synthetic_agent_skip_failures(data: dict) -> list[str]:
             if signature in seen:
                 continue
             seen.add(signature)
-            failures.append(
-                f"{agent_id[:8]} {agent_type or 'agent'}: {text or title}"
-            )
+            failures.append(f"{agent_id[:8]} {agent_type or 'agent'}: {text or title}")
     return failures
 
 
@@ -10974,11 +10897,7 @@ def _agent_task_title_check(data: dict, check: dict) -> tuple[bool, str]:
     title = str(agent.get("title") or agent.get("name") or "").strip()
     if not title:
         return False, "Root task title is missing"
-    forbidden = {
-        str(item).strip().casefold()
-        for item in check.get("forbidden_titles", [])
-        if str(item).strip()
-    }
+    forbidden = {str(item).strip().casefold() for item in check.get("forbidden_titles", []) if str(item).strip()}
     if title.casefold() in forbidden:
         return False, f"Root task title {title!r} is generic"
     expected = str(check.get("value") or check.get("expected_title") or "").strip()
@@ -11002,10 +10921,14 @@ def _iter_completion_output_file_pointers(outputs: object) -> list[dict]:
                 continue
             filename = candidate.get("original_filename")
             storage_path = candidate.get("storage_path")
-            if isinstance(filename, str) and filename.strip() and isinstance(storage_path, str) and storage_path.strip():
+            if (
+                isinstance(filename, str)
+                and filename.strip()
+                and isinstance(storage_path, str)
+                and storage_path.strip()
+            ):
                 pointers.append(candidate)
     return pointers
-
 
 
 def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bool, str]:
@@ -11019,15 +10942,12 @@ def _response_schema_has_file_pointer_check(data: dict, check: dict) -> tuple[bo
     fields = schema.get("fields") if isinstance(schema, dict) else None
     if not isinstance(fields, list) or not fields:
         return False, "response_schema missing fields"
-    file_fields = [
-        f
-        for f in fields
-        if isinstance(f, dict) and f.get("type") in ("file_pointer", "list[file_pointer]")
-    ]
+    file_fields = [f for f in fields if isinstance(f, dict) and f.get("type") in ("file_pointer", "list[file_pointer]")]
     if not file_fields:
         types = [str(f.get("type")) for f in fields if isinstance(f, dict)]
         return False, f"response_schema has no file_pointer field (types={types})"
     return True, f"Found {len(file_fields)} file_pointer field(s)"
+
 
 def _completion_summary_file_outputs_check(data: dict, check: dict) -> tuple[bool, str]:
     """Require Task Complete outputs to include FilePointers matching extension/mime filters."""
@@ -11111,9 +11031,7 @@ _APPROVAL_AMOUNT_RE = re.compile(
 _APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
 
 
-def _claude_code_sessions_with_transcripts(
-    sessions: list[dict], *, min_chars: int = 1
-) -> list[dict]:
+def _claude_code_sessions_with_transcripts(sessions: list[dict], *, min_chars: int = 1) -> list[dict]:
     """Return sessions whose stored terminal output meets ``min_chars``."""
     return [
         session
@@ -11138,8 +11056,7 @@ def _claude_code_started_task_ids(messages: list) -> set[str]:
             continue
         action_type = metadata.get("action_type")
         if action_type in {"claude_code_started", "task_started"} or (
-            metadata.get("toolName") == "spawn_claude_code_agent"
-            and metadata.get("ws_url")
+            metadata.get("toolName") == "spawn_claude_code_agent" and metadata.get("ws_url")
         ):
             started.add(task_id)
     return started
@@ -11185,16 +11102,12 @@ async def _await_claude_code_chip_terminality(
             return latest
         terminal = _claude_code_terminal_task_ids(messages)
         if started <= terminal:
-            print(
-                f"    ✓ Claude Code chip terminality settled "
-                f"({len(terminal)}/{len(started)} task_complete+task_id)"
-            )
+            print(f"    ✓ Claude Code chip terminality settled ({len(terminal)}/{len(started)} task_complete+task_id)")
             return latest
         if time.monotonic() >= deadline:
             missing = sorted(started - terminal)
             print(
-                f"    ⚠ Claude Code cancel messages incomplete before log collection; "
-                f"missing task_id(s): {missing[:5]}"
+                f"    ⚠ Claude Code cancel messages incomplete before log collection; missing task_id(s): {missing[:5]}"
             )
             return latest
         await asyncio.sleep(1.5)
@@ -11284,14 +11197,9 @@ async def _hydrate_claude_code_sessions(data: dict) -> None:
         benchmark_state["claude_code_session_evidence_error"] = str(exc)[:300]
 
 
-
-
 def _approval_user_visible_text(request: dict) -> str:
     """Return only approval copy shown to the user, excluding opaque IDs."""
-    return " ".join(
-        str(request.get(key) or "")
-        for key in ("question", "message", "description")
-    ).lower()
+    return " ".join(str(request.get(key) or "") for key in ("question", "message", "description")).lower()
 
 
 def _approval_request_satisfies_detail_check(
@@ -11300,11 +11208,7 @@ def _approval_request_satisfies_detail_check(
     *,
     user_visible_only: bool = False,
 ) -> bool:
-    evidence = (
-        _approval_user_visible_text(request)
-        if user_visible_only
-        else json.dumps(request, default=str).lower()
-    )
+    evidence = _approval_user_visible_text(request) if user_visible_only else json.dumps(request, default=str).lower()
     required_strings = check.get("required_strings") or []
     if not all(str(value).lower() in evidence for value in required_strings):
         return False
@@ -11318,10 +11222,7 @@ def _approval_request_satisfies_detail_check(
         return False
     minimum_seat_count = int(check.get("minimum_seat_count", 1 if check.get("require_seat") is True else 0))
     if minimum_seat_count:
-        seat_tokens = {
-            re.sub(r"\s+|-", "", token.lower())
-            for token in _APPROVAL_SEAT_TOKEN_RE.findall(evidence)
-        }
+        seat_tokens = {re.sub(r"\s+|-", "", token.lower()) for token in _APPROVAL_SEAT_TOKEN_RE.findall(evidence)}
         if len(seat_tokens) < minimum_seat_count:
             return False
     return True
@@ -11392,16 +11293,12 @@ def _run_declared_static_check(
                 return False, f"Observed tool failure: {failures[0]}"
             continue
         if check_type == "explore_research_not_reject_loop":
-            loops = _explore_reject_loop_failures(
-                data, min_rejects=int(check.get("min_rejects", 3))
-            )
+            loops = _explore_reject_loop_failures(data, min_rejects=int(check.get("min_rejects", 3)))
             if loops:
                 return False, loops[0]
             continue
         if check_type == "explore_completion_summary":
-            missing = _explore_chip_summary_failures(
-                data, min_chars=int(check.get("min_chars", 200))
-            )
+            missing = _explore_chip_summary_failures(data, min_chars=int(check.get("min_chars", 200)))
             if missing:
                 return False, missing[0]
             continue
@@ -11428,8 +11325,7 @@ def _run_declared_static_check(
                 if len(summary) < minimum:
                     return (
                         False,
-                        f"T7: {label} completion summary was {len(summary)} characters; "
-                        f"expected at least {minimum}",
+                        f"T7: {label} completion summary was {len(summary)} characters; expected at least {minimum}",
                     )
                 outputs = card.get("outputs")
                 if require_outputs and (not isinstance(outputs, list) or not outputs):
@@ -11521,9 +11417,7 @@ def _run_declared_static_check(
                 )
             continue
         if check_type == "agent_status":
-            expected_status = str(
-                check.get("value") or check.get("expected_status") or "COMPLETED"
-            ).upper()
+            expected_status = str(check.get("value") or check.get("expected_status") or "COMPLETED").upper()
             observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
             if observed_status != expected_status:
                 return False, f"Agent status was {observed_status}; expected {expected_status}"
@@ -11582,11 +11476,7 @@ def _run_declared_static_check(
                     f"T7: deliverable blob was {len(blob)} characters; expected at least {minimum}",
                 )
             lowered = blob.lower()
-            missing = [
-                marker
-                for marker in (check.get("required_strings") or [])
-                if str(marker).lower() not in lowered
-            ]
+            missing = [marker for marker in (check.get("required_strings") or []) if str(marker).lower() not in lowered]
             if missing:
                 return False, f"T7: deliverable missing required marker {missing[0]!r}"
             creator_names = [str(name) for name in (check.get("creator_names") or []) if str(name).strip()]
@@ -11647,11 +11537,7 @@ def _run_declared_static_check(
             ]
             if not gps:
                 return False, "T3: general-purpose agent tree was empty"
-            over_limit = [
-                gp
-                for gp in gps
-                if int(gp.get("explore_spawn_count") or 0) > maximum
-            ]
+            over_limit = [gp for gp in gps if int(gp.get("explore_spawn_count") or 0) > maximum]
             if over_limit:
                 sample = over_limit[0]
                 return (
@@ -11782,8 +11668,7 @@ def _run_declared_static_check(
                 suffix = f" ({evidence_error})" if evidence_error else ""
                 return (
                     False,
-                    f"Claude Code session count was {len(sessions)}; "
-                    f"expected at least {min_sessions}{suffix}",
+                    f"Claude Code session count was {len(sessions)}; expected at least {min_sessions}{suffix}",
                 )
             stored = [
                 session
@@ -12286,9 +12171,7 @@ async def run_single_task(
             try:
                 if await pause_agent(base_url, agent_id):
                     print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
-                    data = await _refresh_agent_after_pause_for_browser_terminal(
-                        base_url, agent_id, data
-                    )
+                    data = await _refresh_agent_after_pause_for_browser_terminal(base_url, agent_id, data)
                     # Wait for Session Cancelled (task_complete+task_id) before
                     # freezing the transcript into the durable hub archive.
                     data = await _await_claude_code_chip_terminality(base_url, agent_id, data)
@@ -12537,9 +12420,7 @@ async def run_single_task(
             if browser_archive_error is not None:
                 passed = False
                 failure_reason = (
-                    f"{failure_reason} | {browser_archive_error}"
-                    if failure_reason
-                    else browser_archive_error
+                    f"{failure_reason} | {browser_archive_error}" if failure_reason else browser_archive_error
                 )
 
         # Final context well-formedness check
@@ -12623,9 +12504,7 @@ async def run_single_task(
         claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
         if isinstance(claude_code_sessions, list) and claude_code_sessions:
             logs["claude_code_sessions"] = claude_code_sessions
-        session_evidence_error = (data.get("_benchmark") or {}).get(
-            "claude_code_session_evidence_error"
-        )
+        session_evidence_error = (data.get("_benchmark") or {}).get("claude_code_session_evidence_error")
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
@@ -12643,9 +12522,7 @@ async def run_single_task(
                     raise RuntimeError("collect_tree_messages returned a non-agent logs.tree")
                 child_transcripts = tree_child_transcript_count(tree, agent_id)
                 if child_transcripts == 0:
-                    raise RuntimeError(
-                        "logs.tree has no child transcripts; refusing to archive empty fan-out chips"
-                    )
+                    raise RuntimeError("logs.tree has no child transcripts; refusing to archive empty fan-out chips")
                 logs["tree"] = tree
                 print(
                     f"    Tree messages captured for {len(logs['tree'])} agent(s) "
@@ -12772,12 +12649,8 @@ async def run_single_task(
                                 "task": task.name,
                                 "hasAgent": bool(agent_id),
                                 "keepFailedAgents": keep_failed_agents,
-                                "statusFileConfigured": bool(
-                                    os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE")
-                                ),
-                                "tokenConfigured": bool(
-                                    os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_TOKEN")
-                                ),
+                                "statusFileConfigured": bool(os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE")),
+                                "tokenConfigured": bool(os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_TOKEN")),
                             },
                             "timestamp": int(time.time() * 1000),
                         }
@@ -12832,9 +12705,7 @@ async def run_single_task(
             await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             if interrupt_cleanup_started:
                 if not _should_delete_cancelled_agent(keep_failed_agents):
-                    raise RuntimeError(
-                        "owner-requested benchmark teardown cannot retain the cancelled agent"
-                    )
+                    raise RuntimeError("owner-requested benchmark teardown cannot retain the cancelled agent")
                 await delete_agent(base_url, agent_id)
                 cancelled_agent_deleted = True
                 print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
@@ -12850,8 +12721,7 @@ async def run_single_task(
                     print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
         interrupt_cleanup_ready = interrupt_cleanup_started
         print(
-            "    Interrupt cleanup evidence: "
-            f"agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
+            f"    Interrupt cleanup evidence: agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
         # region agent log
         try:
@@ -13059,11 +12929,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # pipeline-e2e = harness plumbing tests. Orthogonal to tag slices.
             # Polar tasks also declare bench=rose-bench but stay behind the
             # polar-bench suite tag so this axis stays first-party-sized.
-            tasks = [
-                t
-                for t in all_tasks()
-                if t.bench == args.suite and not is_polar_bench_task(t)
-            ]
+            tasks = [t for t in all_tasks() if t.bench == args.suite and not is_polar_bench_task(t)]
         else:
             tasks = get_tasks_by_tag(args.suite)
     else:
@@ -13926,8 +13792,7 @@ async def main_async(args):
         )
         await _refresh_local_compute_tokens_for_run(
             base_url,
-            require_claude_code=bool(claude_code_tasks_for_refresh)
-            and not allow_claude_code_credential_skip,
+            require_claude_code=bool(claude_code_tasks_for_refresh) and not allow_claude_code_credential_skip,
         )
         # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
         # that must send email (message_person) needs a fresh credential overlay
@@ -13935,9 +13800,7 @@ async def main_async(args):
         # fails before an email_send approval can fire.
         if any("message_person" in (t.expected_tools or []) for t in tasks):
             if not _sync_email_credentials():
-                raise RuntimeError(
-                    "Benchmark run could not refresh email credentials for message_person tasks"
-                )
+                raise RuntimeError("Benchmark run could not refresh email credentials for message_person tasks")
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required
@@ -13949,24 +13812,18 @@ async def main_async(args):
     # Claude Code tasks become the deploy-approved loud SKIP.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
-    allow_claude_code_credential_skip = (
-        os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
-    )
+    allow_claude_code_credential_skip = os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
     if claude_code_tasks:
         has_claude_creds = await _check_claude_code_credentials(base_url)
         if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
             if allow_claude_code_credential_skip:
-                print(
-                    "  ⚠ Claude Code credentials unavailable — skipping: "
-                    + ", ".join(skipped_names)
-                )
+                print("  ⚠ Claude Code credentials unavailable — skipping: " + ", ".join(skipped_names))
                 skipped_claude_tasks = claude_code_tasks
                 tasks = [t for t in tasks if not t.requires_claude_code]
             else:
                 raise RuntimeError(
-                    "Claude Code credentials unavailable after compute-token refresh: "
-                    + ", ".join(skipped_names)
+                    "Claude Code credentials unavailable after compute-token refresh: " + ", ".join(skipped_names)
                 )
 
     await _update_world_model_before_simulation(args)
@@ -13982,10 +13839,7 @@ async def main_async(args):
         if polar_wall_clock_disabled(t):
             budget = polar_browser_step_budget(t)
             t._resolved_timeout_seconds = 0
-            print(
-                f"  🧭 {t.name} → wall-clock disabled; "
-                f"browser step budget={budget if budget is not None else '—'}"
-            )
+            print(f"  🧭 {t.name} → wall-clock disabled; browser step budget={budget if budget is not None else '—'}")
             continue
         if args.bootstrap:
             t._resolved_timeout_seconds = t.timeout_seconds
@@ -14130,9 +13984,7 @@ async def main_async(args):
         # like all three completed.
         for name, running_count in running_name_counts.items():
             live_ids = [
-                agent_id
-                for agent_id in _live_task_agent_ids.get(name, [])
-                if agent_id not in finished_agent_ids
+                agent_id for agent_id in _live_task_agent_ids.get(name, []) if agent_id not in finished_agent_ids
             ]
             for index in range(running_count):
                 live_agent_id = live_ids[index] if index < len(live_ids) else None
@@ -14273,9 +14125,7 @@ async def main_async(args):
                 pending = set(pending_results)
                 while pending:
                     _report_running.clear()
-                    _report_running.update(
-                        Counter(pending_results[future].name for future in pending)
-                    )
+                    _report_running.update(Counter(pending_results[future].name for future in pending))
                     done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                     for task_future in done:
                         task = pending_results[task_future]
