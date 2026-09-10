@@ -5769,6 +5769,98 @@ cleanup_stale_owner_recovery_proxies() {
     return "$status"
 }
 
+# Shared by the early exact-owner recovery entrypoint and the normal controller
+# EXIT cleanup. Keep the one definition before either caller can execute.
+cloudbench_confirm_guest_shutdowns() {
+    local deadline j out port status_code failed=0
+    local -a pending_indices next_pending_indices
+    pending_indices=()
+    next_pending_indices=()
+    [ "${#CHILD_OUT[@]}" -gt 0 ] || return 0
+    deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
+
+    # Request every guest first so cancellation/archive/provider cleanup runs in
+    # parallel across the fleet. The local status proxies are still alive here;
+    # terminating CHILD_PIDS first destroys the only machine-pinned data plane.
+    for j in "${!CHILD_OUT[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
+            && [ -e "$out/guest-shutdown.confirmed" ]; then
+            continue
+        fi
+        port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
+        case "$port" in
+            ''|*[!0-9]*)
+                # A child whose boot config was never applied never started a
+                # guest, so no acknowledgement can ever exist. Treating that as
+                # an unconfirmed cleanup quarantined the owner permanently: the
+                # policy never left `retain`, --recover-stale-owner refused it,
+                # and the clone kept running with no sanctioned cleanup path.
+                # No acknowledgement marker is fabricated - nothing was cleaned,
+                # because nothing ever ran.
+                if [ -s "$out/boot-config-unapplied" ] \
+                    && [ ! -e "$out/cloudbench-run.json" ]; then
+                    echo "ℹ️  [${CHILD_BENCH[$j]:-unknown}] boot config was never applied; no guest cleanup is owed"
+                    continue
+                fi
+                echo "❌ [${CHILD_BENCH[$j]:-unknown}] no status proxy for guest cleanup acknowledgement" >&2
+                failed=1
+                continue
+                ;;
+        esac
+        status_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+            "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
+        case "$status_code" in
+            # A configured guest persists its shutdown request before the
+            # driver-PID ownership fence can return 409. Preserve that possible
+            # in-progress state and let /shutdown-health provide the only
+            # cleanup verdict.
+            202|204|409) pending_indices+=("$j") ;;
+            *)
+                echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
+                failed=1
+                ;;
+        esac
+    done
+
+    while [ "${#pending_indices[@]}" -gt 0 ] && [ "$SECONDS" -le "$deadline" ]; do
+        next_pending_indices=()
+        for j in "${pending_indices[@]}"; do
+            out="${CHILD_OUT[$j]}"
+            port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
+            status_code="$(curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+                -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+                "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
+            if [ "$status_code" = "204" ]; then
+                if ! cloudbench_publish_guest_shutdown_confirmation "$out" "$RUN_ID"; then
+                    echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
+                    failed=1
+                fi
+            elif [ "$status_code" = "500" ]; then
+                echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest exited without cleanup acknowledgement" >&2
+                failed=1
+            else
+                next_pending_indices+=("$j")
+            fi
+        done
+        if [ "${next_pending_indices[0]+set}" = "set" ]; then
+            pending_indices=("${next_pending_indices[@]}")
+        else
+            pending_indices=()
+        fi
+        [ "${#pending_indices[@]}" -eq 0 ] || sleep 0.25
+    done
+    if [ "${#pending_indices[@]}" -gt 0 ]; then
+        echo "❌ ${#pending_indices[@]} guest(s) did not acknowledge browser/session cleanup; retaining provider ownership" >&2
+        failed=1
+    fi
+    if [ "$failed" = "0" ]; then
+        echo "✅ every guest acknowledged browser/session cleanup before fleet machine teardown"
+    fi
+    return "$failed"
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
     local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
@@ -7599,96 +7691,6 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
             "${provenance_args[@]}"; then
         return 1
     fi
-}
-
-cloudbench_confirm_guest_shutdowns() {
-    local deadline j out port status_code failed=0
-    local -a pending_indices next_pending_indices
-    pending_indices=()
-    next_pending_indices=()
-    [ "${#CHILD_OUT[@]}" -gt 0 ] || return 0
-    deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
-
-    # Request every guest first so cancellation/archive/provider cleanup runs in
-    # parallel across the fleet. The local status proxies are still alive here;
-    # terminating CHILD_PIDS first destroys the only machine-pinned data plane.
-    for j in "${!CHILD_OUT[@]}"; do
-        out="${CHILD_OUT[$j]}"
-        if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
-            && [ -e "$out/guest-shutdown.confirmed" ]; then
-            continue
-        fi
-        port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
-        case "$port" in
-            ''|*[!0-9]*)
-                # A child whose boot config was never applied never started a
-                # guest, so no acknowledgement can ever exist. Treating that as
-                # an unconfirmed cleanup quarantined the owner permanently: the
-                # policy never left `retain`, --recover-stale-owner refused it,
-                # and the clone kept running with no sanctioned cleanup path.
-                # No acknowledgement marker is fabricated - nothing was cleaned,
-                # because nothing ever ran.
-                if [ -s "$out/boot-config-unapplied" ] \
-                    && [ ! -e "$out/cloudbench-run.json" ]; then
-                    echo "ℹ️  [${CHILD_BENCH[$j]:-unknown}] boot config was never applied; no guest cleanup is owed"
-                    continue
-                fi
-                echo "❌ [${CHILD_BENCH[$j]:-unknown}] no status proxy for guest cleanup acknowledgement" >&2
-                failed=1
-                continue
-                ;;
-        esac
-        status_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
-            -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
-            "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
-        case "$status_code" in
-            # A configured guest persists its shutdown request before the
-            # driver-PID ownership fence can return 409. Preserve that possible
-            # in-progress state and let /shutdown-health provide the only
-            # cleanup verdict.
-            202|204|409) pending_indices+=("$j") ;;
-            *)
-                echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
-                failed=1
-                ;;
-        esac
-    done
-
-    while [ "${#pending_indices[@]}" -gt 0 ] && [ "$SECONDS" -le "$deadline" ]; do
-        next_pending_indices=()
-        for j in "${pending_indices[@]}"; do
-            out="${CHILD_OUT[$j]}"
-            port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
-            status_code="$(curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
-                -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
-                "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
-            if [ "$status_code" = "204" ]; then
-                if ! cloudbench_publish_guest_shutdown_confirmation "$out" "$RUN_ID"; then
-                    echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
-                    failed=1
-                fi
-            elif [ "$status_code" = "500" ]; then
-                echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest exited without cleanup acknowledgement" >&2
-                failed=1
-            else
-                next_pending_indices+=("$j")
-            fi
-        done
-        if [ "${next_pending_indices[0]+set}" = "set" ]; then
-            pending_indices=("${next_pending_indices[@]}")
-        else
-            pending_indices=()
-        fi
-        [ "${#pending_indices[@]}" -eq 0 ] || sleep 0.25
-    done
-    if [ "${#pending_indices[@]}" -gt 0 ]; then
-        echo "❌ ${#pending_indices[@]} guest(s) did not acknowledge browser/session cleanup; retaining provider ownership" >&2
-        failed=1
-    fi
-    if [ "$failed" = "0" ]; then
-        echo "✅ every guest acknowledged browser/session cleanup before fleet machine teardown"
-    fi
-    return "$failed"
 }
 
 cleanup() {
