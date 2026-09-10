@@ -42,6 +42,11 @@ INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBEN
 publish_driver_state() {
     local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
     printf '%s\n' "$state" > "$temporary" && mv -f "$temporary" "$DRIVER_STATE_FILE"
+    # region agent log
+    printf '{"hypothesisId":"H,I","location":"scripts/cloudbench-boot.sh:publish_driver_state","message":"driver state published","data":{"pid":"%s","state":"%s","cleanupAckPresent":%s},"timestamp":%s}\n' \
+        "$$" "$state" "$([ -s "$CLEANUP_ACK_FILE" ] && printf true || printf false)" "$(($(date +%s) * 1000))" \
+        >> /opt/cursor/logs/debug.log 2>/dev/null || true
+    # endregion
 }
 publish_cleanup_ack() {
     local temporary="${CLEANUP_ACK_FILE}.tmp.$$"

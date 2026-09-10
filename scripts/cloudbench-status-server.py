@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -13,6 +14,7 @@ import signal
 import socket
 import stat
 import tempfile
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -232,6 +234,14 @@ def main() -> int:
                     self.send_error(403)
                     return
                 if cleanup_acknowledged():
+                    # region agent log
+                    try:
+                        observed_state = (root / "cloudbench-driver.state").read_text().strip()
+                        with open("/opt/cursor/logs/debug.log", "a") as handle:
+                            handle.write(json.dumps({"hypothesisId": "G,J", "location": "scripts/cloudbench-status-server.py:shutdown-health", "message": "cleanup acknowledged response state", "data": {"driverState": observed_state}, "timestamp": int(time.time() * 1000)}) + "\n")
+                    except OSError:
+                        pass
+                    # endregion
                     self.send_response(204)
                     self.end_headers()
                     return
