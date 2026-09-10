@@ -13,6 +13,7 @@ symptoms:
   - "ERROR: exact psql command is unavailable"
   - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
   - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
+  - "ValueError: exact owner does not identify one warm source Machine"
 tags:
   - cloudbench
   - fly-io
@@ -51,6 +52,10 @@ sources:
   - fleet run capability-stability-20260910120311-2848604
   - commit b9979c5af
   - commit 117328730
+  - commit 4ebec8a34
+  - commit 5d90c105d
+  - commit 4f743b245
+  - commit cb7f35bd8
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -1112,6 +1117,72 @@ inventory scan, shared row, lock, channel, subscription, or cross-agent fan-in;
 cleanup remains O(1) bounded per exact owner. The exact live stability streak
 still must pass before this recurrence's temporary instrumentation is removed.
 
+## Fifteenth recurrence on 2026-09-10
+
+Exact stale-owner recovery next failed before guest cleanup because
+`resolve_exact_recovery_warm_identity` assumed every owned clone directly named
+one identical warm source Machine. The autoscaler instead creates a hierarchical
+owner graph: a primary Machine is cloned from the external warm root, then each
+worker Machine is cloned from that owned primary. The canonical two-edge fixture
+therefore contained source IDs `feedface000001` and `deadbeef000001`.
+
+The unchanged pre-fix command was
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph`.
+It failed in 0.23 seconds with `ValueError: exact owner does not identify one
+warm source Machine`. NDJSON hypothesis E independently recorded
+`recordCount=2`, `sourceCount=2`, and both source IDs. This rejected malformed
+metadata as the cause: the fixture's owner/audit identities, expected/fresh
+record sets, and Machine index were all canonical and mutually consistent.
+
+The critical path was:
+
+`--recover-stale-owner <exact-token>` → validate the exact owner-local audit →
+collect every expected clone source → incorrectly require one distinct source →
+abort before resolving the external warm guard → never reach the canonical
+`guest-cleanup-unconfirmed` acknowledgement gate.
+
+The deepest owned cause was a lifecycle-contract inconsistency: allocation
+already persisted clone lineage as a parent graph, while recovery interpreted
+that same lineage as a flat set. The resolver now reconstructs parent edges from
+the exact `fresh` audit, cross-checks every expected record and `by-machine-id`
+entry, requires exactly one external root, rejects duplicate targets, cycles,
+disconnected components, source mismatches, and incomplete indexes, and resolves
+the warm Volume only from that validated root. It never derives authority from a
+provider-wide inventory.
+
+The latent quarantine sibling already had stronger permanent coverage:
+`test_exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers`
+proves an unconfirmed exact owner enters guest acknowledgement and cannot invoke
+any reaper, while
+`test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`
+proves every acknowledgement precedes exact provider teardown. The hierarchical
+root regression additionally asserts that resolution leaves
+`guest-cleanup-unconfirmed` intact, and the worker-plan regressions map each
+hierarchical worker from its exact owner-local ledger. No duplicate point test
+was added.
+
+The accepted-destroy evidence also closed the adjacent lifecycle gap without
+changing a timeout. Six exact destroy calls returned status 0 while six exact-ID
+reads still returned valid `created`, `pending_destroy`, or `destroyed` objects.
+`reap_volume` therefore returns accepted-pending status 75, retains exact
+ownership, and lets only bounded provisioning spend its next attempt. Exact
+teardown drains later owner records but cannot retire any pending record until an
+exact-ID not-found receipt arrives. Rejected, malformed, wrong-ID, and unreadable
+lifecycle responses remain hard failures.
+
+Post-fix, the unchanged command passes with `1 passed` in 0.08 seconds. The
+nine-test hierarchy, quarantine, worker-mapping, and accepted-destroy set passes
+in 4.53 seconds. `bash -n scripts/run-bench-fleet && bash
+scripts/tests/cloudbench-multi-workstream.test.sh` exits 0 through all 16
+source-ordered scenarios. No test contacted or destroyed a provider resource,
+and no benchmark definition, timeout, or concurrency setting changed.
+
+At 10,000 agents, recovery remains independently keyed to one exact owner and
+reads only that owner's bounded local clone graph. It adds no provider inventory,
+cross-owner query, global poller, shared row, lock, channel, subscription, or
+fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1215,6 +1286,14 @@ failing-before/passing-after local regression, full lifecycle suites, preserved
 10,000-agent keyed behavior, and no benchmark task, timeout, or concurrency
 change. They retained ownership of the exact live stability-proof rerun and
 allowed instrumentation to remain until it passes.
+
+For the fifteenth recurrence, the user required the deepest general fix for
+hierarchical clone topology, unchanged exact-owner and fail-closed semantics,
+the unchanged regression plus any necessary quarantine sibling, and a causal
+accepted-destroy fix only where captured evidence proved it. They prohibited
+timeout or benchmark-definition changes and direct provider destruction,
+retained ownership of the exact live recovery rerun, and required the current
+branch to be committed and pushed.
 
 ## Reusable lesson
 
