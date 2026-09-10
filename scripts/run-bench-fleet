@@ -5694,18 +5694,29 @@ release_recovery_status_proxy_ports() {  # <owner-token>
     local token="$1" port
     local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
     local -a ports=()
-    local -A seen=()
     [ -n "$token" ] || return 0
     [ -f "$STALE_OWNER_RECOVERY_PORTS_FILE" ] \
         && [ ! -L "$STALE_OWNER_RECOVERY_PORTS_FILE" ] || return 1
+    python3 - "$STALE_OWNER_RECOVERY_PORTS_FILE" <<'PY' || return 1
+from pathlib import Path
+import stat
+import sys
+
+path = Path(sys.argv[1])
+metadata = path.lstat()
+if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit(1)
+values = path.read_text(encoding="utf-8").splitlines()
+if (
+    not values
+    or len(values) != len(set(values))
+    or any(not value.isdigit() or not 1024 <= int(value) <= 65_535 for value in values)
+):
+    raise SystemExit(1)
+PY
     while IFS= read -r port; do
-        case "$port" in ''|*[!0-9]*) return 1 ;; esac
-        [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
-            && [ -z "${seen[$port]:-}" ] || return 1
-        seen["$port"]=1
         ports+=("$port")
     done < "$STALE_OWNER_RECOVERY_PORTS_FILE"
-    [ "${#ports[@]}" -gt 0 ] || return 1
     for port in "${ports[@]}"; do
         python3 "$AUTOSCALER_PORT_LEASE_HELPER" release \
             --root "$root" --owner-pid "$$" --token "$token" --port "$port" \
