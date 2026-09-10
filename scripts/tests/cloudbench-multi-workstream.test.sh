@@ -1115,6 +1115,7 @@ elif args[:2] == ["machine", "update"]:
         if found is None:
             sys.exit(1)
         found["boot_env"] = boot_env
+        found.setdefault("config", {})["env"] = boot_env
         found["state"] = "stopped"
         if flag_value("--vm-size"):
             vm_size = flag_value("--vm-size")
