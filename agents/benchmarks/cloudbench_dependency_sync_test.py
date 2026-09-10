@@ -8855,9 +8855,15 @@ fleet_recovery_reconnect_guest_shutdowns {shlex.quote(str(registry))}
         not in line
         for line in call_lines
     )
+    assert any(
+        line.startswith("fly ssh console")
+        and f"--receipt '/data/cloudbench-guest-quiescence-{guest_token}.json'" in line
+        for line in call_lines
+    )
     assert all(
         f"/data/cloudbench-guest-quiescence-{guest_token}.json" not in line
         for line in call_lines
+        if line.startswith("curl ")
     )
     evidence_fetches = [
         line
