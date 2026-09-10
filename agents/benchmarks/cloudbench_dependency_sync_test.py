@@ -8185,6 +8185,576 @@ recover_exact_stale_fleet_owner {owner}
     assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
 
 
+def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(
+    tmp_path: Path,
+) -> None:
+    """Only one-to-one local output mappings may authorize guest reconnection."""
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
+    end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+    build_plan = fleet[start:end]
+    owner = "5b" * 16
+    machine_id = "deadbeef000001"
+    clone_name = "cloudbench-owned-machine"
+    cases = (
+        ("valid-with-volume-only-sibling", f"clone {machine_id}\n", "61001\n", True),
+        ("missing-cid", None, "61001\n", False),
+        ("malformed-cid", "clone not-hex\n", "61001\n", False),
+        ("mismatched-cid", "clone deadbeef999999\n", "61001\n", False),
+        ("missing-port", f"clone {machine_id}\n", None, False),
+        ("malformed-port", f"clone {machine_id}\n", "70000\n", False),
+    )
+
+    for label, cid_payload, port_payload, should_pass in cases:
+        case_root = tmp_path / label
+        runs_root = case_root / "runs"
+        run_id = "fixture-run"
+        output = runs_root / run_id / "bench-owned"
+        output.mkdir(parents=True)
+        registry = case_root / "ownership" / owner
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        (registry / "meta").write_text(
+            "version=2\n"
+            "app=bench-app\n"
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"runs_root={runs_root}\n"
+            "cleanup_policy=retain\n"
+        )
+        (clones / clone_name).write_text(
+            f"name={clone_name}\nid={machine_id}\nvolume_id=vol_owned_machine\n"
+        )
+        (clones / "cloudbench-volume-only").write_text(
+            "name=cloudbench-volume-only\nvolume_id=vol_owned_only\n"
+        )
+        if cid_payload is not None:
+            (output / ".cid").write_text(cid_payload)
+        if port_payload is not None:
+            (output / "status-proxy.port").write_text(port_payload)
+        plan = case_root / "plan"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+{build_plan}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+""",
+                "exact-recovery-plan",
+                str(registry),
+                str(plan),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        if should_pass:
+            assert result.returncode == 0, result.stderr
+            rows = plan.read_text().splitlines()
+            assert len(rows) == 1
+            assert machine_id in rows[0]
+            assert "vol_owned_machine" in rows[0]
+            assert "vol_owned_only" not in rows[0]
+        else:
+            assert result.returncode != 0, f"{label} unexpectedly passed"
+            assert not plan.exists()
+
+
+def test_exact_guest_status_and_shutdown_config_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """Absent/malformed exact-ID state or config never reaches proxy startup."""
+    fleet = FLEET_SCRIPT.read_text()
+    status_functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "machine_status_exact_read() {",
+            "registry_machine_details() {",
+        )
+    )
+    machine_id = "deadbeef000001"
+    calls = tmp_path / "status-calls"
+    for mode, expected_status in (("absent", 1), ("malformed", 2)):
+        calls.write_text("")
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP=bench-app
+MODE="$1"
+CALLS="$2"
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  if [ "$MODE" = absent ]; then
+    printf "Error: machine {machine_id} was not found in app 'bench-app'\n" >&2
+    return 1
+  fi
+  printf 'Machine ID: neighbor000001\nState: started\n'
+}}
+{status_functions}
+registry_machine_details {machine_id}
+""",
+                "exact-machine-status",
+                mode,
+                str(calls),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == expected_status, (
+            f"{mode}: {result.stderr}{result.stdout}"
+        )
+        assert calls.read_text().splitlines() == [
+            f"machine status {machine_id} -a bench-app"
+        ]
+
+    config_function = _extract_fleet_function(
+        fleet, "machine_guest_recovery_configuration() {"
+    )
+    valid_config = {
+        "mounts": [{"volume": "vol_owned"}],
+        "env": {
+            "CLOUDBENCH_BARRIER_TOKEN": "barrier-token",
+            "CLOUDBENCH_RUN_TOKEN": "guest-token",
+            "CLOUDBENCH_STATUS_PORT": "8011",
+        },
+    }
+    config_cases: list[tuple[str, str | None, bool]] = [
+        ("valid", json.dumps(valid_config), True),
+        (
+            "missing-barrier-token",
+            json.dumps(
+                {
+                    **valid_config,
+                    "env": {
+                        key: value
+                        for key, value in valid_config["env"].items()
+                        if key != "CLOUDBENCH_BARRIER_TOKEN"
+                    },
+                }
+            ),
+            False,
+        ),
+        (
+            "malformed-barrier-token",
+            json.dumps(
+                {
+                    **valid_config,
+                    "env": {
+                        **valid_config["env"],
+                        "CLOUDBENCH_BARRIER_TOKEN": "unsafe token",
+                    },
+                }
+            ),
+            False,
+        ),
+        (
+            "missing-guest-token",
+            json.dumps(
+                {
+                    **valid_config,
+                    "env": {
+                        key: value
+                        for key, value in valid_config["env"].items()
+                        if key != "CLOUDBENCH_RUN_TOKEN"
+                    },
+                }
+            ),
+            False,
+        ),
+        (
+            "malformed-status-port",
+            json.dumps(
+                {
+                    **valid_config,
+                    "env": {
+                        **valid_config["env"],
+                        "CLOUDBENCH_STATUS_PORT": "70000",
+                    },
+                }
+            ),
+            False,
+        ),
+        (
+            "volume-mismatch",
+            json.dumps({**valid_config, "mounts": [{"volume": "vol_neighbor"}]}),
+            False,
+        ),
+        ("malformed-config", "{", False),
+        ("unreadable-config", None, False),
+    ]
+    for label, payload, should_pass in config_cases:
+        config_script = (
+            "machine_config_exact_read() { return 1; }"
+            if payload is None
+            else "machine_config_exact_read() { printf '%s' \"$CONFIG\"; }"
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+CONFIG="$1"
+{config_script}
+{config_function}
+machine_guest_recovery_configuration {machine_id} vol_owned
+""",
+                "exact-machine-config",
+                payload or "",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert (result.returncode == 0) is should_pass, (
+            f"{label}: {result.stderr}{result.stdout}"
+        )
+
+
+def test_exact_guest_recovery_retains_quarantine_on_proxy_or_health_failure(
+    tmp_path: Path,
+) -> None:
+    """Proxy startup and non-204 shutdown health are mandatory acknowledgements."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup_proxy = _extract_fleet_function(
+        fleet, "cleanup_stale_owner_recovery_proxies() {"
+    )
+    reconnect = _extract_fleet_function(
+        fleet, "fleet_recovery_reconnect_guest_shutdowns() {"
+    )
+    confirm = _extract_fleet_function(fleet, "cloudbench_confirm_guest_shutdowns() {")
+    owner = "5c" * 16
+    machine_id = "deadbeef000001"
+    clone_name = "cloudbench-owned-machine"
+
+    for mode in ("proxy-start-failure", "non-204-health"):
+        case_root = tmp_path / mode
+        registry = case_root / "ownership" / owner
+        output = case_root / "runs" / "fixture-run" / "bench-owned"
+        output.mkdir(parents=True)
+        (registry / "clones").mkdir(parents=True)
+        (registry / "meta").write_text(
+            "run_id=fixture-run\ncleanup_policy=retain\n"
+        )
+        (registry / "guest-cleanup-unconfirmed").touch()
+        unexpected = case_root / "unexpected-authorization"
+        calls = case_root / "calls"
+        script = f"""set -uo pipefail
+MODE="$1"
+REGISTRY="$2"
+OUTPUT="$3"
+UNEXPECTED="$4"
+CALLS="$5"
+FLEET_REGISTRY_DIR="$REGISTRY"
+FLEET_REGISTRY_PUBLISHED=0
+KEEP_CLONES=0
+RUN_ID=original-run
+CLOUDBENCH_BARRIER_TOKEN=original-token
+CLOUDBENCH_CHILD_TERM_SECONDS=1
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
+_agent_stale_owner_debug_log() {{ :; }}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+fleet_registry_build_guest_recovery_plan() {{
+  printf 'guest\tbench-owned\t{clone_name}\t{machine_id}\tvol_owned\t%s\t61001\n' \
+    "$OUTPUT" > "$2"
+}}
+registry_machine_details() {{ printf 'started {clone_name} fdaa::101\n'; }}
+machine_guest_recovery_configuration() {{
+  printf 'barrier-token\tguest-token\t8011\n'
+}}
+claim_recovery_status_proxy_ports() {{ printf '62001\n' > "$1"; }}
+release_recovery_status_proxy_ports() {{ printf 'release %s\n' "$1" >> "$CALLS"; }}
+cloudbench_terminate_and_wait() {{
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+start_data_plane_proxy() {{
+  printf 'proxy-start\n' >> "$CALLS"
+  [ "$MODE" != proxy-start-failure ] || return 1
+  sleep 60 &
+  printf -v "$5" '%s' "$!"
+}}
+cloudbench_publish_guest_shutdown_confirmation() {{ touch "$UNEXPECTED"; return 99; }}
+fleet_registry_confirm_guest_teardown() {{ touch "$UNEXPECTED"; return 99; }}
+curl() {{
+  local url="${{@: -1}}"
+  printf '%s\n' "$url" >> "$CALLS"
+  case "$url" in
+    */shutdown) printf 202 ;;
+    */shutdown-health) printf 500 ;;
+    *) printf 404 ;;
+  esac
+}}
+{confirm}
+{cleanup_proxy}
+{reconnect}
+if fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"; then
+  exit 90
+fi
+[ -e "$REGISTRY/guest-cleanup-unconfirmed" ] || exit 91
+[ "$(registry_meta_value "$REGISTRY/meta" cleanup_policy)" = retain ] || exit 92
+[ ! -e "$UNEXPECTED" ] || exit 93
+"""
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "exact-recovery-failure",
+                mode,
+                str(registry),
+                str(output),
+                str(unexpected),
+                str(calls),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"{mode}: {result.stderr}{result.stdout}"
+        call_lines = calls.read_text().splitlines()
+        assert "proxy-start" in call_lines
+        if mode == "non-204-health":
+            assert any(line.endswith("/shutdown") for line in call_lines)
+            assert any(line.endswith("/shutdown-health") for line in call_lines)
+        else:
+            assert all("/shutdown" not in line for line in call_lines)
+
+
+def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    owner = "5d" * 16
+    neighbor = "6d" * 16
+    capacity_root = tmp_path / "capacity"
+    reservations = capacity_root / "reservations"
+    reservations.mkdir(parents=True)
+    owner_meta = tmp_path / "meta"
+    pid_start = "Mon Jan 1 00:00:00 2001"
+    owner_meta.write_text(
+        "host=test-host\n"
+        "pid=999999\n"
+        f"pid_start={pid_start}\n"
+        f"fleet_owner_token={owner}\n"
+    )
+
+    def reservation_payload(token: str, fleet_owner: str) -> str:
+        return (
+            "version=1\n"
+            "app=bench-app\n"
+            "host=test-host\n"
+            "pid=999999\n"
+            f"pid_start={pid_start}\n"
+            f"fleet_owner_token={fleet_owner}\n"
+            f"token={token}\n"
+        )
+
+    owner_token = f"{owner}-primary"
+    neighbor_token = f"{neighbor}-primary"
+    (reservations / owner_token).write_text(reservation_payload(owner_token, owner))
+    neighbor_reservation = reservations / neighbor_token
+    neighbor_reservation.write_text(reservation_payload(neighbor_token, neighbor))
+    capacity_functions = "\n".join(
+        (
+            _extract_fleet_function(fleet, "registry_meta_value() {"),
+            _extract_fleet_function(
+                fleet, "capacity_release_stale_owner_reservations() {"
+            ),
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+CAPACITY_RESERVATION_ROOT="$1"
+{capacity_functions}
+capacity_release_stale_owner_reservations "$2" "$3"
+""",
+            "exact-capacity-release",
+            str(capacity_root),
+            str(owner_meta),
+            owner_token,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (reservations / owner_token).exists()
+    assert neighbor_reservation.exists()
+
+    release_proxy = _extract_fleet_function(
+        fleet, "release_recovery_status_proxy_ports() {"
+    )
+    assert "release-owner" not in release_proxy
+    lease_root = tmp_path / "proxy-leases"
+    lease_root.mkdir()
+    ports_file = tmp_path / "ports"
+    ports_file.write_text("62001\n")
+    release_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT="$1"
+AUTOSCALER_PORT_LEASE_HELPER="$2"
+STALE_OWNER_RECOVERY_PORTS_FILE="$3"
+process_start="$(ps -o lstart= -p $$ | awk '{{$1=$1; print}}')"
+printf '{{"pid":%s,"process_start":"%s","token":"exact-token"}}\n' \
+  "$$" "$process_start" > "$1/62001"
+printf '{{"pid":%s,"process_start":"%s","token":"neighbor-token"}}\n' \
+  "$$" "$process_start" > "$1/62002"
+{release_proxy}
+release_recovery_status_proxy_ports exact-token
+[ ! -e "$1/62001" ] && [ -e "$1/62002" ]
+""",
+            "exact-proxy-release",
+            str(lease_root),
+            str(PORT_LEASE_SCRIPT),
+            str(ports_file),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert release_result.returncode == 0, release_result.stderr
+
+
+def test_exact_v2_pool_recovery_reads_only_owner_audit_claims(
+    tmp_path: Path,
+) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    owner = "5e" * 16
+    exact_id = "deadbeef000001"
+    neighbor_id = "feedface000002"
+    audit_root = tmp_path / "audits"
+    audit = audit_root / owner
+    (audit / "pool").mkdir(parents=True)
+    (audit / "fresh").mkdir()
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\napp=bench-app\n")
+    (audit / "pool" / exact_id).write_text(
+        f"machine_id={exact_id}\n"
+        f"fleet_owner_token={owner}\n"
+        "app=bench-app\n"
+        "disposition=claimed\n"
+    )
+    claims = tmp_path / "claims"
+    claims.mkdir()
+    (claims / exact_id).write_text("exact\n")
+    (claims / neighbor_id).write_text("malformed-neighbor-must-not-be-read\n")
+    owner_meta = tmp_path / "ownership" / owner / "meta"
+    owner_meta.parent.mkdir(parents=True)
+    owner_meta.write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        f"audit_dir={audit}\n"
+    )
+    calls = tmp_path / "calls"
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "exact_owner_pool_claim_ids() {",
+            "recover_exact_pool_claims() {",
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+FLEET_AUDIT_ROOT="$1"
+POOL_CLAIMS_DIR="$2"
+CALLS="$3"
+pool_claim_cleanup_unconfirmed() {{ return 1; }}
+recover_one_exact_pool_claim() {{ printf '%s\n' "${{1##*/}}" >> "$CALLS"; }}
+{functions}
+recover_exact_pool_claims "$4" exact
+""",
+            "exact-pool-recovery",
+            str(audit_root),
+            str(claims),
+            str(calls),
+            str(owner_meta),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == [exact_id]
+    assert (claims / neighbor_id).exists()
+
+
+def test_recovery_proxy_batch_claim_rolls_back_partial_publication(
+    tmp_path: Path,
+) -> None:
+    """A failed all-or-nothing port batch leaves no partial recovery lease."""
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_port_lease_batch_rollback",
+        PORT_LEASE_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module._candidate_ports = lambda _start: [62010, 62011]
+    module._port_is_bindable = lambda _port: True
+    root = tmp_path / "leases"
+    with module.Registry(root) as registry:
+        original_publish = registry._publish
+        publish_count = 0
+
+        def fail_second_publish(
+            lease: Path, record: dict[str, object]
+        ) -> None:
+            nonlocal publish_count
+            publish_count += 1
+            if publish_count == 2:
+                raise RuntimeError("injected second lease publication failure")
+            original_publish(lease, record)
+
+        registry._publish = fail_second_publish
+        try:
+            registry.claim_batch(
+                owner_pid=os.getpid(),
+                token="exact-recovery",
+                start=62010,
+                count=2,
+            )
+        except RuntimeError as error:
+            assert "injected second lease publication failure" in str(error)
+        else:
+            raise AssertionError("partial batch publication unexpectedly succeeded")
+    assert not [path for path in root.iterdir() if path.name.isdigit()]
+
+
 def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
     tmp_path: Path,
 ) -> None:
@@ -8844,7 +9414,7 @@ def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proo
             '[{"id":"facefeed000002","name":"cloudbench-legacy","state":"stopped"}]',
             "[]",
             1,
-            3,
+            2,
             2,
         ),
         (

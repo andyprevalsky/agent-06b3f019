@@ -5691,11 +5691,26 @@ claim_recovery_status_proxy_ports() {  # <output-file> <count> <preferred-start>
 }
 
 release_recovery_status_proxy_ports() {  # <owner-token>
-    local token="$1"
+    local token="$1" port
     local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
+    local -a ports=()
+    local -A seen=()
     [ -n "$token" ] || return 0
-    python3 "$AUTOSCALER_PORT_LEASE_HELPER" release-owner \
-        --root "$root" --owner-pid "$$" --token "$token"
+    [ -f "$STALE_OWNER_RECOVERY_PORTS_FILE" ] \
+        && [ ! -L "$STALE_OWNER_RECOVERY_PORTS_FILE" ] || return 1
+    while IFS= read -r port; do
+        case "$port" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
+            && [ -z "${seen[$port]:-}" ] || return 1
+        seen["$port"]=1
+        ports+=("$port")
+    done < "$STALE_OWNER_RECOVERY_PORTS_FILE"
+    [ "${#ports[@]}" -gt 0 ] || return 1
+    for port in "${ports[@]}"; do
+        python3 "$AUTOSCALER_PORT_LEASE_HELPER" release \
+            --root "$root" --owner-pid "$$" --token "$token" --port "$port" \
+            || return 1
+    done
 }
 
 cleanup_stale_owner_recovery_proxies() {
@@ -6251,10 +6266,6 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 "$clone_status" "$source_id" "$clone_out"; then
             preallocation_failure=1
         fi
-        if [ -z "$target_id" ] && [ "$preallocation_failure" -eq 0 ]; then
-            deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
-            target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
-        fi
         if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ]; then
             target_volume="$(clone_failure_owned_volume_id "$clone_status" "$clone_out")"
             if [ -n "$target_volume" ]; then
@@ -6275,6 +6286,11 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
                 mv "$names_ledger.tmp" "$names_ledger"
             fi
+        fi
+        if [ -z "$target_id" ] && [ -z "$target_volume" ] \
+            && [ "$preallocation_failure" -eq 0 ]; then
+            deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
+            target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
         fi
         if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ] \
             && [ -z "$target_volume" ] \
