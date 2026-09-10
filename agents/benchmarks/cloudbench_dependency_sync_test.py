@@ -7825,11 +7825,17 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     # The pre-fix controller has no quarantine recovery functions, so this
     # unchanged reproduction reaches its real outer-gate rejection. Once the
     # production functions exist, the same fixture exercises them end-to-end.
-    functions = "\n".join(
-        _extract_fleet_function(fleet, signature)
-        for signature in signatures
-        if signature in fleet
-    )
+    extracted = []
+    for signature in signatures:
+        if signature not in fleet:
+            continue
+        if signature == "fleet_registry_build_guest_recovery_plan() {":
+            start = fleet.index(signature)
+            end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+            extracted.append(fleet[start:end])
+        else:
+            extracted.append(_extract_fleet_function(fleet, signature))
+    functions = "\n".join(extracted)
     owner = "5a" * 16
     run_id = "20260910-021331-1465409"
     ownership_root = tmp_path / "ownership"
@@ -7935,6 +7941,8 @@ RUN_ID=fixture-controller-run
 CLOUDBENCH_CHILD_TERM_SECONDS=2
 STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
 AUTOSCALER_PORT_LEASE_HELPER=/nonexistent/port-helper
 CALLS={shlex.quote(str(calls))}
 _agent_stale_owner_debug_log() {{ :; }}
