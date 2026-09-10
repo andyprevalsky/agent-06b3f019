@@ -1674,9 +1674,53 @@ print(volume_ids[0])
 '
 }
 
+machine_status_exact_read() {  # <machine-id>; 0=exact status, 1=exactly absent, 2=unsafe read
+    local id="$1" output status
+    case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
+    if output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
+        printf '%s\n' "$output"
+        return 0
+    else
+        status=$?
+    fi
+    case "$output" in
+        *"machine $id was not found in app"*|*"failed to get VM $id: machine not found"*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "${output:0:200}" >&2
+    return 2
+}
+
+machine_config_exact_read() {  # <machine-id>; exact config JSON or non-zero
+    local id="$1"
+    case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    FLY machine status "$id" -a "$APP" -d 2>/dev/null
+}
+
 machine_volume_id() {  # machine_volume_id <machine_id> → its mounted volume id (or empty)
-    FLY machines list -a "$APP" --json 2>/dev/null \
-        | machine_volume_id_from_json "$1" 2>/dev/null || true
+    local config
+    config="$(machine_config_exact_read "$1")" || return 1
+    python3 -c '
+import json
+import sys
+
+try:
+    config = json.load(sys.stdin)
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(config, dict):
+    raise SystemExit(1)
+mounts = config.get("mounts") or []
+volumes = [
+    mount.get("volume")
+    for mount in mounts
+    if isinstance(mount, dict) and isinstance(mount.get("volume"), str)
+]
+if len(volumes) != 1 or not volumes[0]:
+    raise SystemExit(1)
+print(volumes[0])
+' <<< "$config"
 }
 
 volume_inventory_contains_id() {  # <volume-id>; stdout=exact state; 0=present, 1=exactly absent, 2=unknown
@@ -1777,7 +1821,8 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
 }
 
 reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
-    local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i machines="" command_rc=0
+    local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
+    local state="" command_rc=0
     [ -n "$id" ] || return 0
     if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
@@ -1812,39 +1857,44 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
             FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
         fi
 
-        command_rc=0
         if [ -n "$diagnostic_log" ]; then
-            if machines="$(FLY machines list -a "$APP" --json 2>> "$diagnostic_log")"; then
-                command_rc=0
+            if details="$(registry_machine_details "$id" 2>> "$diagnostic_log")"; then
+                detail_status=0
             else
-                command_rc=$?
+                detail_status=$?
             fi
-        elif machines="$(FLY machines list -a "$APP" --json 2>/dev/null)"; then
-            command_rc=0
+        elif details="$(registry_machine_details "$id")"; then
+            detail_status=0
         else
-            command_rc=$?
+            detail_status=$?
         fi
-        if [ "$command_rc" != "0" ]; then
+        if [ "$detail_status" -eq 1 ]; then
             if [ -n "$diagnostic_log" ]; then
-                printf '[%s] machine list failed rc=%s; presence remains unknown\n' \
+                printf '[%s] worker exactly absent after destroy attempt %s/5\n' \
                     "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
-                    "$command_rc" >> "$diagnostic_log" 2>/dev/null || true
+                    "$i" >> "$diagnostic_log" 2>/dev/null || true
+            fi
+            reap_volume "$vol" "$diagnostic_log"
+            return $?
+        elif [ "$detail_status" -eq 0 ]; then
+            state="$(printf '%s' "$details" | awk '{print $1}')"
+        else
+            if [ -n "$diagnostic_log" ]; then
+                printf '[%s] exact machine status unreadable; presence remains unknown\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                    >> "$diagnostic_log" 2>/dev/null || true
             fi
             sleep 3
             continue
         fi
-        if ! printf '%s' "$machines" | grep -q "\"$id\""; then
-            if [ -n "$diagnostic_log" ]; then
-                printf '[%s] worker absent after destroy attempt %s/5\n' \
-                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
-                    >> "$diagnostic_log" 2>/dev/null || true
-            fi
+        if [ "$state" = "destroyed" ]; then
             reap_volume "$vol" "$diagnostic_log"
             return $?
         fi
         if [ -n "$diagnostic_log" ]; then
-            printf '[%s] worker still present after destroy attempt %s/5\n' \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
+            printf '[%s] worker still present after destroy attempt %s/5 (state=%s)\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                "$i" "$state" \
                 >> "$diagnostic_log" 2>/dev/null || true
         fi
         if [ "$i" = 3 ]; then
@@ -1865,36 +1915,41 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
         sleep 3
     done
 
-    command_rc=0
     if [ -n "$diagnostic_log" ]; then
-        if machines="$(FLY machines list -a "$APP" --json 2>> "$diagnostic_log")"; then
-            command_rc=0
+        if details="$(registry_machine_details "$id" 2>> "$diagnostic_log")"; then
+            detail_status=0
         else
-            command_rc=$?
+            detail_status=$?
         fi
-    elif machines="$(FLY machines list -a "$APP" --json 2>/dev/null)"; then
-        command_rc=0
+    elif details="$(registry_machine_details "$id")"; then
+        detail_status=0
     else
-        command_rc=$?
+        detail_status=$?
     fi
-    if [ "$command_rc" != "0" ]; then
-        if [ -n "$diagnostic_log" ]; then
-            printf '[%s] final machine list failed rc=%s; refusing to forget worker\n' \
-                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
-                "$command_rc" >> "$diagnostic_log" 2>/dev/null || true
-        fi
-        return 1
+    if [ "$detail_status" -eq 1 ]; then
+        reap_volume "$vol" "$diagnostic_log"
+        return $?
     fi
-    if printf '%s' "$machines" | grep -q "\"$id\""; then
+    if [ "$detail_status" -ne 0 ]; then
         if [ -n "$diagnostic_log" ]; then
-            printf '[%s] worker remained present after all destroy attempts\n' \
+            printf '[%s] final exact machine status unreadable; refusing to forget worker\n' \
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
                 >> "$diagnostic_log" 2>/dev/null || true
         fi
-        echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
-    reap_volume "$vol" "$diagnostic_log"
+    state="$(printf '%s' "$details" | awk '{print $1}')"
+    if [ "$state" = "destroyed" ]; then
+        reap_volume "$vol" "$diagnostic_log"
+        return $?
+    fi
+    if [ -n "$diagnostic_log" ]; then
+        printf '[%s] worker remained present after all destroy attempts (state=%s)\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+            "$state" >> "$diagnostic_log" 2>/dev/null || true
+    fi
+    echo "  ⚠️ could not destroy machine $id — check: flyctl machine status $id -a $APP" >&2
+    return 1
 }
 
 registry_meta_value() {  # registry_meta_value <meta-file> <key>
@@ -3816,47 +3871,56 @@ with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_
 PY
 }
 
-capacity_release_stale_owner_reservations() {  # <owner-meta> <token-prefix>
-    local meta="$1" token_prefix="$2"
-    local target_pid target_pid_start target_host
+capacity_release_stale_owner_reservations() {  # <owner-meta> <exact-token>
+    local meta="$1" exact_token="$2"
+    local target_pid target_pid_start target_host target_owner
     target_pid="$(registry_meta_value "$meta" pid)"
     target_pid_start="$(registry_meta_value "$meta" pid_start)"
     target_host="$(registry_meta_value "$meta" host)"
+    target_owner="$(registry_meta_value "$meta" fleet_owner_token)"
     python3 - "$CAPACITY_RESERVATION_ROOT" "$APP" "$target_host" \
-        "$target_pid" "$target_pid_start" "$token_prefix" <<'PY'
+        "$target_pid" "$target_pid_start" "$target_owner" "$exact_token" <<'PY'
 import fcntl
 import os
+import re
 import sys
 
-root, app, host, pid, pid_start, prefix = sys.argv[1:]
+root, app, host, pid, pid_start, owner, token = sys.argv[1:]
+if (
+    re.fullmatch(r"[0-9a-f]{32}", owner) is None
+    or token != f"{owner}-primary"
+):
+    raise SystemExit(1)
 reservations = os.path.join(root, "reservations")
 if not os.path.isdir(reservations):
     raise SystemExit(0)
 with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_handle:
     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-    for name in os.listdir(reservations):
-        if not name.startswith(prefix):
-            continue
-        path = os.path.join(reservations, name)
-        try:
-            fields = dict(
-                line.rstrip("\n").split("=", 1)
-                for line in open(path, encoding="utf-8")
-                if "=" in line
-            )
-        except OSError:
-            raise SystemExit(1)
-        expected = (
-            fields.get("version") == "1"
-            and fields.get("app") == app
-            and fields.get("host") == host
-            and fields.get("pid") == pid
-            and fields.get("pid_start") == pid_start
-            and fields.get("token") == name
+    path = os.path.join(reservations, token)
+    if not os.path.exists(path):
+        raise SystemExit(0)
+    if not os.path.isfile(path):
+        raise SystemExit(1)
+    try:
+        fields = dict(
+            line.rstrip("\n").split("=", 1)
+            for line in open(path, encoding="utf-8")
+            if "=" in line
         )
-        if not expected:
-            raise SystemExit(1)
-        os.unlink(path)
+    except OSError:
+        raise SystemExit(1)
+    expected = (
+        fields.get("version") == "1"
+        and fields.get("app") == app
+        and fields.get("host") == host
+        and fields.get("pid") == pid
+        and fields.get("pid_start") == pid_start
+        and fields.get("fleet_owner_token") == owner
+        and fields.get("token") == token
+    )
+    if not expected:
+        raise SystemExit(1)
+    os.unlink(path)
 PY
 }
 
@@ -3891,26 +3955,59 @@ else:
 }
 
 registry_machine_details() {  # registry_machine_details <id>; 0="state name", 1=absent, 2=unsafe read
-    local id="$1"
-    FLY machines list -a "$APP" --json 2>/dev/null | MACHINE_ID="$id" python3 -c '
-import json, os, sys
-try:
-    machines = json.load(sys.stdin)
-except (TypeError, ValueError):
+    local id="$1" output status
+    if output="$(machine_status_exact_read "$id")"; then
+        status=0
+    else
+        status=$?
+    fi
+    [ "$status" -eq 0 ] || return "$status"
+    MACHINE_ID="$id" python3 -c '
+import ipaddress
+import os
+import re
+import sys
+
+machine_id = os.environ["MACHINE_ID"]
+lines = sys.stdin.read().splitlines()
+top_ids = [
+    line.split(":", 1)[1].strip()
+    for line in lines
+    if line.startswith("Machine ID:")
+]
+top_states = [
+    line.split(":", 1)[1].strip()
+    for line in lines
+    if line.startswith("State:")
+]
+pairs = {}
+for line in lines:
+    match = re.fullmatch(r"\s*([^=]+?)\s*=\s*(.*?)\s*", line)
+    if not match:
+        continue
+    key, value = match.groups()
+    if key in pairs:
+        raise SystemExit(2)
+    pairs[key] = value
+state = pairs.get("State", "")
+name = pairs.get("Name", "")
+private_ip = pairs.get("Private IP", "")
+if (
+    top_ids != [machine_id]
+    or len(top_states) != 1
+    or pairs.get("ID") != machine_id
+    or state != top_states[0]
+    or not re.fullmatch(r"[a-z][a-z0-9_-]*", state)
+    or not re.fullmatch(r"[A-Za-z0-9._-]+", name)
+):
     raise SystemExit(2)
-if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
-    raise SystemExit(2)
-matches = [machine for machine in machines if machine.get("id") == os.environ["MACHINE_ID"]]
-if not matches:
-    raise SystemExit(1)
-if len(matches) != 1:
-    raise SystemExit(2)
-state = matches[0].get("state")
-name = matches[0].get("name")
-if not isinstance(state, str) or not state or not isinstance(name, str) or not name:
-    raise SystemExit(2)
-print(state, name)
-'
+if private_ip:
+    try:
+        ipaddress.ip_address(private_ip)
+    except ValueError:
+        raise SystemExit(2)
+print(state, name, private_ip)
+' <<< "$output"
 }
 
 registry_runner_count() {  # registry_runner_count <started-machine-id>; exact integer or non-zero
@@ -4102,8 +4199,8 @@ PY
     done <<< "$retired"
 }
 
-recover_registry_audit_only_fresh() {  # <v2-registry>; repair audit-before-registry crash window
-    local registry="$1" owner="${1##*/}" meta="$1/meta" audit expected fresh
+recover_registry_audit_only_fresh() {  # <v2-registry> [exact]; repair audit-before-registry crash window
+    local registry="$1" recovery_scope="${2:-}" owner="${1##*/}" meta="$1/meta" audit expected fresh
     local clone_name source_id disposition id volume_id resolved record
     [ "$(registry_meta_value "$meta" version)" = "2" ] || return 0
     case "$owner" in ''|*[!0-9a-f]*) return 1 ;; esac
@@ -4153,6 +4250,10 @@ recover_registry_audit_only_fresh() {  # <v2-registry>; repair audit-before-regi
                 volume_id="$(registry_meta_value "$fresh" volume_id)"
                 ;;
             ownership-pending)
+                if [ "$recovery_scope" = "exact" ]; then
+                    echo "❌ exact stale-owner audit has unresolved name-only ownership: $clone_name" >&2
+                    return 1
+                fi
                 resolved="$(registry_resolve_name "$clone_name")"
                 case $? in
                     0)
@@ -4309,6 +4410,18 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
         case "$volume_id" in *[!a-zA-Z0-9_-]*) echo "❌ malformed fleet volume ownership record: $record" >&2; return 1 ;; esac
         if [ -z "$id" ]; then
+            if [ "$mode" = "forced" ] && [ -n "$volume_id" ]; then
+                # Exact cancellation recovery accepts only canonical v2
+                # Volume-only ownership. The provider-returned Volume ID is
+                # already complete authority; resolving its clone name would
+                # inventory unrelated Machines and cannot strengthen identity.
+                echo "🧹 reaping fleet-owned volume $volume_id (name=$clone_name; no machine allocated)"
+                reap_volume "$volume_id" || return 1
+                fleet_audit_update_registry_clone "$registry" "$clone_name" "" "$volume_id" \
+                    destroyed-verified-absent || return 1
+                rm -f "$record"
+                continue
+            fi
             resolved="$(registry_resolve_name "$clone_name")"
             case $? in
                 0)
@@ -5076,17 +5189,145 @@ recover_one_exact_pool_claim() {  # <claim> <owner-token> <host> <pid> <pid-star
         "$expected_host" "$expected_pid" "$expected_start"
 }
 
-recover_exact_pool_claims() {  # <dead-owner-meta>
-    local meta="$1" target_host target_pid target_start target_token target_registry version claim_path id
+exact_owner_pool_claim_ids() {  # <v2-owner-meta>; emits only nonterminal exact-owner claim IDs
+    python3 - "$1" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+meta_path = Path(sys.argv[1])
+audit_root = Path(sys.argv[2])
+expected_app = sys.argv[3]
+
+def regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+def plain_directory(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+def fields(path: Path) -> dict[str, str]:
+    if not regular_file(path):
+        raise ValueError(f"non-regular exact-owner record: {path}")
+    payload = path.read_bytes()
+    if len(payload) > 65_536:
+        raise ValueError(f"oversized exact-owner record: {path}")
+    parsed: dict[str, str] = {}
+    for raw in payload.decode().splitlines():
+        key, separator, value = raw.partition("=")
+        if not separator or key in parsed:
+            raise ValueError(f"noncanonical exact-owner record: {path}")
+        parsed[key] = value
+    return parsed
+
+meta = fields(meta_path)
+owner = meta_path.parent.name
+audit = Path(meta.get("audit_dir", ""))
+if (
+    not re.fullmatch(r"[0-9a-f]{32}", owner)
+    or meta.get("version") != "2"
+    or meta.get("fleet_owner_token") != owner
+    or meta.get("app") != expected_app
+    or audit != audit_root / owner
+    or not plain_directory(audit)
+    or fields(audit / "meta").get("fleet_owner_token") != owner
+    or fields(audit / "meta").get("app") != expected_app
+):
+    raise ValueError("unsafe exact-owner pool audit identity")
+
+claim_ids: set[str] = set()
+pool = audit / "pool"
+if pool.exists():
+    if not plain_directory(pool):
+        raise ValueError("unsafe exact-owner pool directory")
+    for record in pool.iterdir():
+        value = fields(record)
+        machine_id = value.get("machine_id", "")
+        disposition = value.get("disposition", "")
+        if (
+            record.name != machine_id
+            or not re.fullmatch(r"[0-9a-f]+", machine_id)
+            or value.get("fleet_owner_token") != owner
+            or value.get("app") != expected_app
+            or disposition
+            not in {
+                "claimed",
+                "returned-stopped-claim-released",
+                "destroyed-removed-from-pool",
+            }
+        ):
+            raise ValueError("unsafe exact-owner pool record")
+        if disposition == "claimed":
+            claim_ids.add(machine_id)
+
+fresh = audit / "fresh"
+if not plain_directory(fresh):
+    raise ValueError("missing exact-owner fresh audit")
+for record in fresh.iterdir():
+    value = fields(record)
+    if value.get("disposition") != "transfer-pending-stopped":
+        continue
+    machine_id = value.get("machine_id", "")
+    if (
+        not re.fullmatch(r"[0-9a-f]+", machine_id)
+        or value.get("fleet_owner_token") != owner
+        or value.get("app") != expected_app
+    ):
+        raise ValueError("unsafe exact-owner pending transfer")
+    claim_ids.add(machine_id)
+
+for machine_id in sorted(claim_ids):
+    print(machine_id)
+PY
+}
+
+recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
+    local meta="$1" recovery_scope="${2:-}" target_host target_pid target_start target_token version claim_path id
     local claim_host claim_pid claim_start st presence cleanup_status claim_token claim_digest
+    local exact_ids
     target_host="$(registry_meta_value "$meta" host)"
     target_pid="$(registry_meta_value "$meta" pid)"
     target_start="$(registry_meta_value "$meta" pid_start)"
     target_token="$(registry_meta_value "$meta" fleet_owner_token)"
-    target_registry="${meta%/meta}"
     version="$(registry_meta_value "$meta" version)"
     [ -n "$target_host" ] && [ -n "$target_pid" ] && [ -n "$target_start" ] || return 1
     mkdir -p "$POOL_CLAIMS_DIR" || return 1
+    if [ "$version" = "2" ]; then
+        exact_ids="$(exact_owner_pool_claim_ids "$meta")" || return 1
+        while IFS= read -r id; do
+            [ -n "$id" ] || continue
+            claim_path="$POOL_CLAIMS_DIR/$id"
+            [ -f "$claim_path" ] && [ ! -L "$claim_path" ] || {
+                echo "❌ exact owner audit requires missing pool claim $id" >&2
+                return 1
+            }
+            if pool_claim_cleanup_unconfirmed "$claim_path"; then
+                echo "❌ refusing exact recovery of pool machine $id: guest cleanup is unconfirmed" >&2
+                return 1
+            else
+                cleanup_status=$?
+                [ "$cleanup_status" -eq 1 ] || {
+                    echo "❌ malformed cleanup ownership in pool claim $id" >&2
+                    return 1
+                }
+            fi
+            echo "↩️  reconciling exact dead-owner pool claim $id"
+            recover_one_exact_pool_claim "$claim_path" "$target_token" \
+                "$target_host" "$target_pid" "$target_start" || return 1
+        done <<< "$exact_ids"
+        return 0
+    fi
+    if [ "$recovery_scope" = "exact" ]; then
+        echo "❌ exact stale-owner recovery cannot safely discover legacy pool claims" >&2
+        return 1
+    fi
     for claim_path in "$POOL_CLAIMS_DIR"/*; do
         [ -f "$claim_path" ] || continue
         claim_host="$(registry_meta_value "$claim_path" host)"
@@ -5099,10 +5340,6 @@ recover_exact_pool_claims() {  # <dead-owner-meta>
         id="${claim_path##*/}"
         case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
         claim_token="$(registry_meta_value "$claim_path" fleet_owner_token)"
-        if [ "$version" = "2" ]; then
-            [ "${target_registry##*/}" = "$target_token" ] || return 1
-            [ "$claim_token" = "$target_token" ] || return 1
-        fi
         if pool_claim_cleanup_unconfirmed "$claim_path"; then
             echo "❌ refusing exact recovery of pool machine $id: guest cleanup is unconfirmed" >&2
             return 1
@@ -5112,12 +5349,6 @@ recover_exact_pool_claims() {  # <dead-owner-meta>
                 echo "❌ malformed cleanup ownership in pool claim $id" >&2
                 return 1
             }
-        fi
-        if [ "$version" = "2" ]; then
-            echo "↩️  reconciling exact dead-owner pool claim $id"
-            recover_one_exact_pool_claim "$claim_path" "$target_token" \
-                "$target_host" "$target_pid" "$target_start" || return 1
-            continue
         fi
         echo "↩️  force-stopping legacy exact dead-owner pool claim $id"
         FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
@@ -5172,9 +5403,6 @@ PY
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
     python3 - "$registry" "$plan" "$APP" <<'PY'
-import ipaddress
-import json
-import os
 from pathlib import Path
 import re
 import stat
@@ -5320,64 +5548,8 @@ for candidate in run_dir.iterdir():
 if set(output_by_machine) != set(machine_records):
     raise ValueError("incomplete stale-owner output mapping")
 
-machines_path = run_dir / "machines.json"
-if not regular_file(machines_path):
-    raise ValueError("missing stale-owner machine snapshot")
-machines = json.loads(machines_path.read_text(encoding="utf-8"))
-if not isinstance(machines, list):
-    raise ValueError("machine snapshot is not a list")
-
 guests: list[tuple[str, ...]] = []
-barrier_token = ""
-private_ips: set[str] = set()
 for machine_id, (clone_name, volume_id) in machine_records.items():
-    matches = [
-        item
-        for item in machines
-        if isinstance(item, dict) and item.get("id") == machine_id
-    ]
-    if len(matches) != 1:
-        raise ValueError("exact owned machine is missing or duplicated in snapshot")
-    machine = matches[0]
-    config = machine.get("config")
-    environment = config.get("env") if isinstance(config, dict) else None
-    mounts = config.get("mounts") if isinstance(config, dict) else None
-    mounted = [
-        mount.get("volume")
-        for mount in mounts or []
-        if isinstance(mount, dict) and mount.get("volume")
-    ]
-    private_ip = machine.get("private_ip")
-    if (
-        machine.get("name") != clone_name
-        or machine.get("state") != "started"
-        or not isinstance(private_ip, str)
-        or private_ip in private_ips
-        or mounted != [volume_id]
-        or not isinstance(environment, dict)
-    ):
-        raise ValueError("exact owned machine snapshot identity is unsafe")
-    try:
-        ipaddress.ip_address(private_ip)
-    except ValueError as error:
-        raise ValueError("invalid exact owned machine private IP") from error
-    private_ips.add(private_ip)
-    token = environment.get("CLOUDBENCH_BARRIER_TOKEN")
-    guest_run_token = environment.get("CLOUDBENCH_RUN_TOKEN")
-    remote_port = environment.get("CLOUDBENCH_STATUS_PORT")
-    if (
-        not isinstance(token, str)
-        or not safe_key.fullmatch(token)
-        or not isinstance(guest_run_token, str)
-        or not safe_key.fullmatch(guest_run_token)
-        or not isinstance(remote_port, str)
-        or not remote_port.isdigit()
-        or not 1 <= int(remote_port) <= 65_535
-    ):
-        raise ValueError("missing or malformed exact guest shutdown configuration")
-    if barrier_token and token != barrier_token:
-        raise ValueError("exact owner machines do not share one barrier token")
-    barrier_token = token
     bench, output, preferred_port = output_by_machine[machine_id]
     values = (
         "guest",
@@ -5387,21 +5559,59 @@ for machine_id, (clone_name, volume_id) in machine_records.items():
         volume_id,
         str(output),
         str(preferred_port),
-        private_ip,
-        remote_port,
-        guest_run_token,
     )
     if any("\t" in value or "\n" in value for value in values):
         raise ValueError("unsafe stale-owner recovery plan field")
     guests.append(values)
 
 with plan.open("w", encoding="utf-8") as handle:
-    handle.write(f"token\t{barrier_token}\n")
     for values in sorted(guests, key=lambda item: item[3]):
         handle.write("\t".join(values) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
 PY
+}
+
+machine_guest_recovery_configuration() {  # <machine-id> <expected-volume>; token, guest-token, status-port
+    local id="$1" expected_volume="$2" config
+    config="$(machine_config_exact_read "$id")" || return 1
+    EXPECTED_VOLUME="$expected_volume" python3 -c '
+import json
+import os
+import re
+import sys
+
+try:
+    config = json.load(sys.stdin)
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(config, dict):
+    raise SystemExit(1)
+mounts = config.get("mounts") or []
+mounted = [
+    mount.get("volume")
+    for mount in mounts
+    if isinstance(mount, dict) and isinstance(mount.get("volume"), str)
+]
+environment = config.get("env")
+if mounted != [os.environ["EXPECTED_VOLUME"]] or not isinstance(environment, dict):
+    raise SystemExit(1)
+token = environment.get("CLOUDBENCH_BARRIER_TOKEN")
+guest_token = environment.get("CLOUDBENCH_RUN_TOKEN")
+remote_port = environment.get("CLOUDBENCH_STATUS_PORT")
+safe = re.compile(r"[A-Za-z0-9._-]+")
+if (
+    not isinstance(token, str)
+    or safe.fullmatch(token) is None
+    or not isinstance(guest_token, str)
+    or safe.fullmatch(guest_token) is None
+    or not isinstance(remote_port, str)
+    or not remote_port.isdigit()
+    or not 1 <= int(remote_port) <= 65_535
+):
+    raise SystemExit(1)
+print(token, guest_token, remote_port, sep="\t")
+' <<< "$config"
 }
 
 cloudbench_publish_guest_shutdown_confirmation() {  # <output-dir> <run-id>
@@ -5485,6 +5695,7 @@ cleanup_stale_owner_recovery_proxies() {
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
     local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
+    local guest_barrier_token details detail_status state actual_name configuration
     local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
     local recovery_index shutdown_status
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
@@ -5500,10 +5711,46 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         return 1
     fi
     while IFS=$'\t' read -r kind bench clone_name machine_id volume_id output \
-        preferred_port private_ip remote_port guest_run_token; do
+        preferred_port; do
         case "$kind" in
-            token) barrier_token="$bench" ;;
             guest)
+                if details="$(registry_machine_details "$machine_id")"; then
+                    detail_status=0
+                else
+                    detail_status=$?
+                fi
+                [ "$detail_status" -eq 0 ] || {
+                    echo "❌ [$bench] exact owned Machine $machine_id is absent or unreadable" >&2
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                }
+                read -r state actual_name private_ip <<< "$details"
+                [ "$state" = "started" ] && [ "$actual_name" = "$clone_name" ] \
+                    && [ -n "$private_ip" ] || {
+                    echo "❌ [$bench] exact owned Machine identity/state is unsafe for guest recovery" >&2
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                }
+                configuration="$(machine_guest_recovery_configuration \
+                    "$machine_id" "$volume_id")" || {
+                    echo "❌ [$bench] exact guest shutdown configuration is unsafe" >&2
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                }
+                IFS=$'\t' read -r guest_barrier_token guest_run_token remote_port \
+                    <<< "$configuration"
+                [ -n "$guest_barrier_token" ] && [ -n "$guest_run_token" ] \
+                    && [ -n "$remote_port" ] || {
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                }
+                if [ -n "$barrier_token" ] \
+                    && [ "$barrier_token" != "$guest_barrier_token" ]; then
+                    echo "❌ exact owner Machines do not share one shutdown token" >&2
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                fi
+                barrier_token="$guest_barrier_token"
                 recovery_benches+=("$bench")
                 recovery_outputs+=("$output")
                 recovery_ips+=("$private_ip")
@@ -5519,6 +5766,10 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     # region agent log
     _agent_stale_owner_debug_log H6 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
         "validated exact stale-owner guest recovery mapping" guestCount "$guest_count"
+    # endregion
+    # region agent log
+    _agent_stale_owner_debug_log H12 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
+        "validated live exact-ID Machine status and shutdown configuration" guestCount "$guest_count"
     # endregion
     if [ "$guest_count" -gt 0 ]; then
         [ -n "$barrier_token" ] || {
@@ -5632,6 +5883,81 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
 }
 
+resolve_exact_recovery_warm_identity() {  # <v2-registry>; exact source Machine and mounted Volume
+    local registry="${1%/}" source_id volume_id
+    source_id="$(python3 - "$registry" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
+from pathlib import Path
+import re
+import stat
+import sys
+
+registry = Path(sys.argv[1])
+audit_root = Path(sys.argv[2])
+expected_app = sys.argv[3]
+
+def regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+def plain_directory(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+def fields(path: Path) -> dict[str, str]:
+    if not regular_file(path):
+        raise ValueError(f"non-regular exact recovery identity: {path}")
+    payload = path.read_bytes()
+    if len(payload) > 65_536:
+        raise ValueError(f"oversized exact recovery identity: {path}")
+    parsed: dict[str, str] = {}
+    for raw in payload.decode().splitlines():
+        key, separator, value = raw.partition("=")
+        if not separator or key in parsed:
+            raise ValueError(f"noncanonical exact recovery identity: {path}")
+        parsed[key] = value
+    return parsed
+
+meta = fields(registry / "meta")
+owner = registry.name
+audit = Path(meta.get("audit_dir", ""))
+if (
+    not re.fullmatch(r"[0-9a-f]{32}", owner)
+    or meta.get("version") != "2"
+    or meta.get("app") != expected_app
+    or meta.get("fleet_owner_token") != owner
+    or audit != audit_root / owner
+    or not plain_directory(audit / "expected-fresh")
+    or fields(audit / "meta").get("fleet_owner_token") != owner
+    or fields(audit / "meta").get("app") != expected_app
+):
+    raise ValueError("unsafe exact recovery source identity")
+
+sources: set[str] = set()
+for record in (audit / "expected-fresh").iterdir():
+    value = fields(record)
+    if (
+        set(value) != {"clone_name", "source_machine_id"}
+        or value["clone_name"] != record.name
+        or re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", record.name) is None
+        or re.fullmatch(r"[0-9a-f]+", value["source_machine_id"]) is None
+    ):
+        raise ValueError("unsafe exact recovery source record")
+    sources.add(value["source_machine_id"])
+if len(sources) != 1:
+    raise ValueError("exact owner does not identify one warm source Machine")
+print(next(iter(sources)))
+PY
+)" || return 1
+    case "$source_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    volume_id="$(machine_volume_id "$source_id")" || return 1
+    case "$volume_id" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    printf '%s %s\n' "$source_id" "$volume_id"
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -5713,10 +6039,10 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     # drained. Unlike generic successor recovery, this exact cancellation path
     # must not preserve a remote runner: cancellation explicitly owns and reaps
     # every machine in this token's durable ledger.
-    if ! recover_registry_audit_only_fresh "$registry" \
+    if ! recover_registry_audit_only_fresh "$registry" exact \
         || ! reap_registry_clones "$registry" forced \
-        || ! recover_exact_pool_claims "$meta" \
-        || ! capacity_release_stale_owner_reservations "$meta" "$token-" \
+        || ! recover_exact_pool_claims "$meta" exact \
+        || ! capacity_release_stale_owner_reservations "$meta" "$token-primary" \
         || ! fleet_audit_finalize_recovered_registry "$registry"; then
         rm -rf "$registry/recovery-lock"
         return 1
@@ -6495,10 +6821,14 @@ print(state)
 '
 }
 pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
-    local id="$1" machines
-    export -n machines 2>/dev/null || true
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
-    printf '%s' "$machines" | pool_machine_state_from_json "$id"
+    local id="$1" details status
+    if details="$(registry_machine_details "$id")"; then
+        status=0
+    else
+        status=$?
+    fi
+    [ "$status" -eq 0 ] || return "$status"
+    printf '%s\n' "$details" | awk '{print $1}'
 }
 
 POOL_INVENTORY_JSON=""
@@ -6802,37 +7132,23 @@ fi
 
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     recovery_status=0
-    warm_pair="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
-import json
-import os
-import sys
-
-try:
-    machines = json.load(sys.stdin)
-except (TypeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(2)
-matches = [
-    machine for machine in machines
-    if isinstance(machine, dict) and machine.get("name") == os.environ["MN"]
-]
-if len(matches) != 1 or not isinstance(matches[0].get("id"), str):
-    raise SystemExit(2)
-mounts = (matches[0].get("config") or {}).get("mounts") or []
-volume_id = mounts[0].get("volume") if mounts and isinstance(mounts[0], dict) else ""
-if not isinstance(volume_id, str) or not volume_id:
-    raise SystemExit(2)
-print(matches[0]["id"], volume_id)
-')" || recovery_status=1
+    recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"
+    warm_pair="$(resolve_exact_recovery_warm_identity "$recovery_registry")" \
+        || recovery_status=1
     if [ "$recovery_status" = "0" ]; then
         WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
         WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $2}')"
         [ -n "$WARM_ID" ] && [ -n "$WARM_VOLUME_ID" ] || recovery_status=1
     fi
+    # region agent log
+    _agent_stale_owner_debug_log H11 scripts/run-bench-fleet:exact-recovery-entrypoint \
+        "resolved warm-source guard from exact owner audit and exact-ID config" \
+        status "$recovery_status"
+    # endregion
     if [ "$recovery_status" = "0" ] \
         && ! recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN"; then
         recovery_status=1
     fi
-    reap_orphaned_fleet_proxies || true
     cloudbench_controller_lock_release "$LOCK_DIR"
     if [ "$recovery_status" = "0" ]; then
         echo "✅ exact stale fleet ownership reconciled: $RECOVER_OWNER_TOKEN"

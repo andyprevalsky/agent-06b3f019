@@ -2016,7 +2016,14 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     the failed worker is removed so replacement capacity can be created."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
-    reap = _extract_fleet_function(fleet, "reap_machine() {")
+    reap = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "machine_status_exact_read() {",
+            "registry_machine_details() {",
+            "reap_machine() {",
+        )
+    )
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     root = tmp_path / "root"
@@ -2030,7 +2037,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
         "storage-failed",
         "upload-failure",
         "upload-and-reap-failure",
-        "upload-and-list-failure",
+        "upload-and-status-failure",
         "readiness-failure",
     ):
         out = tmp_path / mode
@@ -2077,7 +2084,7 @@ fly_with_timeout() {{
     *"ssh sftp put"*"cloudbench-local.patch"*)
       if [ "$MODE" = upload-failure ] \
           || [ "$MODE" = upload-and-reap-failure ] \
-          || [ "$MODE" = upload-and-list-failure ]; then
+          || [ "$MODE" = upload-and-status-failure ]; then
         printf '%s\n' 'SFTP_PROVIDER_SENTINEL: remote volume rejected write' >&2
         return 42
       fi ;;
@@ -2093,15 +2100,39 @@ FLY() {{
         printf '%s\n' 'DESTROY_PROVIDER_SENTINEL: provider refused destroy' >&2
         return 37
       fi
-      [ "$MODE" = upload-and-list-failure ] || printf '%s\n' "$4" > "$REAPED" ;;
-    "machines list"*)
-      if [ "$MODE" = upload-and-list-failure ]; then
-        printf '%s\n' 'LIST_PROVIDER_SENTINEL: provider inventory unavailable' >&2
+      [ "$MODE" = upload-and-status-failure ] || printf '%s\n' "$4" > "$REAPED" ;;
+    "machine status"*)
+      if [ "$MODE" = upload-and-status-failure ]; then
+        printf '%s\n' 'STATUS_PROVIDER_SENTINEL: exact Machine unreadable' >&2
         return 55
       elif [ "$MODE" = upload-and-reap-failure ]; then
-        printf '%s\n' '[{{"id":"abc123"}}]'
+        cat <<'STATUS'
+Machine ID: abc123
+Instance ID: fixture
+State: started
+HostStatus: ok
+
+VM
+  ID            = abc123
+  Instance ID   = fixture
+  State         = started
+  Image         = fixture
+  Name          = cloudbench-worker
+  Private IP    = fdaa::123
+  Region        = iad
+  Process Group =
+  CPU Kind      = shared
+  vCPUs         = 1
+  Memory        = 1024
+  Created       = fixture
+  Updated       = fixture
+  Entrypoint    =
+  Command       =
+  Volume        = volume-abc123
+STATUS
       else
-        printf '%s\n' '[]'
+        printf "Error: machine abc123 was not found in app '%s'\\n" "$APP" >&2
+        return 1
       fi ;;
     "machine stop"*) return 0 ;;
     *) return 0 ;;
@@ -2116,7 +2147,7 @@ sleep() {{ :; }}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
 test -s "$OUT/worker-abc123.stage.log"
-if [ "$MODE" = upload-and-reap-failure ] || [ "$MODE" = upload-and-list-failure ]; then
+if [ "$MODE" = upload-and-reap-failure ] || [ "$MODE" = upload-and-status-failure ]; then
   test "$(_pool_ids "$OUT")" = 1
   test ! -e "$REAPED"
   test -e "$OUT/worker-abc123.pending"
@@ -2176,12 +2207,12 @@ fi
             cleanup_log = (out / "worker-abc123.cleanup.log").read_text()
             assert "destroy failed rc=37" in cleanup_log
             assert "DESTROY_PROVIDER_SENTINEL" in cleanup_log
-        elif mode == "upload-and-list-failure":
+        elif mode == "upload-and-status-failure":
             assert launch_calls == []
             assert "SFTP_PROVIDER_SENTINEL" in stage_log
             cleanup_log = (out / "worker-abc123.cleanup.log").read_text()
-            assert "machine list failed rc=55" in cleanup_log
-            assert "LIST_PROVIDER_SENTINEL" in cleanup_log
+            assert "exact machine status unreadable" in cleanup_log
+            assert "STATUS_PROVIDER_SENTINEL" in cleanup_log
             assert "refusing to forget worker" in cleanup_log
 
         assert "ready_deadline=$((SECONDS + worker_ready_timeout))" in provision
@@ -7185,29 +7216,40 @@ def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
         for sig in (
+            "machine_status_exact_read() {",
+            "machine_config_exact_read() {",
             "machine_volume_id_from_json() {",
             "machine_volume_id() {",
             "volume_inventory_contains_id() {",
             "reap_volume() {",
+            "registry_machine_details() {",
             "reap_machine() {",
         )
     )
     calls = tmp_path / "calls"
+    destroyed = tmp_path / "destroyed"
+    machine_id = "c10e0001"
 
     script = f"""set -uo pipefail
 APP=bench-app
-WARM_ID=warm-1
+WARM_ID=feedface000001
 WARM_VOLUME_ID=vol_warm
 export CALLS_FILE="$CALLS_FILE"
+DESTROYED={shlex.quote(str(destroyed))}
 FLY() {{
   echo "$*" >> "$CALLS_FILE"
   case "$1 $2" in
-    "machines list")
-      # clone-1 exists (with its volume) until it has been destroyed once
-      if grep -q "machine destroy" "$CALLS_FILE"; then echo "[]"; else
-        printf '[{{"id":"clone-1","config":{{"mounts":[{{"volume":"vol_clone"}}]}}}}]\\n'
+    "machine status")
+      [ "$3" = {machine_id} ] || return 97
+      if [ "${{6:-}}" = -d ]; then
+        printf '{{"mounts":[{{"volume":"vol_clone"}}]}}\\n'
+      elif [ -e "$DESTROYED" ]; then
+        printf "Error: machine %s was not found in app '%s'\\n" "$3" "$APP" >&2
+        return 1
+      else
+        return 98
       fi ;;
-    "machine destroy") return 0 ;;
+    "machine destroy") : > "$DESTROYED"; return 0 ;;
     "volumes destroy") return 0 ;;
     "volumes show")
       printf '%s\n' '{{"id":"vol_clone","state":"pending_destroy"}}' ;;
@@ -7215,7 +7257,7 @@ FLY() {{
   return 0
 }}
 {helpers}
-reap_machine clone-1
+reap_machine {machine_id}
 echo "reap_machine_exit=$?"
 reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
 """
@@ -7229,10 +7271,13 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
 
     assert result.returncode == 0, result.stderr
     log = calls.read_text()
-    assert "machine destroy --force clone-1" in log
+    assert f"machine destroy --force {machine_id}" in log
     assert "volumes destroy vol_clone" in log, "forked volume must be reaped with its machine"
-    # the volume was resolved BEFORE the destroy (list precedes destroy)
-    assert log.index("machines list") < log.index("machine destroy")
+    # The exact mounted Volume is captured before the Machine destroy.
+    assert log.index(f"machine status {machine_id} -a bench-app -d") < log.index(
+        "machine destroy"
+    )
+    assert "machines list" not in log
     assert "reap_machine_exit=0" in result.stdout
     # warm volume is never destroyable through the reap path
     assert "warm_guard=held" in result.stdout
@@ -7825,10 +7870,14 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     """Exact recovery must prove every configured guest ack before provider reap."""
     fleet = FLEET_SCRIPT.read_text()
     signatures = (
+        "machine_status_exact_read() {",
+        "machine_config_exact_read() {",
+        "registry_machine_details() {",
         "registry_meta_value() {",
         "fleet_registry_cleanup_state() {",
         "registry_owner_alive() {",
         "fleet_registry_build_guest_recovery_plan() {",
+        "machine_guest_recovery_configuration() {",
         "cloudbench_publish_guest_shutdown_confirmation() {",
         "cloudbench_confirm_guest_shutdowns() {",
         "fleet_registry_confirm_guest_teardown() {",
@@ -7962,6 +8011,73 @@ AUTOSCALER_PORT_LEASE_HELPER=/nonexistent/port-helper
 CALLS={shlex.quote(str(calls))}
 _agent_stale_owner_debug_log() {{ :; }}
 release_cleanup_disk_reserve() {{ return 0; }}
+FLY() {{
+  printf 'provider %s\\n' "$*" >> "$CALLS"
+  case "$1 $2 $3" in
+    "machine status deadbeef000001")
+      if [ "${{6:-}}" = -d ]; then
+        printf '%s\\n' {shlex.quote(json.dumps(machine_rows[0]["config"]))}
+      else
+        cat <<'STATUS'
+Machine ID: deadbeef000001
+Instance ID: fixture-alpha
+State: started
+HostStatus: ok
+
+VM
+  ID            = deadbeef000001
+  Instance ID   = fixture-alpha
+  State         = started
+  Image         = fixture
+  Name          = cloudbench-owned-alpha
+  Private IP    = fdaa::101
+  Region        = iad
+  Process Group =
+  CPU Kind      = shared
+  vCPUs         = 2
+  Memory        = 4096
+  Created       = fixture
+  Updated       = fixture
+  Entrypoint    =
+  Command       =
+  Volume        = vol_owned_alpha
+STATUS
+      fi
+      ;;
+    "machine status deadbeef000002")
+      if [ "${{6:-}}" = -d ]; then
+        printf '%s\\n' {shlex.quote(json.dumps(machine_rows[1]["config"]))}
+      else
+        cat <<'STATUS'
+Machine ID: deadbeef000002
+Instance ID: fixture-beta
+State: started
+HostStatus: ok
+
+VM
+  ID            = deadbeef000002
+  Instance ID   = fixture-beta
+  State         = started
+  Image         = fixture
+  Name          = cloudbench-owned-beta
+  Private IP    = fdaa::102
+  Region        = iad
+  Process Group =
+  CPU Kind      = shared
+  vCPUs         = 2
+  Memory        = 4096
+  Created       = fixture
+  Updated       = fixture
+  Entrypoint    =
+  Command       =
+  Volume        = vol_owned_beta
+STATUS
+      fi
+      ;;
+    "machines list "*|*"neighbor"*) return 99 ;;
+    *) return 98 ;;
+  esac
+}}
 claim_recovery_status_proxy_ports() {{
   printf 'claim-ports %s %s\\n' "$2" "$3" >> "$CALLS"
   printf '62001\\n62002\\n' > "$1"
@@ -8046,6 +8162,8 @@ recover_exact_stale_fleet_owner {owner}
     assert "proxy 62001 8011 fdaa::101" in call_lines
     assert "proxy 62002 8011 fdaa::102" in call_lines
     assert all("fdaa::999" not in line and "neighbor" not in line for line in call_lines)
+    assert sum(line.startswith("provider machine status ") for line in call_lines) == 4
+    assert all("provider machines list" not in line for line in call_lines)
     assert sum(line.startswith("shutdown http://") for line in call_lines) == 2
     assert sum(line.startswith("shutdown-health http://") for line in call_lines) == 2
     transition_index = call_lines.index("audit-recovery")
@@ -8074,6 +8192,8 @@ def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
+            "machine_status_exact_read() {",
+            "machine_config_exact_read() {",
             "machine_volume_id_from_json() {",
             "machine_volume_id() {",
             "volume_inventory_contains_id() {",
@@ -8999,7 +9119,8 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     # reap retry against ghosts and claims race)
     for fn_sig in ("reap_machine() {", "pool_machine_state() {"):
         body = _extract_fleet_function(fleet, fn_sig)
-        assert "FLY machines list" in body, f"{fn_sig} must verify against live state"
+        assert "registry_machine_details" in body, f"{fn_sig} must verify exact live state"
+        assert "FLY machines list" not in body
 
     # Shared mode serves the last good snapshot even after it ages. It must never
     # execute the live fallback under the provider failure it is meant to absorb.
