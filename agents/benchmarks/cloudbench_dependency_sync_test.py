@@ -7878,6 +7878,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
                 "state": "started",
                 "private_ip": private_ip,
                 "config": {
+                    "mounts": [{"volume": volume_id}],
                     "env": {
                         "CLOUDBENCH_BARRIER_TOKEN": barrier_token,
                         "CLOUDBENCH_RUN_TOKEN": guest_token,

@@ -346,6 +346,9 @@ cleanup_owned_script_snapshot_on_exit() {
     trap - EXIT
     trap '' HUP INT TERM
     stop_script_snapshot_creator || ec=1
+    if declare -F cleanup_stale_owner_recovery_proxies >/dev/null 2>&1; then
+        cleanup_stale_owner_recovery_proxies || ec=1
+    fi
     if [ "$SCRIPT_SNAPSHOT_HANDOFF_PENDING" = "1" ]; then
         # The tracked detacher returns only after publishing its owner record or
         # after synchronously reaping an unpublished session. On the latter
@@ -716,6 +719,10 @@ AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
 
 APP="navi-whisper-lux-bench"
 REGION="${CLOUDBENCH_REGION:-iad}"
@@ -5137,9 +5144,498 @@ recover_exact_pool_claims() {  # <dead-owner-meta>
     done
 }
 
+_agent_stale_owner_debug_log() {  # <hypothesis> <location> <message> [key value...]
+    python3 - "$@" <<'PY' >/dev/null 2>&1 || true
+import json
+import sys
+import time
+
+hypothesis, location, message, *fields = sys.argv[1:]
+data = dict(zip(fields[::2], fields[1::2]))
+with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as handle:
+    handle.write(
+        json.dumps(
+            {
+                "hypothesisId": hypothesis,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+PY
+}
+
+fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
+    local registry="${1%/}" plan="$2"
+    python3 - "$registry" "$plan" "$APP" <<'PY'
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+registry = Path(sys.argv[1])
+plan = Path(sys.argv[2])
+expected_app = sys.argv[3]
+safe_key = re.compile(r"[A-Za-z0-9._-]+")
+safe_machine = re.compile(r"[0-9a-f]+")
+safe_volume = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def plain_directory(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+
+def fields(path: Path, *, allowed: set[str], maximum: int = 65_536) -> dict[str, str]:
+    if not regular_file(path):
+        raise ValueError(f"non-regular recovery metadata: {path}")
+    payload = path.read_text(encoding="utf-8")
+    if len(payload.encode()) > maximum:
+        raise ValueError(f"oversized recovery metadata: {path}")
+    parsed: dict[str, str] = {}
+    for raw in payload.splitlines():
+        key, separator, value = raw.partition("=")
+        if not separator or key in parsed or key not in allowed:
+            raise ValueError(f"noncanonical recovery metadata: {path}")
+        parsed[key] = value
+    return parsed
+
+
+meta_allowed = {
+    "version",
+    "app",
+    "fleet_owner_token",
+    "host",
+    "pid",
+    "pid_start",
+    "run_id",
+    "workspace_root",
+    "runs_root",
+    "audit_dir",
+    "owned_ids_file",
+    "owned_names_file",
+    "cleanup_policy",
+}
+meta = fields(registry / "meta", allowed=meta_allowed)
+owner = registry.name
+if (
+    not plain_directory(registry)
+    or not safe_machine.fullmatch(owner)
+    or len(owner) != 32
+    or meta.get("version") != "2"
+    or meta.get("app") != expected_app
+    or meta.get("fleet_owner_token") != owner
+    or meta.get("cleanup_policy") not in {"retain", "reap"}
+):
+    raise ValueError("noncanonical stale-owner recovery identity")
+
+run_id = meta.get("run_id", "")
+runs_root_value = meta.get("runs_root", "")
+if not safe_key.fullmatch(run_id) or not runs_root_value:
+    raise ValueError("missing stale-owner run mapping")
+runs_root = Path(runs_root_value)
+if (
+    not runs_root.is_absolute()
+    or not plain_directory(runs_root)
+    or runs_root.resolve() != runs_root
+):
+    raise ValueError("unsafe stale-owner runs root")
+run_dir = runs_root / run_id
+if (
+    run_dir.parent != runs_root
+    or not plain_directory(run_dir)
+    or run_dir.resolve() != run_dir
+):
+    raise ValueError("unsafe stale-owner run directory")
+
+clones_dir = registry / "clones"
+if not plain_directory(clones_dir):
+    raise ValueError("missing canonical clone registry")
+machine_records: dict[str, tuple[str, str]] = {}
+volume_ids: set[str] = set()
+for record in clones_dir.iterdir():
+    if not regular_file(record) or not safe_key.fullmatch(record.name):
+        raise ValueError("noncanonical clone registry entry")
+    value = fields(record, allowed={"name", "id", "volume_id"})
+    clone_name = value.get("name", "")
+    machine_id = value.get("id", "")
+    volume_id = value.get("volume_id", "")
+    if (
+        clone_name != record.name
+        or not clone_name.startswith("cloudbench-")
+        or not safe_volume.fullmatch(volume_id)
+        or volume_id in volume_ids
+    ):
+        raise ValueError("ambiguous clone registry identity")
+    volume_ids.add(volume_id)
+    if machine_id:
+        if (
+            set(value) != {"name", "id", "volume_id"}
+            or not safe_machine.fullmatch(machine_id)
+            or machine_id in machine_records
+        ):
+            raise ValueError("ambiguous machine registry identity")
+        machine_records[machine_id] = (clone_name, volume_id)
+    elif set(value) != {"name", "volume_id"}:
+        raise ValueError("noncanonical volume-only registry identity")
+
+output_by_machine: dict[str, tuple[str, Path, int]] = {}
+for candidate in run_dir.iterdir():
+    if not plain_directory(candidate):
+        continue
+    cid = candidate / ".cid"
+    if not cid.exists() and not cid.is_symlink():
+        continue
+    if not safe_key.fullmatch(candidate.name) or not regular_file(cid):
+        raise ValueError("unsafe stale-owner output mapping")
+    cid_parts = cid.read_text(encoding="utf-8").split()
+    if len(cid_parts) != 2 or cid_parts[0] != "clone":
+        raise ValueError("noncanonical stale-owner machine mapping")
+    machine_id = cid_parts[1]
+    if machine_id not in machine_records or machine_id in output_by_machine:
+        raise ValueError("stale-owner output does not map one-to-one to registry")
+    port_path = candidate / "status-proxy.port"
+    if not regular_file(port_path):
+        raise ValueError("missing stale-owner status proxy mapping")
+    port_value = port_path.read_text(encoding="utf-8").strip()
+    if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
+        raise ValueError("invalid stale-owner status proxy port")
+    output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
+if set(output_by_machine) != set(machine_records):
+    raise ValueError("incomplete stale-owner output mapping")
+
+machines_path = run_dir / "machines.json"
+if not regular_file(machines_path):
+    raise ValueError("missing stale-owner machine snapshot")
+machines = json.loads(machines_path.read_text(encoding="utf-8"))
+if not isinstance(machines, list):
+    raise ValueError("machine snapshot is not a list")
+
+guests: list[tuple[str, ...]] = []
+barrier_token = ""
+private_ips: set[str] = set()
+for machine_id, (clone_name, volume_id) in machine_records.items():
+    matches = [
+        item
+        for item in machines
+        if isinstance(item, dict) and item.get("id") == machine_id
+    ]
+    if len(matches) != 1:
+        raise ValueError("exact owned machine is missing or duplicated in snapshot")
+    machine = matches[0]
+    config = machine.get("config")
+    environment = config.get("env") if isinstance(config, dict) else None
+    mounts = config.get("mounts") if isinstance(config, dict) else None
+    mounted = [
+        mount.get("volume")
+        for mount in mounts or []
+        if isinstance(mount, dict) and mount.get("volume")
+    ]
+    private_ip = machine.get("private_ip")
+    if (
+        machine.get("name") != clone_name
+        or machine.get("state") != "started"
+        or not isinstance(private_ip, str)
+        or private_ip in private_ips
+        or mounted != [volume_id]
+        or not isinstance(environment, dict)
+    ):
+        raise ValueError("exact owned machine snapshot identity is unsafe")
+    try:
+        ipaddress.ip_address(private_ip)
+    except ValueError as error:
+        raise ValueError("invalid exact owned machine private IP") from error
+    private_ips.add(private_ip)
+    token = environment.get("CLOUDBENCH_BARRIER_TOKEN")
+    guest_run_token = environment.get("CLOUDBENCH_RUN_TOKEN")
+    remote_port = environment.get("CLOUDBENCH_STATUS_PORT")
+    if (
+        not isinstance(token, str)
+        or not safe_key.fullmatch(token)
+        or not isinstance(guest_run_token, str)
+        or not safe_key.fullmatch(guest_run_token)
+        or not isinstance(remote_port, str)
+        or not remote_port.isdigit()
+        or not 1 <= int(remote_port) <= 65_535
+    ):
+        raise ValueError("missing or malformed exact guest shutdown configuration")
+    if barrier_token and token != barrier_token:
+        raise ValueError("exact owner machines do not share one barrier token")
+    barrier_token = token
+    bench, output, preferred_port = output_by_machine[machine_id]
+    values = (
+        "guest",
+        bench,
+        clone_name,
+        machine_id,
+        volume_id,
+        str(output),
+        str(preferred_port),
+        private_ip,
+        remote_port,
+        guest_run_token,
+    )
+    if any("\t" in value or "\n" in value for value in values):
+        raise ValueError("unsafe stale-owner recovery plan field")
+    guests.append(values)
+
+with plan.open("w", encoding="utf-8") as handle:
+    handle.write(f"token\t{barrier_token}\n")
+    for values in sorted(guests, key=lambda item: item[3]):
+        handle.write("\t".join(values) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
+}
+
+cloudbench_publish_guest_shutdown_confirmation() {  # <output-dir> <run-id>
+    python3 - "$1" "$2" <<'PY'
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+output = Path(sys.argv[1])
+run_id = sys.argv[2]
+if (
+    not re.fullmatch(r"[A-Za-z0-9._-]+", run_id)
+    or output.is_symlink()
+    or not stat.S_ISDIR(output.stat().st_mode)
+):
+    raise SystemExit(1)
+temporary = output / f".guest-shutdown.confirmed.{os.getpid()}.tmp"
+target = output / "guest-shutdown.confirmed"
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+        handle.write(f"{run_id}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+finally:
+    os.close(descriptor)
+try:
+    os.replace(temporary, target)
+    directory = os.open(output, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+start_data_plane_proxy() {
+    cloudbench_start_data_plane_proxy "$@"
+}
+
+claim_recovery_status_proxy_ports() {  # <output-file> <count> <preferred-start>
+    local output="$1" count="$2" preferred="$3"
+    local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
+    python3 "$AUTOSCALER_PORT_LEASE_HELPER" claim-batch \
+        --root "$root" --owner-pid "$$" \
+        --token "$STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN" \
+        --count "$count" --start "$preferred" > "$output"
+}
+
+release_recovery_status_proxy_ports() {  # <owner-token>
+    local token="$1"
+    local root="${CLOUDBENCH_RECOVERY_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-recovery-port-leases}"
+    [ -n "$token" ] || return 0
+    python3 "$AUTOSCALER_PORT_LEASE_HELPER" release-owner \
+        --root "$root" --owner-pid "$$" --token "$token"
+}
+
+cleanup_stale_owner_recovery_proxies() {
+    local status=0
+    cloudbench_terminate_and_wait 5 "${STALE_OWNER_RECOVERY_PROXY_PIDS[@]:-}" || status=1
+    STALE_OWNER_RECOVERY_PROXY_PIDS=()
+    release_recovery_status_proxy_ports "$STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN" \
+        || status=1
+    STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+    [ -z "$STALE_OWNER_RECOVERY_PLAN_FILE" ] \
+        || rm -f "$STALE_OWNER_RECOVERY_PLAN_FILE" 2>/dev/null || status=1
+    [ -z "$STALE_OWNER_RECOVERY_PORTS_FILE" ] \
+        || rm -f "$STALE_OWNER_RECOVERY_PORTS_FILE" 2>/dev/null || status=1
+    STALE_OWNER_RECOVERY_PLAN_FILE=""
+    STALE_OWNER_RECOVERY_PORTS_FILE=""
+    return "$status"
+}
+
+fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
+    local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
+    local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
+    local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
+    local recovery_index shutdown_status
+    local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
+    local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
+    local -a recovery_benches recovery_outputs recovery_ips recovery_remote
+
+    STALE_OWNER_RECOVERY_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-guest-recovery.XXXXXX")" \
+        || return 1
+    if ! fleet_registry_build_guest_recovery_plan \
+        "$registry" "$STALE_OWNER_RECOVERY_PLAN_FILE"; then
+        echo "❌ exact stale-owner guest recovery mapping is unsafe: $registry" >&2
+        cleanup_stale_owner_recovery_proxies || true
+        return 1
+    fi
+    while IFS=$'\t' read -r kind bench clone_name machine_id volume_id output \
+        preferred_port private_ip remote_port guest_run_token; do
+        case "$kind" in
+            token) barrier_token="$bench" ;;
+            guest)
+                recovery_benches+=("$bench")
+                recovery_outputs+=("$output")
+                recovery_ips+=("$private_ip")
+                recovery_remote+=("$remote_port")
+                guest_count=$((guest_count + 1))
+                if [ -z "$preferred_start" ] || [ "$preferred_port" -lt "$preferred_start" ]; then
+                    preferred_start="$preferred_port"
+                fi
+                ;;
+            *) cleanup_stale_owner_recovery_proxies || true; return 1 ;;
+        esac
+    done < "$STALE_OWNER_RECOVERY_PLAN_FILE"
+    # region agent log
+    _agent_stale_owner_debug_log H6 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
+        "validated exact stale-owner guest recovery mapping" guestCount "$guest_count"
+    # endregion
+    if [ "$guest_count" -gt 0 ]; then
+        [ -n "$barrier_token" ] || {
+            cleanup_stale_owner_recovery_proxies || true
+            return 1
+        }
+        STALE_OWNER_RECOVERY_PORTS_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-guest-recovery-ports.XXXXXX")" \
+            || { cleanup_stale_owner_recovery_proxies || true; return 1; }
+        STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN="${RUN_ID:-recovery}-$RANDOM-$RANDOM"
+        if ! claim_recovery_status_proxy_ports "$STALE_OWNER_RECOVERY_PORTS_FILE" \
+            "$guest_count" "$preferred_start"; then
+            echo "❌ could not claim exact stale-owner recovery proxy ports" >&2
+            cleanup_stale_owner_recovery_proxies || true
+            return 1
+        fi
+        [ "$(wc -l < "$STALE_OWNER_RECOVERY_PORTS_FILE" | tr -d ' ')" = "$guest_count" ] \
+            || { cleanup_stale_owner_recovery_proxies || true; return 1; }
+        exec 18< "$STALE_OWNER_RECOVERY_PORTS_FILE"
+        CHILD_OUT=()
+        CHILD_BENCH=()
+        for ((recovery_index = 0; recovery_index < guest_count; recovery_index++)); do
+            IFS= read -r proxy_port <&18 || {
+                exec 18<&-
+                cleanup_stale_owner_recovery_proxies || true
+                return 1
+            }
+            case "$proxy_port" in
+                ''|*[!0-9]*)
+                    exec 18<&-
+                    cleanup_stale_owner_recovery_proxies || true
+                    return 1
+                    ;;
+            esac
+            proxy_pid=""
+            if ! start_data_plane_proxy "$proxy_port" "${recovery_remote[$recovery_index]}" \
+                "${recovery_ips[$recovery_index]}" \
+                "${recovery_outputs[$recovery_index]}/stale-owner-status-proxy.log" \
+                proxy_pid status; then
+                exec 18<&-
+                echo "❌ [${recovery_benches[$recovery_index]}] exact stale-owner status proxy did not reconnect" >&2
+                cleanup_stale_owner_recovery_proxies || true
+                return 1
+            fi
+            [ -n "$proxy_pid" ] && kill -0 "$proxy_pid" 2>/dev/null || {
+                exec 18<&-
+                cleanup_stale_owner_recovery_proxies || true
+                return 1
+            }
+            STALE_OWNER_RECOVERY_PROXY_PIDS+=("$proxy_pid")
+            marker_tmp="${recovery_outputs[$recovery_index]}/status-proxy.port.tmp.$$"
+            if ! printf '%s\n' "$proxy_port" > "$marker_tmp" \
+                || ! mv "$marker_tmp" "${recovery_outputs[$recovery_index]}/status-proxy.port"; then
+                rm -f "$marker_tmp" 2>/dev/null || true
+                exec 18<&-
+                cleanup_stale_owner_recovery_proxies || true
+                return 1
+            fi
+            CHILD_OUT+=("${recovery_outputs[$recovery_index]}")
+            CHILD_BENCH+=("${recovery_benches[$recovery_index]}")
+        done
+        exec 18<&-
+        # region agent log
+        _agent_stale_owner_debug_log H7 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
+            "reconnected exact stale-owner status proxies" proxyCount "${#STALE_OWNER_RECOVERY_PROXY_PIDS[@]}"
+        # endregion
+    else
+        CHILD_OUT=()
+        CHILD_BENCH=()
+    fi
+
+    RUN_ID="$(registry_meta_value "$meta" run_id)"
+    CLOUDBENCH_BARRIER_TOKEN="$barrier_token"
+    CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN=1
+    if cloudbench_confirm_guest_shutdowns; then
+        shutdown_status=0
+    else
+        shutdown_status=$?
+    fi
+    unset CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN
+    # region agent log
+    _agent_stale_owner_debug_log H8 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
+        "completed token-bound stale-owner shutdown health contract" guestCount "$guest_count" \
+        status "$shutdown_status"
+    # endregion
+    if [ "$shutdown_status" -ne 0 ] || ! cleanup_stale_owner_recovery_proxies; then
+        RUN_ID="$save_run"
+        CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
+        return 1
+    fi
+
+    FLEET_REGISTRY_DIR="$registry"
+    FLEET_REGISTRY_PUBLISHED=1
+    KEEP_CLONES=0
+    if ! fleet_registry_confirm_guest_teardown; then
+        FLEET_REGISTRY_DIR="$save_registry"
+        FLEET_REGISTRY_PUBLISHED="$save_published"
+        KEEP_CLONES="$save_keep"
+        RUN_ID="$save_run"
+        CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
+        return 1
+    fi
+    # region agent log
+    _agent_stale_owner_debug_log H9 scripts/run-bench-fleet:fleet_recovery_reconnect_guest_shutdowns \
+        "durably authorized exact stale-owner provider teardown" cleanupState \
+        "$(fleet_registry_cleanup_state "$registry" "$(registry_meta_value "$meta" cleanup_policy)")"
+    # endregion
+    FLEET_REGISTRY_DIR="$save_registry"
+    FLEET_REGISTRY_PUBLISHED="$save_published"
+    KEEP_CLONES="$save_keep"
+    RUN_ID="$save_run"
+    CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
+    local needs_guest_recovery=0
     case "$token" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#token}" -eq 32 ] || return 1
     if [ ! -d "$registry" ]; then
@@ -5165,6 +5661,7 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     [ -f "$meta" ] && [ ! -L "$meta" ] \
         && { [ "$version" = "1" ] || [ "$version" = "2" ]; } \
         && [ "$app" = "$APP" ] \
+        && [ "$(registry_meta_value "$meta" fleet_owner_token)" = "$token" ] \
         && [ "$host" = "$FLEET_OWNER_HOST" ] || {
         echo "❌ exact stale-owner registry identity is unsafe: $registry" >&2
         return 1
@@ -5172,10 +5669,7 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
     case "$cleanup_state" in
         reap) ;;
-        quarantined)
-            echo "❌ exact stale-owner cleanup is quarantined pending guest acknowledgement: $registry" >&2
-            return 1
-            ;;
+        quarantined) needs_guest_recovery=1 ;;
         retain)
             echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
             return 1
@@ -5197,6 +5691,24 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     [ "$recovery_lock_status" -eq 2 ] && return 0
     [ "$recovery_lock_status" -eq 0 ] || return 1
     echo "🧭 force-recovering exact cancelled fleet owner $token"
+    if [ "$needs_guest_recovery" = "1" ]; then
+        echo "🧭 reconnecting exact owned guests for authenticated cleanup acknowledgement"
+        if ! fleet_recovery_reconnect_guest_shutdowns "$registry"; then
+            rm -rf "$registry/recovery-lock"
+            return 1
+        fi
+        policy="$(registry_meta_value "$meta" cleanup_policy)"
+        cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
+        if [ "$cleanup_state" != "reap" ]; then
+            echo "❌ exact stale-owner guest acknowledgement did not authorize provider teardown" >&2
+            rm -rf "$registry/recovery-lock"
+            return 1
+        fi
+    fi
+    # region agent log
+    _agent_stale_owner_debug_log H10 scripts/run-bench-fleet:recover_exact_stale_fleet_owner \
+        "entered exact provider reaper after durable guest authorization" cleanupState "$cleanup_state"
+    # endregion
     # The supervising waiter already proved the entire controller process group
     # drained. Unlike generic successor recovery, this exact cancellation path
     # must not preserve a remote runner: cancellation explicitly owns and reaps
@@ -6691,7 +7203,7 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 }
 
 cloudbench_confirm_guest_shutdowns() {
-    local deadline j out port status_code marker_tmp failed=0
+    local deadline j out port status_code failed=0
     local -a pending_indices next_pending_indices
     pending_indices=()
     next_pending_indices=()
@@ -6703,7 +7215,10 @@ cloudbench_confirm_guest_shutdowns() {
     # terminating CHILD_PIDS first destroys the only machine-pinned data plane.
     for j in "${!CHILD_OUT[@]}"; do
         out="${CHILD_OUT[$j]}"
-        [ -e "$out/guest-shutdown.confirmed" ] && continue
+        if [ "${CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN:-0}" != "1" ] \
+            && [ -e "$out/guest-shutdown.confirmed" ]; then
+            continue
+        fi
         port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
         case "$port" in
             ''|*[!0-9]*)
@@ -6728,23 +7243,11 @@ cloudbench_confirm_guest_shutdowns() {
             -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
             "http://127.0.0.1:$port/shutdown" 2>/dev/null || true)"
         case "$status_code" in
-            204)
-                marker_tmp="$out/guest-shutdown.confirmed.tmp.$$"
-                if ! printf '%s\n' "$RUN_ID" > "$marker_tmp"; then
-                    rm -f -- "$marker_tmp" 2>/dev/null || true
-                    echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not write guest cleanup confirmation marker" >&2
-                    failed=1
-                elif ! mv "$marker_tmp" "$out/guest-shutdown.confirmed"; then
-                    rm -f -- "$marker_tmp" 2>/dev/null || true
-                    echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
-                    failed=1
-                fi
-                ;;
             # A configured guest persists its shutdown request before the
             # driver-PID ownership fence can return 409. Preserve that possible
             # in-progress state and let /shutdown-health provide the only
             # cleanup verdict.
-            202|409) pending_indices+=("$j") ;;
+            202|204|409) pending_indices+=("$j") ;;
             *)
                 echo "❌ [${CHILD_BENCH[$j]:-unknown}] guest cleanup request failed (HTTP ${status_code:-transport-error})" >&2
                 failed=1
@@ -6761,13 +7264,7 @@ cloudbench_confirm_guest_shutdowns() {
                 -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
                 "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
             if [ "$status_code" = "204" ]; then
-                marker_tmp="$out/guest-shutdown.confirmed.tmp.$$"
-                if ! printf '%s\n' "$RUN_ID" > "$marker_tmp"; then
-                    rm -f -- "$marker_tmp" 2>/dev/null || true
-                    echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not write guest cleanup confirmation marker" >&2
-                    failed=1
-                elif ! mv "$marker_tmp" "$out/guest-shutdown.confirmed"; then
-                    rm -f -- "$marker_tmp" 2>/dev/null || true
+                if ! cloudbench_publish_guest_shutdown_confirmation "$out" "$RUN_ID"; then
                     echo "❌ [${CHILD_BENCH[$j]:-unknown}] could not publish guest cleanup confirmation marker" >&2
                     failed=1
                 fi
