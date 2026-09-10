@@ -901,7 +901,7 @@ def canonical_messages(messages: Any) -> str:
             filtered.append(item)
         return filtered
 
-    def _clean(v: Any) -> Any:
+    def _clean(v: Any, *, strip_memory_forks: bool = False, root: bool = False) -> Any:
         if isinstance(v, dict):
             out = {}
             for k, val in v.items():
@@ -930,16 +930,28 @@ def canonical_messages(messages: Any) -> str:
                 if lk in ("image_url", "data", "source") and isinstance(val, (str, dict)):
                     out[k] = "<blob>"
                 else:
-                    out[k] = _clean(val)
+                    out[k] = _clean(
+                        val,
+                        strip_memory_forks=root and k == "messages" and isinstance(val, list),
+                    )
             return out
         if isinstance(v, list):
-            stable_items = _without_memory_forks(v)
+            # Only the outer provider message sequence contains planner-memory
+            # fork messages. Nested lists can be arbitrary user/tool payloads;
+            # interpreting transcript-shaped dictionaries there would erase
+            # meaningful input and create false cache-key collisions.
+            stable_items = _without_memory_forks(v) if strip_memory_forks else v
             return _sort_parallel_tool_batches([_clean(x) for x in stable_items])
         if isinstance(v, str):
             return _normalize_volatile_text(v)
         return v
 
-    return json.dumps(_clean(messages), sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(
+        _clean(messages, strip_memory_forks=isinstance(messages, list), root=True),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def content_key(goal: str, call_site: str, messages: Any) -> str:

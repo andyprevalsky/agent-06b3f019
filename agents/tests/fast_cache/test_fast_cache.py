@@ -267,6 +267,39 @@ def test_canonical_messages_ignore_planner_memory_fork_churn():
     assert normalize.canonical_messages(with_alpha) != normalize.canonical_messages(different)
 
 
+def test_canonical_messages_preserve_transcript_shaped_nested_payloads():
+    """Memory-fork stripping applies only to the provider's top-level message list."""
+
+    def request(memory_block: str):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "nested_getmem",
+                                "type": "function",
+                                "function": {"name": "get_memories", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "nested_getmem",
+                        "name": "get_memories",
+                        "content": memory_block,
+                    },
+                ],
+            }
+        ]
+
+    assert normalize.canonical_messages(request("nested alpha")) != normalize.canonical_messages(
+        request("nested beta")
+    )
+
+
 def test_canonical_messages_ignore_separate_dynamic_user_context_system_message_churn():
     def request(recent_message: str, integrations: list[str], user_text: str = "same goal"):
         return {

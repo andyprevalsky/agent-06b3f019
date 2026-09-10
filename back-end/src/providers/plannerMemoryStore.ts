@@ -220,7 +220,7 @@ export async function searchPlannerMemories(
         -- query to zero nodes (for example, "against"). In that case retain
         -- the home-token overlap path instead of silently returning no rows.
         AND (
-          numnode(search_query.value) = 0
+          (numnode(search_query.value) = 0 AND overlap.count > 0)
           OR to_tsvector('english', m."goal") @@ search_query.value
         )
         ${passedFilter}

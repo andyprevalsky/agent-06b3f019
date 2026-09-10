@@ -383,22 +383,36 @@ export async function runTests(): Promise<boolean> {
         'all-English-stopword FTS queries retain lexical-overlap candidates',
         async () => {
           const id = randomUUID();
+          const unrelatedId = randomUUID();
           try {
-            await prisma.plannerMemory.create({
-              data: {
-                id,
-                goal: 'against',
-                goalTokens: tokenizePlannerMemoryGoal('against'),
-                benchmarkTaskName: TASK,
-                rootStatus: 'COMPLETED',
-                passed: true,
-                worldModelMode: 'real',
-              },
+            await prisma.plannerMemory.createMany({
+              data: [
+                {
+                  id,
+                  goal: 'against',
+                  goalTokens: tokenizePlannerMemoryGoal('against'),
+                  benchmarkTaskName: TASK,
+                  rootStatus: 'COMPLETED',
+                  passed: true,
+                  worldModelMode: 'real',
+                },
+                {
+                  id: unrelatedId,
+                  goal: 'completely unrelated recent memory',
+                  goalTokens: tokenizePlannerMemoryGoal('completely unrelated recent memory'),
+                  benchmarkTaskName: TASK,
+                  rootStatus: 'COMPLETED',
+                  passed: true,
+                  worldModelMode: 'real',
+                  agentCreatedAt: new Date('2099-01-01T00:00:00.000Z'),
+                },
+              ],
             });
             const hits = await search({ goal: 'against', user_id: s.userId });
             assert(hits.some((candidate) => candidate.id === id));
+            assert(!hits.some((candidate) => candidate.id === unrelatedId));
           } finally {
-            await prisma.plannerMemory.deleteMany({ where: { id } });
+            await prisma.plannerMemory.deleteMany({ where: { id: { in: [id, unrelatedId] } } });
           }
         }
       )
