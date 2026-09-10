@@ -126,7 +126,11 @@ else
   STATE_ROOT="${FLEET_INFRA_PROOF_STATE_ROOT:-.context/fleet/infra-stability-proof}"
   PROOF_ID="infra-stability-$(date -u +%Y%m%d%H%M%S)-$$"
 fi
-mkdir -p "$ARTIFACT_DIR" "$STATE_ROOT"
+mkdir -p "$STATE_ROOT"
+if ! mkdir -p "$ARTIFACT_DIR" 2>/dev/null || [ ! -d "$ARTIFACT_DIR" ]; then
+  echo "⚠️  optional artifact directory unavailable; retaining proof logs under $STATE_ROOT" >&2
+  ARTIFACT_DIR="$STATE_ROOT"
+fi
 PROOF_DIR="$STATE_ROOT/$PROOF_ID"
 mkdir -p "$PROOF_DIR"
 SUMMARY_JSON="$PROOF_DIR/summary.json"
@@ -265,7 +269,9 @@ PY
   cp -f "$SUMMARY_JSON" "$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}_summary.json" 2>/dev/null || true
 }
 
+set +e
 {
+  set -e
   echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED"
   for ((i = 0; i < RUNS; i++)); do
     mapfile -t BENCHES < <(
@@ -348,4 +354,9 @@ PY
   echo "✅ ${MODE^^} STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)"
   echo "   summary: $SUMMARY_JSON"
 } 2>&1 | tee "$SUMMARY_ARTIFACT"
-exit "${PIPESTATUS[0]}"
+pipeline_status=("${PIPESTATUS[@]}")
+set -e
+if [ "${pipeline_status[1]}" -ne 0 ]; then
+  echo "⚠️  optional artifact log failed; canonical proof status remains in $SUMMARY_JSON" >&2
+fi
+exit "${pipeline_status[0]}"
