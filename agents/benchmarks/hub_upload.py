@@ -38,26 +38,6 @@ DEFAULT_HUB_URL = "https://navi-j9a9.onrender.com"
 DURABLE_OPEN_AGENT_ORIGIN = "https://www.roselabs.ai"
 
 
-def _agent_debug_log(hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as stream:
-            stream.write(
-                json.dumps(
-                    {
-                        "hypothesisId": hypothesis_id,
-                        "location": location,
-                        "message": message,
-                        "data": data,
-                        "timestamp": int(time.time() * 1000),
-                    },
-                    default=str,
-                )
-                + "\n"
-            )
-    except OSError:
-        pass
-
-
 class HubVisibilityError(RuntimeError):
     """A benchmark could not prove its run is visible in the in-app Hub."""
 
@@ -270,52 +250,10 @@ def _post_run_bundle(
     # (e.g. the fast-mode proxy) — same trap as archive_api's _direct_opener.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     max_attempts = 4 if required else 1
-    request_started = time.monotonic()
-    # region agent log
-    _agent_debug_log(
-        "A,C",
-        "agents/benchmarks/hub_upload.py:_post_run_bundle",
-        "Hub upload prepared",
-        {
-            "runId": body.get("run_id"),
-            "base": base,
-            "payloadBytes": len(payload),
-            "effectiveTimeoutSeconds": effective_timeout,
-            "live": live,
-            "maxAttempts": max_attempts,
-        },
-    )
-    # endregion
     for attempt in range(1, max_attempts + 1):
-        attempt_started = time.monotonic()
-        # region agent log
-        _agent_debug_log(
-            "B,D",
-            "agents/benchmarks/hub_upload.py:_post_run_bundle:attempt",
-            "Hub upload attempt started",
-            {
-                "runId": body.get("run_id"),
-                "attempt": attempt,
-                "sequenceElapsedMs": round((attempt_started - request_started) * 1000),
-            },
-        )
-        # endregion
         try:
             with opener.open(request, timeout=effective_timeout) as response:
                 ok = 200 <= response.status < 300
-                # region agent log
-                _agent_debug_log(
-                    "B,C",
-                    "agents/benchmarks/hub_upload.py:_post_run_bundle:response",
-                    "Hub upload response received",
-                    {
-                        "runId": body.get("run_id"),
-                        "attempt": attempt,
-                        "status": response.status,
-                        "attemptElapsedMs": round((time.monotonic() - attempt_started) * 1000),
-                    },
-                )
-                # endregion
                 if ok:
                     print(f"📤 uploaded run bundle to {label}: {body.get('run_id')}")
                 return ok
@@ -325,44 +263,14 @@ def _post_run_bundle(
                 425,
                 429,
             } or exc.code >= 500
-            # region agent log
-            _agent_debug_log(
-                "B,D",
-                "agents/benchmarks/hub_upload.py:_post_run_bundle:exception",
-                "Hub upload attempt failed",
-                {
-                    "runId": body.get("run_id"),
-                    "attempt": attempt,
-                    "exceptionType": type(exc).__name__,
-                    "exception": str(exc),
-                    "retryable": retryable,
-                    "attemptElapsedMs": round((time.monotonic() - attempt_started) * 1000),
-                    "sequenceElapsedMs": round((time.monotonic() - request_started) * 1000),
-                },
-            )
-            # endregion
             recovered_visible_run = False
-            visibility_error = None
             run_id = str(body.get("run_id") or "")
             if required and live and retryable and run_id:
                 try:
                     verify_run_visible(run_id, timeout=min(timeout, 5.0))
                     recovered_visible_run = True
-                except HubVisibilityError as verify_exc:
-                    visibility_error = str(verify_exc)
-                # region agent log
-                _agent_debug_log(
-                    "A,B",
-                    "agents/benchmarks/hub_upload.py:_post_run_bundle:reconcile",
-                    "Hub upload ambiguous outcome reconciled",
-                    {
-                        "runId": run_id,
-                        "attempt": attempt,
-                        "visible": recovered_visible_run,
-                        "visibilityError": visibility_error,
-                    },
-                )
-                # endregion
+                except HubVisibilityError:
+                    pass
             if recovered_visible_run:
                 print(
                     f"✅ benchmark Hub upload attempt {attempt} committed before "
