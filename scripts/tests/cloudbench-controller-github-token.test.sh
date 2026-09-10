@@ -73,33 +73,36 @@ require_text() {
 }
 
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_controller_github_token_b64' \
+  'token="$(resolve_github_token)"' \
   "run-bench-cloud must resolve a controller token for warm git-sync"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'CONTROLLER_B64=' \
-  "refresh-deps SYNC_CMD must embed CONTROLLER_B64 from the controller"
+  'export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat' \
+  "warm git-sync must load its request-scoped controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FATAL: controller GitHub token unavailable for warm git-sync' \
+  'No controller GitHub token for warm-source git-sync' \
   "warm git-sync must fail closed when no controller token is available"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_github_token_b64' \
   "fleet worker token resolution must use the shared controller resolver"
-# Stronger: the refresh-deps block must mention CONTROLLER_B64 before fetch.
-python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps must stage CONTROLLER_B64 before git fetch"
+# Stronger: refresh-deps must enter the one request-scoped token delivery path,
+# and that path must export the token before invoking the guest fetch helper.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps must stage its controller token before git fetch"
 from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text()
 start = text.find('if [ "$MODE" = "refresh-deps" ]')
 end = text.find('if [ "$MODE" = "refresh-wmh"', start)
 block = text[start:end]
-if "CONTROLLER_B64=" not in block:
-    raise SystemExit("missing CONTROLLER_B64 in refresh-deps")
-if "cloudbench_controller_github_token_b64" not in block:
-    raise SystemExit("missing controller token resolve in refresh-deps")
-fetch_at = block.find("git -c safe.directory")
-ctrl_at = block.find("CONTROLLER_B64=")
-if ctrl_at < 0 or fetch_at < 0 or ctrl_at > fetch_at:
-    raise SystemExit("CONTROLLER_B64 must be set before git fetch in refresh-deps")
+if 'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' not in block:
+    raise SystemExit("refresh-deps bypasses warm_source_fetch_ref")
+start = text.find("warm_source_fetch_ref()")
+end = text.find("# SSH-exec a shell snippet", start)
+helper = text[start:end]
+resolve_at = helper.find('token="$(resolve_github_token)"')
+export_at = helper.find("export CLOUDBENCH_GITHUB_TOKEN_B64=")
+fetch_at = helper.find("bash /data/cloudbench-fetch-ref.sh")
+if min(resolve_at, export_at, fetch_at) < 0 or not resolve_at < export_at < fetch_at:
+    raise SystemExit("request-scoped controller token must be resolved and exported before fetch-ref")
 PY
 pass "refresh-deps and fleet source wiring pass the controller token into warm git-sync"
 
