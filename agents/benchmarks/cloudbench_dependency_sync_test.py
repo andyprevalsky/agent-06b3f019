@@ -7150,8 +7150,25 @@ def test_cloud_fleet_provenance_is_staged_stamped_aggregated_and_validated() -> 
 
 def _extract_fleet_function(source: str, signature: str) -> str:
     start = source.index(signature)
-    end = source.index("\n}\n", start) + 3
-    return source[start:end]
+    heredoc_terminator: str | None = None
+    offset = start
+    for line in source[start:].splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if heredoc_terminator is not None:
+            if stripped == heredoc_terminator:
+                heredoc_terminator = None
+            offset += len(line)
+            continue
+        match = re.search(
+            r"<<-?\s*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_]*))",
+            line,
+        )
+        if match is not None:
+            heredoc_terminator = next(value for value in match.groups() if value)
+        if line.startswith("}") and stripped == "}":
+            return source[start : offset + len(line)]
+        offset += len(line)
+    raise ValueError(f"unterminated shell function: {signature}")
 
 
 def _cloudbench_incremental_log_functions() -> str:
