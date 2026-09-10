@@ -7809,21 +7809,26 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
 ) -> None:
     """Exact recovery must prove every configured guest ack before provider reap."""
     fleet = FLEET_SCRIPT.read_text()
+    signatures = (
+        "registry_meta_value() {",
+        "fleet_registry_cleanup_state() {",
+        "registry_owner_alive() {",
+        "fleet_registry_build_guest_recovery_plan() {",
+        "cloudbench_publish_guest_shutdown_confirmation() {",
+        "cloudbench_confirm_guest_shutdowns() {",
+        "fleet_registry_confirm_guest_teardown() {",
+        "cleanup_stale_owner_recovery_proxies() {",
+        "fleet_recovery_reconnect_guest_shutdowns() {",
+        "acquire_registry_recovery_lock() {",
+        "recover_exact_stale_fleet_owner() {",
+    )
+    # The pre-fix controller has no quarantine recovery functions, so this
+    # unchanged reproduction reaches its real outer-gate rejection. Once the
+    # production functions exist, the same fixture exercises them end-to-end.
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
-        for signature in (
-            "registry_meta_value() {",
-            "fleet_registry_cleanup_state() {",
-            "registry_owner_alive() {",
-            "fleet_registry_build_guest_recovery_plan() {",
-            "cloudbench_publish_guest_shutdown_confirmation() {",
-            "cloudbench_confirm_guest_shutdowns() {",
-            "fleet_registry_confirm_guest_teardown() {",
-            "cleanup_stale_owner_recovery_proxies() {",
-            "fleet_recovery_reconnect_guest_shutdowns() {",
-            "acquire_registry_recovery_lock() {",
-            "recover_exact_stale_fleet_owner() {",
-        )
+        for signature in signatures
+        if signature in fleet
     )
     owner = "5a" * 16
     run_id = "20260910-021331-1465409"
