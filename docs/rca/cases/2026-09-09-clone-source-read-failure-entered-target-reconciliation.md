@@ -27,6 +27,9 @@ sources:
   - fleet run 20260909-215629-914100
   - fleet run 20260910-002414-1221609
   - fleet run 20260910-021331-1465409
+  - exact stale owner 03596f65144d485f8a667fc31f7e3cc6
+  - commit 8562f093a
+  - commit d8d1dc8dc
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -480,6 +483,98 @@ the same O(guests in one exact owner) shutdown calls and exact-ID provider reads
 execute once. It adds no provider call, poller, lock, row, channel, subscription,
 shared state, or fan-in.
 
+## Seventh recurrence on 2026-09-10
+
+The real recovery of exact owner `03596f65144d485f8a667fc31f7e3cc6`
+validated all nine registry-to-output mappings, current Machine states, mounted
+Volumes, run tokens, and exact data-plane proxies. Guest cleanup then failed in
+two forms. Six `POST /shutdown` requests settled at HTTP 500 after
+`cloudbench-driver.state=exited`; three remained HTTP 202 with
+`cloudbench-driver.state=running` through the recovery deadline. All nine
+runner cleanup-status reads and token-bound acknowledgement reads returned 404.
+The six bounded `bench.log` tails ended with
+`FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup
+acknowledgement`, `FATAL: could not publish guest cleanup acknowledgement`, and
+`driver exited rc=1`. H8 recorded `guestCount=9,status=1`; no H9 authorization
+or H10 provider reaper event followed, so the exact owner remained quarantined.
+
+The critical path was:
+
+`cloudbench-boot.sh` asynchronous driver launch → driver
+`run_with_heartbeat` benchmark launch → authenticated `/shutdown` TERM to the
+exact driver → driver INT to the exact runner → `run_single_task` cancellation
+archive/payment/root DELETE → atomic run-level cleanup status → driver token and
+state validation → root-owned cleanup evidence and acknowledgement → HTTP 204.
+
+Two independent boundaries were wrong. First, the non-interactive boot
+supervisor launched its driver as an ordinary background job. Bash therefore
+started that driver with SIGINT and SIGQUIT ignored; the driver's inner
+`set -m` could not reset a disposition ignored at shell entry, and the runner
+inherited it. Second, this branch exported
+`BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE` and required its clean token-bound
+value in `cloudbench-run.sh`, but `run_benchmark.py` contained no consumer,
+retained cancelled roots because `--keep-failed-agents` was set, and accepted
+any DELETE response as success. Commit `533001686` had implemented the runner
+half on a sibling branch; commit `ac6e6d72b` later imported the driver
+requirement without that half. Extracted-function and structural tests did not
+execute boot, driver, and runner together, allowing the split contract to ship.
+
+The unchanged owning-boundary command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack`.
+
+Before the fix it exited 1 with HTTP 202. The actual signal-target record was
+`ignored=0000000001001006 caught=0000000000000000`; the driver recorded a
+successful `kill -INT`, but no H14 runner-cancellation event followed. A direct
+runner-only cancellation then recorded H14 with both contract variables
+configured and H16 `deleteConfirmed=false`, while no status file existed. This
+confirmed both failures without provider mutation. H17 was confirmed for the
+six exited guests: a signal attempt permanently selected the strict status
+check, and the absent runner publisher made acknowledgement impossible. H18
+was resolved before implementation: `/data` is root-owned and the driver
+explicitly chowns only narrower paths, so having the `rose` runner atomically
+replace a root-level status file was not a production-safe contract.
+
+The boot supervisor now enables monitor mode only around the real driver launch,
+giving the driver and its descendants a normal interrupt disposition. The
+runner publishes atomic, file-and-directory-fsynced `pending|clean|failed`
+status under its already runner-writable context directory, counts every
+interrupted root, overrides diagnostic failed-agent retention only for
+owner-requested cancellation, and requires the canonical root DELETE to return
+HTTP 204. Completion is recorded only after the task's full `finally` cleanup.
+At process exit the runner publishes `clean` only when every started cleanup
+completed; all other states remain fail-closed.
+
+The root driver validates the private status token and state, mirrors that exact
+runner-produced evidence to the existing root-owned public status path, and
+publishes the cleanup acknowledgement only for `clean` plus the exact run token.
+It never synthesizes a runner verdict. Boot now appends status/ack presence to
+`bench.log` before sealing `driver.state=exited`, so future recovery has durable
+source-boundary evidence even when acknowledgement is absent.
+
+The unchanged owning command now exits 0. Post-fix H15 records
+`ignored=0000000001001000 caught=0000000000000002`; H14 proves cancellation
+reached the runner with the contract configured; H16 proves
+`deleteConfirmed=true`; the final H14 records `state=clean,started=1,completed=1`;
+H17 records clean state plus token match; and H18 records driver status 0 with
+both public status and acknowledgement present. The permanent regression
+executes the actual boot script, actual driver signal trap and 30-second
+heartbeat semantics, and actual runner cancellation/DELETE/finalization
+functions. The complete lifecycle suite passes all 267 tests, runner contract
+tests pass 14/14, status-service shutdown passes, fleet infra-canary structural
+checks pass, and the multi-workstream suite passes every scenario.
+
+The real retained owner has intentionally not been rerun: provider cleanup
+remains the owner's verification action. Exact-owner quarantine and the
+guest-ack-before-provider-reap ordering are unchanged.
+
+At 10,000 agents, each active guest has one isolated driver, runner, and
+constant-size pair of status files. Cancellation adds O(interrupted roots in
+that one runner) local counter updates and one canonical DELETE per root; there
+is no cross-agent channel, subscription, table scan, shared lock, provider
+poll, or global fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -521,6 +616,13 @@ entrypoint ordering fix with one shared implementation, a regression that
 executes production source order rather than extracted functions, full relevant
 suites, unchanged fail-closed semantics and autoscaler probes, a pushed branch,
 and the exact real-owner rerun command.
+
+For the seventh recurrence, the user required bounded evidence from only the
+nine exact guests, an actual boot/driver-trap regression, the deepest owned
+cleanup-ack repair, persistent source evidence, and preservation of
+exact-owner quarantine with no fabricated acknowledgement. Provider cleanup
+remains exclusively the user's rerun action; task definitions, timeouts, and
+concurrency are unchanged.
 
 ## Reusable lesson
 
