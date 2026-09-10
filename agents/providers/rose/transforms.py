@@ -937,6 +937,7 @@ def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
     *,
     tools_declared: bool = True,
+    cache_opening_user: bool = False,
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR, Anthropic-via-OR).
@@ -949,15 +950,19 @@ def transform_messages_for_openai(
 
     - We mark the trailing block of the FIRST system message as a cache
       breakpoint (idempotent — preserves any caller-supplied breakpoints).
+      When the caller supplies a logical provider-cache sequence,
+      ``cache_opening_user`` also marks the FIRST user message. That opening
+      turn is stable for an append-only agent conversation and extends short
+      system prompts past provider minimums.
     - We do NOT mark the last user message. Different OR providers interpret
       the last cache_control marker differently:
         * Anthropic accepts multiple breakpoints and picks the longest
           matching prefix.
         * Gemini-via-OR treats the LAST cache_control as the cache key —
-          marking a per-call dynamic user message there makes every call's
-          cache key unique, defeating the cache.
-      Marking only the stable system prefix gives both providers a usable
-      cache key without trading one off against the other.
+          marking a per-call dynamic tail there makes every call's cache key
+          unique, defeating the cache. The first user turn remains stable.
+      Marking the stable opening prefix gives both providers a usable cache
+      key without trading one off against the other.
 
     Callers that want additional breakpoints (e.g. message_person stacks a
     static-rules block + a per-user voice block in one system message)
@@ -997,6 +1002,7 @@ def transform_messages_for_openai(
         return out
 
     first_system_seen = False
+    first_user_seen = False
     for m in out:
         if m.get("role") == "system":
             if not first_system_seen:
@@ -1004,6 +1010,9 @@ def transform_messages_for_openai(
                 first_system_seen = True
             else:
                 _strip_system_prompt_boundary(m)
+        elif cache_opening_user and m.get("role") == "user" and not first_user_seen:
+            _add_openrouter_cache_breakpoint(m)
+            first_user_seen = True
         elif m.get("role") == "assistant":
             _normalize_openai_tool_calls(m)
 

@@ -1633,6 +1633,7 @@ class RoseClient:
                     per_step_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     exclude_anthropic_family=_exclude_anthropic_family,
+                    cache_namespace=cache_namespace,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)

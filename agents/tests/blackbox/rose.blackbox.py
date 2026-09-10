@@ -984,10 +984,8 @@ def test_reconstruct_agent_response_handles_non_dict_input():
 
 
 def test_transform_messages_for_openai_adds_cache_breakpoints():
-    """Cache-control contract for the OR waterfall path: only the first system
-    message's trailing block gets marked. The last user message must NOT be
-    marked because Gemini-via-OR uses the LAST cache_control as the cache key,
-    which would defeat caching when that block is per-call dynamic.
+    """Cache-control contract for unscoped OR helper calls: only the first
+    system message is marked, never a mutable user tail.
     """
     msgs = [
         {"role": "system", "content": "you are helpful"},
@@ -1005,6 +1003,30 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert out[2] == {"role": "assistant", "content": "hi"}
     # Original not mutated
     assert msgs[0]["content"] == "you are helpful"
+    assert msgs[1]["content"] == "hello"
+
+
+def test_transform_messages_for_openai_marks_stable_conversation_prefix():
+    """Gemini's final explicit breakpoint must include the stable opening turn.
+
+    Explore-agent system prompts are smaller than Gemini's cache minimum, while
+    the opening user goal remains byte-identical across the task's later turns.
+    The mutable conversation tail must remain outside that breakpoint.
+    """
+    msgs = [
+        {"role": "system", "content": "stable rules"},
+        {"role": "user", "content": "stable task goal"},
+        {"role": "assistant", "content": "working"},
+        {"role": "tool", "content": "dynamic result"},
+    ]
+
+    out = transform_messages_for_openai(msgs, cache_opening_user=True)
+
+    assert out[1]["content"] == [
+        {"type": "text", "text": "stable task goal", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert out[-1] == {"role": "tool", "content": "dynamic result"}
+    assert msgs[1]["content"] == "stable task goal", "callers' messages must not be mutated"
 
 
 def test_transform_messages_for_openai_stamps_tool_call_type():
@@ -2980,6 +3002,26 @@ def test_build_openrouter_body_includes_optionals():
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42
     assert body["seed"] == 7
+
+
+def test_build_openrouter_body_uses_logical_sequence_for_sticky_routing():
+    sequence_id = "agent:parent:task:explore-a:call:explore_agent"
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "stable task goal"},
+        ],
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace=sequence_id,
+    )
+
+    assert body["session_id"] == sequence_id
 
 
 TOOL_HISTORY_MESSAGES = [
@@ -6252,12 +6294,14 @@ async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth(
                 pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "Use a browser child"}],
                 response_model=_AgentAction,
+                cache_namespace="agent:parent:task:explore-a:call:explore_agent",
             )
         )
 
     assert any(chunk.kind == "tool_call" for chunk in chunks)
     assert captured["response_format"] is None
     assert captured["tool_choice"] == "any"
+    assert captured["cache_namespace"] == "agent:parent:task:explore-a:call:explore_agent"
     assert {tool["name"] for tool in captured["tools"]} == {
         "spawn_agent",
         "attempt_completion",
@@ -6404,6 +6448,10 @@ async def run_all_tests():
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
     r.record(
+        "openai_messages_stable_conversation_cache_prefix",
+        test_transform_messages_for_openai_marks_stable_conversation_prefix,
+    )
+    r.record(
         "openai_messages_tool_call_type_discriminator",
         test_transform_messages_for_openai_stamps_tool_call_type,
     )
@@ -6507,6 +6555,10 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record(
+        "openrouter_body_logical_sequence_sticky_routing",
+        test_build_openrouter_body_uses_logical_sequence_for_sticky_routing,
+    )
     r.record(
         "named_tool_choice_degrades_only_for_google",
         test_named_tool_choice_degrades_only_for_google_routes,

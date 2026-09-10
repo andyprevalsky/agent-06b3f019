@@ -124,6 +124,7 @@ def build_openrouter_body(
     seed: Optional[int],
     provider_fast_mode: bool = True,
     effort: Optional[str] = None,
+    cache_namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble the OpenRouter /chat/completions request body for one model.
 
@@ -139,7 +140,9 @@ def build_openrouter_body(
     body: Dict[str, Any] = {
         "model": model,
         "messages": transform_messages_for_openai(
-            messages, tools_declared=bool(openrouter_tools)
+            messages,
+            tools_declared=bool(openrouter_tools),
+            cache_opening_user=bool(cache_namespace),
         ),
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -159,6 +162,12 @@ def build_openrouter_body(
         body["seed"] = seed
     if provider_fast_mode:
         body["speed"] = "fast"
+    if cache_namespace:
+        # OpenRouter otherwise derives sticky routing from message hashes and
+        # only activates it after a cache hit. Agent loops already own one
+        # stable, sibling-isolated sequence ID; reuse it so the first successful
+        # turn pins later turns to the endpoint holding the warm provider cache.
+        body["session_id"] = cache_namespace
     return body
 
 
@@ -181,6 +190,7 @@ async def waterfall_complete(
     per_step_timeout_s: float = _PER_STEP_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
     exclude_anthropic_family: bool = False,
+    cache_namespace: Optional[str] = None,
 ) -> AsyncIterator[StreamChunk]:
     """Walk the pool's waterfall until one model streams a clean response.
 
@@ -244,6 +254,7 @@ async def waterfall_complete(
             seed=seed,
             provider_fast_mode=provider_fast_mode,
             effort=effort,
+            cache_namespace=cache_namespace,
         )
         emitted_user_visible = False
         try:
