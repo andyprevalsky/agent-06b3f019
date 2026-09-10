@@ -7870,6 +7870,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
     """Exact recovery must prove every configured guest ack before provider reap."""
     fleet = FLEET_SCRIPT.read_text()
     signatures = (
+        "_agent_stale_owner_debug_log() {",
         "machine_status_exact_read() {",
         "machine_config_exact_read() {",
         "registry_machine_details() {",
@@ -8010,7 +8011,6 @@ STALE_OWNER_RECOVERY_PLAN_FILE=""
 STALE_OWNER_RECOVERY_PORTS_FILE=""
 AUTOSCALER_PORT_LEASE_HELPER=/nonexistent/port-helper
 CALLS={shlex.quote(str(calls))}
-_agent_stale_owner_debug_log() {{ :; }}
 release_cleanup_disk_reserve() {{ return 0; }}
 FLY() {{
   printf 'provider %s\\n' "$*" >> "$CALLS"
