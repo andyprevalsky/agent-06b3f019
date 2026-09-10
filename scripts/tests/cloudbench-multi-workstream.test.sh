@@ -167,30 +167,6 @@ clone_source_read_rate_limit_contract() (
     CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
     RANDOM=0
 
-    # region agent log
-    _agent_debug_log() {
-        python3 - "$@" <<'PY'
-import json
-import sys
-import time
-
-data = {}
-for raw in sys.argv[4:]:
-    key, separator, value = raw.partition("=")
-    if separator:
-        data[key] = value
-with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as handle:
-    handle.write(json.dumps({
-        "hypothesisId": sys.argv[1],
-        "location": sys.argv[2],
-        "message": sys.argv[3],
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }, separators=(",", ":")) + "\n")
-PY
-    }
-    # endregion
-
     fleet_registry_record_name() { return 0; }
     fleet_registry_record_id() { return 0; }
     fleet_registry_release_name() { return 0; }
@@ -247,6 +223,97 @@ if [ "${CLOUDBENCH_TEST_CLONE_SOURCE_RATE_LIMIT_REPRO:-0}" = "1" ]; then
     clone_source_read_rate_limit_contract
     exit $?
 fi
+
+clone_source_read_rate_limit_contract \
+    || fail "source-machine read rejection crossed into target reconciliation"
+echo "PASS: source-machine read failures remain pre-allocation clone failures"
+
+restoring_volume_reappearance_contract() (
+    local function_name function_source list_count settle_count status=0
+    local contract_root="$TMP_ROOT/restoring-volume-reappearance"
+    local calls="$contract_root/provider.calls"
+    local list_step="$contract_root/list-step"
+    local audit="$contract_root/fresh-clone.audit"
+    local registry_record="$contract_root/registry/clones/cloudbench-restoring"
+    local settled_inventory
+
+    for function_name in volume_inventory_contains_id reap_volume; do
+        function_source="$(fleet_production_function "$function_name")"
+        [ -n "$function_source" ] \
+            || { echo "FAIL: could not load production $function_name" >&2; return 1; }
+        eval "$function_source"
+    done
+
+    mkdir -p "${registry_record%/*}"
+    : > "$calls"
+    printf '0\n' > "$list_step"
+    {
+        printf 'machine_id=deadbeef000001\n'
+        printf 'volume_id=vol_restoring\n'
+        printf 'disposition=owned\n'
+    } > "$audit"
+    printf 'name=cloudbench-restoring\nid=deadbeef000001\nvolume_id=vol_restoring\n' \
+        > "$registry_record"
+    APP="$FLEET_BENCH_APP"
+    WARM_VOLUME_ID=vol_warm
+
+    FLY() {
+        printf '%s\n' "$*" >> "$calls"
+        case "$1 $2" in
+            "volumes destroy")
+                return 0
+                ;;
+            "volumes list")
+                list_count="$(cat "$list_step")"
+                list_count=$((list_count + 1))
+                printf '%s\n' "$list_count" > "$list_step"
+                if [ "$list_count" -le 2 ]; then
+                    printf '[]\n'
+                else
+                    printf '[{"id":"vol_restoring","name":"cloudbench_data","state":"created","attached_machine_id":null}]\n'
+                fi
+                return 0
+                ;;
+        esac
+        return 99
+    }
+    sleep() { :; }
+
+    reap_volume vol_restoring || status=$?
+    if [ "$status" -ne 0 ]; then
+        for settle_count in 1 2 3; do
+            settled_inventory="$(FLY volumes list -a "$APP" --json)" || return 1
+            printf '%s' "$settled_inventory" | grep -q '"id":"vol_restoring"' && break
+        done
+        printf '%s' "$settled_inventory" | grep -q '"id":"vol_restoring"' \
+            || { echo "FAIL: restoring volume did not reappear after retained teardown authority" >&2; return 1; }
+        grep -Fxq 'disposition=owned' "$audit" \
+            || { echo "FAIL: nonterminal restoring volume lost its owned audit disposition" >&2; return 1; }
+        [ -f "$registry_record" ] \
+            || { echo "FAIL: nonterminal restoring volume lost its exact registry authority" >&2; return 1; }
+        return 0
+    fi
+
+    sed 's/^disposition=owned$/disposition=destroyed-verified-absent/' \
+        "$audit" > "$audit.tmp"
+    mv "$audit.tmp" "$audit"
+    rm -f "$registry_record"
+
+    settled_inventory="$(FLY volumes list -a "$APP" --json)" || return 1
+    if printf '%s' "$settled_inventory" | grep -q '"id":"vol_restoring"'; then
+        echo "FAIL: teardown sealed destroyed-verified-absent after two transient absences; vol_restoring reappeared provider-visible as detached created" >&2
+        return 1
+    fi
+)
+
+if [ "${CLOUDBENCH_TEST_RESTORING_VOLUME_REAP_REPRO:-0}" = "1" ]; then
+    restoring_volume_reappearance_contract
+    exit $?
+fi
+
+restoring_volume_reappearance_contract \
+    || fail "restoring volume reappeared after exact teardown authority was retired"
+echo "PASS: volume teardown survives transient restore-time provider absence"
 
 registry_retirement_during_scan_contract() (
     local root registry meta signal owner_pid owner_start
@@ -598,6 +665,10 @@ def find_machine(state, machine_id):
     return next((m for m in state["machines"] if m["id"] == machine_id), None)
 
 
+def find_volume(state, volume_id):
+    return next((v for v in state["volumes"] if v["id"] == volume_id), None)
+
+
 def rb_export(rb_text, key):
     match = re.search(rf"^export {key}=(.*)$", rb_text, re.MULTILINE)
     if not match:
@@ -902,6 +973,31 @@ elif args[:2] == ["volumes", "list"]:
                     break
     with locked_state() as state:
         print(json.dumps(state["volumes"]))
+elif args[:2] == ["volumes", "show"]:
+    volume_id = args[2]
+    with locked_state() as state:
+        found = find_volume(state, volume_id)
+        if found is None:
+            print(
+                "Error: failed retrieving volume: failed to get volume "
+                f"{volume_id}: volume not found (Request ID: fixture)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(json.dumps(found))
+        if found.get("state") in {"pending_destroy", "destroyed"}:
+            state["volumes"] = [
+                volume for volume in state["volumes"]
+                if volume.get("id") != volume_id
+            ]
+elif args[:2] == ["volumes", "destroy"]:
+    volume_id = args[2]
+    with locked_state() as state:
+        found = find_volume(state, volume_id)
+        if found is None:
+            print(f"volume {volume_id} not found", file=sys.stderr)
+            sys.exit(1)
+        found["state"] = "pending_destroy"
 elif args[:3] == ["volume", "snapshots", "list"]:
     with locked_state() as state:
         print(json.dumps(state["snapshots"]))
@@ -1092,17 +1188,7 @@ elif args[:2] == ["machine", "destroy"]:
             print("injected worker scale-down destroy failure", file=sys.stderr)
             sys.exit(1)
     with locked_state() as state:
-        destroyed = find_machine(state, target)
-        destroyed_volumes = {
-            mount.get("volume")
-            for mount in ((destroyed or {}).get("config", {}).get("mounts") or [])
-            if mount.get("volume")
-        }
         state["machines"] = [m for m in state["machines"] if m["id"] != target]
-        state["volumes"] = [
-            volume for volume in state["volumes"]
-            if volume.get("id") not in destroyed_volumes
-        ]
     if os.path.exists(worker_marker):
         open(os.path.join(MARKERS, "worker-scale-down-complete"), "w").close()
 elif args[:3] == ["ssh", "sftp", "put"]:

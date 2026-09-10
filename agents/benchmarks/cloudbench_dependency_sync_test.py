@@ -5349,17 +5349,29 @@ def test_clone_releases_only_definitive_preallocation_failures() -> None:
     classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
     owned_volume = _extract_fleet_function(fleet, "clone_failure_owned_volume_id() {")
     cloner = _clone_machine_bundle(fleet)
-    script = f"""{classifier}
+    script = f"""SOURCE_ID=683e47df5094d8
+{classifier}
 {owned_volume}
 for message in \
   'Error: failed to create volume: resource_exhausted: rate limit exceeded' \
-  'Error: failed to create volume: machine capacity hold failed'; do
-  clone_failure_definitively_unallocated "$message" || exit 1
+  'Error: failed to create volume: machine capacity hold failed' \
+  'Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded (Request ID: captured-lax)'; do
+  clone_failure_definitively_unallocated 1 "$SOURCE_ID" "$message" || exit 1
 done
-clone_failure_definitively_unallocated \
+clone_failure_definitively_unallocated 1 "$SOURCE_ID" \
   \"Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_x'\" \
   && exit 2
-clone_failure_definitively_unallocated 'Error: failed to launch VM: volume not found' && exit 2
+clone_failure_definitively_unallocated 1 "$SOURCE_ID" \
+  'Error: failed to launch VM: volume not found' && exit 2
+clone_failure_definitively_unallocated 1 "$SOURCE_ID" \
+  'Error: could not get machine feedface000000: failed to get VM feedface000000: resource_exhausted: rate limit exceeded' \
+  && exit 2
+clone_failure_definitively_unallocated 142 "$SOURCE_ID" \
+  'Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded' \
+  && exit 2
+clone_failure_definitively_unallocated 1 "$SOURCE_ID" \
+  $'Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded\\nError: failed to create volume: resource_exhausted' \
+  && exit 2
 test -z \"$(clone_failure_owned_volume_id 1 \
   \"Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_exact_123'\")\" || exit 3
 [ \"$(clone_failure_owned_volume_id 1 \
@@ -5407,6 +5419,10 @@ exit 0
     )
     assert cloner.index('reap_volume "$target_volume"') < cloner.index(
         'fleet_registry_release_name "$target_name"'
+    )
+    assert (
+        'if [ -z "$target_id" ] && [ "$preallocation_failure" -eq 0 ]; then'
+        in cloner
     )
 
 
@@ -5468,9 +5484,9 @@ FLY() {{
       printf '%s\n' "$*" >> "$CALLS"
       [ "$3" = vol_vp2q8xeydwjm79w4 ] || return 99
       return 1 ;;
-    "volumes list")
+    "volumes show")
       printf '%s\n' "$*" >> "$CALLS"
-      printf '%s\n' '[]'
+      printf '%s\n' '{{"id":"vol_vp2q8xeydwjm79w4","state":"pending_destroy"}}'
       return 0 ;;
   esac
   return 99
@@ -5495,8 +5511,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
     assert result.returncode == 0, result.stderr + result.stdout
     assert calls.read_text().splitlines() == [
         "volumes destroy vol_vp2q8xeydwjm79w4 -a bench-app --yes",
-        "volumes list -a bench-app --json",
-        "volumes list -a bench-app --json",
+        "volumes show vol_vp2q8xeydwjm79w4 -a bench-app --json",
     ]
     assert ledger.with_suffix(".log").read_text().splitlines() == [
         "clone name=cloudbench-ff94c207ec984ab8922dfc65 source=871535c0322758 status=1 attempt=1/1",
@@ -5513,10 +5528,10 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
 def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
     tmp_path: Path,
 ) -> None:
-    """Destroy + inventory failure must retain ownership for later recovery.
+    """Destroy + lifecycle-read failure must retain ownership for recovery.
 
     The exact volume record must exist before the first delete attempt. Neither
-    a failed provider read nor invalid JSON is proof that the volume is absent.
+    a failed provider read, invalid JSON, nor a live state proves deletion.
     """
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
@@ -5535,8 +5550,8 @@ def test_failed_clone_retains_exact_owner_when_delete_absence_is_unknown(
         )
     )
 
-    for list_mode in ("failure", "invalid-json", "present"):
-        case_root = tmp_path / list_mode
+    for show_mode in ("failure", "invalid-json", "present"):
+        case_root = tmp_path / show_mode
         registry = case_root / "registry"
         (registry / "clones").mkdir(parents=True)
         ledger = case_root / "owned.ids"
@@ -5551,7 +5566,7 @@ SNAP_ID=snapshot-1
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
-LIST_MODE={shlex.quote(list_mode)}
+SHOW_MODE={shlex.quote(show_mode)}
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 sleep() {{ :; }}
@@ -5569,11 +5584,14 @@ FLY() {{
       fi
       printf '%s\n' "$*" >> "$CALLS"
       return 0 ;;
-    "volumes list")
+    "volumes show")
       printf '%s\n' "$*" >> "$CALLS"
-      if [ "$LIST_MODE" = failure ]; then return 1; fi
-      if [ "$LIST_MODE" = present ]; then
-        printf '%s\n' '[{{"id":"vol_exactowned"}},{{"id":"vol_neighbor"}}]'
+      if [ "$SHOW_MODE" = failure ]; then
+        printf '%s\n' 'provider lifecycle read timed out' >&2
+        return 1
+      fi
+      if [ "$SHOW_MODE" = present ]; then
+        printf '%s\n' '{{"id":"vol_exactowned","state":"created"}}'
         return 0
       fi
       printf '%s\n' '{{not-json'
@@ -5602,11 +5620,13 @@ grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || ex
             timeout=10,
         )
 
-        assert result.returncode == 0, f"{list_mode}: {result.stderr}{result.stdout}"
+        assert result.returncode == 0, f"{show_mode}: {result.stderr}{result.stdout}"
         log = calls.read_text()
         assert "destroy-before-record" not in log
         assert log.count("volumes destroy vol_exactowned -a bench-app --yes") == 6
-        assert log.count("volumes list -a bench-app --json") == 6
+        assert (
+            log.count("volumes show vol_exactowned -a bench-app --json") == 6
+        )
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
@@ -7158,7 +7178,8 @@ FLY() {{
       fi ;;
     "machine destroy") return 0 ;;
     "volumes destroy") return 0 ;;
-    "volumes list") echo "[]" ;;
+    "volumes show")
+      printf '%s\n' '{{"id":"vol_clone","state":"pending_destroy"}}' ;;
   esac
   return 0
 }}
@@ -7187,6 +7208,155 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
     assert "volumes destroy vol_warm" not in log
 
 
+def test_reap_volume_requires_an_exact_terminal_lifecycle_receipt(
+    tmp_path: Path,
+) -> None:
+    """Only an exact terminal state or exact-ID absence can retire ownership."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+        )
+    )
+    cases = {
+        "pending_destroy": (0, 1),
+        "destroyed": (0, 1),
+        "exact-absent": (0, 1),
+        "created": (1, 6),
+        "restoring": (1, 6),
+        "scheduling_destroy": (1, 6),
+        "recovering": (1, 6),
+        "provider-failure": (1, 6),
+        "invalid-json": (1, 6),
+        "wrong-id": (1, 6),
+    }
+
+    for mode, (expected_status, expected_attempts) in cases.items():
+        calls = tmp_path / f"{mode}.calls"
+        script = f"""set -uo pipefail
+APP=bench-app
+WARM_VOLUME_ID=vol_warm
+MODE={shlex.quote(mode)}
+CALLS={shlex.quote(str(calls))}
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "volumes destroy") return 0 ;;
+    "volumes show")
+      case "$MODE" in
+        exact-absent)
+          printf 'Error: failed retrieving volume: failed to get volume vol_owned: volume not found (Request ID: fixture)\n' >&2
+          return 1 ;;
+        provider-failure)
+          printf 'provider lifecycle read timed out\n' >&2
+          return 1 ;;
+        invalid-json) printf '{{not-json\n'; return 0 ;;
+        wrong-id) printf '{{"id":"vol_neighbor","state":"destroyed"}}\n'; return 0 ;;
+        *) printf '{{"id":"vol_owned","state":"%s"}}\n' "$MODE"; return 0 ;;
+      esac ;;
+  esac
+  return 99
+}}
+{helpers}
+reap_volume vol_owned
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode == expected_status, (
+            mode,
+            result.stdout,
+            result.stderr,
+        )
+        call_log = calls.read_text().splitlines()
+        assert call_log.count(
+            "volumes destroy vol_owned -a bench-app --yes"
+        ) == expected_attempts
+        assert call_log.count(
+            "volumes show vol_owned -a bench-app --json"
+        ) == expected_attempts
+        assert not any("volumes list" in call for call in call_log)
+
+
+def test_reap_volume_retains_authority_when_restore_reappears_after_absence(
+    tmp_path: Path,
+) -> None:
+    """A restore-time destroy can transiently hide a volume for multiple lists.
+
+    Teardown must not return success and retire its exact audit/registry authority
+    when the same volume later settles back to detached ``created``.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+        )
+    )
+    calls = tmp_path / "provider.calls"
+    list_step = tmp_path / "list-step"
+    list_step.write_text("0\n")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+WARM_VOLUME_ID=vol_warm
+CALLS={shlex.quote(str(calls))}
+LIST_STEP={shlex.quote(str(list_step))}
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "volumes destroy")
+      [ "$3" = vol_restoring ] || return 99
+      return 0 ;;
+    "volumes list")
+      step="$(cat "$LIST_STEP")"
+      step=$((step + 1))
+      printf '%s\n' "$step" > "$LIST_STEP"
+      if [ "$step" -le 2 ]; then
+        printf '[]\n'
+      else
+        printf '[{{"id":"vol_restoring","name":"cloudbench_data","state":"created","attached_machine_id":null}}]\n'
+      fi
+      return 0 ;;
+  esac
+  return 99
+}}
+{helpers}
+if reap_volume vol_restoring; then
+  settled="$(FLY volumes list -a "$APP" --json)" || exit 91
+  if printf '%s' "$settled" | grep -q '"id":"vol_restoring"'; then
+    echo "FAIL: teardown sealed destroyed-verified-absent after two transient absences; vol_restoring reappeared provider-visible as detached created" >&2
+    exit 90
+  fi
+  exit 92
+fi
+for _ in 1 2 3; do
+  settled="$(FLY volumes list -a "$APP" --json)" || exit 93
+  printf '%s' "$settled" | grep -q '"id":"vol_restoring"' && break
+done
+printf '%s' "$settled" | grep -q '"id":"vol_restoring"' || exit 94
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete(
     tmp_path: Path,
 ) -> None:
@@ -7205,13 +7375,13 @@ def test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete(
     postcondition_root = tmp_path / "postcondition"
     postcondition_root.mkdir()
     postcondition_calls = postcondition_root / "calls"
-    inventory_step = postcondition_root / "inventory-step"
-    inventory_step.write_text("0\n")
+    lifecycle_step = postcondition_root / "lifecycle-step"
+    lifecycle_step.write_text("0\n")
     postcondition_script = f"""set -uo pipefail
 APP=bench-app
 WARM_VOLUME_ID=vol_warm
 CALLS={shlex.quote(str(postcondition_calls))}
-INVENTORY_STEP={shlex.quote(str(inventory_step))}
+LIFECYCLE_STEP={shlex.quote(str(lifecycle_step))}
 sleep() {{ :; }}
 FLY() {{
   printf '%s\n' "$*" >> "$CALLS"
@@ -7219,14 +7389,15 @@ FLY() {{
     "volumes destroy")
       [ "$3" = vol_exact ] || return 99
       return 0 ;;
-    "volumes list")
-      step="$(cat "$INVENTORY_STEP")"
+    "volumes show")
+      step="$(cat "$LIFECYCLE_STEP")"
       step=$((step + 1))
-      printf '%s\n' "$step" > "$INVENTORY_STEP"
+      printf '%s\n' "$step" > "$LIFECYCLE_STEP"
       case "$step" in
-        1) printf '%s\n' '[{{"id":"vol_exact"}},{{"id":"vol_neighbor"}}]' ;;
+        1) printf '%s\n' '{{"id":"vol_exact","state":"created"}}' ;;
         2) printf '%s\n' '{{not-json' ;;
-        *) printf '%s\n' '[{{"id":"vol_neighbor"}}]' ;;
+        3) printf '%s\n' '{{"id":"vol_exact","state":"scheduling_destroy"}}' ;;
+        *) printf '%s\n' '{{"id":"vol_exact","state":"pending_destroy"}}' ;;
       esac
       return 0 ;;
   esac
@@ -7249,13 +7420,15 @@ reap_volume vol_exact
     postcondition_log = postcondition_calls.read_text().splitlines()
     assert postcondition_log == [
         "volumes destroy vol_exact -a bench-app --yes",
-        "volumes list -a bench-app --json",
+        "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
-        "volumes list -a bench-app --json",
+        "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
-        "volumes list -a bench-app --json",
-        "volumes list -a bench-app --json",
+        "volumes show vol_exact -a bench-app --json",
+        "volumes destroy vol_exact -a bench-app --yes",
+        "volumes show vol_exact -a bench-app --json",
     ]
+    assert not any("volumes list" in call for call in postcondition_log)
     assert not any("volumes destroy vol_neighbor" in call for call in postcondition_log)
 
     functions = "\n".join(
@@ -7337,13 +7510,14 @@ FLY() {{
       grep -Fxv "$3" "$VOLUMES" > "$VOLUMES.tmp"
       mv "$VOLUMES.tmp" "$VOLUMES"
       return 0 ;;
-    "volumes list")
-      python3 - "$VOLUMES" <<'PY'
-import json
-import sys
-print(json.dumps([{{"id": line.strip()}} for line in open(sys.argv[1]) if line.strip()]))
-PY
-      return 0 ;;
+    "volumes show")
+      if grep -Fxq "$3" "$VOLUMES"; then
+        printf '{{"id":"%s","state":"created"}}\n' "$3"
+        return 0
+      fi
+      printf 'Error: failed retrieving volume: failed to get volume %s: volume not found (Request ID: fixture)\n' \
+        "$3" >&2
+      return 1 ;;
   esac
   return 0
 }}
