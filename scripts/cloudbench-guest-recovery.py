@@ -708,8 +708,40 @@ def describe_state(args: argparse.Namespace) -> int:
         and value["backend_log"]["within_limit"] is True
     ):
         raise GuestRecoveryError("exact quiesced guest state is inconsistent")
+
+    def available_evidence(candidate: dict[str, Any]) -> bool:
+        return (
+            candidate["exists"] is True
+            and candidate["regular"] is True
+            and candidate["symlink"] is False
+            and isinstance(candidate["bytes"], int)
+            and candidate["within_limit"] is True
+        )
+
+    state_kind = value["state"]
+    if (
+        state_kind == "exited"
+        and value["reason"]
+        == "missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json"
+        and value["services_status"] == "stopped"
+        and stopped_pids
+        and not live_pids
+        and backend_port_value is not None
+        and backend_closed_value is True
+        and available_evidence(value["services_manifest"])
+        and value["run_json"]
+        == {
+            "exists": False,
+            "regular": False,
+            "symlink": False,
+            "bytes": None,
+            "within_limit": False,
+        }
+        and available_evidence(value["backend_log"])
+    ):
+        state_kind = "exited-no-run"
     print(
-        value["state"],
+        state_kind,
         value["driver_state"],
         len(value["driver_descendants"]),
         value["reason"],

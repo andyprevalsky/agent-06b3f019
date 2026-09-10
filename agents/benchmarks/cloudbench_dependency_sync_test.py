@@ -9664,6 +9664,91 @@ cloudbench_recover_guest_cleanup_receipts "$REGISTRY"
     assert all("machines list" not in line for line in call_lines)
 
 
+def test_exited_runless_subtype_requires_complete_process_and_service_fence(
+    tmp_path: Path,
+) -> None:
+    """Only exact terminal state can enter runless provider cleanup."""
+    machine_id = "deadbeef000019"
+    guest_token = "runless-exited-token"
+    state_receipt = tmp_path / "state.json"
+    missing_run = {
+        "exists": False,
+        "regular": False,
+        "symlink": False,
+        "bytes": None,
+        "within_limit": False,
+    }
+    available_file = {
+        "exists": True,
+        "regular": True,
+        "symlink": False,
+        "bytes": 100,
+        "within_limit": True,
+    }
+    state = {
+        "schema_version": "cloudbench-guest-state-v1",
+        "version": 1,
+        "state": "exited",
+        "machine_id": machine_id,
+        "guest_run_token": guest_token,
+        "reason": (
+            "missing regular exact guest evidence: "
+            "/data/repo/.context/cloudbench/run.json"
+        ),
+        "driver_state": "exited",
+        "driver_pid": None,
+        "driver_process_state": None,
+        "driver_token_match": False,
+        "driver_descendants": [],
+        "services_manifest": available_file,
+        "run_json": missing_run,
+        "backend_log": available_file,
+        "services_status": "stopped",
+        "stopped_service_pids": [99999991, 99999992],
+        "live_service_pids": [],
+        "backend_port": 3001,
+        "backend_closed": True,
+    }
+    command = [
+        sys.executable,
+        str(GUEST_RECOVERY_SCRIPT),
+        "describe-state",
+        "--machine-id",
+        machine_id,
+        "--guest-run-token",
+        guest_token,
+        "--receipt",
+        str(state_receipt),
+    ]
+
+    state_receipt.write_text(json.dumps(state))
+    valid = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert valid.returncode == 0, valid.stderr
+    assert valid.stdout.startswith("exited-no-run\texited\t0\t")
+
+    unsafe_cases = {
+        "live-service": {"live_service_pids": [99999991]},
+        "backend-open": {"backend_closed": False},
+        "services-not-stopped": {"services_status": None},
+        "no-stopped-service-proof": {"stopped_service_pids": []},
+        "backend-evidence-unavailable": {
+            "backend_log": missing_run,
+        },
+    }
+    for label, updates in unsafe_cases.items():
+        candidate = json.loads(json.dumps(state))
+        candidate.update(updates)
+        state_receipt.write_text(json.dumps(candidate))
+        rejected = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected.returncode == 0, f"{label}: {rejected.stderr}"
+        assert rejected.stdout.startswith("exited\texited\t0\t"), label
+
+
 @pytest.mark.parametrize(
     ("database_container", "database_volume"),
     (
