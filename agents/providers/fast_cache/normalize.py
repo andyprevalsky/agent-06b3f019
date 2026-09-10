@@ -69,10 +69,9 @@ _SECRET_FIELDS = {
 _REQUEST_PARTITION_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key"}
 _SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n"
 _USER_CONTEXT_PREFIX = "# User Context"
-# Planner reference plans (RAG over the trace archive) are injected as a user
-# message; the retrieved set drifts as the archive grows, so it must not key replays.
+# Planner memories are a live-history fork, so their presence and contents must
+# not key otherwise-identical planner replays.
 _MEMORY_TOOL_NAME = "get_memories"
-_MEMORY_RESULT_PREFIX = "# Memories of similar past runs"
 _VOLATILE_OBJECT_FIELDS = {
     "agent_id",
     "agentid",
@@ -325,10 +324,6 @@ def _canonicalize_dynamic_user_context(text: str) -> str:
     if not text.lstrip().startswith(_USER_CONTEXT_PREFIX):
         return text
     return f"{_USER_CONTEXT_PREFIX}\n<dynamic-user-context>"
-
-
-def _canonicalize_dynamic_memories(text: Any) -> str:
-    return f"{_MEMORY_RESULT_PREFIX}\n<dynamic-memories>"
 
 
 def _canonicalize_package_manager_output(text: str) -> str:
@@ -735,11 +730,7 @@ def _is_oai_demo_bound_child_goal(blob: str) -> bool:
 def is_oai_demo_goal_text(text: str | None) -> bool:
     """True for mass-agent DEMO root, window, or identity-bound child goals."""
     blob = str(text or "")
-    return (
-        OAI_DEMO_ROOT_GOAL_PREFIX in blob
-        or OAI_DEMO_CHILD_WINDOW in blob
-        or _is_oai_demo_bound_child_goal(blob)
-    )
+    return OAI_DEMO_ROOT_GOAL_PREFIX in blob or OAI_DEMO_CHILD_WINDOW in blob or _is_oai_demo_bound_child_goal(blob)
 
 
 def canonicalize_oai_demo_goal_for_hash(goal: str) -> str:
@@ -877,6 +868,39 @@ def canonical_messages(messages: Any) -> str:
             out.extend(batch)
         return out
 
+    def _memory_fork_call_ids(item: Any) -> set[str]:
+        if not isinstance(item, dict) or item.get("role") != "assistant":
+            return set()
+        calls = item.get("tool_calls")
+        if not isinstance(calls, list):
+            return set()
+        ids: set[str] = set()
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if not isinstance(function, dict) or function.get("name") != _MEMORY_TOOL_NAME:
+                continue
+            call_id = call.get("id")
+            if isinstance(call_id, str) and call_id:
+                ids.add(call_id)
+        return ids
+
+    def _without_memory_forks(items: list[Any]) -> list[Any]:
+        memory_ids = set().union(*(_memory_fork_call_ids(item) for item in items))
+        filtered: list[Any] = []
+        for item in items:
+            if _memory_fork_call_ids(item):
+                continue
+            if (
+                isinstance(item, dict)
+                and item.get("role") == "tool"
+                and (item.get("name") == _MEMORY_TOOL_NAME or item.get("tool_call_id") in memory_ids)
+            ):
+                continue
+            filtered.append(item)
+        return filtered
+
     def _clean(v: Any) -> Any:
         if isinstance(v, dict):
             out = {}
@@ -902,12 +926,6 @@ def canonical_messages(messages: Any) -> str:
                 ):
                     out[k] = val.split(_SYSTEM_PROMPT_DYNAMIC_BOUNDARY)[0] + _SYSTEM_PROMPT_DYNAMIC_BOUNDARY
                     continue
-                # Planner memory fork: the retrieved memories depend on the live
-                # history table, not on the trajectory, so the tool result must not
-                # perturb the fingerprint (same goal → same key with or without hits).
-                if lk == "content" and v.get("role") == "tool" and v.get("name") == _MEMORY_TOOL_NAME:
-                    out[k] = _canonicalize_dynamic_memories(val)
-                    continue
                 # Collapse large base64/image payloads — they're stable but huge.
                 if lk in ("image_url", "data", "source") and isinstance(val, (str, dict)):
                     out[k] = "<blob>"
@@ -915,7 +933,8 @@ def canonical_messages(messages: Any) -> str:
                     out[k] = _clean(val)
             return out
         if isinstance(v, list):
-            return _sort_parallel_tool_batches([_clean(x) for x in v])
+            stable_items = _without_memory_forks(v)
+            return _sort_parallel_tool_batches([_clean(x) for x in stable_items])
         if isinstance(v, str):
             return _normalize_volatile_text(v)
         return v
@@ -1108,6 +1127,8 @@ def soft_complete_allowed(
 ) -> bool:
     """True when soft-complete stubs may fire (same gate as DEMO cache replay)."""
     return demo_cache_allowed(goal, root_goal=root_goal)
+
+
 # Pre-Jul-21 / pre-Aug-22 position fingerprint shape used by the OAi demo warm
 # cache (no user_messages, no exclude_anthropic_family).
 _OAI_DEMO_CACHE_KEY_VERSIONS = ("v42", "v43")

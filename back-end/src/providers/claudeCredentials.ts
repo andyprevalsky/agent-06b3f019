@@ -346,12 +346,26 @@ function buildClaudeCodeCredentialResult(
     if (!accessToken.startsWith('sk-ant-oat')) return null;
     const common = { source, userId, poolTokenId };
     if (refreshToken.length > 0) {
-      return {
+      const result: ClaudeCodeCredentialResult = {
         ...common,
         credentials: credentialsJson,
         accessToken,
         credentialMode: 'oauth_envelope',
       };
+      // E2B startup can take longer than the remaining lifetime of an access
+      // token. Handing a nearly-expired token to the sandbox creates a TOCTOU
+      // race where selection succeeds but the first model request gets a 401.
+      // Expire only the sandbox copy so Claude Code refreshes the full envelope
+      // before use; the persisted production credential remains untouched.
+      const expiresAt = oauth.expiresAt;
+      if (
+        typeof expiresAt === 'number' &&
+        Number.isFinite(expiresAt) &&
+        expiresAt <= Date.now() + 5 * 60 * 1000
+      ) {
+        return forceOauthEnvelopeRefresh(result);
+      }
+      return result;
     }
     return {
       ...common,

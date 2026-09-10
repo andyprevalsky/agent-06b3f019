@@ -199,11 +199,13 @@ def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[
     """
     blocks: List[Dict[str, Any]] = []
     if static_system:
-        blocks.append({
-            "type": "text",
-            "text": static_system,
-            "cache_control": {"type": "ephemeral", "scope": "global"},
-        })
+        blocks.append(
+            {
+                "type": "text",
+                "text": static_system,
+                "cache_control": {"type": "ephemeral", "scope": "global"},
+            }
+        )
 
     if not dynamic_system:
         return blocks
@@ -216,11 +218,13 @@ def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[
         text = part.strip()
         if not text:
             continue
-        blocks.append({
-            "type": "text",
-            "text": text,
-            "cache_control": {"type": "ephemeral", "scope": "global"},
-        })
+        blocks.append(
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral", "scope": "global"},
+            }
+        )
     return blocks
 
 
@@ -370,25 +374,11 @@ def build_anthropic_body(
     )
     _downgrade_forced_tool_choice_if_unsupported(body, pool_spec.claude_auth_model)
 
-    # Context-only tools (e.g. the planner's get_memories fork) are declared so
-    # the forked tool_use/tool_result history is legal, but never callable:
-    # structured output keeps its output_config and tool_choice is "none".
-    # Appended to real native tools when those exist (choice unchanged).
-    if context_tools:
-        declared = [
-            {
-                "name": tool.get("name"),
-                "description": tool.get("description"),
-                "input_schema": tool.get("input_schema") or tool.get("parameters") or {"type": "object"},
-            }
-            for tool in context_tools
-            if isinstance(tool, dict) and tool.get("name")
-        ]
-        if body.get("tools"):
-            body["tools"] = [*body["tools"], *declared]
-        else:
-            body["tools"] = declared
-            body["tool_choice"] = {"type": "none"}
+    # Context-only definitions describe historical tool_use/tool_result blocks;
+    # Anthropic accepts those blocks without re-declaring the historical tool.
+    # A tool present in body.tools is callable, so never append context-only
+    # entries (especially under auto/any selection).
+    del context_tools
 
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
@@ -616,13 +606,13 @@ async def anthropic_api_key_complete(
                     raise RoseInvalidRequest(f"Anthropic 400: {error_body[:2000]}", status=status)
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(f"Anthropic {status}: {error_body[:2000]}", status=status)
                 raise RoseError(f"Anthropic {status}: {error_body[:2000]}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                 continue
             raise RoseServerError(f"Anthropic connect/read error: {exc}") from exc
 
@@ -725,11 +715,7 @@ async def _attempt_with_token(
                         # Mirror the HTTP 401/403 path: rotate immediately.
                         msg = str(exc)
                         rate_limited_until = _extract_rate_limited_until(response, msg)
-                        reason = (
-                            "rate_limit"
-                            if rate_limited_until or _looks_like_rate_limit(msg)
-                            else "auth_error"
-                        )
+                        reason = "rate_limit" if rate_limited_until or _looks_like_rate_limit(msg) else "auth_error"
                         raise _RotateToken(
                             reason,
                             status=401,
@@ -764,11 +750,7 @@ async def _attempt_with_token(
 
                 if status in (401, 403):
                     rate_limited_until = _extract_rate_limited_until(response, error_body)
-                    reason = (
-                        "rate_limit"
-                        if rate_limited_until or _looks_like_rate_limit(error_body)
-                        else "auth_error"
-                    )
+                    reason = "rate_limit" if rate_limited_until or _looks_like_rate_limit(error_body) else "auth_error"
                     raise _RotateToken(
                         reason,
                         status=status,
@@ -792,7 +774,7 @@ async def _attempt_with_token(
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                        await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                        await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
                     raise RoseServerError(
                         f"Anthropic {status}: {error_body[:2000]}",
@@ -806,7 +788,7 @@ async def _attempt_with_token(
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
-                await asyncio.sleep(min(2 ** attempt, _BACKOFF_CAP_S))
+                await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                 continue
             raise RoseServerError(f"Anthropic connect/read error: {exc}") from exc
         except RoseStallError:
@@ -832,9 +814,9 @@ def _backoff_for_429(response: httpx.Response, attempt: int) -> float:
         try:
             delay = max(1.0, min(float(retry_after), _BACKOFF_CAP_S))
         except ValueError:
-            delay = min(2 ** attempt, _BACKOFF_CAP_S)
+            delay = min(2**attempt, _BACKOFF_CAP_S)
     else:
-        delay = min(2 ** attempt, _BACKOFF_CAP_S)
+        delay = min(2**attempt, _BACKOFF_CAP_S)
     jitter = random.uniform(0, min(delay * 0.25, 1.0))
     return min(delay + jitter, _BACKOFF_CAP_S)
 
@@ -848,9 +830,7 @@ _RESET_HEADER_NAMES = (
     "x-rate-limit-reset",
     "ratelimit-reset",
 )
-_ISO_TS_RE = re.compile(
-    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
-)
+_ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 _EPOCH_RESET_RE = re.compile(
     r"(?:reset|until|retry(?:_|\s|-)?after|available(?:_|\s|-)?at)[^\d]{0,32}(\d{10,13})",
     re.IGNORECASE,
@@ -974,9 +954,7 @@ def _reset_is_far_future(rate_limited_until: Optional[str]) -> bool:
         return False
     if reset_at.tzinfo is None:
         reset_at = reset_at.replace(tzinfo=timezone.utc)
-    seconds_until_reset = (
-        reset_at.astimezone(timezone.utc) - datetime.now(timezone.utc)
-    ).total_seconds()
+    seconds_until_reset = (reset_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
     return seconds_until_reset > _USAGE_WINDOW_RESET_THRESHOLD_S
 
 

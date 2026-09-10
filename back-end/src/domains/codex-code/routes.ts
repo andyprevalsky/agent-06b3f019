@@ -22,6 +22,7 @@ router.post(
         github_repo_url,
         user_id,
         fast_mode_cache_enabled,
+        memory_enabled,
         harness_mode,
         rose_api_base_url,
       } = createSessionSchema.parse(req.body);
@@ -33,6 +34,7 @@ router.post(
         github_repo_url,
         user_id,
         fast_mode_cache_enabled,
+        memory_enabled,
         harness_mode,
         rose_api_base_url,
       });

@@ -59,6 +59,17 @@ export function tokenizePlannerMemoryGoal(goal: string): string[] {
   ];
 }
 
+/** PostgreSQL applies its own English stemming; feed it the original words. */
+function plannerMemoryFtsWords(goal: string): string[] {
+  return [
+    ...new Set(
+      (goal.toLowerCase().match(TOKEN_RE) ?? []).filter(
+        (token) => token.length >= 2 && !STOPWORDS.has(token)
+      )
+    ),
+  ];
+}
+
 export interface PlannerMemoryRunInput {
   rootAgentId: string;
   userId: string | null;
@@ -127,7 +138,17 @@ export async function upsertPlannerMemoryFromRun(input: PlannerMemoryRunInput): 
   await prisma.plannerMemory.upsert({
     where: { id: input.rootAgentId },
     create: { id: input.rootAgentId, ...data },
-    update: data,
+    // Re-finalization may change the archived trajectory. Invalidate every
+    // derived cache field and any in-flight lease so the next reader rebuilds
+    // the critical path from the newly published bundle.
+    update: {
+      ...data,
+      criticalPath: Prisma.DbNull,
+      compressorVersion: null,
+      compressedAt: null,
+      compressionLeaseId: null,
+      compressionLeaseUntil: null,
+    },
   });
 }
 
@@ -147,7 +168,7 @@ export async function searchPlannerMemories(
   const queryTokens = tokenizePlannerMemoryGoal(goal);
   if (queryTokens.length === 0) return [];
   const queryTokenArray = Prisma.sql`ARRAY[${Prisma.join(queryTokens)}]::text[]`;
-  const tsquery = queryTokens.join(' | ');
+  const tsquery = plannerMemoryFtsWords(goal).join(' | ');
   const limit = Math.max(
     1,
     Math.min(PLANNER_MEMORY_SEARCH_MAX_LIMIT, input.limit ?? PLANNER_MEMORY_SEARCH_DEFAULT_LIMIT)
@@ -177,13 +198,16 @@ export async function searchPlannerMemories(
       lexical_coverage: number;
     }>
   >(Prisma.sql`
-    WITH ranked AS MATERIALIZED (
+    WITH search_query AS MATERIALIZED (
+      SELECT to_tsquery('english', ${tsquery}) AS value
+    ), ranked AS MATERIALIZED (
       SELECT m."id", m."userId", m."goal", m."benchmarkTaskName", m."rootStatus", m."passed",
              m."worldModelMode", m."agentCreatedAt", m."criticalPath", m."compressorVersion",
-             0::float8 AS fts_rank,
+             ts_rank(to_tsvector('english', m."goal"), search_query.value)::float8 AS fts_rank,
              overlap.count / ${queryTokens.length}::float8 AS lexical_coverage,
              overlap.count / GREATEST(cardinality(m."goalTokens"), 1)::float8 AS reverse_coverage
       FROM "PlannerMemory" m
+      CROSS JOIN search_query
       CROSS JOIN LATERAL (
         SELECT COUNT(*)::float8 AS count
         FROM unnest(${queryTokenArray}) AS query_terms(query_token)
@@ -192,7 +216,13 @@ export async function searchPlannerMemories(
       WHERE m."id" <> ${exclude}
         AND m."worldModelMode" = 'real'
         AND (m."benchmarkTaskName" IS NOT NULL OR m."userId" = ${userId})
-        AND to_tsvector('english', m."goal") @@ to_tsquery('english', ${tsquery})
+        -- PostgreSQL's English dictionary can reduce a syntactically valid
+        -- query to zero nodes (for example, "against"). In that case retain
+        -- the home-token overlap path instead of silently returning no rows.
+        AND (
+          numnode(search_query.value) = 0
+          OR to_tsvector('english', m."goal") @@ search_query.value
+        )
         ${passedFilter}
       ORDER BY lexical_coverage DESC, reverse_coverage DESC,
                m."agentCreatedAt" DESC NULLS LAST, m."id" ASC

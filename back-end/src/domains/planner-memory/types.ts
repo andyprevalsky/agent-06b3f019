@@ -21,7 +21,7 @@ export const plannerMemoryUpsertSchema = z.object({
   passed: z.boolean().nullable().optional(),
   world_model_mode: z.string().optional(),
   agent_created_at: z.string().nullable().optional(),
-  critical_path: z.unknown().optional(),
+  critical_path: z.record(z.unknown()).nullable().optional(),
   compressor_version: z.string().optional(),
 });
 export type PlannerMemoryUpsertBody = z.infer<typeof plannerMemoryUpsertSchema>;

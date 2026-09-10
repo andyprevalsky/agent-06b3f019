@@ -65,7 +65,7 @@ model Agent {
   writeLockEnabled                 Boolean                   @default(true)
   fastModeCacheEnabled             Boolean                   @default(true)
   worldModelMode                   String                    @default("real")
-  memoryEnabled                    Boolean                   @default(false)
+  memoryEnabled                    Boolean                   @default(true)
   isBenchmark                      Boolean                   @default(false)
   githubRepoUrl                    String?
   parent                           Agent?                    @relation("AgentHierarchy", fields: [parentAgentId], references: [id])

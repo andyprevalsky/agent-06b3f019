@@ -51,7 +51,11 @@ router.post(
 router.get(
   '/stats',
   authenticate,
-  asyncHandler<AuthRequest>(async (_req: AuthRequest, res: Response) => {
+  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Planner memory stats are internal only' });
+      return;
+    }
     res.json(await service.stats());
   })
 );
@@ -109,6 +113,10 @@ router.post(
       return;
     }
     const claim = await service.claimCompression(String(req.params.id), parsed.data);
+    if (claim.claimed === true) {
+      res.status(200).json(claim);
+      return;
+    }
     res.status(claim.reason === 'missing' ? 404 : 200).json(claim);
   })
 );

@@ -430,13 +430,10 @@ def build_codex_responses_body(
     }
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
-    # Context-only tools legalize forked tool history without being callable:
-    # declared alongside structured output with tool_choice "none".
-    declared_context = _responses_tools(context_tools)
-    if declared_context:
-        responses_tools = [*(responses_tools or []), *declared_context]
-        if not tools:
-            body["tool_choice"] = "none"
+    # Responses input may retain historical function_call/output items without
+    # re-declaring those functions. Definitions in body.tools are selectable,
+    # so context-only tools must never be added to that callable set.
+    del context_tools
     if responses_tools:
         body["tools"] = responses_tools
     if response_format:

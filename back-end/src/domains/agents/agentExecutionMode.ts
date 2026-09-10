@@ -1,5 +1,6 @@
 import type { CreateAgentBody } from './types';
 import { isNonRealWorldModelMode, normalizeWorldModelMode } from '../../providers/worldModelMode';
+import { plannerMemoryEnabledByDefault } from '../../providers/plannerMemoryDefaults';
 import { isAdminUser } from '../../utils/adminAccess';
 export { normalizeWorldModelMode } from '../../providers/worldModelMode';
 
@@ -67,6 +68,17 @@ export function applyMemoryInheritance(
     typeof parentMemoryEnabled === 'boolean'
   ) {
     body.memory_enabled = parentMemoryEnabled;
+  }
+}
+
+/**
+ * New production roots use planner memory by default. Benchmark roots stay off
+ * unless their task explicitly opts into the memory A/B arm; descendants then
+ * inherit the resolved value from their parent.
+ */
+export function applyMemoryDefault(body: CreateAgentBody, isBenchmark = false): void {
+  if (body.memory_enabled === undefined) {
+    body.memory_enabled = plannerMemoryEnabledByDefault(isBenchmark);
   }
 }
 

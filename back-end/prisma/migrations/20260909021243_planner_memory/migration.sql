@@ -4,7 +4,7 @@
 -- compressed trajectory. Goal retrieval is one indexed FTS query over
 -- precomputed planner-scoring tokens; compression uses an atomic lease.
 -- AlterTable
-ALTER TABLE "Agent" ADD COLUMN     "memoryEnabled" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "Agent" ADD COLUMN     "memoryEnabled" BOOLEAN NOT NULL DEFAULT true;
 
 -- CreateTable
 CREATE TABLE "PlannerMemory" (

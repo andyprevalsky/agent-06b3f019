@@ -11475,6 +11475,7 @@ async def test_create_agent_sends_write_lock_override_when_env_set():
 
     assert agent_id == "agent-123"
     assert posts[0]["write_lock_enabled"] is False
+    assert posts[0]["memory_enabled"] is False
     assert patches[0]["write_lock_enabled"] is False
 
 

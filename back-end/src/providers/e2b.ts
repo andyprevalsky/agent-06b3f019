@@ -480,6 +480,7 @@ export async function createCodexCodeSession(
   harnessOptions?: {
     harnessMode?: 'code' | 'rose';
     roseApiBaseUrl?: string;
+    memoryEnabled?: boolean;
   }
 ): Promise<{ wsUrl: string; taskId: string; sandboxId: string; uploadedFiles: string[] }> {
   log.info(`Creating Codex Code session for agent ${agentId}`);
@@ -545,6 +546,9 @@ export async function createCodexCodeSession(
     envs.ROSE_API_KEY = apiKey;
     envs.ROSE_USER_ID = userId!;
     envs.ROSE_ANCHOR_AGENT_ID = agentId;
+    // Benchmark runs are memory-off unless their catalog task explicitly opts
+    // into the planner-memory A/B arm.
+    envs.ROSE_MEMORY_ENABLED = harnessOptions?.memoryEnabled === true ? 'true' : 'false';
   }
   if (credentialMeta) {
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);

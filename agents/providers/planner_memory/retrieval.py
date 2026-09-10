@@ -42,6 +42,7 @@ _STOPWORDS = frozenset(
 )
 
 STRATEGIES = ("jaccard", "coverage", "trgm", "fts", "hybrid", "coverage_fts", "coverage_trgm")
+COMPRESSION_BATCH_TIMEOUT_SECONDS = 15.0
 
 
 def tokenize(text: str) -> list[str]:
@@ -303,10 +304,31 @@ async def retrieve_memories(
             else:
                 result.skipped_uncompressed += 1
         if pending:
-            outcomes = await asyncio.gather(
-                *(_ensure_critical_path(hit, agent_id=agent_id, user_id=user_id) for hit in pending),
-                return_exceptions=True,
+            tasks = [
+                asyncio.create_task(_ensure_critical_path(hit, agent_id=agent_id, user_id=user_id)) for hit in pending
+            ]
+            _done, unfinished = await asyncio.wait(
+                tasks,
+                timeout=COMPRESSION_BATCH_TIMEOUT_SECONDS,
             )
+            if unfinished:
+                for task in unfinished:
+                    task.cancel()
+                # Let every cancelled compressor run its lease-release finally
+                # block before the planner continues.
+                await asyncio.gather(*unfinished, return_exceptions=True)
+                logger.warning(
+                    "planner_memory.compress_timeout",
+                    timeout_seconds=COMPRESSION_BATCH_TIMEOUT_SECONDS,
+                    unfinished=len(unfinished),
+                )
+            outcomes: list[Any] = []
+            for task in tasks:
+                if task.cancelled():
+                    outcomes.append(asyncio.TimeoutError("planner memory compression timed out"))
+                    continue
+                error = task.exception()
+                outcomes.append(error if error is not None else task.result())
             for hit, outcome in zip(pending, outcomes):
                 if outcome is True:
                     ready.append(hit)

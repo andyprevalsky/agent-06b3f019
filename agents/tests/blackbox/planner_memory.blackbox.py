@@ -691,7 +691,7 @@ def test_planner_context_tools_are_constant_and_declared_only():
     assert json.dumps(planner_context_tools(), sort_keys=True) == json.dumps(tools, sort_keys=True)
 
 
-def test_anthropic_body_declares_context_tools_without_making_them_callable():
+def test_anthropic_body_keeps_context_tools_historical_only():
     from providers.planner_memory import GET_MEMORIES_TOOL, build_memory_fork
     from providers.rose.claude_auth import build_anthropic_body
     from providers.rose.pools import get_pool
@@ -708,31 +708,56 @@ def test_anthropic_body_declares_context_tools_without_making_them_callable():
         max_tokens=1000,
         context_tools=[GET_MEMORIES_TOOL],
     )
-    assert [t["name"] for t in body["tools"]] == ["get_memories"]
-    assert body["tool_choice"]["type"] == "none"
+    assert "get_memories" not in [t["name"] for t in body.get("tools", [])]
     assert "output_config" in body or "output_format" in body, "structured output must survive the declaration"
     blocks = [b for m in body["messages"] for b in (m["content"] if isinstance(m["content"], list) else [])]
     assert any(b.get("type") == "tool_use" and b.get("name") == "get_memories" for b in blocks)
     assert any(b.get("type") == "tool_result" and b.get("tool_use_id") == fork.tool_call_id for b in blocks)
 
+    native = {**GET_MEMORIES_TOOL, "name": "send_message_to_user"}
+    with_native = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "GOAL"}, *fork.messages()],
+        tools=[native],
+        tool_choice="auto",
+        response_format=None,
+        max_tokens=1000,
+        context_tools=[GET_MEMORIES_TOOL],
+    )
+    assert [tool["name"] for tool in with_native["tools"]] == ["send_message_to_user"]
 
-def test_responses_body_declares_context_tools_with_choice_none():
-    from providers.planner_memory import GET_MEMORIES_TOOL
+
+def test_responses_body_keeps_context_tools_historical_only():
+    from providers.planner_memory import GET_MEMORIES_TOOL, build_memory_fork
     from providers.rose.gpt_auth import build_codex_responses_body
     from providers.rose.pools import get_pool
     from providers.rose.schema import build_openai_response_format
     from utils.tool_schemas import PlannerResponse
 
+    fork = build_memory_fork(GOAL, [_hit()], k=3)
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "GOAL"}, *fork.messages()]
     body = build_codex_responses_body(
         pool_spec=get_pool("rose-1-ultra"),
-        messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "GOAL"}],
+        messages=messages,
         response_format=build_openai_response_format(PlannerResponse),
         tools=None,
         context_tools=[GET_MEMORIES_TOOL],
         request_id="r",
     )
-    assert body["tool_choice"] == "none" and [t["name"] for t in body["tools"]] == ["get_memories"]
+    assert "get_memories" not in [tool["name"] for tool in body.get("tools", [])]
+    assert any(item.get("type") == "function_call" for item in body["input"])
+    assert any(item.get("type") == "function_call_output" for item in body["input"])
     assert body["text"]["format"]["type"] == "json_schema"
+
+    native = {**GET_MEMORIES_TOOL, "name": "send_message_to_user"}
+    with_native = build_codex_responses_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=messages,
+        tools=[native],
+        context_tools=[GET_MEMORIES_TOOL],
+        request_id="r-native",
+    )
+    assert [tool["name"] for tool in with_native["tools"]] == ["send_message_to_user"]
 
 
 # ── planner context real roles ──────────────────────────────────────────────
@@ -946,6 +971,55 @@ async def test_planner_activity_compresses_uncompressed_hit_and_caches_it():
     assert [m["role"] for m in captured["messages"]] == ["system", "user", "assistant", "tool"]
 
 
+async def test_retrieval_timeout_keeps_ready_hits_and_releases_compression_lease():
+    import providers.planner_memory.retrieval as retrieval
+    from providers.planner_memory import RetrievalConfig, build_transcript
+
+    cached = _cand("ready", GOAL, trgm=0.95, cp=_hit().critical_path.model_dump())
+    hanging = _cand("hanging", f"{GOAL} curbside", trgm=0.9)
+    transcript = build_transcript(
+        root_agent_id="hanging",
+        goal=hanging["goal"],
+        messages=_messages(),
+        passed=True,
+        root_status="COMPLETED",
+    )
+    released: list[tuple[str, str]] = []
+
+    async def fake_search(*args, **kwargs):
+        return [cached, hanging]
+
+    async def fake_claim(id_: str, **kwargs):
+        return {"claimed": True, "lease_id": f"lease-{id_}"}
+
+    async def fake_release(id_: str, *, lease_id: str):
+        released.append((id_, lease_id))
+        return True
+
+    async def hanging_compressor(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    config = RetrievalConfig(min_score=0.0, relative_floor=0.0, k=3, max_compressions=1)
+    with (
+        patch.object(retrieval.backend, "search_memories", new=fake_search),
+        patch.object(retrieval.backend, "claim_compression", new=fake_claim),
+        patch.object(retrieval.backend, "release_compression", new=fake_release),
+        patch("providers.planner_memory.transcript.load_bundle_transcript", return_value=transcript),
+        patch.object(retrieval, "compress_transcript", new=hanging_compressor),
+        patch.object(retrieval, "COMPRESSION_BATCH_TIMEOUT_SECONDS", 0.01),
+    ):
+        result = await retrieval.retrieve_memories(
+            GOAL,
+            user_id="user-a",
+            exclude_root_agent_id="current",
+            config=config,
+        )
+
+    assert [hit.id for hit in result.hits] == ["ready"]
+    assert result.skipped_uncompressed == 1
+    assert released == [("hanging", "lease-hanging")]
+
+
 async def test_retrieval_never_raises_when_backend_is_down():
     from providers.planner_memory import retrieve_memories
 
@@ -1009,8 +1083,8 @@ async def run_all_tests():
     )
     r.record("fork_flattens_without_tools", test_fork_flattens_to_text_when_no_tools_are_declared)
     r.record("planner_context_tools_constant", test_planner_context_tools_are_constant_and_declared_only)
-    r.record("anthropic_body_context_tools", test_anthropic_body_declares_context_tools_without_making_them_callable)
-    r.record("responses_body_context_tools", test_responses_body_declares_context_tools_with_choice_none)
+    r.record("anthropic_body_context_tools", test_anthropic_body_keeps_context_tools_historical_only)
+    r.record("responses_body_context_tools", test_responses_body_keeps_context_tools_historical_only)
     r.record("planner_messages_real_tool_roles", test_build_planner_messages_keeps_real_tool_roles)
     await r.record_async("activity_forks_with_hits", test_planner_activity_forks_get_memories_when_enabled_with_hits)
     await r.record_async("activity_memory_off_unchanged", test_planner_activity_without_memory_sends_unchanged_context)
@@ -1019,6 +1093,10 @@ async def run_all_tests():
     r.record("completed_only_scoring", test_search_requests_completed_runs_only_and_scoring_drops_failures)
     await r.record_async(
         "activity_compresses_and_caches", test_planner_activity_compresses_uncompressed_hit_and_caches_it
+    )
+    await r.record_async(
+        "retrieval_timeout_releases_lease",
+        test_retrieval_timeout_keeps_ready_hits_and_releases_compression_lease,
     )
     await r.record_async("retrieval_backend_down_safe", test_retrieval_never_raises_when_backend_is_down)
     r.record("no_unmocked_outbound_calls", test_no_unmocked_outbound_calls)

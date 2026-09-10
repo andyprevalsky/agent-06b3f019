@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+/* eslint-disable max-lines */
 /**
  * Planner memory blackbox: the history table is written by archive finalize
  * (never drifts from R2), searchable by goal with the visibility rules, and
@@ -8,6 +9,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
+import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
 import { tokenizePlannerMemoryGoal } from '../../providers/plannerMemoryStore';
 import { readArchivedArtifact } from '../../providers/traceArchive';
@@ -66,6 +68,17 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
 }
 
 const internalHeaders = { 'X-API-Key': API_KEY };
+
+function userToken(userId: string): string {
+  const secret = process.env.SUPABASE_JWT_SECRET;
+  const supabaseUrl = process.env.SUPABASE_URL;
+  assert(secret && supabaseUrl, 'SUPABASE_JWT_SECRET and SUPABASE_URL are required');
+  return jwt.sign({ sub: userId }, secret, {
+    algorithm: 'HS256',
+    issuer: `${supabaseUrl}/auth/v1`,
+    expiresIn: '5m',
+  });
+}
 
 async function seedAgent(userId: string, goal: string, status: string): Promise<string> {
   const id = randomUUID();
@@ -171,6 +184,7 @@ async function search(
         goal: string;
         critical_path: unknown;
         lexical_coverage: number;
+        fts_rank: number;
         trgm_similarity: number;
       }>;
     }
@@ -212,6 +226,16 @@ export async function runTests(): Promise<boolean> {
       await runTest(
         're-finalizing the same root is idempotent (one row, outcome updated)',
         async () => {
+          await prisma.plannerMemory.update({
+            where: { id: s.benchmarkRootId },
+            data: {
+              criticalPath: { outcome: 'passed', terminal_condition: 'stale' },
+              compressorVersion: 'stale-version',
+              compressedAt: new Date(),
+              compressionLeaseId: randomUUID(),
+              compressionLeaseUntil: new Date(Date.now() + 60_000),
+            },
+          });
           await finalize(s.benchmarkRootId, {
             benchmarkTaskName: TASK,
             benchmarkPassed: false,
@@ -221,6 +245,11 @@ export async function runTests(): Promise<boolean> {
           const rows = await prisma.plannerMemory.findMany({ where: { id: s.benchmarkRootId } });
           assert.strictEqual(rows.length, 1);
           assert.strictEqual(rows[0].passed, false);
+          assert.strictEqual(rows[0].criticalPath, null);
+          assert.strictEqual(rows[0].compressorVersion, null);
+          assert.strictEqual(rows[0].compressedAt, null);
+          assert.strictEqual(rows[0].compressionLeaseId, null);
+          assert.strictEqual(rows[0].compressionLeaseUntil, null);
           // Restore the passing verdict for the retrieval tests below.
           await finalize(s.benchmarkRootId, {
             benchmarkTaskName: TASK,
@@ -332,6 +361,7 @@ export async function runTests(): Promise<boolean> {
             seeded.trgm_similarity >= maxTrgm - 1e-9,
             'exact goal text must have the top trigram similarity'
           );
+          assert(seeded.fts_rank > 0, 'a normal full-text match must expose its real rank');
           assert(
             hits.slice(0, 3).some((c) => c.id === s.benchmarkRootId),
             'seeded goal must rank in the top 3'
@@ -344,6 +374,32 @@ export async function runTests(): Promise<boolean> {
           assert(!excluded.some((c) => c.id === s.benchmarkRootId));
           const nothing = await search({ goal: `zqxjv wplmk ${randomUUID()}`, user_id: s.userId });
           assert.strictEqual(nothing.filter((c) => c.id === s.benchmarkRootId).length, 0);
+        }
+      )
+    );
+
+    results.push(
+      await runTest(
+        'all-English-stopword FTS queries retain lexical-overlap candidates',
+        async () => {
+          const id = randomUUID();
+          try {
+            await prisma.plannerMemory.create({
+              data: {
+                id,
+                goal: 'against',
+                goalTokens: tokenizePlannerMemoryGoal('against'),
+                benchmarkTaskName: TASK,
+                rootStatus: 'COMPLETED',
+                passed: true,
+                worldModelMode: 'real',
+              },
+            });
+            const hits = await search({ goal: 'against', user_id: s.userId });
+            assert(hits.some((candidate) => candidate.id === id));
+          } finally {
+            await prisma.plannerMemory.deleteMany({ where: { id } });
+          }
         }
       )
     );
@@ -503,18 +559,41 @@ export async function runTests(): Promise<boolean> {
     );
 
     results.push(
-      await runTest('writes are internal-only; unauthenticated calls are rejected', async () => {
-        const noAuth = await request(`${BASE_URL}/api/planner-memory/search`, {
-          method: 'POST',
-          body: JSON.stringify({ goal: GOAL_BENCH }),
-        });
-        assert.strictEqual(noAuth.status, 401);
-        const badBody = await request(`${BASE_URL}/api/planner-memory/search`, {
-          method: 'POST',
-          headers: internalHeaders,
-          body: JSON.stringify({ goal: '' }),
-        });
-        assert.strictEqual(badBody.status, 400);
+      await runTest(
+        'stats/writes are internal-only; unauthenticated calls are rejected',
+        async () => {
+          const noAuth = await request(`${BASE_URL}/api/planner-memory/search`, {
+            method: 'POST',
+            body: JSON.stringify({ goal: GOAL_BENCH }),
+          });
+          assert.strictEqual(noAuth.status, 401);
+          const badBody = await request(`${BASE_URL}/api/planner-memory/search`, {
+            method: 'POST',
+            headers: internalHeaders,
+            body: JSON.stringify({ goal: '' }),
+          });
+          assert.strictEqual(badBody.status, 400);
+          const userStats = await request(`${BASE_URL}/api/planner-memory/stats`, {
+            headers: { Authorization: `Bearer ${userToken(s.userId)}` },
+          });
+          assert.strictEqual(userStats.status, 403);
+        }
+      )
+    );
+
+    results.push(
+      await runTest('fixture upsert rejects scalar and array critical paths', async () => {
+        for (const criticalPath of ['not-an-object', ['also', 'not', 'an', 'object']]) {
+          const invalid = await request(`${BASE_URL}/api/planner-memory/${randomUUID()}`, {
+            method: 'PUT',
+            headers: internalHeaders,
+            body: JSON.stringify({
+              goal: `Invalid critical path ${RUN_ID}`,
+              critical_path: criticalPath,
+            }),
+          });
+          assert.strictEqual(invalid.status, 400);
+        }
       })
     );
 

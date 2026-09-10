@@ -18,6 +18,7 @@ import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle'
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
+  applyMemoryDefault,
   applyMemoryInheritance,
   applyWorldModelModeInheritance,
   assertWorldModelModeAccess,
@@ -187,6 +188,7 @@ export async function createAgent(
   applyFastModeDefault(body, userId);
 
   const benchmarkFlag = await resolveSubAgentBenchmarkFlag(body, userId, isBenchmark);
+  applyMemoryDefault(body, benchmarkFlag);
   disableFastModeForWorldModel(body);
   assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);

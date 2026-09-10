@@ -91,7 +91,12 @@ def read_rows(concurrency: int = 64) -> tuple[list[dict[str, Any]], Counter]:
 
 def write_cache(rows: list[dict[str, Any]]) -> Path:
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CACHE_PATH.open("w", encoding="utf-8") as handle:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(CACHE_PATH, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     return CACHE_PATH
@@ -164,7 +169,10 @@ def main() -> int:
             rows = rows[: args.limit]
         outcome = asyncio.run(upsert(rows, backend=args.backend.rstrip("/"), api_key=api_key))
         print(json.dumps({"rows": len(rows), "outcome": dict(outcome)}, indent=1))
-        return 0 if outcome.get("ok") == len(rows) else 1
+        succeeded = outcome.get("ok", 0) == len(rows)
+        if succeeded and args.limit == 0:
+            CACHE_PATH.unlink(missing_ok=True)
+        return 0 if succeeded else 1
     parser.print_help()
     return 2
 

@@ -64,12 +64,11 @@ _PLANNER_CONTEXT_TOOLS: list[dict[str, Any]] | None = None
 
 
 def planner_context_tools() -> list[dict[str, Any]]:
-    """Constant declared-only toolset for planner calls.
+    """Constant history-only toolset for planner calls.
 
-    The plan-phase tools (same schemas the plan loop declares, so real tool
-    history in the pre-plan context stays native and the tools prefix is
-    byte-identical for every planner call) plus ``get_memories``. tool_choice is forced off by
-    the provider builders; the planner only ever emits its structured plan.
+    These names/schemas describe native history that can appear in the planner
+    context. Provider request builders deliberately do not add them to the
+    callable tool set; the planner only emits its structured plan.
     """
     global _PLANNER_CONTEXT_TOOLS
     if _PLANNER_CONTEXT_TOOLS is None:

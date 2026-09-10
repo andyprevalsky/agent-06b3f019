@@ -25,6 +25,7 @@ import {
 import { assertExistingDescendantRequestMatches } from './agentDescendantStartService';
 import {
   applyFastModeDefault,
+  applyMemoryDefault,
   assertWorldModelModeAccess,
   disableFastModeForWorldModel,
 } from './agentExecutionMode';
@@ -137,7 +138,6 @@ async function startBatchWorkflow(
         ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
         : {}),
       ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-      ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
       ...(body.memory_enabled !== undefined ? { memoryEnabled: body.memory_enabled } : {}),
       rejectDuplicateWorkflowId: true,
     },
@@ -254,6 +254,9 @@ async function resolveAllMetadata(
 export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<BatchAgentResult[]> {
   const { bodies, userId, isInternal, clientIP } = args;
   const verifierType = 'FLOAT_LLM_JUDGE';
+  const memoryOmittedOnRequest = new Set(
+    bodies.filter((body) => body.memory_enabled === undefined).map((body) => body.agent_id!)
+  );
 
   if (isInternal) {
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
@@ -262,6 +265,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
   for (const body of bodies) {
+    applyMemoryDefault(body, inheritsBenchmarkFromBatchParent(body, parentById));
     disableFastModeForWorldModel(body);
     assertWorldModelModeAccess(body, userId);
   }
@@ -279,7 +283,16 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   const existingById = new Map(existing.map((a) => [a.id, a]));
   for (const body of bodies) {
     const stored = existingById.get(body.agent_id!);
-    if (stored !== undefined) assertExistingDescendantRequestMatches(body, stored);
+    if (stored !== undefined) {
+      // Parent inheritance/defaulting above is for new rows. An idempotent
+      // retry that omitted this immutable field must recover the durable child
+      // value before collision validation, even when the parent's value later
+      // changed or differs from the child.
+      if (memoryOmittedOnRequest.has(body.agent_id!)) {
+        body.memory_enabled = stored.memoryEnabled;
+      }
+      assertExistingDescendantRequestMatches(body, stored);
+    }
   }
 
   const newBodies = bodies.filter((b) => !existingById.has(b.agent_id!));

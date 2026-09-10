@@ -45,6 +45,7 @@ export function assertExistingDescendantRequestMatches(
       body.fast_mode_cache_enabled ?? existing.fastModeCacheEnabled,
       existing.fastModeCacheEnabled,
     ],
+    ['memory_enabled', body.memory_enabled ?? existing.memoryEnabled, existing.memoryEnabled],
     ['world_model_mode', body.world_model_mode ?? 'real', existing.worldModelMode],
   ];
   const mismatch = fields.find(
@@ -116,6 +117,9 @@ export async function resumeExistingSubAgent(
   if (existing === undefined) return null;
   if (body.fast_mode_cache_enabled === undefined) {
     body.fast_mode_cache_enabled = existing.fastModeCacheEnabled;
+  }
+  if (body.memory_enabled === undefined) {
+    body.memory_enabled = existing.memoryEnabled;
   }
   assertExistingDescendantRequestMatches(body, existing);
   const workflowId = existing.temporalWorkflowStartPending
