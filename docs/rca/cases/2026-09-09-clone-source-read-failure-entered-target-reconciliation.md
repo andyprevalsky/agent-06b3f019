@@ -13,6 +13,8 @@ symptoms:
   - "ERROR: services evidence has no exact isolated stopped database identity"
   - "ERROR: durable backend evidence contains no exact provider session identity"
   - "ERROR: exact psql command is unavailable"
+  - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
+  - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
 tags:
   - cloudbench
   - fly-io
@@ -48,6 +50,9 @@ sources:
   - commit 59a52e554
   - commit 7af3750c2
   - commit c400e3600
+  - capability stability proof capability-stability-20260910120311-2848604
+  - commit b9979c5af
+  - commit 117328730
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -1035,6 +1040,80 @@ At 10,000 agents this adds one O(1) local state-file read per shutdown request.
 It adds no provider inventory, polling loop, shared row, lock, channel,
 subscription, or cross-agent fan-in.
 
+## Fourteenth recurrence on 2026-09-10
+
+Capability-stability proof
+`capability-stability-20260910120311-2848604` reset at slice 0 after Fly created
+exact volume `vol_v3g193x1j2gyezx4` for `agent-payment-abandonment` but could not
+launch its Machine because the region had insufficient resources. Six exact
+destroy calls at 12:15:22, 12:15:26, 12:15:30, 12:15:34, 12:15:38, and
+12:15:42 each exited 0 with `Destroyed volume ID`, while six exact-ID lifecycle
+reads still returned the same valid provider object. The fleet provisioned 9/10
+and classified the terminated slice as infrastructure with `passed_slices=0`.
+
+The critical path was:
+
+provider returns a volume-only failed clone → controller durably records the
+exact volume and clone name → exact destroy is accepted → exact lifecycle
+remains visible during bounded confirmation → `reap_volume` returns generic
+failure → `clone_machine_target` aborts instead of spending attempt 2.
+
+The first bad boundary was `scripts/run-bench-fleet` `reap_volume`: its binary
+return contract represented authoritative absence as success and represented
+both accepted-but-pending destruction and rejected/ambiguous destruction as the
+same failure. `clone_machine_target` therefore could not continue safely even
+though exact ownership was already durable and every provider mutation and
+lifecycle response was unambiguous. Extending the confirmation timeout would
+only move the race and was not necessary.
+
+The deterministic pre-fix command was
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_clone_retries_after_accepted_destroy_outlives_confirmation_window`.
+It failed because the production function exited 1 after six accepted destroy
+receipts, the shell fixture exited 90, and clone attempt 2 never ran. The
+unchanged regression now passes with `1 passed`: it observes six accepted
+destroy calls, six still-visible exact lifecycle reads, a distinct status 75,
+and a successful second clone attempt. It also proves the first attempt's exact
+volume/name owner remains present and is never marked
+`destroyed-verified-absent`; a seventh later exact read supplies the
+authoritative not-found receipt without name or global inventory reconciliation.
+
+`reap_volume` now owns a three-outcome contract: 0 only for authoritative
+exact-ID absence, 75 only when every bounded destroy was accepted and every
+exact lifecycle response remained valid, and 1 for any rejected or ambiguous
+destroy/lifecycle response. All teardown callers continue to fail closed on
+both nonzero outcomes. Only `clone_machine_target` consumes 75 as permission to
+spend the next existing bounded allocation attempt, while retaining the prior
+attempt's exact owner. Status 0 alone retires audit, registry, and name-ledger
+ownership. No benchmark definition, timeout, concurrency, or provider-wide
+inventory behavior changed.
+
+The deepest owned cause is a lifecycle-contract inconsistency: one binary result
+collapsed provider mutation acceptance, provider convergence, and authoritative
+absence even though callers require three different decisions. Reusing one
+classification in `reap_volume` is the narrowest unification; deleting a state
+is not coherent because accepted pending destruction and ambiguous rejection
+have different safe retry semantics while neither permits ownership retirement.
+The sibling failure prevented is any provider lifecycle that accepts an
+asynchronous exact-resource destroy but remains visible beyond a bounded
+confirmation window.
+
+Post-fix instrumentation records `destroyAccepted=1`,
+`destroyAmbiguous=0`, and `lifecycleAmbiguous=0`, followed by
+`reapStatus=75` at clone attempt 1. Rejected, malformed, wrong-ID, and unknown
+lifecycle fixtures still return 1. The focused lifecycle set passes all 9
+tests; the complete dependency-sync suite passes all 287 tests; and the full
+cloudbench/fleet lifecycle shell set, fleet canary, stability-proof,
+orphan-reaper, concurrency, environment, token, autoscale, fetch, app-lock,
+seed, restore, and status-service suites pass.
+
+At 10,000 agents, each provisioning owner can retain at most the existing five
+attempt-keyed volume records and performs at most the existing six exact-ID
+destroy/lifecycle pairs per failed attempt. There is no unbounded wait, global
+inventory scan, shared row, lock, channel, subscription, or cross-agent fan-in;
+cleanup remains O(1) bounded per exact owner. The exact live stability streak
+still must pass before this recurrence's temporary instrumentation is removed.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1130,6 +1209,15 @@ failure to be fixed, an unchanged failing-before/passing-after regression,
 full relevant suites, no timeout or benchmark-definition changes, and terminal
 semantics that remain bounded and exact-owner scoped.
 
+For the fourteenth recurrence, the user required accepted asynchronous destroy
+to remain distinct from rejected or ambiguous cleanup without an arbitrary
+longer wait. They required durable exact ownership until authoritative absence,
+bounded clone attempts to continue only from unambiguous acceptance, a
+failing-before/passing-after local regression, full lifecycle suites, preserved
+10,000-agent keyed behavior, and no benchmark task, timeout, or concurrency
+change. They retained ownership of the exact live stability-proof rerun and
+allowed instrumentation to remain until it passes.
+
 ## Reusable lesson
 
-Classify resource-creation failure phase once before reconciliation, and use that same source-aware disposition for both control flow and durable ownership retirement.
+Model accepted-pending, rejected-or-ambiguous, and authoritatively-absent provider lifecycles as distinct states, and retire exact ownership only from authoritative absence.
