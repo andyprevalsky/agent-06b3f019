@@ -97,6 +97,7 @@ _POST_RESULT_IDLE_ACTIONS = frozenset(
         "read_browser_state",
         "read_network_requests",
         "read_logs",
+        "recover_from_challenge",
         "noop",
         "sleep",
         "move",
@@ -110,6 +111,7 @@ _FORM_RESULT_VERDICTS = (
     "form blocked",
     "pow_not_satisfied",
     "human detected",
+    "form submission allowed",
 )
 # Actions that leave the page where the score/verdict was observed.
 _NAVIGATION_MARKERS = (

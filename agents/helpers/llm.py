@@ -5087,12 +5087,27 @@ def _completed_child_task_structured_response(
     if not context or not response_schema:
         return None
 
+    synthetic_completion_seen = False
     for message in reversed(context):
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata")
         if not isinstance(metadata, dict):
             continue
+        tool_calls = metadata.get("tool_calls")
+        if isinstance(tool_calls, list) and any(
+            isinstance(tool_call, dict)
+            and tool_call.get("tool") == "attempt_completion"
+            and str(tool_call.get("tool_call_id") or "").startswith(
+                "completed-child-attempt-completion-"
+            )
+            for tool_call in tool_calls
+        ):
+            # A rejected synthetic completion must be one-shot. Continue
+            # scanning so a newer completed child (encountered before this
+            # marker in reverse order) can still trigger its own handoff, but
+            # do not synthesize the same older child again.
+            synthetic_completion_seen = True
         tool_name = metadata.get("toolName")
         if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
             continue
@@ -5106,6 +5121,8 @@ def _completed_child_task_structured_response(
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
             structured_response = structured_response["output"]
         if _structured_response_satisfies_schema(structured_response, response_schema):
+            if synthetic_completion_seen:
+                return None
             return structured_response
 
     return None

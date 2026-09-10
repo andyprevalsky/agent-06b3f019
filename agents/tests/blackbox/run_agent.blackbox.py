@@ -1739,6 +1739,57 @@ async def test_completed_code_child_dispatches_parent_completion_without_llm():
     assert [item["tool_name"] for item in executed] == ["attempt_completion"]
 
 
+async def test_rejected_completed_child_handoff_returns_control_to_llm():
+    """A rejected synthetic completion is not replayed forever."""
+    response_schema = {
+        "fields": [
+            {"name": "purchase_completed", "type": "bool", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    child_result = {
+        "purchase_completed": True,
+        "order_confirmation_id": "111-2222222-3333333",
+    }
+    context = [
+        {"role": "USER", "text": "Buy the item", "timestamp": "2026-09-10T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-09-10T00:00:01Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": child_result,
+            },
+        },
+    ]
+    llm_calls = 0
+
+    def corrective_llm_turn():
+        nonlocal llm_calls
+        llm_calls += 1
+        return [{"tool": "web_search", "query": "correct the rejected handoff"}]
+
+    result, _, executed = await _run_single_iteration(
+        [],
+        [],
+        skip_verification=False,
+        initial_context=context,
+        response_schema=response_schema,
+        verifier_score=0.4,
+        verifier_reasoning="The parent still needs corrective work.",
+        verifier_structured_response=child_result,
+        llm_tool_calls_factory=corrective_llm_turn,
+        max_iterations=2,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert llm_calls == 1
+    assert [item["tool_name"] for item in executed] == ["attempt_completion", "web_search"]
+
+
 async def test_verifier_usage_preserves_cache_sequence_identity():
     usage_calls = []
 
@@ -2331,6 +2382,10 @@ async def run_all_tests():
     await r.record_async(
         "completed_code_child_dispatches_parent_completion_without_llm",
         test_completed_code_child_dispatches_parent_completion_without_llm,
+    )
+    await r.record_async(
+        "rejected_completed_child_handoff_returns_control_to_llm",
+        test_rejected_completed_child_handoff_returns_control_to_llm,
     )
     await r.record_async(
         "pause_after_forced_completion_llm_still_dispatches_attempt_completion",
