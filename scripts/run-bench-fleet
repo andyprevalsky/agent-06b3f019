@@ -1675,13 +1675,24 @@ print(volume_ids[0])
 }
 
 machine_status_exact_read() {  # <machine-id>; 0=exact status, 1=exactly absent, 2=unsafe read
-    local id="$1" output status
+    local id="$1" output status has_equals_rows=0 has_table_rows=0
     case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
     if output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
-        printf '%s\n' "$output"
-        return 0
+        status=0
     else
         status=$?
+    fi
+    case "$output" in *" = "*) has_equals_rows=1 ;; esac
+    case "$output" in *" │ "*) has_table_rows=1 ;; esac
+    # region agent log
+    _agent_stale_owner_debug_log H13 scripts/run-bench-fleet:machine_status_exact_read \
+        "captured exact Machine status transport and render contract" \
+        machineId "$id" providerStatus "$status" outputBytes "${#output}" \
+        hasEqualsRows "$has_equals_rows" hasTableRows "$has_table_rows"
+    # endregion
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$output"
+        return 0
     fi
     case "$output" in
         *"machine $id was not found in app"*|*"failed to get VM $id: machine not found"*)

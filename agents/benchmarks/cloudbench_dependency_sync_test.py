@@ -8026,22 +8026,22 @@ State: started
 HostStatus: ok
 
 VM
-  ID            = deadbeef000001
-  Instance ID   = fixture-alpha
-  State         = started
-  Image         = fixture
-  Name          = cloudbench-owned-alpha
-  Private IP    = fdaa::101
-  Region        = iad
-  Process Group =
-  CPU Kind      = shared
-  vCPUs         = 2
-  Memory        = 4096
-  Created       = fixture
-  Updated       = fixture
-  Entrypoint    =
-  Command       =
-  Volume        = vol_owned_alpha
+ ID            │ deadbeef000001
+ Instance ID   │ fixture-alpha
+ State         │ started
+ Image         │ fixture
+ Name          │ cloudbench-owned-alpha
+ Private IP    │ fdaa::101
+ Region        │ iad
+ Process Group │
+ CPU Kind      │ shared
+ vCPUs         │ 2
+ Memory        │ 4096
+ Created       │ fixture
+ Updated       │ fixture
+ Entrypoint    │
+ Command       │
+ Volume        │ vol_owned_alpha
 STATUS
       fi
       ;;
@@ -8056,22 +8056,22 @@ State: started
 HostStatus: ok
 
 VM
-  ID            = deadbeef000002
-  Instance ID   = fixture-beta
-  State         = started
-  Image         = fixture
-  Name          = cloudbench-owned-beta
-  Private IP    = fdaa::102
-  Region        = iad
-  Process Group =
-  CPU Kind      = shared
-  vCPUs         = 2
-  Memory        = 4096
-  Created       = fixture
-  Updated       = fixture
-  Entrypoint    =
-  Command       =
-  Volume        = vol_owned_beta
+ ID            │ deadbeef000002
+ Instance ID   │ fixture-beta
+ State         │ started
+ Image         │ fixture
+ Name          │ cloudbench-owned-beta
+ Private IP    │ fdaa::102
+ Region        │ iad
+ Process Group │
+ CPU Kind      │ shared
+ vCPUs         │ 2
+ Memory        │ 4096
+ Created       │ fixture
+ Updated       │ fixture
+ Entrypoint    │
+ Command       │
+ Volume        │ vol_owned_beta
 STATUS
       fi
       ;;
