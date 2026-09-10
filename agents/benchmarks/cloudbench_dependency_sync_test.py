@@ -10795,6 +10795,81 @@ def test_exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep() -> Non
     assert "resolve_exact_recovery_warm_identity" in recovery_entrypoint
 
 
+def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
+    tmp_path: Path,
+) -> None:
+    """Worker clones make primary Machines intermediate graph nodes, not warm roots."""
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
+    owner = "5" * 32
+    app = "bench-app"
+    warm_id = "feedface000001"
+    primary_id = "deadbeef000001"
+    worker_id = "deadbeef000002"
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    (registry / "clones").mkdir(parents=True)
+    audit_root = tmp_path / "audits"
+    audit = audit_root / owner
+    for directory in (audit / "fresh", audit / "expected-fresh", audit / "by-machine-id"):
+        directory.mkdir(parents=True)
+    (registry / "meta").write_text(
+        "version=2\n"
+        f"app={app}\n"
+        f"fleet_owner_token={owner}\n"
+        f"audit_dir={audit}\n"
+    )
+    (audit / "meta").write_text(
+        f"fleet_owner_token={owner}\n"
+        f"app={app}\n"
+    )
+    records = (
+        ("cloudbench-primary", warm_id, primary_id, "vol_primary"),
+        ("cloudbench-worker", primary_id, worker_id, "vol_worker"),
+    )
+    for clone_name, source_id, machine_id, volume_id in records:
+        (audit / "expected-fresh" / clone_name).write_text(
+            f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
+        )
+        (audit / "fresh" / clone_name).write_text(
+            "version=1\n"
+            f"fleet_owner_token={owner}\n"
+            "run_id=fixture-run\n"
+            f"app={app}\n"
+            f"clone_name={clone_name}\n"
+            "source=fresh-clone\n"
+            f"source_machine_id={source_id}\n"
+            f"machine_id={machine_id}\n"
+            f"volume_id={volume_id}\n"
+            "disposition=owned\n"
+        )
+
+    script = f"""set -uo pipefail
+APP={app}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+REGISTRY={shlex.quote(str(registry))}
+machine_volume_id() {{
+  [ "$1" = {warm_id} ] || {{
+    echo "FAIL: recovery selected non-root source $1" >&2
+    return 91
+  }}
+  printf 'vol_warm\n'
+}}
+{resolver}
+resolve_exact_recovery_warm_identity "$REGISTRY"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.stdout.strip() == f"{warm_id} vol_warm"
+
+
 def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     tmp_path: Path,
 ) -> None:
