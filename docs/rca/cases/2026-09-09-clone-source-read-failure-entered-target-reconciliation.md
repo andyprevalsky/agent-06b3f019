@@ -35,6 +35,9 @@ sources:
   - commit 4333f47dd
   - commit 74c3e8006
   - commit de67d9499
+  - commit f6609222b
+  - commit fb887cc1f
+  - commit d8d17dd2d
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -759,6 +762,83 @@ five bounded reads through that guest's isolated proxy, and one atomic local
 seal per file. It adds no app-wide inventory, cross-owner session read, shared
 poller, row, lock, channel, subscription, or fan-in.
 
+## Tenth recurrence on 2026-09-10
+
+The v6 rerun safely recovered four quiesced guests with exact provider IDs but
+left five guests quarantined. H23 proved that Machines `2862102a194e38`,
+`865463eb495118`, and `e82e291c433d58` still had a token-owned running driver
+and four descendants after authenticated shutdown was requested. H20 proved
+that `parallel-tool-calls` and `polar-bu-066` were quiesced with complete sealed
+run/backend evidence, but the provider-manifest helper rejected both because
+their logs contained no exact provider session ID. H22 recorded
+`guestCount=9,recoveredCount=4,status=1`; H9 and H10 were absent, so no owner
+reaper ran.
+
+The focused pre-fix command was:
+
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
+-k 'active_legacy_guest_seals_sessions or
+quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt or
+zero_allocated_receipt_rejects'`.
+
+It exited 1 with two failures. The active fixture stopped at `exact guest run is
+still active ... retaining quarantine`, and the quiesced fixture failed because
+`prove-zero-allocation` did not exist. The incomplete/nonzero-evidence case
+already passed, confirming that fail-closed rejection was healthy.
+
+The first bad boundary was `cloudbench_recover_guest_cleanup_receipts`: it had
+one terminal transition for a quiesced, nonempty provider-session manifest, but
+no terminal transition for either an immutable active legacy guest or a
+complete authoritative zero-allocation set. H24 was confirmed because every
+active H23 state immediately selected quarantine without sealing provider IDs
+or fencing the Machine. H25 was confirmed because an empty provider manifest
+could not produce any positive receipt. H26 was confirmed from both retained
+logs: each had one server start, one terminal SIGTERM, an exact root agent, zero
+provider-allocation events, and zero `BrowserSession` mutations; the isolated
+database identity in `services.json` supplies an exact root/tree query boundary.
+H27 was rejected: no provider-wide inventory is needed or safe.
+
+This is the same lifecycle-contract recurrence: terminal recovery state was
+represented by one provider-cleanup receipt shape even though the producer can
+end in three authoritative states—runner clean, exact nonempty allocation, or
+exact zero allocation—and an active immutable producer first requires a
+Machine fence.
+
+Active recovery now seals and fsyncs the exact backend-derived provider IDs
+before any stop, stops only the owner-recorded Machine ID, polls only that exact
+ID, and seals a status proof containing the matching Machine ID, clone name,
+and `stopped` state. Provider cleanup accepts only that pre-stop manifest and
+binds its receipt to the stopped-proof hash. A partially completed rerun accepts
+a stopped Machine only with the same sealed manifest, raw status, and proof.
+No provider call can occur before the stopped proof exists.
+
+Quiesced zero recovery validates one complete backend lifecycle, one-task root
+identity, zero provider-allocation events, zero `BrowserSession` mutations, and
+the quiescence hashes. On the guest it reads the exact isolated database name
+from `services.json`, checks only that database in `pg_database`, and, when the
+database exists, queries only the recursive exact root tree and
+`BrowserSession.agentId` membership. A live exact tree with zero sessions is
+soft-deleted idempotently and queried again; exact database absence, root
+absence, an already deleted root, or verified exact-tree deletion produces an
+atomic hashed `provider-zero-allocated` receipt. Any incomplete lifecycle,
+mismatched hash, nonzero event/session set, ambiguous database result, or
+failed exact query remains quarantined. The status service authenticates and
+bounds the new proof path.
+
+The unchanged focused reproduction now exits 0 with `3 passed`. The complete
+provider-free dependency suite passes all 277 tests, the authenticated
+status-service suite passes, the fleet infra-canary structural suite passes,
+Python and Bash syntax checks pass, and the complete multi-workstream
+lifecycle suite exits 0. No real provider cleanup ran during verification, and
+no benchmark task, timeout, concurrency, prompt, evaluator, or provider
+behavior changed.
+
+At 10,000 agents, explicit recovery remains O(resources in one exact owner):
+one bounded evidence read and exact stop/status stream per active guest, or one
+exact database/root/tree query stream per quiesced zero guest. It performs no
+provider inventory, app-wide Machine list, cross-owner database/session scan,
+shared poller, lock, row, channel, subscription, or global fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -825,6 +905,16 @@ active-versus-quiescent process evidence. They required valid private clean
 receipts or explicit quarantine for `parallel-tool-calls` and `polar-bu-066`,
 an actual-layout regression, fail-closed exact-only cleanup, no fabricated
 receipts, and no task, timeout, or concurrency changes.
+
+For the tenth recurrence, the user required active legacy guests to seal exact
+session evidence before exact-ID Machine stop, prove that same ID stopped before
+cleanup, and persist exact provider receipts. For zero-ID quiesced guests, they
+required complete lifecycle plus exact root-bound database evidence, idempotent
+exact-root deletion when present, and a positive hashed zero-allocation receipt.
+They prohibited provider-wide listing, task-name inference, cleanup while a
+guest could still allocate, weakened incomplete-evidence quarantine, and any
+benchmark task, timeout, or concurrency change. They retained ownership of the
+real cleanup rerun.
 
 ## Reusable lesson
 
