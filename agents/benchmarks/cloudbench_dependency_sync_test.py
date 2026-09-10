@@ -9172,36 +9172,25 @@ def test_failed_runner_receipt_enters_exact_cleanup_without_authorizing_ack(
     output.mkdir()
     exact_helper = tmp_path / "exact-helper"
     exact_helper.write_text(
-        """#!/usr/bin/env bash
-set -eu
-command="$1"
-shift
-printf '%s\\n' "$command" >> "$CALLS"
-case "$command" in
-  classify-runner-receipt)
-    printf 'failed\\n'
-    ;;
-  recover-runner-receipt)
-    touch "$UNEXPECTED_ACK"
-    exit 91
-    ;;
-  cleanup-provider-sessions)
-    receipt=""
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --receipt) receipt="$2"; shift 2 ;;
-        *) shift ;;
-      esac
-    done
-    [ -n "$receipt" ]
-    printf '{}\\n' > "$receipt"
-    ;;
-  validate-recovery-receipt)
-    ;;
-  *)
-    exit 92
-    ;;
-esac
+        """#!/usr/bin/env python3
+from pathlib import Path
+import os
+import sys
+
+command = sys.argv[1]
+with open(os.environ["CALLS"], "a", encoding="utf-8") as handle:
+    handle.write(command + "\\n")
+if command == "classify-runner-receipt":
+    print("failed")
+elif command == "recover-runner-receipt":
+    Path(os.environ["UNEXPECTED_ACK"]).touch()
+    raise SystemExit(91)
+elif command == "cleanup-provider-sessions":
+    arguments = sys.argv[2:]
+    receipt = Path(arguments[arguments.index("--receipt") + 1])
+    receipt.write_text("{}\\n", encoding="utf-8")
+elif command != "validate-recovery-receipt":
+    raise SystemExit(92)
 """
     )
     exact_helper.chmod(0o755)
