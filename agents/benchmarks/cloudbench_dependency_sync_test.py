@@ -9479,7 +9479,9 @@ def test_system_postgres_services_manifest_omits_inactive_docker_identity(
 ) -> None:
     """System-Postgres manifests must not publish nominal Docker ownership."""
     stack = STACK_SCRIPT.read_text()
-    function = _extract_fleet_function(stack, "write_services_manifest() {")
+    start = stack.index("write_services_manifest() {")
+    end = stack.index("\n}\n\n# ── World Model Harness", start) + 3
+    function = stack[start:end]
     repo = tmp_path / "repo"
     repo.mkdir()
     context = repo / ".context" / "cloudbench"
