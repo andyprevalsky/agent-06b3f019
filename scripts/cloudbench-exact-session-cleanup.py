@@ -26,6 +26,7 @@ SAFE_AGENT = re.compile(
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 RUNNER_FIELDS = {"version", "token", "state"}
+RUNNER_STATES = {"pending", "clean", "failed"}
 SCHEMA = "cloudbench-guest-cleanup-recovery-v1"
 ZERO_QUERY_SCHEMA = "cloudbench-guest-zero-allocation-v1"
 
@@ -134,9 +135,9 @@ def parse_runner_status(payload: bytes, expected_token: str) -> dict[str, str]:
         set(parsed) != RUNNER_FIELDS
         or parsed["version"] != "1"
         or parsed["token"] != expected_token
-        or parsed["state"] != "clean"
+        or parsed["state"] not in RUNNER_STATES
     ):
-        raise CleanupEvidenceError("runner receipt does not prove exact clean state")
+        raise CleanupEvidenceError("runner receipt has invalid exact lifecycle state")
     return parsed
 
 
@@ -165,6 +166,8 @@ def recover_runner_receipt(args: argparse.Namespace) -> int:
     source = Path(args.source)
     payload = read_bytes(source, maximum=65_536)
     parsed = parse_runner_status(payload, args.guest_run_token)
+    if parsed["state"] != "clean":
+        raise CleanupEvidenceError("runner receipt does not prove exact clean state")
     value: dict[str, Any] = {
         "schema_version": SCHEMA,
         "version": 1,
@@ -178,6 +181,14 @@ def recover_runner_receipt(args: argparse.Namespace) -> int:
     receipt = Path(args.receipt)
     if not validate_existing(receipt, value):
         atomic_json(receipt, value)
+    return 0
+
+
+def classify_runner_receipt(args: argparse.Namespace) -> int:
+    identity(args)
+    payload = read_bytes(Path(args.source), maximum=65_536)
+    parsed = parse_runner_status(payload, args.guest_run_token)
+    print(parsed["state"])
     return 0
 
 
@@ -1229,6 +1240,10 @@ def parse_args() -> argparse.Namespace:
     runner.add_argument("--source", required=True)
     runner.add_argument("--receipt", required=True)
 
+    runner_state = subparsers.add_parser("classify-runner-receipt")
+    add_identity_arguments(runner_state)
+    runner_state.add_argument("--source", required=True)
+
     manifest = subparsers.add_parser("build-provider-manifest")
     add_provider_arguments(manifest)
 
@@ -1265,6 +1280,8 @@ def main() -> int:
     args = parse_args()
     if args.command == "recover-runner-receipt":
         return recover_runner_receipt(args)
+    if args.command == "classify-runner-receipt":
+        return classify_runner_receipt(args)
     if args.command == "build-provider-manifest":
         publish_manifest(args)
         return 0

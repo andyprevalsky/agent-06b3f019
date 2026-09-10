@@ -6145,6 +6145,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local state_driver state_descendants state_reason fetch_spec remote_path
     local local_path maximum status_code machine_status_evidence stopped_proof
     local machine_status_temporary stopped_verified remote_zero zero_evidence
+    local runner_lifecycle
     local -a identity_args validation_args
     owner="${owner##*/}"
     [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
@@ -6242,18 +6243,38 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         # endregion
         case "$runner_status_code" in
             200)
-                if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                        recover-runner-receipt "${identity_args[@]}" \
-                        --source "$runner_evidence" --receipt "$receipt" \
-                    && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                        validate-recovery-receipt "${validation_args[@]}" \
-                    && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
-                    recovered=$((recovered + 1))
+                runner_lifecycle="$(python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                    classify-runner-receipt "${identity_args[@]}" \
+                    --source "$runner_evidence")" || {
+                    echo "❌ [$bench] private runner cleanup receipt is malformed or mismatched" >&2
+                    failed=1
                     continue
-                fi
-                echo "❌ [$bench] private runner cleanup receipt is malformed or mismatched" >&2
-                failed=1
-                continue
+                }
+                case "$runner_lifecycle" in
+                    clean)
+                        if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                                recover-runner-receipt "${identity_args[@]}" \
+                                --source "$runner_evidence" --receipt "$receipt" \
+                            && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                                validate-recovery-receipt "${validation_args[@]}" \
+                            && cloudbench_publish_guest_shutdown_confirmation \
+                                "$output" "$RUN_ID"; then
+                            recovered=$((recovered + 1))
+                            continue
+                        fi
+                        echo "❌ [$bench] positive runner cleanup receipt is invalid" >&2
+                        failed=1
+                        continue
+                        ;;
+                    pending|failed)
+                        echo "🧭 [$bench] runner cleanup state is $runner_lifecycle; performing exact cleanup"
+                        ;;
+                    *)
+                        echo "❌ [$bench] private runner cleanup lifecycle is unsafe" >&2
+                        failed=1
+                        continue
+                        ;;
+                esac
                 ;;
             404)
                 ;;
