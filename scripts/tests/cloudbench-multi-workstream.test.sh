@@ -317,7 +317,8 @@ echo "PASS: volume teardown survives transient restore-time provider absence"
 
 registry_retirement_during_scan_contract() (
     local root registry meta signal owner_pid owner_start
-    local registry_meta_source registry_alive_source reconcile_source race_error malformed_error
+    local registry_meta_source cleanup_state_source registry_alive_source
+    local reconcile_source race_error malformed_error
     root="$TMP_ROOT/registry-retirement-race"
     registry="$root/retiring-owner"
     meta="$registry/meta"
@@ -325,13 +326,16 @@ registry_retirement_during_scan_contract() (
     mkdir -p "$registry/clones"
 
     registry_meta_source="$(fleet_production_function registry_meta_value)"
+    cleanup_state_source="$(fleet_production_function fleet_registry_cleanup_state)"
     registry_alive_source="$(fleet_production_function registry_owner_alive)"
     reconcile_source="$(fleet_production_function reconcile_stale_fleet_registries)"
-    [ -n "$registry_meta_source" ] && [ -n "$registry_alive_source" ] \
+    [ -n "$registry_meta_source" ] && [ -n "$cleanup_state_source" ] \
+        && [ -n "$registry_alive_source" ] \
         && [ -n "$reconcile_source" ] \
         || fail "could not load the production fleet-registry reconciliation boundary"
     registry_meta_source="${registry_meta_source/registry_meta_value()/production_registry_meta_value()}"
     eval "$registry_meta_source"
+    eval "$cleanup_state_source"
     eval "$registry_alive_source"
     eval "$reconcile_source"
 
