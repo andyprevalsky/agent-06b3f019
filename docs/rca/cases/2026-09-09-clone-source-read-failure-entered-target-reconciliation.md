@@ -13,7 +13,6 @@ symptoms:
   - "ERROR: exact psql command is unavailable"
   - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
   - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
-  - "ValueError: exact owner does not identify one warm source Machine"
 tags:
   - cloudbench
   - fly-io
