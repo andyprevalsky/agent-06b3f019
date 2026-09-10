@@ -1156,6 +1156,7 @@ def test_fan_in_synthesis_goal_detection():
     assert is_fan_in_synthesis_goal("Generate 30 hook-tested openings using the ranked research.")
     assert is_fan_in_synthesis_goal("Select the 20 creators Andy should engage with weekly.")
     assert not is_fan_in_synthesis_goal("Search GitHub for CUDA kernel repositories")
+    assert not is_fan_in_synthesis_goal("Write a report that independently validates the deployment")
     # Keyword hits alone are not enough for rewrite; still detectable as wording.
     assert is_fan_in_synthesis_goal("Implement merge sort")
     assert is_fan_in_synthesis_goal("Finalize the OAuth flow")

@@ -92,8 +92,10 @@ _FAN_IN_DERIVATION_RE = re.compile(
     r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,1000}\b(?:based on|from|using)\b"
 )
 _FAN_IN_ARTIFACT_RE = re.compile(
-    r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,200}"
-    r"\b(?:calendar|creators?|hooks?|openings?|ranking|report|scripts?|strategy)\b"
+    r"(?is)(?:"
+    r"\b(?:build|create|generate)\b.{0,200}\b(?:calendar|hooks?|openings?)\b|"
+    r"\bselect\b.{0,200}\bcreators?\b"
+    r")"
 )
 
 
