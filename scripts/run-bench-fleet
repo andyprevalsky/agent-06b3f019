@@ -5476,11 +5476,13 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
     python3 - "$registry" "$plan" "$APP" <<'PY'
+import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+import time
 
 registry = Path(sys.argv[1])
 plan = Path(sys.argv[2])
