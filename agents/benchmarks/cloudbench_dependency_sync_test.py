@@ -16,6 +16,8 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
@@ -9281,8 +9283,21 @@ cloudbench_recover_guest_cleanup_receipts "$REGISTRY"
     assert all("machines list" not in line for line in call_lines)
 
 
+@pytest.mark.parametrize(
+    ("database_container", "database_volume"),
+    (
+        ("", ""),
+        (
+            "victoria-db-exact-zero",
+            "victoria-pgdata-exact-zero",
+        ),
+    ),
+    ids=("canonical-system-postgres", "legacy-nominal-docker-labels"),
+)
 def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
     tmp_path: Path,
+    database_container: str,
+    database_volume: str,
 ) -> None:
     """Complete lifecycle plus an exact root/tree query can prove zero allocation."""
     owner = "7d" * 16
@@ -9326,8 +9341,8 @@ def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
         "ports": {"backend": 3001},
         "services": [{"name": "back-end", "pid": 99999992}],
         "database": {
-            "container": "",
-            "volume": "",
+            "container": database_container,
+            "volume": database_volume,
             "owned_by_run_sh": True,
             "use_system_postgres": True,
             "name": database_name,
@@ -9457,6 +9472,57 @@ case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} 
     assert any("pg_database" in line and database_name in line for line in psql_lines)
     assert any(root_agent in line and '"BrowserSession"' in line for line in psql_lines)
     assert all("Kernel" not in line and "Steel" not in line for line in psql_lines)
+
+
+def test_system_postgres_services_manifest_omits_inactive_docker_identity(
+    tmp_path: Path,
+) -> None:
+    """System-Postgres manifests must not publish nominal Docker ownership."""
+    stack = STACK_SCRIPT.read_text()
+    function = _extract_fleet_function(stack, "write_services_manifest() {")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    context = repo / ".context" / "cloudbench"
+    script = f"""set -uo pipefail
+cd {shlex.quote(str(repo))}
+RUN_CONTEXT_DIR=.context/cloudbench
+SERVICE_STATUS=stopped
+NAMES=(back-end)
+PIDS=(99999992)
+BENCHMARK_MODE=true
+DB_CONTAINER=victoria-db-exact-zero
+DB_VOLUME=victoria-pgdata-exact-zero
+DB_OWNED_BY_US=true
+USE_SYSTEM_PG=true
+LOCAL_DB_NAME=victoria_bench_exact_zero
+LOCAL_DB_ACTUAL_PORT=5432
+LOCAL_DB_PORT=5432
+BACKEND_PORT=3001
+FRONTEND_PORT=3002
+HEALTH_PORT=3003
+MAC_APP_PORT=0
+SDK_METRICS_PORT=0
+NGROK_WEB_PORT=0
+{function}
+write_services_manifest
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    database = json.loads((context / "services.json").read_text())["database"]
+    assert database == {
+        "container": "",
+        "name": "victoria_bench_exact_zero",
+        "owned_by_run_sh": True,
+        "port": 5432,
+        "runtime_port": 5432,
+        "use_system_postgres": True,
+        "volume": "",
+    }
 
 
 def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
