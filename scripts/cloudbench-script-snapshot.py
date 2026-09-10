@@ -61,6 +61,13 @@ def _process_identity_state(pid: int, expected_start: str) -> str:
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unknown" if _pid_exists(pid) else "absent"
+    # region agent log
+    try:
+        with open("/opt/cursor/logs/debug.log", "a") as handle:
+            handle.write(json.dumps({"hypothesisId": "D,E", "location": "scripts/cloudbench-script-snapshot.py:_process_identity_state", "message": "process birth probe result", "data": {"pid": pid, "returncode": result.returncode, "hasOutput": bool(result.stdout.strip())}, "timestamp": int(time.time() * 1000)}) + "\n")
+    except OSError:
+        pass
+    # endregion
     if result.returncode != 0 or not result.stdout.strip():
         return "unknown" if _pid_exists(pid) else "absent"
     actual_start = " ".join(result.stdout.split())
@@ -468,6 +475,13 @@ def cleanup(
     try:
         with _snapshot_lock(path):
             marker = _read_marker(path, token)
+            # region agent log
+            try:
+                with open("/opt/cursor/logs/debug.log", "a") as handle:
+                    handle.write(json.dumps({"hypothesisId": "D,F", "location": "scripts/cloudbench-script-snapshot.py:cleanup", "message": "cleanup identity branch inputs", "data": {"callerPid": pid, "parentPid": os.getppid(), "markerPid": marker["owner_pid"], "allowTransfer": allow_transfer}, "timestamp": int(time.time() * 1000)}) + "\n")
+            except OSError:
+                pass
+            # endregion
             expected_start = " ".join(pid_start.split())
             if marker["owner_pid"] != pid or marker["owner_pid_start"] != expected_start:
                 if marker["owner_pid"] == pid:
