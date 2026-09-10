@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -11326,6 +11327,46 @@ cloudbench_detach_reexec "$LOG" bash -c \
     )
 
 
+def test_detach_reexec_closes_inherited_launcher_pipe(tmp_path: Path) -> None:
+    """A persistent detached Hub must not retain a process-substitution writer.
+
+    The exact live failure left agent_link_server fd 63 writing the slice tee's
+    input pipe after every controller process had exited.
+    """
+    env_lib = ENV_HELPER_SCRIPT.read_text()
+    start = env_lib.index("cloudbench_detach_reexec() {")
+    end = env_lib.index("\nPY\n}", start) + len("\nPY\n}")
+    helper = env_lib[start:end]
+    launcher = tmp_path / "launcher.sh"
+    launcher.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -uo pipefail\n"
+        f"{helper}\n"
+        'cloudbench_detach_reexec "$LOG" bash -c "sleep 3"\n'
+    )
+    launcher.chmod(0o755)
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(write_fd, True)
+    try:
+        launched = subprocess.run(
+            ["bash", str(launcher)],
+            env={**os.environ, "LOG": str(tmp_path / "hub.log")},
+            pass_fds=(write_fd,),
+            check=False,
+            timeout=5,
+        )
+        assert launched.returncode == 0
+        os.close(write_fd)
+        write_fd = -1
+        readable, _, _ = select.select([read_fd], [], [], 1)
+        assert readable, "detached child retained the launcher's pipe writer"
+        assert os.read(read_fd, 1) == b"", "launcher pipe did not reach EOF"
+    finally:
+        os.close(read_fd)
+        if write_fd >= 0:
+            os.close(write_fd)
+
+
 def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     """28 autoscalers + clone resolvers each running their own `flyctl machines
     list` was ~28x redundant API load per interval — the source of
@@ -11532,6 +11573,66 @@ test ! -e "$lock"
         capture_output=True,
         check=False,
         timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_inventory_release_uses_sealed_owner_birth_identity(tmp_path: Path) -> None:
+    """A fallible second ps read must not strand a live owner's keyed lock."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "inventory_refresh_lock_acquire() {",
+            "inventory_refresh_lock_release() {",
+        )
+    )
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    ps_count = tmp_path / "ps-count"
+    ps_count.write_text("0\n")
+    ps_shim = shim_dir / "ps"
+    ps_shim.write_text(
+        "#!/usr/bin/env bash\n"
+        'count="$(cat "$PS_COUNT")"\n'
+        "count=$((count + 1))\n"
+        'printf "%s\\n" "$count" > "$PS_COUNT"\n'
+        'if [ "$count" -eq 1 ]; then printf "sealed-birth\\n"; else printf "drifted-birth\\n"; fi\n'
+    )
+    ps_shim.chmod(0o755)
+    lock_root = tmp_path / "lock-root"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+FLEET_DIR="$ROOT"
+INVENTORY_REFRESH_LOCK="$ROOT/machines-refresh.lock"
+INVENTORY_WAIT_FIFO="$ROOT/inventory.wait"
+FLEET_OWNER_HOST=test-host
+SNAPSHOT_REFRESH_TIMEOUT=1
+CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS=1
+MACHINE_READINESS_SCRIPT="$READINESS"
+mkdir -p "$ROOT"
+mkfifo "$INVENTORY_WAIT_FIFO"
+{helpers}
+inventory_refresh_lock_acquire
+inventory_refresh_lock_release
+test ! -e "$INVENTORY_REFRESH_LOCK"
+""",
+        ],
+        env={
+            **os.environ,
+            "ROOT": str(lock_root),
+            "READINESS": str(MACHINE_READINESS_SCRIPT),
+            "PS_COUNT": str(ps_count),
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
     )
     assert result.returncode == 0, result.stderr
 
@@ -13162,6 +13263,44 @@ def test_nested_controller_borrows_parent_owned_script_snapshot(tmp_path: Path) 
             owner.wait(timeout=5)
     assert owner.returncode == 0, (owner_stdout, owner_stderr)
     assert not list(snapshot_root.glob("cloudbench-scripts.*")), "the exact parent owner did not remove its snapshot"
+
+
+def test_script_snapshot_cleanup_uses_sealed_self_identity(tmp_path: Path) -> None:
+    """EXIT cleanup must not reject its sealed owner after a drifted ps read."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _extract_fleet_function(fleet, "cleanup_owned_script_snapshot() {")
+    snapshot = tmp_path / f"cloudbench-scripts.{'a' * 32}"
+    snapshot.mkdir()
+    captured = tmp_path / "cleanup-args"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+CLOUDBENCH_SCRIPT_SNAPSHOT="$SNAPSHOT"
+CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE=owner
+CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_TOKEN={"a" * 32}
+CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID_START=sealed-birth
+SCRIPT_SNAPSHOT_OWNER_HELPER=cloudbench-script-snapshot.py
+SCRIPT_SNAPSHOT_ALLOW_TRANSFER=0
+script_snapshot_current_pid_start() {{ printf 'drifted-birth\\n'; }}
+python3() {{ printf '%s\\n' "$*" > "$CAPTURED"; return 0; }}
+{cleanup}
+cleanup_owned_script_snapshot
+grep -Fq -- '--pid-start sealed-birth' "$CAPTURED"
+""",
+        ],
+        env={
+            **os.environ,
+            "SNAPSHOT": str(snapshot),
+            "CAPTURED": str(captured),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_script_snapshot_initialization_signal_and_publish_failure_clean_up(

@@ -161,6 +161,11 @@ cleanup_owned_script_snapshot() {
     if [ -z "$owner_start" ]; then
         owner_start="$current_start"
     elif [ -n "$current_start" ] && [ "$current_start" != "$owner_start" ]; then
+        # region agent log
+        printf '{"hypothesisId":"C","location":"scripts/run-bench-fleet:cleanup_owned_script_snapshot","message":"snapshot self identity mismatch","data":{"pid":"%s","sealedStart":"%s","currentStart":"%s"},"timestamp":%s}\n' \
+            "$$" "$owner_start" "$current_start" "$(($(date +%s) * 1000))" \
+            >> /opt/cursor/logs/debug.log 2>/dev/null || true
+        # endregion
         echo "❌ script snapshot owner birth drifted from sealed identity" >&2
         return 1
     fi
@@ -1388,6 +1393,11 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
                 INVENTORY_REFRESH_LOCK_TOKEN="$token"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK="$lock"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN="$token"
+                # region agent log
+                printf '{"hypothesisId":"A","location":"scripts/run-bench-fleet:inventory_refresh_lock_acquire","message":"inventory lock acquired","data":{"pid":"%s","pidStart":"%s"},"timestamp":%s}\n' \
+                    "$owner_pid" "$owner_start" "$(($(date +%s) * 1000))" \
+                    >> /opt/cursor/logs/debug.log 2>/dev/null || true
+                # endregion
                 return 0
             fi
         fi
@@ -1433,12 +1443,24 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
 
 inventory_refresh_lock_release() {
     local lock="$INVENTORY_REFRESH_LOCK" owner_pid owner_start
+    local lock_host lock_pid lock_start lock_token
     owner_pid="${BASHPID:-$$}"
     owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    [ "$(registry_meta_value "$lock" host)" = "$FLEET_OWNER_HOST" ] \
-        && [ "$(registry_meta_value "$lock" pid)" = "$owner_pid" ] \
-        && [ "$(registry_meta_value "$lock" pid_start)" = "$owner_start" ] \
-        && [ "$(registry_meta_value "$lock" token)" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] \
+    lock_host="$(registry_meta_value "$lock" host)"
+    lock_pid="$(registry_meta_value "$lock" pid)"
+    lock_start="$(registry_meta_value "$lock" pid_start)"
+    lock_token="$(registry_meta_value "$lock" token)"
+    # region agent log
+    printf '{"hypothesisId":"A","location":"scripts/run-bench-fleet:inventory_refresh_lock_release","message":"inventory lock release identity","data":{"pid":"%s","lockPid":"%s","currentStart":"%s","lockStart":"%s","hostMatch":%s,"tokenMatch":%s},"timestamp":%s}\n' \
+        "$owner_pid" "$lock_pid" "$owner_start" "$lock_start" \
+        "$([ "$lock_host" = "$FLEET_OWNER_HOST" ] && printf true || printf false)" \
+        "$([ "$lock_token" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] && printf true || printf false)" \
+        "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+    # endregion
+    [ "$lock_host" = "$FLEET_OWNER_HOST" ] \
+        && [ "$lock_pid" = "$owner_pid" ] \
+        && [ "$lock_start" = "$owner_start" ] \
+        && [ "$lock_token" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] \
         || return 1
     rm -f "$lock"
     unset INVENTORY_REFRESH_LOCK_TOKEN
