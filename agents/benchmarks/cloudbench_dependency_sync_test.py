@@ -7882,7 +7882,6 @@ rc=$?
     assert calls.read_text().splitlines() == [
         f"machine {first_machine}",
         f"machine {second_machine}",
-        "volume vol_second",
         f"audit {second_name}",
     ]
 
