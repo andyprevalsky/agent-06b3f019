@@ -431,6 +431,55 @@ recovery still issues the same two exact-ID reads per owned guest. The change
 adds no provider call, app-wide read, poller, lock, row, channel, subscription,
 shared state, or fan-in.
 
+## Sixth recurrence on 2026-09-10
+
+The exact-owner recovery transition validated its warm-source guard and every
+owned guest, reconnected all exact status proxies, and then exited 127 with
+`cloudbench_confirm_guest_shutdowns: command not found`. Bash executed the
+top-level `--recover-stale-owner` entrypoint before reaching the one shared
+guest-shutdown function definition later in `run-bench-fleet`. No shutdown
+health acknowledgement or provider cleanup could occur.
+
+The unchanged pre-fix command was
+`CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY=1 bash
+scripts/tests/cloudbench-multi-workstream.test.sh`. It exited 1 after the real
+immutable script snapshot reported line 5923 `command not found`. NDJSON events
+proved the earlier boundaries were healthy: H11 resolved the warm identity with
+status 0, H13 read current table-form Machine status with provider status 0, H6
+and H12 validated one exact guest, and H7 reconnected one exact proxy. H8 then
+recorded status 127. The extracted-function Python regression remained green
+because its hand-assembled signature list placed
+`cloudbench_confirm_guest_shutdowns` before
+`fleet_recovery_reconnect_guest_shutdowns`, reversing production source order.
+
+Archive searches for `cloudbench_confirm_guest_shutdowns command not found exact
+stale owner recovery` and `bash function definition entrypoint source ordering
+extraction test` selected this case and the 2026-07-21 shell-helper extraction
+case. This incident is a recurrence of the exact recovery lifecycle work and a
+relative of the extraction-test case: production had a real ordering defect,
+while the owning regression reconstructed a different ordering and hid it.
+
+The one shared `cloudbench_confirm_guest_shutdowns` definition now appears
+before `fleet_recovery_reconnect_guest_shutdowns` and therefore before the early
+exact-recovery entrypoint. The later duplicate location was removed rather than
+copying the helper. Normal EXIT cleanup still calls the same function body.
+
+The permanent shell regression now drives a real detached controller through
+allocation, durable exact guest publication, SIGKILL, immutable-snapshot
+`--recover-stale-owner`, authenticated shutdown health, and exact provider
+reaping. Its fake provider now emits the same exact status/config/absence
+contracts consumed by production. The unchanged focused command exits 0; H8
+records shutdown status 0, H9 records `cleanupState=reap`, and H10 enters the
+provider reaper only afterward. The complete multi-workstream suite passes,
+including every mandatory-autoscaler failure probe; the full dependency-sync
+suite passes all 266 tests; the fleet infra-canary structural suite and Bash
+syntax checks pass.
+
+At 10,000 agents, this is a source-order-only move with zero added runtime work:
+the same O(guests in one exact owner) shutdown calls and exact-ID provider reads
+execute once. It adds no provider call, poller, lock, row, channel, subscription,
+shared state, or fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -466,6 +515,12 @@ Machine lookup, a deterministic regression for why
 `2862102a194e38` was classified absent/unreadable, and a fix that preserves
 fail-closed identity, exact-owner boundaries, autoscaler probes, and all
 task/timeout/concurrency settings.
+
+For the sixth recurrence, the user required a general function-definition /
+entrypoint ordering fix with one shared implementation, a regression that
+executes production source order rather than extracted functions, full relevant
+suites, unchanged fail-closed semantics and autoscaler probes, a pushed branch,
+and the exact real-owner rerun command.
 
 ## Reusable lesson
 
