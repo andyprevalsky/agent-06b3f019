@@ -7759,6 +7759,7 @@ def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
         "exact-absent": (0, 1),
         "created": (75, 6),
         "restoring": (75, 6),
+        "waiting_for_detach": (75, 6),
         "scheduling_destroy": (75, 6),
         "recovering": (75, 6),
         "provider-failure": (1, 6),
