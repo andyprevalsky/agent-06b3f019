@@ -1693,6 +1693,7 @@ id_b="$(head -1 "$POOL_B")"
     fail "concurrent workstreams must provision distinct machines (a=$id_a b=$id_b)"
 journal_must_be_read_only "scenario 1"
 echo "PASS: scenario 1 — concurrent provisioning with isolated pool machines"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 2 — concurrent RUNS that must FINISH WITH SUCCESS (1/1 passed each)
@@ -2642,6 +2643,7 @@ if [ "${CLOUDBENCH_TEST_PENDING_HUB_SELF_TEST:-0}" = "1" ]; then
     exit 0
 fi
 
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ]; then
 hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs" \
     "${CLOUDBENCH_TEST_ORIGINAL_HUB_TOKEN:-00000000000000000000000000000001}" \
     || fail "workstream A test Hub failed its pending-owner launch handshake"
