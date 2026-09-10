@@ -3062,7 +3062,7 @@ name=cloudbench-live-neighbor
 volume_id=$neighbor_volume
 EOF
 cancel_launcher_log="$TMP_ROOT/controller-detached-wait-cancel.log"
-CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=2 \
+CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM=1 \
     CLOUDBENCH_DETACHED_RECOVERY_SECONDS=2 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$cancel_launcher_log" \
@@ -3070,22 +3070,32 @@ CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=2 \
 cancel_launcher_pid=$!
 PIDS+=("$cancel_launcher_pid")
 
-cancel_allocated=0
-for _ in $(seq 1 200); do
-    if FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
-import json, os
-with open(os.environ["FAKE_STATE"]) as handle:
-    machines = json.load(handle)["machines"]
-raise SystemExit(0 if any(item["name"] != "cloudbench-warm" for item in machines) else 1)
-PY
-    then
-        cancel_allocated=1
+cancel_target_registry=""
+cancel_recovery_ready=0
+for _ in $(seq 1 400); do
+    for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+        [ -d "$registry" ] || continue
+        [ "$registry" = "$neighbor_registry" ] && continue
+        recovery_record="$(find "$registry/clones" -maxdepth 1 -type f -print -quit 2>/dev/null)"
+        recovery_audit="$SANDBOX/.git/cloudbench-fleet-audits/${registry##*/}"
+        recovery_output="$(find "$WS_A/.context/fleet/runs" -path '*/bench-detached-cancel' \
+            -type d -print -quit 2>/dev/null)"
+        [ -n "$recovery_record" ] && [ -n "$recovery_output" ] || continue
+        grep -qE '^id=[0-9a-f]+$' "$recovery_record" || continue
+        grep -qE '^volume_id=[a-zA-Z0-9_-]+$' "$recovery_record" || continue
+        grep -qF 'disposition=owned' "$recovery_audit/fresh/${recovery_record##*/}" \
+            2>/dev/null || continue
+        [ -s "$recovery_output/.cid" ] && [ -s "$recovery_output/status-proxy.port" ] \
+            || continue
+        cancel_target_registry="$registry"
+        cancel_recovery_ready=1
         break
-    fi
-    sleep 0.1
+    done
+    [ "$cancel_recovery_ready" -eq 0 ] || break
+    sleep 0.05
 done
-[ "$cancel_allocated" -eq 1 ] ||
-    fail "detached cancellation fixture never crossed provider allocation"
+[ "$cancel_recovery_ready" -eq 1 ] ||
+    fail "detached cancellation fixture never published its exact recoverable guest identity"
 FAKE_STATE="$FAKE_DIR/state.json" NEIGHBOR_VOLUME="$neighbor_volume" python3 - <<'PY'
 import json
 import os
@@ -3104,13 +3114,6 @@ state["volumes"].append(
 with open(path, "w") as handle:
     json.dump(state, handle)
 PY
-cancel_target_registry=""
-for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
-    [ -d "$registry" ] || continue
-    [ "$registry" = "$neighbor_registry" ] && continue
-    cancel_target_registry="$registry"
-    break
-done
 [ -n "$cancel_target_registry" ] ||
     fail "detached cancellation did not publish its exact target registry"
 cancel_owner_token="${cancel_target_registry##*/}"
