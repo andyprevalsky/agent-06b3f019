@@ -7160,7 +7160,7 @@ def _extract_fleet_function(source: str, signature: str) -> str:
             offset += len(line)
             continue
         match = re.search(
-            r"<<-?\s*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_]*))",
+            r"(?<!<)<<-?(?!<)\s*(?:'([^']+)'|\"([^\"]+)\"|([A-Za-z_][A-Za-z0-9_]*))",
             line,
         )
         if match is not None:
