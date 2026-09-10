@@ -139,6 +139,19 @@ fi
 SH
 chmod +x "$tmp/fake-fleet"
 
+broken_artifacts="$tmp/broken-artifacts"
+ln -s "$tmp/unavailable/artifacts" "$broken_artifacts"
+broken_artifact_status=0
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$broken_artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-broken-artifact" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/broken-artifact.log" 2>&1 || broken_artifact_status=$?
+[ "$broken_artifact_status" -eq 0 ] \
+  || fail "unavailable optional artifact directory masked proof status (exit=$broken_artifact_status)"
+grep -Fq "CAPABILITY STABILITY PROOF PASSED" "$tmp/broken-artifact.log" \
+  || fail "proof did not reach its canonical terminal result without artifact storage"
+
 FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
 FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-pass" \
 FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
