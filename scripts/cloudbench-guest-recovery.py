@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 SAFE_MACHINE = re.compile(r"[0-9a-f]+")
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9._-]+")
 SCHEMA = "cloudbench-guest-quiescence-v1"

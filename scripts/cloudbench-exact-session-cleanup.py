@@ -16,7 +16,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 SAFE_OWNER = re.compile(r"[0-9a-f]{32}")
 SAFE_MACHINE = re.compile(r"[0-9a-f]+")
