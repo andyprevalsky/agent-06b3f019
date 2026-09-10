@@ -452,18 +452,19 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
   assert(warning > bypass, 'expected its warning to report the usable Claude count');
 });
 
-test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
+test('missing-Claude bypass accepts either caller-validated Anthropic-compatible fallback', async () => {
   const source = readSeedLocalSource();
   const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
   const rateLimitedBypass = source.indexOf('rateLimitedClaudeCodeCount > 0', zeroClaude);
   const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
-  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
-  const emptyKeyFailure = source.indexOf(
-    'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY',
-    keyValidation
+  const anthropicValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
+  const openrouterValidation = source.indexOf('process.env.OPENROUTER_API_KEY?.trim()', bypass);
+  const missingFallbackFailure = source.indexOf(
+    'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY or OPENROUTER_API_KEY',
+    openrouterValidation
   );
   const warning = source.indexOf('caller-validated', bypass);
-  const fallback = source.indexOf('ANTHROPIC_API_KEY fallback', warning);
+  const fallback = source.indexOf('Anthropic-compatible API fallback', warning);
   const strictFailure = source.indexOf(
     "throw new Error('No usable claude_code integrations after sync')",
     bypass
@@ -475,10 +476,14 @@ test('missing-Claude bypass requires the caller-validated Anthropic fallback opt
     'expected rate-limited Claude rows to proceed before the missing-Claude opt-in'
   );
   assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
-  assert(keyValidation > bypass, 'expected the fallback to validate the Anthropic API key');
-  assert(emptyKeyFailure > keyValidation, 'expected an empty Anthropic API key to fail closed');
-  assert(warning > emptyKeyFailure, 'expected validation before the fallback warning');
-  assert(fallback > warning, 'expected the runtime replacement to be the Anthropic API key');
+  assert(anthropicValidation > bypass, 'expected validation of the Anthropic API key');
+  assert(openrouterValidation > anthropicValidation, 'expected validation of the OpenRouter key');
+  assert(
+    missingFallbackFailure > openrouterValidation,
+    'expected both missing Anthropic-compatible fallbacks to fail closed'
+  );
+  assert(warning > missingFallbackFailure, 'expected validation before the fallback warning');
+  assert(fallback > warning, 'expected the runtime replacement to be Anthropic-compatible');
   assert(
     strictFailure > fallback,
     'expected missing Claude OAuth to fail closed without the opt-in'

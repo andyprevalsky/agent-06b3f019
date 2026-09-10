@@ -1017,15 +1017,17 @@ async function syncComputeTokensWithRetries(): Promise<void> {
               `(SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1)`
           );
         } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1') {
-          if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+          const anthropicApiKey = process.env.ANTHROPIC_API_KEY?.trim();
+          const openrouterApiKey = process.env.OPENROUTER_API_KEY?.trim();
+          if (!anthropicApiKey && !openrouterApiKey) {
             throw new Error(
-              'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY'
+              'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY or OPENROUTER_API_KEY'
             );
           }
           console.warn(
             `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
               '0 usable claude_code — proceeding with the caller-validated ' +
-              'ANTHROPIC_API_KEY fallback (SEED_ALLOW_MISSING_CLAUDE_CODE=1)'
+              'Anthropic-compatible API fallback (SEED_ALLOW_MISSING_CLAUDE_CODE=1)'
           );
         } else {
           throw new Error('No usable claude_code integrations after sync');

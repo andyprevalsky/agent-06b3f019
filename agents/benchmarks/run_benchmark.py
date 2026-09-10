@@ -6163,6 +6163,17 @@ def _sync_compute_tokens(
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     if tolerate_claude_code_unavailable:
         env["SEED_ALLOW_MISSING_CLAUDE_CODE"] = "1"
+        # The running backend is the source of truth for fallback readiness,
+        # and it accepts either its shared Anthropic key or the OpenRouter
+        # Anthropic-compatible gateway.  ``--compute-tokens-only`` deliberately
+        # does not load back-end/.env, so carry only those two already-configured
+        # candidates into the seed subprocess.  Otherwise the backend can prove
+        # OpenRouter ready while seed-local sees neither key and rejects the same
+        # fallback contract before any benchmark agent is created.
+        for fallback_env_name in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+            fallback_value = load_env_var(fallback_env_name, _BACKEND_ENV)
+            if fallback_value:
+                env[fallback_env_name] = fallback_value
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
