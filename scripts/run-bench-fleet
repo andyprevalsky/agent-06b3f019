@@ -2067,10 +2067,12 @@ fleet_registry_confirm_guest_teardown() {
         mv "$temporary" "$meta" || return 1
     fi
     [ "$(registry_meta_value "$meta" cleanup_policy)" = "$expected_policy" ] || return 1
+    cloudbench_fsync_directory "$FLEET_REGISTRY_DIR" || return 1
     # Removal is the sole transition out of quarantine and occurs only after
     # every token-bound guest acknowledgement has already been observed.
     rm -f "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" || return 1
-    [ ! -e "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" ]
+    [ ! -e "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" ] \
+        && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
 }
 
 fleet_registry_record_name() {  # fleet_registry_record_name <clone-name>
@@ -5613,6 +5615,25 @@ if (
     raise SystemExit(1)
 print(token, guest_token, remote_port, sep="\t")
 ' <<< "$config"
+}
+
+cloudbench_fsync_directory() {  # <plain-directory>
+    python3 - "$1" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+path = Path(sys.argv[1])
+metadata = path.lstat()
+if path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+    raise SystemExit(1)
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
 }
 
 cloudbench_publish_guest_shutdown_confirmation() {  # <output-dir> <run-id>

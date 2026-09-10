@@ -7878,6 +7878,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
         "registry_owner_alive() {",
         "fleet_registry_build_guest_recovery_plan() {",
         "machine_guest_recovery_configuration() {",
+        "cloudbench_fsync_directory() {",
         "cloudbench_publish_guest_shutdown_confirmation() {",
         "cloudbench_confirm_guest_shutdowns() {",
         "fleet_registry_confirm_guest_teardown() {",
@@ -8467,7 +8468,7 @@ fi
             "destroyed-verified-absent"
         ),
         "recover_exact_pool_claims",
-        f"capacity_release {registry / 'meta'} {owner}-",
+        f"capacity_release {registry / 'meta'} {owner}-primary",
         f"audit_finalize {registry}",
     ]
     assert not record.exists()
