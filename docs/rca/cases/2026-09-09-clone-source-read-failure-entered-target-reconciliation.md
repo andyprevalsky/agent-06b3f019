@@ -22,6 +22,8 @@ tags:
   - preallocation
 sources:
   - commit 65cb5c022656ed028d7031bfb57bb8ad12e002ac
+  - commit 048872d59cb839c6ea8355441e0d1272306e05f8
+  - commit 29687015cd21161079f384f0e922edb8de80517a
   - fleet run 20260909-215629-914100
   - fleet run 20260910-002414-1221609
   - fleet run 20260910-021331-1465409
@@ -385,6 +387,50 @@ and final reaping touch only IDs or files named by that owner. There is no
 app-wide provider list, cross-owner resource scan, subscription, channel, row,
 or global result fan-in.
 
+## Fifth recurrence on 2026-09-10
+
+The exact-owner transition reached its first live Machine read but classified
+Machine `2862102a194e38` as `absent or unreadable` before starting any recovery
+proxy. The exact command itself was healthy: both that Machine and sibling
+`84ed277b490668` returned status 0 with matching started state, exact registry
+name, and private IP under `flyctl v0.4.100`.
+
+The instrumented unchanged owner recovery recorded H11 `status=0`, followed by
+H13 for the rejected Machine with `providerStatus=0`, `outputBytes=1738`,
+`hasEqualsRows=0`, and `hasTableRows=1`. This rejected provider absence,
+authentication failure, and exact-identity drift. `registry_machine_details`
+was the first bad boundary: its human-display parser recognized only legacy
+`key = value` VM rows, while current Fly renders `key │ value`. The exact status
+read succeeded, but the parser produced no VM identity fields and returned
+unsafe status 2; the caller combined statuses 1 and 2 into the observed message.
+
+The deterministic recovery fixture was changed only from legacy equals rows to
+the current Fly table rows. Before the parser fix,
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`
+exited 1 on `exact owned Machine deadbeef000001 is absent or unreadable`.
+After the fix, the unchanged command passes and its logs proceed from two H13
+status-0 table reads through H6/H12 exact mapping and configuration, H7 exact
+proxies, H8 token-bound health, H9 durable reap authorization, and H10 provider
+reaper entry.
+
+The parser now strips terminal styling, isolates exactly one `VM` section from
+the unrelated event-log table, and accepts either the legacy `=` format or
+current `│` format only when every VM row uses one consistent separator.
+Duplicate fields, mixed formats, missing sections, mismatched IDs/states/names,
+invalid private IPs, and malformed rows remain unsafe. The provider call remains
+`machine status <exact-id>`; no inventory, name resolution, fallback, or
+neighbor read was added.
+
+The full provider-free cloudbench suite passes all 266 tests and shell syntax
+validation passes. The retained real owner has not been rerun after the fix, so
+its guest acknowledgements and provider teardown remain pending the explicit
+verification rerun.
+
+At 10,000 agents, parsing remains O(lines in one exact Machine response) and
+recovery still issues the same two exact-ID reads per owned guest. The change
+adds no provider call, app-wide read, poller, lock, row, channel, subscription,
+shared state, or fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -414,6 +460,12 @@ token, proxy, or HTTP result. They prohibited fabricated acknowledgements,
 neighbor listing/sweeping, out-of-owner cleanup, provider mutations during
 tests, and task/timeout/concurrency changes; the real owner remains for the user
 to recover and verify before instrumentation cleanup.
+
+For the fifth recurrence, the user required instrumentation of the exact
+Machine lookup, a deterministic regression for why
+`2862102a194e38` was classified absent/unreadable, and a fix that preserves
+fail-closed identity, exact-owner boundaries, autoscaler probes, and all
+task/timeout/concurrency settings.
 
 ## Reusable lesson
 
