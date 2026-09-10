@@ -70,6 +70,49 @@ unauthorized="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
 [ "$unauthorized" = 403 ] || fail "unauthenticated shutdown returned HTTP $unauthorized"
 kill -0 "$driver_pid" 2>/dev/null || fail "unauthenticated request signalled the guest driver"
 
+mkdir -p "$tmp/repo/.context/cloudbench/logs"
+printf 'version=1\ntoken=%s\nstate=clean\n' "$run_token" \
+    > "$tmp/cloudbench-interrupt-cleanup-$run_token.status"
+printf '{"state":"quiesced"}\n' \
+    > "$tmp/cloudbench-guest-quiescence-$run_token.json"
+printf '{"state":"active"}\n' \
+    > "$tmp/cloudbench-guest-state-$run_token.json"
+printf '{"tasks":[]}\n' > "$tmp/repo/.context/cloudbench/run.json"
+printf 'bounded backend evidence\n' \
+    > "$tmp/repo/.context/cloudbench/logs/backend.log"
+recovery_paths=(
+    "/cloudbench-interrupt-cleanup-$run_token.status"
+    "/cloudbench-guest-quiescence-$run_token.json"
+    "/cloudbench-guest-state-$run_token.json"
+    "/repo/.context/cloudbench/run.json"
+    "/repo/.context/cloudbench/logs/backend.log"
+)
+for recovery_path in "${recovery_paths[@]}"; do
+    unauthenticated_evidence="$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$port$recovery_path")"
+    [ "$unauthenticated_evidence" = 403 ] \
+        || fail "unauthenticated recovery evidence returned HTTP $unauthenticated_evidence: $recovery_path"
+    authenticated_evidence="$(curl -sS -o "$tmp/recovery-response" -w '%{http_code}' \
+        -H "Authorization: Bearer $auth_token" \
+        "http://127.0.0.1:$port$recovery_path")"
+    [ "$authenticated_evidence" = 200 ] \
+        || fail "authenticated recovery evidence returned HTTP $authenticated_evidence: $recovery_path"
+    cmp "$tmp/recovery-response" "$tmp${recovery_path}" \
+        || fail "recovery evidence response differed from exact guest file: $recovery_path"
+done
+
+python3 - "$tmp/cloudbench-interrupt-cleanup-$run_token.status" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(b"x" * 65_537)
+PY
+oversized_evidence="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/cloudbench-interrupt-cleanup-$run_token.status")"
+[ "$oversized_evidence" = 413 ] \
+    || fail "oversized recovery evidence returned HTTP $oversized_evidence"
+
 before_request="$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer $auth_token" \
     "http://127.0.0.1:$port/shutdown-health")"

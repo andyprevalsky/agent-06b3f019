@@ -9091,6 +9091,90 @@ def test_exited_guest_quiescence_requires_stopped_services_and_seals_run_evidenc
     assert not receipt.exists()
 
 
+def test_running_guest_is_diagnosed_active_and_never_sealed_quiescent(
+    tmp_path: Path,
+) -> None:
+    """A live exact benchmark process is active evidence, not a timeout verdict."""
+    data_dir = tmp_path / "data"
+    repo_dir = data_dir / "repo"
+    context_dir = repo_dir / ".context" / "cloudbench"
+    logs_dir = context_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    backend_log = logs_dir / "backend.log"
+    backend_log.write_text("bounded backend evidence from an active run\n")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        backend_port = reservation.getsockname()[1]
+    (context_dir / "services.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "benchmark_mode": True,
+                "worktree": str(repo_dir),
+                "status": "stopped",
+                "run_sh_pid": 99_999_991,
+                "ports": {"backend": backend_port},
+                "services": [{"name": "back-end", "pid": 99_999_992}],
+            }
+        )
+    )
+    run_token = "active-guest-token"
+    driver = subprocess.Popen(
+        ["sleep", "60"],
+        env={**os.environ, "CLOUDBENCH_RUN_TOKEN": run_token},
+    )
+    try:
+        (data_dir / "cloudbench-driver.state").write_text("running\n")
+        (data_dir / "cloudbench-driver.pid").write_text(f"{driver.pid}\n")
+        receipt = data_dir / "quiescence.json"
+        state_receipt = data_dir / "state.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(GUEST_RECOVERY_SCRIPT),
+                "quiesce",
+                "--machine-id",
+                "deadbeef000001",
+                "--guest-run-token",
+                run_token,
+                "--data-dir",
+                str(data_dir),
+                "--repo-dir",
+                str(repo_dir),
+                "--receipt",
+                str(receipt),
+                "--state-receipt",
+                str(state_receipt),
+                "--run-json",
+                str(context_dir / "run.json"),
+                "--backend-log",
+                str(backend_log),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        driver.terminate()
+        driver.wait(timeout=5)
+
+    assert result.returncode != 0
+    assert "exact guest driver is still active" in result.stderr
+    assert not receipt.exists()
+    value = json.loads(state_receipt.read_text())
+    assert value["schema_version"] == "cloudbench-guest-state-v1"
+    assert value["state"] == "active"
+    assert value["machine_id"] == "deadbeef000001"
+    assert value["guest_run_token"] == run_token
+    assert value["driver_state"] == "running"
+    assert value["driver_pid"] == driver.pid
+    assert value["driver_process_state"] is not None
+    assert value["driver_token_match"] is True
+    assert value["run_json"]["exists"] is False
+    assert value["backend_log"]["exists"] is True
+    assert value["reason"] == "exact guest driver is still active"
+
+
 def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(
     tmp_path: Path,
 ) -> None:
