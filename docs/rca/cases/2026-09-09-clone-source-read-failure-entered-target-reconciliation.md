@@ -13,6 +13,8 @@ symptoms:
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "exact stale-owner registry identity is unsafe"
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
+  - "driver exited without cleanup acknowledgement"
+  - "3 guest(s) did not acknowledge browser/session cleanup; retaining provider ownership"
 tags:
   - cloudbench
   - fly-io
@@ -29,6 +31,9 @@ sources:
   - fleet run 20260910-021331-1465409
   - commit 8562f093a
   - commit d8d1dc8dc
+  - commit 59307b5aa
+  - commit 458f9ae51
+  - exact-owner recovery /tmp/rose-quarantined-guest-recovery-v4.log
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -574,6 +579,108 @@ that one runner) local counter updates and one canonical DELETE per root; there
 is no cross-agent channel, subscription, table scan, shared lock, provider
 poll, or global fan-in.
 
+## Eighth recurrence on 2026-09-10
+
+The post-fix controller was rerun against the same nine pre-fix guest snapshots.
+As expected, no guest could retroactively acquire the corrected boot, driver,
+or runner code. Six exact `/shutdown` requests again returned HTTP 500 after
+driver exit, three exact guests remained pending through the acknowledgement
+deadline, and recovery exited 1 without entering the reaper. This rejected the
+hypothesis that controller retry alone could make an old guest publish a new
+top-level acknowledgement.
+
+The retained owner still names exactly nine Machine-plus-Volume records and one
+Volume-only record. The nine Machine IDs are `865463eb495118`,
+`d896269c97e048`, `e82e291c433d58`, `28625d2c491758`,
+`813962a40d3148`, `84ed277b490668`, `83e202b7737028`,
+`2862102a194e38`, and `2862595b6d4328`. Their Volumes are respectively
+`vol_vjyqyjyy6eo69dmv`, `vol_vdeje7emwew5y5k4`,
+`vol_v3g1gogd8eg28mw4`, `vol_vdeje7empdn000k4`,
+`vol_r1j2jkjjp5k1kl3r`, `vol_vgnpnznj6p6xdpj4`,
+`vol_v3g1gogl7y0q5314`, `vol_r68w87833g9deyd4`, and
+`vol_vgnpnznjg87o2gj4`; the Volume-only identity is
+`vol_42kekpk3pk98yz84`.
+
+Durable, per-output runner/backend evidence names 28 exact Kernel sessions:
+
+- `polar-odysseys-b1bd700090c2`: `q2hvke6g3qpxawls7m3yhszg`,
+  `hvvnzrmo4zp9nt2fdk2icbkq`, `iykspsm83664aaqcx9remu7q`,
+  `auoqogx5ck38anof6v9a5918`, `ubxo30kk209qx8ydmowkczx2`,
+  `tj6k6vetgv600e5jgr4gsfuu`, `tn07sfczffwej3qibyy3u0uf`,
+  `vko6vhpj3hexb4r0xhtsjhkl`, `m5mtf56d9mny3pp3lye4nm17`, and
+  `rxo3dbijoilelkc5rf2h86zv`.
+- `polar-odysseys-437482860f2b`: `szf2i7xhtpj9e2ndkua3rgdr`.
+- `polar-odysseys-5aaab80dfeee`: `e31wbs1h879em8xpmtlodmdp`,
+  `hcv6elx8j1r7p1yxh594yua8`, `sln3cubtdofy060x9oo3ii9g`, and
+  `x856n4tq8d102lhw6kfzha2b`.
+- `agent-payment-abandonment`: `vi7qbg1klnml068ofov0oao3`.
+- `polar-odysseys-47b251d71185`: `ouemy82vhbr4jv4nqc0zzhmn`,
+  `jffp8rep2504828k1jabkskc`, `th7doep6r0cb9wpqyoz7b2so`,
+  `ib7tdk7j17bzlavopgnz0hb1`, and `j0wpf1jbnicxluql9gx0jtij`.
+- `polar-odysseys-753ce2163f6e`: `hc0pd5kq7spf9fslbf6tysys`.
+- `polar-odysseys-7e31dc76193f`: `tj0d946jze5lkm801z49bakj`,
+  `v8kdet6i4j30kq5by439jtxk`, `tx2y33la58weixtemlv9qfp0`,
+  `ojp37z3fxjoa2f5dyrhb4e9v`, `s7c7qp9xih5a55vxc3dwcsfy`, and
+  `s5o0mlw9m6ax4oao6rg5cmit`.
+
+No exact provider session ID appears in the durable evidence for
+`parallel-tool-calls` or `polar-bu-066`. That is a real trace-capture gap, not
+proof that those guests own no external session. Recovery must therefore find
+a valid private runner cleanup receipt for each of those outputs or leave the
+entire owner quarantined. A provider resource created before its ID reached
+durable evidence cannot be discovered safely without the prohibited
+cross-owner provider inventory.
+
+The first bad recovery boundary was the assumption that only the mirrored
+top-level guest acknowledgement could authorize teardown. The guest already
+had two narrower durable authorities that the controller did not consume: the
+runner's token-bound `state=clean` receipt, when present, and the exact provider
+IDs in that output's immutable run record and backend log. This is another
+recurrence of the duplicated lifecycle contract: production could produce
+exact cleanup evidence, but stale-owner recovery had no source-bound,
+idempotent transition from that evidence to its existing exact reaper.
+
+Recovery now first requests the unchanged top-level acknowledgement. On
+failure, it reads the exact private runner receipt through that guest's existing
+exact proxy and accepts only canonical version, run-token, and `clean` fields.
+If no runner receipt exists, it transfers a bounded quiescence helper to that
+exact Machine, requires a stopped services manifest, absent exact service PIDs,
+a closed backend port, and immutable hashes of the one-task `run.json` and
+backend log. It extracts only Kernel/Steel IDs present in those sealed files,
+calls only the provider-specific delete/release endpoints for those IDs, and
+accepts only explicit success/already-absent responses. The controller writes
+an atomic, fsynced receipt bound to owner, run, bench, Machine, run token,
+manifest, evidence hashes, and every exact provider response. It publishes the
+existing per-output cleanup confirmation only after that receipt validates.
+Any missing output, identity, receipt, evidence file, exact session ID,
+quiescence condition, credential, transport response, or provider result keeps
+the owner quarantined; driver exit is never cleanup evidence.
+
+The deterministic pre-fix regression is
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_pre_fix_guest_runner_receipt_authorizes_exact_reaper`.
+Before the fix it exited 1: the non-204 top-level acknowledgement retained the
+owner despite a canonical private runner `clean` receipt. The unchanged test
+now passes, with H8 status 1 followed by H19 runner-receipt validation, H22
+recovery success, H9 durable `reap` authorization, and H10 exact reaper entry.
+Adjacent provider-free tests prove exact-ID-only Kernel/Steel calls,
+idempotency, rejection of incomplete runner evidence, and quiescence evidence
+hashing. The focused suite passes 5 tests, the complete dependency-sync suite
+passes all 271 tests, Bash syntax and status-shutdown suites pass, fleet
+infra-canary passes, and the complete multi-workstream lifecycle suite exits 0.
+
+`run-bench-cloud` now includes both recovery helpers in the immutable boot
+`--file-local` bundle and legacy SFTP bundle, and the controller script snapshot
+includes them. Newly cloned guests therefore receive the same helper versions
+used by their controller. No benchmark task, timeout, concurrency, evaluator,
+or provider behavior changed. The retained real owner was not cleaned or
+reaped; that remains the user's explicit rerun.
+
+At 10,000 agents, recovery remains O(resources in one exact owner and one
+output): one exact proxy read or one exact Machine SSH action, bounded evidence
+reads, and one idempotent call per durably named provider session. It adds no
+inventory, neighboring-session read, global sweep, fan-in, shared lock,
+subscription, row, channel, or polling work.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -622,6 +729,16 @@ cleanup-ack repair, persistent source evidence, and preservation of
 exact-owner quarantine with no fabricated acknowledgement. Provider cleanup
 remains exclusively the user's rerun action; task definitions, timeouts, and
 concurrency are unchanged.
+
+For the eighth recurrence, the user required a controller-owned recovery path
+for the immutable pre-fix guests: use an exact private runner receipt when
+available, otherwise clean only exact provider IDs from durable per-output
+evidence, persist positive receipts, and authorize the existing exact reaper
+only after all nine outputs are proved clean. They prohibited inferring cleanup
+from driver exit, fabricating acknowledgements, listing or sweeping neighboring
+resources, providerful tests, and any task, timeout, or concurrency change.
+They retained ownership of the real cleanup command and required any missing
+provider ID to be reported as a trace-capture gap.
 
 ## Reusable lesson
 
