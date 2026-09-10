@@ -1895,6 +1895,20 @@ registry_meta_value() {  # registry_meta_value <meta-file> <key>
     sed -n "s/^${key}=//p" "$meta" 2>/dev/null | head -1
 }
 
+fleet_registry_cleanup_state() {  # <registry-dir> <cleanup-policy>
+    local registry="${1%/}" policy="$2" guest_cleanup_unconfirmed=0
+    if [ -e "$registry/guest-cleanup-unconfirmed" ] \
+        || [ -L "$registry/guest-cleanup-unconfirmed" ]; then
+        guest_cleanup_unconfirmed=1
+    fi
+    case "$policy:$guest_cleanup_unconfirmed" in
+        reap:0) printf 'reap\n' ;;
+        retain:0) printf 'retain\n' ;;
+        reap:1|retain:1) printf 'quarantined\n' ;;
+        *) printf 'unsafe\n' ;;
+    esac
+}
+
 fleet_registry_init() {
     local staging="$FLEET_OWNERSHIP_ROOT/.$FLEET_OWNER_TOKEN.tmp.$$"
     local tmp_meta="$staging/meta.tmp.$$" meta="$staging/meta"
@@ -4565,7 +4579,7 @@ reap_orphaned_fleet_proxies() {
 }
 
 reconcile_stale_fleet_registries() {
-    local registry meta version app policy host owner_status recovery_lock_status unresolved=0
+    local registry meta version app policy cleanup_state host owner_status recovery_lock_status unresolved=0
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
     for registry in "$FLEET_OWNERSHIP_ROOT"/*; do
         [ -d "$registry" ] || continue
@@ -4585,12 +4599,16 @@ reconcile_stale_fleet_registries() {
             unresolved=1
             continue
         fi
-        [ "$policy" = "retain" ] && continue
-        if [ "$policy" != "reap" ]; then
-            echo "❌ unknown cleanup policy '$policy' in $registry" >&2
-            unresolved=1
-            continue
-        fi
+        cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
+        case "$cleanup_state" in
+            retain|quarantined) continue ;;
+            reap) ;;
+            *)
+                echo "❌ unknown cleanup policy '$policy' in $registry" >&2
+                unresolved=1
+                continue
+                ;;
+        esac
         # A local git-common registry can positively disprove only same-host
         # process ownership. Other-host records remain untouched and still count
         # against the app capacity guard.
@@ -5121,7 +5139,7 @@ recover_exact_pool_claims() {  # <dead-owner-meta>
 
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
-    local version app policy host owner_status recovery_lock_status
+    local version app policy cleanup_state host owner_status recovery_lock_status
     case "$token" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#token}" -eq 32 ] || return 1
     if [ ! -d "$registry" ]; then
@@ -5144,12 +5162,29 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     app="$(registry_meta_value "$meta" app)"
     policy="$(registry_meta_value "$meta" cleanup_policy)"
     host="$(registry_meta_value "$meta" host)"
-    { [ "$version" = "1" ] || [ "$version" = "2" ]; } \
+    [ -f "$meta" ] && [ ! -L "$meta" ] \
+        && { [ "$version" = "1" ] || [ "$version" = "2" ]; } \
         && [ "$app" = "$APP" ] \
-        && [ "$policy" = "reap" ] && [ "$host" = "$FLEET_OWNER_HOST" ] || {
+        && [ "$host" = "$FLEET_OWNER_HOST" ] || {
         echo "❌ exact stale-owner registry identity is unsafe: $registry" >&2
         return 1
     }
+    cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
+    case "$cleanup_state" in
+        reap) ;;
+        quarantined)
+            echo "❌ exact stale-owner cleanup is quarantined pending guest acknowledgement: $registry" >&2
+            return 1
+            ;;
+        retain)
+            echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
+            return 1
+            ;;
+        *)
+            echo "❌ exact stale-owner cleanup authorization state is unsafe: $registry" >&2
+            return 1
+            ;;
+    esac
     registry_owner_alive "$meta"
     owner_status=$?
     [ "$owner_status" -eq 1 ] || {

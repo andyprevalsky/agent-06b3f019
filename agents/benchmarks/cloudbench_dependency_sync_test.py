@@ -7709,6 +7709,101 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_exact_recovery_classifies_cleanup_unconfirmed_owner_as_quarantined(
+    tmp_path: Path,
+) -> None:
+    """A canonical owner is not malformed merely because cleanup is unconfirmed.
+
+    Exact cancellation recovery must retain every resource and durable handle
+    until guest teardown is acknowledged, without crossing any reaper boundary.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_cleanup_state() {",
+            "registry_owner_alive() {",
+            "release_cleanup_disk_reserve() {",
+            "acquire_registry_recovery_lock() {",
+            "recover_exact_stale_fleet_owner() {",
+        )
+    )
+    owner = "5" * 32
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    audit_root = tmp_path / "audits"
+    audit_root.mkdir()
+    (registry / "meta").write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=99999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        "cleanup_policy=retain\n"
+    )
+    (registry / "guest-cleanup-unconfirmed").touch()
+    for index in range(9):
+        clone_name = f"cloudbench-machine-volume-{index}"
+        (clones / clone_name).write_text(
+            f"name={clone_name}\n"
+            f"id=deadbeef00000{index}\n"
+            f"volume_id=vol_machine_{index}\n"
+        )
+    volume_only_name = "cloudbench-volume-only"
+    (clones / volume_only_name).write_text(
+        f"name={volume_only_name}\nvolume_id=vol_volume_only\n"
+    )
+    unexpected = tmp_path / "unexpected-recovery-call"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+FLEET_OWNER_HOST=test-host
+UNEXPECTED={shlex.quote(str(unexpected))}
+_agent_stale_owner_debug_log() {{ :; }}
+recover_registry_audit_only_fresh() {{ touch "$UNEXPECTED"; return 99; }}
+reap_registry_clones() {{ touch "$UNEXPECTED"; return 99; }}
+recover_exact_pool_claims() {{ touch "$UNEXPECTED"; return 99; }}
+capacity_release_stale_owner_reservations() {{ touch "$UNEXPECTED"; return 99; }}
+fleet_audit_finalize_recovered_registry() {{ touch "$UNEXPECTED"; return 99; }}
+fleet_registry_remove_if_empty() {{ touch "$UNEXPECTED"; return 99; }}
+{functions}
+
+[ "$(fleet_registry_cleanup_state "$FLEET_OWNERSHIP_ROOT/{owner}" retain)" = quarantined ] || exit 80
+[ "$(fleet_registry_cleanup_state "$FLEET_OWNERSHIP_ROOT/{owner}" reap)" = quarantined ] || exit 81
+rm "$FLEET_OWNERSHIP_ROOT/{owner}/guest-cleanup-unconfirmed"
+[ "$(fleet_registry_cleanup_state "$FLEET_OWNERSHIP_ROOT/{owner}" retain)" = retain ] || exit 82
+[ "$(fleet_registry_cleanup_state "$FLEET_OWNERSHIP_ROOT/{owner}" reap)" = reap ] || exit 83
+[ "$(fleet_registry_cleanup_state "$FLEET_OWNERSHIP_ROOT/{owner}" invalid)" = unsafe ] || exit 84
+touch "$FLEET_OWNERSHIP_ROOT/{owner}/guest-cleanup-unconfirmed"
+recovery_status=0
+recover_exact_stale_fleet_owner {owner} || recovery_status=$?
+[ "$recovery_status" -ne 0 ] || exit 90
+[ ! -e "$UNEXPECTED" ] || exit 91
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "cleanup is quarantined pending guest acknowledgement" in result.stderr
+    assert "registry identity is unsafe" not in result.stderr
+    assert (registry / "guest-cleanup-unconfirmed").exists()
+    records = list(clones.iterdir())
+    assert len(records) == 10
+    assert sum("\nid=" in f"\n{record.read_text()}" for record in records) == 9
+    assert sum("volume_id=" in record.read_text() for record in records) == 10
+
+
 def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     tmp_path: Path,
 ) -> None:
@@ -7722,6 +7817,7 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "registry_meta_value() {",
+            "fleet_registry_cleanup_state() {",
             "registry_owner_alive() {",
             "recover_registry_audit_only_fresh() {",
             "reap_registry_clones() {",

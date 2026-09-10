@@ -3191,8 +3191,8 @@ assert_no_controller_script_snapshots "detached cancellation recovery"
 cancel_detached_log="$(sed -n 's/^    log: tail -f //p' "$cancel_launcher_log" | tail -1)"
 [ -n "$cancel_detached_log" ] ||
     fail "TERM-resistant cancellation did not publish its detached controller log"
-grep -qF "exact stale-owner registry identity is unsafe" "$cancel_launcher_log" ||
-    fail "SIGKILL recovery did not refuse the cleanup-unconfirmed exact owner"
+grep -qF "exact stale-owner cleanup is quarantined pending guest acknowledgement" "$cancel_launcher_log" ||
+    fail "SIGKILL recovery did not classify the canonical exact owner as cleanup-unconfirmed"
 grep -qF "exact stale fleet ownership recovery failed" "$cancel_launcher_log" ||
     fail "out-of-process recovery did not report retained exact ownership"
 if grep -qF "exact stale fleet ownership reconciled" "$cancel_launcher_log"; then

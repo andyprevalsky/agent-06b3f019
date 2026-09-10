@@ -11,8 +11,8 @@ symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "unresolved clone name 'cloudbench-…'; inspect with: flyctl machines list"
   - "Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded"
-  - "provider-owned volume failure crossed into target machine-name reconciliation"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
+  - "exact stale-owner registry identity is unsafe"
 tags:
   - cloudbench
   - fly-io
@@ -211,6 +211,63 @@ recovery performs one bounded, local, O(1) validation per volume-only owner
 record and adds no provider traffic, polling, shared lock, row, channel,
 subscription, or fan-in.
 
+## Third recurrence on 2026-09-10
+
+The lifecycle contract recurred at the outer exact-owner recovery gate.
+Controllers intentionally publish every v2 owner with `cleanup_policy=retain`
+and `guest-cleanup-unconfirmed`, then authorize reaping only after all token-bound
+guest teardown acknowledgements. `recover_exact_stale_fleet_owner` nevertheless
+embedded `cleanup_policy=reap` in its registry identity predicate. A canonical
+quarantined owner was therefore indistinguishable from malformed ownership.
+
+The caller's exact stale-owner replay in `/tmp/rose-polar-streak-main` exited 1
+with `exact stale-owner registry identity is unsafe`. The permanent pre-fix
+reproduction,
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_classifies_cleanup_unconfirmed_owner_as_quarantined`,
+also exited 1 on that same message. Its hermetic owner contained the production
+shape of ten exact records: nine Machine-plus-Volume identities and one
+Volume-only identity. Every provider, pool, capacity, audit, and registry reaper
+was a fail-if-called stub.
+
+Runtime NDJSON established:
+
+- H1 confirmed: cleanup state was `retain` with the unconfirmed-guest sentinel.
+- H2 rejected: `meta` was a regular non-symlink file and version, app, and host
+  identity fields all matched.
+- H3 rejected: all ten clone records used canonical allocation identities,
+  specifically nine Machine-plus-Volume and one Volume-only.
+- H4 confirmed: the outer gate rejected solely because `cleanupPolicyReap=0`,
+  before audit recovery or any reaper boundary.
+
+The deepest owned cause remained the same duplicated lifecycle algebra. Cleanup
+authorization was encoded as an identity-validation field instead of a separate
+state transition, so later consumers could reinterpret a valid producer state
+as malformed. A `reap` policy with the sentinel still present was also able to
+reach audit-only recovery before the inner clone reaper finally refused it,
+despite the producer's fail-closed transition ordering.
+
+`fleet_registry_cleanup_state` is now the shared classifier for stale-owner
+consumers. `reap` without the sentinel is the only authorized recovery state;
+`retain` without the sentinel remains intentionally retained; and either known
+policy with the sentinel is canonical quarantine. Unknown policies remain
+unsafe. Exact recovery validates regular-file identity first, then reports a
+distinct non-success quarantine result before owner probes or any reaper. The
+generic successor scan uses the same classifier, so the intermediate
+`reap`-plus-sentinel transition cannot cross audit or provider cleanup.
+
+The unchanged focused reproduction now passes while retaining all ten records,
+the sentinel, and every ownership handle with no mutation stub called. The
+existing full fake-provider cancellation scenario still requires a nonzero
+detached wait, zero provider reap calls, and retention of the exact Machine,
+Volume, registry, quarantine sentinel, and capacity reservation; it now asserts
+the explicit quarantine diagnostic instead of the false unsafe-identity one.
+No provider resource, benchmark task, timeout, or concurrency setting changed.
+
+At 10,000 agents, classification is one O(1) local policy/sentinel read per
+owner encountered. It adds no provider call, poll, channel, subscription, row,
+shared lock, mutable global, or fan-in; recovery remains independently keyed by
+the exact fleet-owner token.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -226,6 +283,11 @@ the existing regression to remain unchanged, the correct archive case to be
 appended rather than forked, focused and full suites plus archive validation,
 preservation of autoscaler probes and stability-proof edits, and no provider
 resource mutation or commit.
+
+For the third recurrence, the user required the deepest owned fix, a permanent
+failing-before/passing-after cloudbench regression, preservation of existing
+autoscaler probes, and the exact test commands and results. Tests could not
+mutate provider resources or change benchmark tasks, timeouts, or concurrency.
 
 ## Reusable lesson
 
