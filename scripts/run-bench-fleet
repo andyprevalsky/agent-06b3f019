@@ -5475,7 +5475,7 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
-    python3 - "$registry" "$plan" "$APP" <<'PY'
+    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -5487,6 +5487,7 @@ import time
 registry = Path(sys.argv[1])
 plan = Path(sys.argv[2])
 expected_app = sys.argv[3]
+audit_root = Path(sys.argv[4]) if sys.argv[4] else None
 safe_key = re.compile(r"[A-Za-z0-9._-]+")
 safe_machine = re.compile(r"[0-9a-f]+")
 safe_volume = re.compile(r"[A-Za-z0-9_-]+")
@@ -5506,7 +5507,9 @@ def plain_directory(path: Path) -> bool:
         return False
 
 
-def fields(path: Path, *, allowed: set[str], maximum: int = 65_536) -> dict[str, str]:
+def fields(
+    path: Path, *, allowed: set[str] | None, maximum: int = 65_536
+) -> dict[str, str]:
     if not regular_file(path):
         raise ValueError(f"non-regular recovery metadata: {path}")
     payload = path.read_text(encoding="utf-8")
@@ -5515,7 +5518,12 @@ def fields(path: Path, *, allowed: set[str], maximum: int = 65_536) -> dict[str,
     parsed: dict[str, str] = {}
     for raw in payload.splitlines():
         key, separator, value = raw.partition("=")
-        if not separator or key in parsed or key not in allowed:
+        if (
+            not separator
+            or key in parsed
+            or not safe_key.fullmatch(key)
+            or (allowed is not None and key not in allowed)
+        ):
             raise ValueError(f"noncanonical recovery metadata: {path}")
         parsed[key] = value
     return parsed
@@ -5635,11 +5643,128 @@ try:
 except OSError:
     pass
 # endregion
-if set(output_by_machine) != set(machine_records):
-    raise ValueError("incomplete stale-owner output mapping")
+
+output_machine_by_path = {
+    output: machine_id
+    for machine_id, (_, output, _) in output_by_machine.items()
+}
+worker_by_machine: dict[str, tuple[str, Path, int, str]] = {}
+for candidate in run_dir.iterdir():
+    if not plain_directory(candidate):
+        continue
+    worker_ledger = candidate / "worker-clones.ids"
+    if not worker_ledger.exists() and not worker_ledger.is_symlink():
+        continue
+    primary_id = output_machine_by_path.get(candidate)
+    if primary_id is None or not regular_file(worker_ledger):
+        raise ValueError("unsafe stale-owner worker mapping")
+    payload = worker_ledger.read_text(encoding="utf-8")
+    if len(payload.encode()) > 65_536:
+        raise ValueError("oversized stale-owner worker mapping")
+    bench, output, preferred_port = output_by_machine[primary_id]
+    for machine_id in payload.splitlines():
+        if (
+            not safe_machine.fullmatch(machine_id)
+            or machine_id not in machine_records
+            or machine_id in output_by_machine
+            or machine_id in worker_by_machine
+        ):
+            raise ValueError("ambiguous stale-owner worker mapping")
+        worker_by_machine[machine_id] = (
+            bench,
+            output,
+            preferred_port,
+            primary_id,
+        )
+
+if set(output_by_machine) | set(worker_by_machine) != set(machine_records):
+    raise ValueError("incomplete stale-owner hierarchical output mapping")
+
+if worker_by_machine:
+    audit_value = meta.get("audit_dir", "")
+    audit = Path(audit_value)
+    if (
+        audit_root is None
+        or not audit_root.is_absolute()
+        or not plain_directory(audit_root)
+        or audit != audit_root / owner
+        or not plain_directory(audit)
+        or not plain_directory(audit / "fresh")
+        or not plain_directory(audit / "expected-fresh")
+        or not plain_directory(audit / "by-machine-id")
+        or audit.resolve() != audit
+    ):
+        raise ValueError("unsafe stale-owner hierarchical audit mapping")
+    audit_meta = fields(audit / "meta", allowed=None)
+    if (
+        audit_meta.get("fleet_owner_token") != owner
+        or audit_meta.get("run_id") != run_id
+        or audit_meta.get("app") != expected_app
+    ):
+        raise ValueError("mismatched stale-owner hierarchical audit identity")
+
+    audit_sources: dict[str, str] = {}
+    fresh_allowed = {
+        "version",
+        "fleet_owner_token",
+        "run_id",
+        "app",
+        "clone_name",
+        "source",
+        "source_machine_id",
+        "machine_id",
+        "volume_id",
+        "disposition",
+    }
+    for machine_id, (clone_name, volume_id) in machine_records.items():
+        expected = fields(
+            audit / "expected-fresh" / clone_name,
+            allowed={"clone_name", "source_machine_id"},
+        )
+        fresh = fields(audit / "fresh" / clone_name, allowed=fresh_allowed)
+        source_id = expected.get("source_machine_id", "")
+        index_path = audit / "by-machine-id" / machine_id
+        index_payload = (
+            index_path.read_text(encoding="utf-8").splitlines()
+            if regular_file(index_path)
+            else []
+        )
+        if (
+            expected.get("clone_name") != clone_name
+            or not safe_machine.fullmatch(source_id)
+            or set(fresh) != fresh_allowed
+            or fresh["version"] != "1"
+            or fresh["fleet_owner_token"] != owner
+            or fresh["run_id"] != run_id
+            or fresh["app"] != expected_app
+            or fresh["clone_name"] != clone_name
+            or fresh["source"] != "fresh-clone"
+            or fresh["source_machine_id"] != source_id
+            or fresh["machine_id"] != machine_id
+            or fresh["volume_id"] != volume_id
+            or fresh["disposition"] != "owned"
+            or index_payload != [clone_name]
+        ):
+            raise ValueError("mismatched stale-owner hierarchical clone identity")
+        audit_sources[machine_id] = source_id
+
+    root_sources = {
+        audit_sources[machine_id] for machine_id in output_by_machine
+    }
+    if (
+        len(root_sources) != 1
+        or any(source_id in machine_records for source_id in root_sources)
+        or any(
+            audit_sources[machine_id] != primary_id
+            for machine_id, (_, _, _, primary_id) in worker_by_machine.items()
+        )
+    ):
+        raise ValueError("unsafe stale-owner hierarchical clone topology")
 
 guests: list[tuple[str, ...]] = []
 for machine_id, (clone_name, volume_id) in machine_records.items():
+    if machine_id not in output_by_machine:
+        continue
     bench, output, preferred_port = output_by_machine[machine_id]
     values = (
         "guest",
@@ -5654,8 +5779,26 @@ for machine_id, (clone_name, volume_id) in machine_records.items():
         raise ValueError("unsafe stale-owner recovery plan field")
     guests.append(values)
 
+workers: list[tuple[str, ...]] = []
+for machine_id, (bench, output, preferred_port, _) in worker_by_machine.items():
+    clone_name, volume_id = machine_records[machine_id]
+    values = (
+        "worker",
+        bench,
+        clone_name,
+        machine_id,
+        volume_id,
+        str(output),
+        str(preferred_port),
+    )
+    if any("\t" in value or "\n" in value for value in values):
+        raise ValueError("unsafe stale-owner recovery plan field")
+    workers.append(values)
+
 with plan.open("w", encoding="utf-8") as handle:
     for values in sorted(guests, key=lambda item: item[3]):
+        handle.write("\t".join(values) + "\n")
+    for values in sorted(workers, key=lambda item: item[3]):
         handle.write("\t".join(values) + "\n")
     handle.flush()
     os.fsync(handle.fileno())
@@ -6409,6 +6552,12 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 if [ -z "$preferred_start" ] || [ "$preferred_port" -lt "$preferred_start" ]; then
                     preferred_start="$preferred_port"
                 fi
+                ;;
+            worker)
+                [ -n "$bench" ] && [ -n "$clone_name" ] \
+                    && [ -n "$machine_id" ] && [ -n "$volume_id" ] \
+                    && [ -n "$output" ] && [ -n "$preferred_port" ] \
+                    || { cleanup_stale_owner_recovery_proxies || true; return 1; }
                 ;;
             *) cleanup_stale_owner_recovery_proxies || true; return 1 ;;
         esac

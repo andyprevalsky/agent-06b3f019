@@ -10310,6 +10310,138 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
     ]
 
 
+def test_exact_guest_recovery_rejects_unsafe_autoscaler_worker_mappings(
+    tmp_path: Path,
+) -> None:
+    """Every worker role and parent edge must have exact owner-local evidence."""
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
+    end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+    build_plan = fleet[start:end]
+    owner = "5d" * 16
+    app = "bench-app"
+    run_id = "fixture-run"
+    warm_id = "feedface000001"
+    primary_a = "deadbeef000001"
+    primary_b = "deadbeef000002"
+    worker_id = "deadbeef000003"
+    records = (
+        ("cloudbench-primary-a", warm_id, primary_a, "vol_primary_a"),
+        ("cloudbench-primary-b", warm_id, primary_b, "vol_primary_b"),
+        ("cloudbench-worker", primary_a, worker_id, "vol_worker"),
+    )
+
+    for label in (
+        "missing-worker-ledger-entry",
+        "duplicate-worker-ledger-entry",
+        "unknown-worker-ledger-entry",
+        "output-machine-in-worker-ledger",
+        "worker-audit-parent-mismatch",
+        "primary-audit-root-mismatch",
+        "missing-worker-audit-index",
+    ):
+        case_root = tmp_path / label
+        registry = case_root / "ownership" / owner
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        runs_root = case_root / "runs"
+        output_a = runs_root / run_id / "bench-a"
+        output_b = runs_root / run_id / "bench-b"
+        output_a.mkdir(parents=True)
+        output_b.mkdir(parents=True)
+        audit_root = case_root / "audits"
+        audit = audit_root / owner
+        for directory in (
+            audit / "fresh",
+            audit / "expected-fresh",
+            audit / "by-machine-id",
+        ):
+            directory.mkdir(parents=True)
+        (registry / "meta").write_text(
+            "version=2\n"
+            f"app={app}\n"
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"runs_root={runs_root}\n"
+            f"audit_dir={audit}\n"
+            "cleanup_policy=retain\n"
+        )
+        (audit / "meta").write_text(
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"app={app}\n"
+        )
+        for clone_name, source_id, machine_id, volume_id in records:
+            if label == "worker-audit-parent-mismatch" and machine_id == worker_id:
+                source_id = primary_b
+            if label == "primary-audit-root-mismatch" and machine_id == primary_b:
+                source_id = "feedface000002"
+            (clones / clone_name).write_text(
+                f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
+            )
+            (audit / "expected-fresh" / clone_name).write_text(
+                f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
+            )
+            (audit / "fresh" / clone_name).write_text(
+                "version=1\n"
+                f"fleet_owner_token={owner}\n"
+                f"run_id={run_id}\n"
+                f"app={app}\n"
+                f"clone_name={clone_name}\n"
+                "source=fresh-clone\n"
+                f"source_machine_id={source_id}\n"
+                f"machine_id={machine_id}\n"
+                f"volume_id={volume_id}\n"
+                "disposition=owned\n"
+            )
+            if not (
+                label == "missing-worker-audit-index"
+                and machine_id == worker_id
+            ):
+                (audit / "by-machine-id" / machine_id).write_text(
+                    f"{clone_name}\n"
+                )
+        (output_a / ".cid").write_text(f"clone {primary_a}\n")
+        (output_a / "status-proxy.port").write_text("61001\n")
+        (output_b / ".cid").write_text(f"clone {primary_b}\n")
+        (output_b / "status-proxy.port").write_text("61002\n")
+        worker_payload = f"{worker_id}\n"
+        if label == "missing-worker-ledger-entry":
+            worker_payload = ""
+        elif label == "unknown-worker-ledger-entry":
+            worker_payload = "deadbeef999999\n"
+        elif label == "output-machine-in-worker-ledger":
+            worker_payload = f"{primary_b}\n"
+        (output_a / "worker-clones.ids").write_text(worker_payload)
+        (output_b / "worker-clones.ids").write_text(
+            f"{worker_id}\n" if label == "duplicate-worker-ledger-entry" else ""
+        )
+        plan = case_root / "plan"
+
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"""set -uo pipefail
+APP={app}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+{build_plan}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+""",
+                "exact-unsafe-hierarchical-recovery-plan",
+                str(registry),
+                str(plan),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode != 0, f"{label} unexpectedly passed"
+        assert not plan.exists()
+
+
 def test_exact_guest_status_and_shutdown_config_fail_closed(
     tmp_path: Path,
 ) -> None:
