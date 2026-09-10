@@ -670,6 +670,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
+       "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
+       "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
@@ -719,6 +721,8 @@ AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
+EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-session-cleanup.py"
+GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
 STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
 STALE_OWNER_RECOVERY_PLAN_FILE=""
@@ -5861,6 +5865,198 @@ cloudbench_confirm_guest_shutdowns() {
     return "$failed"
 }
 
+cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
+    local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
+    local bench machine_id guest_run_token proxy_port output runner_status_code
+    local receipt runner_evidence quiescence_evidence run_evidence backend_evidence
+    local manifest guest_log remote_helper remote_quiescence fetch_status temporary
+    local fetch_spec remote_path local_path status_code
+    local -a identity_args validation_args
+    owner="${owner##*/}"
+    [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
+        echo "❌ exact guest cleanup receipt validator is unavailable" >&2
+        return 1
+    }
+    [ "${#recovery_benches[@]}" -eq "${#recovery_machine_ids[@]}" ] \
+        && [ "${#recovery_benches[@]}" -eq "${#recovery_guest_tokens[@]}" ] \
+        && [ "${#recovery_benches[@]}" -eq "${#recovery_proxy_ports[@]}" ] \
+        && [ "${#recovery_benches[@]}" -eq "${#recovery_outputs[@]}" ] || {
+        echo "❌ exact guest cleanup recovery identity arrays disagree" >&2
+        return 1
+    }
+
+    for recovery_index in "${!recovery_benches[@]}"; do
+        bench="${recovery_benches[$recovery_index]}"
+        machine_id="${recovery_machine_ids[$recovery_index]}"
+        guest_run_token="${recovery_guest_tokens[$recovery_index]}"
+        proxy_port="${recovery_proxy_ports[$recovery_index]}"
+        output="${recovery_outputs[$recovery_index]}"
+        receipt="$output/guest-cleanup.recovery-receipt.json"
+        runner_evidence="$output/guest-cleanup.runner.status"
+        quiescence_evidence="$output/guest-cleanup.quiescence.json"
+        run_evidence="$output/guest-cleanup.run.json"
+        backend_evidence="$output/guest-cleanup.backend.log"
+        manifest="$output/guest-cleanup.provider-manifest.json"
+        guest_log="$output/guest-cleanup.guest-recovery.log"
+        identity_args=(
+            --owner "$owner"
+            --fleet-run-id "$RUN_ID"
+            --bench "$bench"
+            --machine-id "$machine_id"
+            --output-dir "$output"
+            --guest-run-token "$guest_run_token"
+        )
+        validation_args=(
+            "${identity_args[@]}"
+            --run-json "$run_evidence"
+            --backend-log "$backend_evidence"
+            --quiescence-receipt "$quiescence_evidence"
+            --manifest "$manifest"
+            --receipt "$receipt"
+        )
+
+        if [ -e "$output/guest-shutdown.confirmed" ] \
+            || [ -L "$output/guest-shutdown.confirmed" ]; then
+            if [ -f "$output/guest-shutdown.confirmed" ] \
+                && [ ! -L "$output/guest-shutdown.confirmed" ] \
+                && [ "$(cat "$output/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
+                recovered=$((recovered + 1))
+                continue
+            fi
+            echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
+            failed=1
+            continue
+        fi
+
+        if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+            if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                validate-recovery-receipt "${validation_args[@]}" \
+                && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
+                recovered=$((recovered + 1))
+                continue
+            fi
+            echo "❌ [$bench] existing guest cleanup recovery receipt is invalid" >&2
+            failed=1
+            continue
+        fi
+
+        temporary="$runner_evidence.tmp.$$"
+        rm -f "$temporary"
+        runner_status_code="$(curl --noproxy '*' -sS --max-time 5 \
+            -o "$temporary" -w '%{http_code}' \
+            "http://127.0.0.1:$proxy_port/repo/.context/cloudbench/cloudbench-interrupt-cleanup-$guest_run_token.status" \
+            2>/dev/null || true)"
+        case "$runner_status_code" in
+            200)
+                if mv "$temporary" "$runner_evidence" \
+                    && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                        recover-runner-receipt "${identity_args[@]}" \
+                        --source "$runner_evidence" --receipt "$receipt" \
+                    && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                        validate-recovery-receipt "${validation_args[@]}" \
+                    && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
+                    recovered=$((recovered + 1))
+                    # region agent log
+                    _agent_stale_owner_debug_log H19 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
+                        "validated exact private runner cleanup receipt" bench "$bench" machineId "$machine_id"
+                    # endregion
+                    continue
+                fi
+                rm -f "$temporary"
+                echo "❌ [$bench] private runner cleanup receipt is malformed or mismatched" >&2
+                failed=1
+                continue
+                ;;
+            404)
+                rm -f "$temporary"
+                ;;
+            *)
+                rm -f "$temporary"
+                echo "❌ [$bench] private runner cleanup receipt is unreadable (HTTP ${runner_status_code:-transport-error})" >&2
+                failed=1
+                continue
+                ;;
+        esac
+
+        remote_helper="/data/cloudbench-guest-recovery.py"
+        remote_quiescence="/data/cloudbench-guest-quiescence-$guest_run_token.json"
+        [ -s "$GUEST_RECOVERY_HELPER" ] || {
+            echo "❌ [$bench] exact guest quiescence helper is unavailable" >&2
+            failed=1
+            continue
+        }
+        : > "$guest_log"
+        if ! FLY ssh console -a "$APP" --machine "$machine_id" \
+                -C "rm -f '$remote_helper'" >>"$guest_log" 2>&1 \
+            || ! FLY ssh sftp put -a "$APP" --machine "$machine_id" -q -m 0755 \
+                "$GUEST_RECOVERY_HELPER" "$remote_helper" >>"$guest_log" 2>&1 \
+            || ! FLY ssh console -a "$APP" --machine "$machine_id" \
+                -C "python3 '$remote_helper' quiesce --machine-id '$machine_id' --guest-run-token '$guest_run_token' --receipt '$remote_quiescence'" \
+                >>"$guest_log" 2>&1; then
+            echo "❌ [$bench] exact guest quiescence could not be sealed" >&2
+            failed=1
+            continue
+        fi
+
+        fetch_status=0
+        for fetch_spec in \
+            "$remote_quiescence|$quiescence_evidence" \
+            "/repo/.context/cloudbench/run.json|$run_evidence" \
+            "/repo/.context/cloudbench/logs/backend.log|$backend_evidence"; do
+            remote_path="${fetch_spec%%|*}"
+            local_path="${fetch_spec#*|}"
+            temporary="$local_path.tmp.$$"
+            rm -f "$temporary"
+            status_code="$(curl --noproxy '*' -sS --max-time 30 \
+                -o "$temporary" -w '%{http_code}' \
+                "http://127.0.0.1:$proxy_port$remote_path" 2>/dev/null || true)"
+            if [ "$status_code" != "200" ] || ! mv "$temporary" "$local_path"; then
+                rm -f "$temporary"
+                fetch_status=1
+                break
+            fi
+        done
+        if [ "$fetch_status" -ne 0 ]; then
+            echo "❌ [$bench] exact guest run evidence is incomplete" >&2
+            failed=1
+            continue
+        fi
+        # region agent log
+        _agent_stale_owner_debug_log H20 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
+            "sealed exact guest quiescence and durable run evidence" bench "$bench" machineId "$machine_id"
+        # endregion
+
+        if python3 "$EXACT_SESSION_CLEANUP_HELPER" cleanup-provider-sessions \
+                "${identity_args[@]}" \
+                --run-json "$run_evidence" \
+                --backend-log "$backend_evidence" \
+                --quiescence-receipt "$quiescence_evidence" \
+                --manifest "$manifest" \
+                --receipt "$receipt" \
+                --agents-env "$ROOT_DIR/agents/.env" \
+                --backend-env "$ROOT_DIR/back-end/.env" \
+            && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                validate-recovery-receipt "${validation_args[@]}" \
+            && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
+            recovered=$((recovered + 1))
+            # region agent log
+            _agent_stale_owner_debug_log H21 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
+                "validated exact provider cleanup receipt" bench "$bench" machineId "$machine_id"
+            # endregion
+            continue
+        fi
+        echo "❌ [$bench] exact provider cleanup evidence or receipt is incomplete" >&2
+        failed=1
+    done
+
+    # region agent log
+    _agent_stale_owner_debug_log H22 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
+        "completed fail-closed exact guest receipt recovery" guestCount "${#recovery_benches[@]}" \
+        recoveredCount "$recovered" status "$failed"
+    # endregion
+    [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
     local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
@@ -5870,6 +6066,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
+    local -a recovery_machine_ids recovery_guest_tokens recovery_proxy_ports
 
     STALE_OWNER_RECOVERY_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-guest-recovery.XXXXXX")" \
         || return 1
@@ -5924,6 +6121,8 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 recovery_outputs+=("$output")
                 recovery_ips+=("$private_ip")
                 recovery_remote+=("$remote_port")
+                recovery_machine_ids+=("$machine_id")
+                recovery_guest_tokens+=("$guest_run_token")
                 guest_count=$((guest_count + 1))
                 if [ -z "$preferred_start" ] || [ "$preferred_port" -lt "$preferred_start" ]; then
                     preferred_start="$preferred_port"
@@ -5988,6 +6187,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 return 1
             }
             STALE_OWNER_RECOVERY_PROXY_PIDS+=("$proxy_pid")
+            recovery_proxy_ports+=("$proxy_port")
             marker_tmp="${recovery_outputs[$recovery_index]}/status-proxy.port.tmp.$$"
             if ! printf '%s\n' "$proxy_port" > "$marker_tmp" \
                 || ! mv "$marker_tmp" "${recovery_outputs[$recovery_index]}/status-proxy.port"; then
@@ -6023,6 +6223,14 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         "completed token-bound stale-owner shutdown health contract" guestCount "$guest_count" \
         status "$shutdown_status"
     # endregion
+    if [ "$shutdown_status" -ne 0 ]; then
+        echo "🧭 top-level guest acknowledgement unavailable; validating exact durable cleanup receipts"
+        if cloudbench_recover_guest_cleanup_receipts "$registry"; then
+            shutdown_status=0
+        else
+            shutdown_status=$?
+        fi
+    fi
     if cleanup_stale_owner_recovery_proxies; then
         proxy_cleanup_status=0
     else

@@ -8670,10 +8670,20 @@ def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
     quiescence.write_text(
         json.dumps(
             {
+                "schema_version": "cloudbench-guest-quiescence-v1",
                 "version": 1,
                 "state": "quiesced",
                 "guest_run_token": "guest-token",
                 "machine_id": "deadbeef000001",
+                "reason": "driver-exited-services-stopped",
+                "driver_state": "exited",
+                "driver_pid": None,
+                "driver_process_state": None,
+                "stopped_service_pids": [99999991, 99999992],
+                "backend_port": 3001,
+                "services_sha256": "1" * 64,
+                "run_json_sha256": hashlib.sha256(run_json.read_bytes()).hexdigest(),
+                "backend_log_sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest(),
             }
         )
     )
@@ -8762,6 +8772,80 @@ def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
         ("kernel", kernel_session, 204),
         ("steel", steel_session, 200),
     ]
+
+
+def test_exited_guest_quiescence_requires_stopped_services_and_seals_run_evidence(
+    tmp_path: Path,
+) -> None:
+    """Driver exit is never cleanup proof; exact stopped services and evidence are."""
+    data_dir = tmp_path / "data"
+    repo_dir = data_dir / "repo"
+    context_dir = repo_dir / ".context" / "cloudbench"
+    logs_dir = context_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    (data_dir / "cloudbench-driver.state").write_text("exited\n")
+    run_json = context_dir / "run.json"
+    backend_log = logs_dir / "backend.log"
+    run_json.write_text('{"tasks":[]}\n')
+    backend_log.write_text("durable exact backend evidence\n")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        backend_port = reservation.getsockname()[1]
+
+    services = {
+        "schema_version": 1,
+        "benchmark_mode": True,
+        "worktree": str(repo_dir),
+        "status": "stopped",
+        "run_sh_pid": 99_999_991,
+        "ports": {"backend": backend_port},
+        "services": [{"name": "back-end", "pid": 99_999_992}],
+    }
+    services_path = context_dir / "services.json"
+    services_path.write_text(json.dumps(services))
+    receipt = data_dir / "quiescence.json"
+    command = [
+        sys.executable,
+        str(GUEST_RECOVERY_SCRIPT),
+        "quiesce",
+        "--machine-id",
+        "deadbeef000001",
+        "--guest-run-token",
+        "guest-token",
+        "--data-dir",
+        str(data_dir),
+        "--repo-dir",
+        str(repo_dir),
+        "--receipt",
+        str(receipt),
+        "--run-json",
+        str(run_json),
+        "--backend-log",
+        str(backend_log),
+    ]
+
+    first = subprocess.run(command, text=True, capture_output=True, check=False)
+    second = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    value = json.loads(receipt.read_text())
+    assert value["reason"] == "driver-exited-services-stopped"
+    assert value["run_json_sha256"] == hashlib.sha256(run_json.read_bytes()).hexdigest()
+    assert value["backend_log_sha256"] == hashlib.sha256(backend_log.read_bytes()).hexdigest()
+
+    receipt.unlink()
+    services["status"] = "running"
+    services_path.write_text(json.dumps(services))
+    running_manifest = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert running_manifest.returncode != 0
+    assert not receipt.exists()
+
+    services["status"] = "stopped"
+    services["run_sh_pid"] = os.getpid()
+    services_path.write_text(json.dumps(services))
+    live_service = subprocess.run(command, text=True, capture_output=True, check=False)
+    assert live_service.returncode != 0
+    assert not receipt.exists()
 
 
 def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(

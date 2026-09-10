@@ -116,6 +116,8 @@ CLOUDBENCH_GUEST_STATUS_SERVER="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-statu
 CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-benchmark-target.py"
 CLOUDBENCH_GUEST_CATALOG_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench_catalog.py"
 CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench_execution_provenance.py"
+CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-exact-session-cleanup.py"
+CLOUDBENCH_GUEST_RECOVERY_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-guest-recovery.py"
 CLOUDBENCH_GUEST_ENV_HELPER="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-env.sh"
 CLOUDBENCH_GUEST_SEED_BUDGET_LIB="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-seed-budget.sh"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-machine-readiness.py"
@@ -3264,6 +3266,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/cloudbench-benchmark-target.py
         --env CLOUDBENCH_CATALOG_SCRIPT=/cloudbench_catalog.py
         --env CLOUDBENCH_ENV_HELPER=/cloudbench-env.sh
+        --env CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/cloudbench-exact-session-cleanup.py
+        --env CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/cloudbench-guest-recovery.py
         --env "LOCAL_PATCH_B64="
         --env "CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN"
         --env "REF=$BENCH_REF"
@@ -3301,6 +3305,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --file-local "/cloudbench_catalog.py=$CLOUDBENCH_GUEST_CATALOG_SCRIPT"
         --file-local "/cloudbench-env.sh=$CLOUDBENCH_GUEST_ENV_HELPER"
         --file-local "/cloudbench-seed-budget.sh=$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"
+        --file-local "/cloudbench-exact-session-cleanup.py=$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT"
+        --file-local "/cloudbench-guest-recovery.py=$CLOUDBENCH_GUEST_RECOVERY_SCRIPT"
     )
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         _envargs+=(
@@ -3572,6 +3578,8 @@ for helper_path in \
     "$CLOUDBENCH_GUEST_STATUS_SERVER" \
     "$CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT" \
     "$CLOUDBENCH_GUEST_CATALOG_SCRIPT" \
+    "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" \
+    "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" \
     "$CLOUDBENCH_GUEST_ENV_HELPER" \
     "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"; do
     [ -s "$helper_path" ] || { echo "❌ Missing controller-owned guest helper: $helper_path" >&2; exit 1; }
@@ -3616,6 +3624,8 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/data/cloudbench-benchmark-target.py"
     echo "export CLOUDBENCH_CATALOG_SCRIPT=/data/cloudbench_catalog.py"
     echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+    echo "export CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/data/cloudbench-exact-session-cleanup.py"
+    echo "export CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/data/cloudbench-guest-recovery.py"
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         echo "export CLOUDBENCH_EXECUTION_PROVENANCE_SCRIPT=/data/cloudbench-execution-provenance.py"
         echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
@@ -3702,7 +3712,7 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
@@ -3721,6 +3731,8 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_STATUS_SERVER" /data/cloudbench-status-server.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT" /data/cloudbench-benchmark-target.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CATALOG_SCRIPT" /data/cloudbench_catalog.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" /data/cloudbench-exact-session-cleanup.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" /data/cloudbench-guest-recovery.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_ENV_HELPER" /data/cloudbench-env.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB" /data/cloudbench-seed-budget.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
