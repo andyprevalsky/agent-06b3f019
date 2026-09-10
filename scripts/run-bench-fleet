@@ -6145,7 +6145,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local state_driver state_descendants state_reason fetch_spec remote_path
     local local_path maximum status_code machine_status_evidence stopped_proof
     local machine_status_temporary stopped_verified remote_zero zero_evidence
-    local runner_lifecycle
+    local runner_lifecycle debug_manifest_status
     local -a identity_args validation_args
     owner="${owner##*/}"
     [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
@@ -6356,6 +6356,32 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             CLOUDBENCH_DEBUG_STATE_BENCH="$bench" \
             CLOUDBENCH_DEBUG_STATE_MACHINE="$machine_id" \
             python3 -c 'import json,os,time; p=json.load(open(os.environ["CLOUDBENCH_DEBUG_STATE_EVIDENCE"])); open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"M,N,O","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"exact guest recovery state branch","data":{"bench":os.environ["CLOUDBENCH_DEBUG_STATE_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_STATE_MACHINE"],"kind":os.environ["CLOUDBENCH_DEBUG_STATE_KIND"],"driver":os.environ["CLOUDBENCH_DEBUG_STATE_DRIVER"],"descendants":os.environ["CLOUDBENCH_DEBUG_STATE_DESCENDANTS"],"reason":os.environ["CLOUDBENCH_DEBUG_STATE_REASON"],"servicesStatus":p.get("services_status"),"liveServiceCount":len(p.get("live_service_pids",[])),"backendClosed":p.get("backend_closed"),"runWithinLimit":p.get("run_json",{}).get("within_limit"),"backendWithinLimit":p.get("backend_log",{}).get("within_limit")},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
+        # endregion
+        # region agent log
+        if [ "$state_kind" = "exited" ] \
+            && [ "$state_reason" = "missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json" ]; then
+            debug_manifest_status="backend-unreadable"
+            cloudbench_fetch_guest_evidence status_code \
+                "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
+                "/repo/.context/cloudbench/logs/backend.log" \
+                "$backend_evidence" 536870912 30
+            if [ "$status_code" = "200" ]; then
+                if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                        build-active-provider-manifest \
+                        "${identity_args[@]}" \
+                        --backend-log "$backend_evidence" \
+                        --manifest "$manifest"; then
+                    debug_manifest_status="exact-manifest"
+                else
+                    debug_manifest_status="manifest-rejected"
+                fi
+            fi
+            CLOUDBENCH_DEBUG_MANIFEST="$manifest" \
+                CLOUDBENCH_DEBUG_MANIFEST_STATUS="$debug_manifest_status" \
+                CLOUDBENCH_DEBUG_MANIFEST_BENCH="$bench" \
+                CLOUDBENCH_DEBUG_MANIFEST_MACHINE="$machine_id" \
+                python3 -c 'import json,os,time; p=json.load(open(os.environ["CLOUDBENCH_DEBUG_MANIFEST"])) if os.path.isfile(os.environ["CLOUDBENCH_DEBUG_MANIFEST"]) else {}; s=p.get("sessions",{}); e=p.get("evidence",{}); open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"M,N,O","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"exited guest provider identity candidate","data":{"bench":os.environ["CLOUDBENCH_DEBUG_MANIFEST_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_MANIFEST_MACHINE"],"status":os.environ["CLOUDBENCH_DEBUG_MANIFEST_STATUS"],"kind":p.get("kind"),"rootAgentBound":isinstance(p.get("root_agent_id"),str),"kernelSessionCount":len(s.get("kernel",[])),"steelSessionCount":len(s.get("steel",[])),"allocationEventCount":e.get("allocation_event_count"),"browserSessionMutationCount":e.get("browser_session_mutation_count")},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
+        fi
         # endregion
         if [ "$quiescence_status" -ne 0 ]; then
             if [ "$state_kind" = "active" ]; then
