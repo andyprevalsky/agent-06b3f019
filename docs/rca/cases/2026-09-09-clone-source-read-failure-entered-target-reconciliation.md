@@ -13,6 +13,7 @@ symptoms:
   - "ERROR: exact psql command is unavailable"
   - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
   - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
+  - "state: pending_destroy after six accepted exact volume destroy calls"
 tags:
   - cloudbench
   - fly-io
@@ -55,6 +56,11 @@ sources:
   - commit 5d90c105d
   - commit 4f743b245
   - commit cb7f35bd8
+  - owner 539b11e970334d9db5d401fa167ac59e
+  - commit 95ab4d584
+  - commit 71197cc5b
+  - https://fly.io/docs/volumes/volume-states/
+  - https://fly.io/docs/about/billing/#volume-billing
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -1182,6 +1188,86 @@ reads only that owner's bounded local clone graph. It adds no provider inventory
 cross-owner query, global poller, shared row, lock, channel, subscription, or
 fan-in.
 
+## Sixteenth recurrence on 2026-09-10
+
+The hierarchical recovery fix exposed the next exact lifecycle boundary for
+owner `539b11e970334d9db5d401fa167ac59e`. Recovery resolved the owner graph,
+recovered all 18 audit identities, and destroyed all 18 exact Machines. Each
+Volume destroy command exited 0, but exact `fly volumes show --json` reads
+continued to return a provider-visible identity. Read-only inspection found 16
+Volumes in `pending_destroy` and two in `destroyed`; every Volume had
+`attached_machine_id=null` and `host_status=ok`. The first exact Volume,
+`vol_42keop1j2zmenp94`, remained `pending_destroy` on a second recovery 26
+minutes later.
+
+Runtime NDJSON evaluated the competing causes:
+
+- H1, a rejected or ambiguous destroy request, was rejected. Every captured
+  mutation had `destroyStatus=0`, and every exact lifecycle read had status 0.
+- H2, an additional detach, lease, or snapshot action, was rejected. Every
+  exact Volume was already unattached, Fly exposes no Volume detach operation,
+  and `vol_42keop1j2zmenp94` had no snapshots.
+- H3, an undersized convergence bound, was rejected. The same identity remained
+  26 minutes later, and Fly documents `pending_destroy` as its intentional
+  24-hour soft-deletion state rather than a short asynchronous transition.
+- H4 was confirmed. Fly documents that `pending_destroy` Volumes accrue no
+  Volume charges, but the audit algebra had no terminal outcome for a non-billing
+  provider deletion whose exact identity remains visible.
+
+The critical path was:
+
+`--recover-stale-owner <exact-token>` → exact Machine destroy/absence →
+exact Volume destroy accepted → exact Volume state `pending_destroy` →
+`reap_volume` returns accepted-pending 75 → registry reaper retains every record
+and returns nonzero after draining the owner.
+
+The first bad boundary was `reap_volume`. Its three outcomes distinguished exact
+absence, accepted-but-still-present, and rejected-or-ambiguous, but
+accepted-but-still-present combined attachable/transitional states with Fly's
+provider-terminal soft-deletion state. Every audit consumer then inherited the
+false requirement that terminal cleanup must erase provider identity.
+
+The unchanged fast pre-fix command was:
+
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_owner_recovery_records_provider_retained_terminal_volume`.
+
+It failed after six accepted exact destroy/read pairs because recovery returned
+nonzero and retained the registry record. After the fix, the same command exits
+0 with `1 passed`. Its NDJSON records `destroyStatus=0`,
+`lifecycleStatus=0`, and exact states `pending_destroy` and `destroyed`, followed
+by `provider-retained terminal deletion receipt` on attempt 1.
+
+`reap_volume` now returns four explicit outcomes: 0 only for exact not-found, 74
+for an accepted exact deletion observed in provider-retained terminal state, 75
+for accepted deletion still in an attachable or transitional state, and 1 for
+rejected or ambiguous evidence. Audit records use the distinct
+`destroyed-provider-retained` disposition, retain the exact Volume ID, and may
+strengthen monotonically to `destroyed-verified-absent`; they can never weaken
+from exact absence back to retained identity. Every Machine, pool transfer,
+failed worker, failed clone, snapshot-failure, and exact registry reaper consumes
+the same outcome. Redundant second Volume destroy loops were removed because
+`reap_machine` already carries the exact Volume through its lifecycle.
+
+The nine-test focused lifecycle set passes, including transition ambiguity,
+provider rejection, retained-terminal idempotency, exact-absence strengthening,
+and head-of-line draining. The complete dependency lifecycle suite passes all
+297 tests. Bash syntax and the complete multi-workstream lifecycle suite pass
+all 16 source-ordered scenarios. No benchmark definition, timeout, concurrency
+bound, provider inventory, or neighboring resource was changed or accessed.
+
+The deepest owned cause remains a logical inconsistency in the harness lifecycle
+contract: provider deletion finality and provider identity disappearance were
+represented as one state even though Fly intentionally separates them. Deleting
+the redundant second destroy loops shrinks provider traffic; the distinct
+terminal audit disposition is necessary because collapsing it into exact absence
+would make the durable record untruthful.
+
+At 10,000 agents, recovery remains O(records in one exact owner). A terminal
+Volume requires one accepted exact-ID mutation and one exact-ID read instead of
+six repeated pairs. Audit state is constant-size per existing owner record, with
+no provider-wide inventory, cross-owner query, shared poller, row, lock, channel,
+subscription, or fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1294,6 +1380,14 @@ timeout or benchmark-definition changes and direct provider destruction,
 retained ownership of the exact live recovery rerun, and required the current
 branch to be committed and pushed.
 
+For the sixteenth recurrence, the user required runtime evidence to distinguish
+an additional provider action from intentional provider-retained deletion. They
+prohibited treating `pending_destroy` as absence, weakening bounds, mutating
+benchmark definitions, or touching neighboring resources. They required an
+unchanged failing-before/passing-after regression, focused lifecycle and
+multi-workstream suites, a separate pushed branch, the exact cherry-pick range,
+and the safe current-owner verification command.
+
 ## Reusable lesson
 
-Model accepted-pending, rejected-or-ambiguous, and authoritatively-absent provider lifecycles as distinct states, and retire exact ownership only from authoritative absence.
+Separate provider-terminal non-billing deletion from exact identity absence, preserve both truthfully, and let only monotonic lifecycle evidence retire active ownership.
