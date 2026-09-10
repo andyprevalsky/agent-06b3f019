@@ -9,12 +9,10 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine_id_for_clone_name before classifying and durably recording an exact provider-returned target volume
 symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
-  - "unresolved clone name 'cloudbench-…'; inspect with: flyctl machines list"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "exact stale-owner registry identity is unsafe"
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
   - "driver exited without cleanup acknowledgement"
-  - "3 guest(s) did not acknowledge browser/session cleanup; retaining provider ownership"
 tags:
   - cloudbench
   - fly-io
@@ -33,7 +31,6 @@ sources:
   - commit d8d1dc8dc
   - commit 59307b5aa
   - commit 458f9ae51
-  - exact-owner recovery /tmp/rose-quarantined-guest-recovery-v4.log
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
