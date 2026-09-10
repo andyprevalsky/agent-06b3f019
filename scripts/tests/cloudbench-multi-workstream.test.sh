@@ -1044,7 +1044,7 @@ elif args[:2] == ["machine", "clone"]:
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad",
-            "private_ip": f"fdaa::fake:{machine_id[:4]}",
+            "private_ip": f"fdaa::{machine_id[:4]}",
             "config": {"mounts": [{"volume": volume_id}],
                        "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                  "memory_mb": vm_memory}},
@@ -3262,9 +3262,9 @@ rm -f "$FAKE_DIR/require-private-ip-proxy" "$FAKE_DIR/stale-started-inventory" \
     cat "$TMP_ROOT/controller-private-ip-proxy.log" >&2
     fail "data-plane tunnels must not depend on eventually consistent machine-name DNS"
 }
-grep -Eq '^proxy [0-9]+:8011 fdaa::fake:' "$FAKE_DIR/journal.log" ||
+grep -Eq '^proxy [0-9]+:8011 fdaa::[0-9a-f]+ ' "$FAKE_DIR/journal.log" ||
     fail "the status tunnel must target the indexed private IP"
-grep -Eq '^proxy [0-9]+:3003 fdaa::fake:' "$FAKE_DIR/journal.log" ||
+grep -Eq '^proxy [0-9]+:3003 fdaa::[0-9a-f]+ ' "$FAKE_DIR/journal.log" ||
     fail "the mandatory-autoscaler tunnel must target the indexed private IP"
 grep -Eq '^machine start [0-9a-f]+' "$FAKE_DIR/journal.log" ||
     fail "every post-config primary must receive an explicit idempotent start request"
