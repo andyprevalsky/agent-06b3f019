@@ -441,6 +441,22 @@ try:
 except OSError:
     pass
 # endregion
+for directory in ("/proc/self/fd", "/dev/fd"):
+    try:
+        inherited_descriptors = os.listdir(directory)
+        break
+    except OSError:
+        inherited_descriptors = None
+if inherited_descriptors is None:
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+else:
+    for value in inherited_descriptors:
+        try:
+            descriptor = int(value)
+            if descriptor > 2:
+                os.close(descriptor)
+        except (OSError, ValueError):
+            pass
 os.execvp(argv[0], argv)
 PY
 }
@@ -544,6 +560,22 @@ os.dup2(fd, 1)
 os.dup2(fd, 2)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
+for directory in ("/proc/self/fd", "/dev/fd"):
+    try:
+        inherited_descriptors = os.listdir(directory)
+        break
+    except OSError:
+        inherited_descriptors = None
+if inherited_descriptors is None:
+    os.closerange(3, os.sysconf("SC_OPEN_MAX"))
+else:
+    for value in inherited_descriptors:
+        try:
+            descriptor = int(value)
+            if descriptor > 2:
+                os.close(descriptor)
+        except (OSError, ValueError):
+            pass
 os.environ["CLOUDBENCH_TRACKED_GROUP_TOKEN"] = group_token
 
 release_read, release_write = os.pipe()
