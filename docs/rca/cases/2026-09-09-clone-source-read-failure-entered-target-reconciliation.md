@@ -13,6 +13,7 @@ symptoms:
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
   - "ERROR: services evidence has no exact isolated stopped database identity"
   - "ERROR: durable backend evidence contains no exact provider session identity"
+  - "ERROR: exact psql command is unavailable"
 tags:
   - cloudbench
   - fly-io
@@ -43,6 +44,8 @@ sources:
   - commit 1527b074a
   - commit 650ab1085
   - commit 78fb850cc
+  - commit 1fa5a12fc
+  - commit 9c8e414d9
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -920,6 +923,70 @@ remains O(resources in one exact owner). The change adds no provider inventory,
 cross-owner query, global poller, shared row, lock, channel, subscription, or
 fan-in.
 
+## Twelfth recurrence on 2026-09-10
+
+The v8 exact-owner rerun eliminated all three stopped-Machine failures but left
+`parallel-tool-calls` and `polar-bu-066` quarantined. H20 proved both exact
+Machines quiesced with sealed run/backend evidence, while H22 recorded
+`guestCount=9,recoveredCount=7,status=1`. The initial
+`ERROR: durable backend evidence contains no exact provider session identity`
+was the expected nonempty-session branch rejecting a zero-session run. Each
+exact output's guest recovery log then recorded the first bad zero-proof
+boundary: `ERROR: exact psql command is unavailable`.
+
+Read-only inspection of only Machines `2862595b6d4328` and `d896269c97e048`
+proved that `/usr/bin/psql` exists and is executable on both, but is the
+canonical Debian symlink to `../share/postgresql-common/pg_wrapper`; each also
+has a regular executable `/usr/lib/postgresql/15/bin/psql`. This rejected a
+missing-package hypothesis. Because `prove_zero_allocation` validates services,
+run, backend, and quiescence evidence before entering `run_exact_psql`, it also
+rejected the prior service-identity and incomplete-lifecycle hypotheses. The
+exact DB/tree result remains intentionally unknown until the live rerun; no
+absence is treated as proof.
+
+The critical path was:
+
+`sealed exact run/backend/quiescence evidence` → `prove-zero-allocation` →
+`run_exact_psql` → exact isolated-database catalog query → exact recursive root
+tree and `BrowserSession` query → hashed zero-allocation proof → exact-owner
+cleanup receipt.
+
+The first bad boundary was `run_exact_psql`. It reused `regular_file`, whose
+correct evidence-file contract rejects every symlink, for an operating-system
+executable. That made the immutable helper disagree with the retained Ubuntu
+image's package-managed executable layout before any exact query could run.
+The deepest owned cause is a path-type contract inconsistency: immutable
+evidence and executable entrypoints shared one validator despite requiring
+different symlink semantics. The sibling failure is any package-managed command
+entrypoint represented by an absolute symlink to a regular executable. The
+problem bucket is fixture/environment/data mismatch.
+
+The permanent pre-fix command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py::test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt`.
+
+It exited 1 twice, for canonical and legacy system-Postgres manifests, with
+`ERROR: exact psql command is unavailable`. The fixture reproduces the retained
+layout with `usr/bin/psql -> ../share/postgresql-common/pg_wrapper`. Recovery now
+uses a separate executable validator: the command must be absolute, resolve
+strictly to a regular nonsymlink target, and be executable. It still invokes the
+original path so wrapper dispatch retains its `psql` identity. Evidence readers
+continue to reject symlinks unchanged.
+
+The unchanged regression now exits 0 with `2 passed`. The full dependency suite
+passes all 283 tests; the complete multi-workstream lifecycle suite, authenticated
+status service, fleet canary/stability/concurrency/autoscale suites, cloudbench
+environment/token/fetch/app-lock/seed/restore/orphan-proxy suites, and Python/Bash
+syntax checks all pass. No provider mutation or live recovery ran during
+verification. Benchmark definitions, timeouts, concurrency, and out-of-owner
+resources are unchanged.
+
+At 10,000 agents, the change adds one O(1) local executable-path resolution per
+explicit zero-proof attempt. Exact database and root/tree queries remain bounded
+to one owner-recorded guest and one root tree; there is no inventory, sweep,
+fan-in, global poller, shared row, lock, channel, or subscription.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -1002,6 +1069,13 @@ fix, no weakening of fail-closed ownership, the complete relevant suites, and a
 pushed recovery branch. They prohibited benchmark task, timeout, or concurrency
 changes and any sweep or destruction outside exact owner
 `03596f65144d485f8a667fc31f7e3cc6`; they retained ownership of the live rerun.
+
+For the twelfth recurrence, the user required runtime-evidence RCA only for the
+two zero-session tasks, a failing regression before the fix, and authoritative
+zero-allocation proof rooted in each exact run's durable run/backend evidence.
+They prohibited absence assumptions, weakened exact-owner semantics, changes to
+task definitions/timeouts/concurrency, and touching out-of-owner resources; they
+retained ownership of the precise live rerun.
 
 ## Reusable lesson
 
