@@ -9064,6 +9064,524 @@ def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
     ]
 
 
+def test_active_legacy_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    """An immutable active guest is fenced by exact Machine stop before cleanup."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "machine_status_exact_read() {",
+            "registry_machine_details() {",
+            "cloudbench_seal_guest_evidence_file() {",
+            "cloudbench_fetch_guest_evidence() {",
+            "cloudbench_publish_guest_shutdown_confirmation() {",
+            "cloudbench_recover_guest_cleanup_receipts() {",
+        )
+    )
+    owner = "7c" * 16
+    machine_id = "deadbeef000019"
+    clone_name = "cloudbench-active-legacy"
+    bench = "active-legacy-bench"
+    guest_token = "active-legacy-token"
+    root_agent = "11111111-2222-4333-8444-555555555555"
+    kernel_session = "kernel-active-exact"
+    output = tmp_path / "runs" / "fixture-run" / bench
+    output.mkdir(parents=True)
+    registry = tmp_path / "ownership" / owner
+    registry.mkdir(parents=True)
+    manifest = output / "guest-cleanup.provider-manifest.json"
+    stopped_proof = output / "guest-cleanup.machine-stopped.json"
+    receipt = output / "guest-cleanup.recovery-receipt.json"
+    stopped_marker = tmp_path / "machine-stopped"
+    calls = tmp_path / "calls"
+    backend_log = (
+        "[Server] Server started mode=fixture port=3001\n"
+        "[HTTP] POST /api/agents -> 201 method=POST path=/api/agents status=201\n"
+        f"[Tracing] span.start agent_id={root_agent} method=PATCH "
+        f"path=/api/agents/{root_agent}\n"
+        f"[Kernel] Created Kernel browser session sessionId={kernel_session} "
+        "contextId=context-exact\n"
+    )
+    state_payload = json.dumps(
+        {
+            "schema_version": "cloudbench-guest-state-v1",
+            "version": 1,
+            "state": "active",
+            "machine_id": machine_id,
+            "guest_run_token": guest_token,
+            "reason": "exact guest driver is still active",
+            "driver_state": "running",
+            "driver_pid": 99999991,
+            "driver_process_state": "S",
+            "driver_token_match": True,
+            "driver_descendants": [
+                {
+                    "pid": 99999992,
+                    "parent_pid": 99999991,
+                    "process_state": "S",
+                    "command": "run_benchmark.py",
+                }
+            ],
+            "services_manifest": {
+                "exists": True,
+                "regular": True,
+                "symlink": False,
+                "bytes": 100,
+                "within_limit": True,
+            },
+            "run_json": {
+                "exists": False,
+                "regular": False,
+                "symlink": False,
+                "bytes": None,
+                "within_limit": False,
+            },
+            "backend_log": {
+                "exists": True,
+                "regular": True,
+                "symlink": False,
+                "bytes": len(backend_log),
+                "within_limit": True,
+            },
+            "services_status": None,
+            "stopped_service_pids": [],
+            "live_service_pids": [],
+            "backend_port": None,
+            "backend_closed": None,
+        },
+        separators=(",", ":"),
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_DELETE(self) -> None:
+            assert self.path == f"/browsers/{kernel_session}"
+            assert stopped_proof.is_file(), "provider cleanup preceded exact stopped-state proof"
+            with calls.open("a") as handle:
+                handle.write("provider-delete\n")
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    provider_port = server.server_address[1]
+    script = f"""set -uo pipefail
+APP=bench-app
+ROOT_DIR={shlex.quote(str(tmp_path))}
+RUN_ID=fixture-run
+CLOUDBENCH_BARRIER_TOKEN=barrier-token
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(EXACT_SESSION_CLEANUP_SCRIPT))}
+GUEST_RECOVERY_HELPER={shlex.quote(str(GUEST_RECOVERY_SCRIPT))}
+REGISTRY={shlex.quote(str(registry))}
+MANIFEST={shlex.quote(str(manifest))}
+STOPPED_PROOF={shlex.quote(str(stopped_proof))}
+STOPPED_MARKER={shlex.quote(str(stopped_marker))}
+CALLS={shlex.quote(str(calls))}
+recovery_benches=({shlex.quote(bench)})
+recovery_clone_names=({shlex.quote(clone_name)})
+recovery_machine_ids=({shlex.quote(machine_id)})
+recovery_guest_tokens=({shlex.quote(guest_token)})
+recovery_proxy_ports=(62019)
+recovery_outputs=({shlex.quote(str(output))})
+recovery_machine_states=(started)
+_agent_stale_owner_debug_log() {{ :; }}
+FLY() {{
+  case "$1 $2" in
+    "ssh console")
+      case "$*" in *" quiesce "*) return 1 ;; *) return 0 ;; esac
+      ;;
+    "ssh sftp") return 0 ;;
+    "machine stop")
+      [ "$3" = {shlex.quote(machine_id)} ] || return 91
+      [ -s "$MANIFEST" ] || return 92
+      [ ! -e "$STOPPED_PROOF" ] || return 93
+      printf 'machine-stop\\n' >> "$CALLS"
+      touch "$STOPPED_MARKER"
+      ;;
+    "machine status")
+      [ "$3" = {shlex.quote(machine_id)} ] || return 94
+      if [ -e "$STOPPED_MARKER" ]; then state=stopped; else state=started; fi
+      printf 'machine-status-%s\\n' "$state" >> "$CALLS"
+      cat <<STATUS
+Machine ID: {machine_id}
+State: $state
+
+VM
+ ID         │ {machine_id}
+ State      │ $state
+ Name       │ {clone_name}
+ Private IP │ fdaa::119
+STATUS
+      ;;
+    *) return 95 ;;
+  esac
+}}
+curl() {{
+  local output_file="" url="" arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      -o) output_file="$1"; shift ;;
+      -H|--max-time|--max-filesize|-w) shift ;;
+      http://*) url="$arg" ;;
+    esac
+  done
+  case "$url" in
+    */cloudbench-interrupt-cleanup-{guest_token}.status) printf 404 ;;
+    */cloudbench-guest-state-{guest_token}.json)
+      printf '%s\\n' {shlex.quote(state_payload)} > "$output_file"
+      printf 200
+      ;;
+    */repo/.context/cloudbench/logs/backend.log)
+      printf '%s' {shlex.quote(backend_log)} > "$output_file"
+      printf 200
+      ;;
+    *) printf 404 ;;
+  esac
+}}
+{functions}
+
+cloudbench_recover_guest_cleanup_receipts "$REGISTRY"
+"""
+    env = {
+        **os.environ,
+        "KERNEL_API_KEY": "kernel-key",
+        "KERNEL_API_BASE_URL": f"http://127.0.0.1:{provider_port}",
+    }
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert json.loads(manifest.read_text())["sessions"] == {
+        "kernel": [kernel_session],
+        "steel": [],
+    }
+    assert json.loads(stopped_proof.read_text())["state"] == "stopped"
+    assert json.loads(receipt.read_text())["kind"] == "provider-exact-cleanup"
+    call_lines = calls.read_text().splitlines()
+    assert call_lines.index("machine-stop") < call_lines.index("machine-status-stopped")
+    assert call_lines.index("machine-status-stopped") < call_lines.index("provider-delete")
+    assert (output / "guest-shutdown.confirmed").read_text() == "fixture-run\n"
+    assert all("machines list" not in line for line in call_lines)
+
+
+def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
+    tmp_path: Path,
+) -> None:
+    """Complete lifecycle plus an exact root/tree query can prove zero allocation."""
+    owner = "7d" * 16
+    machine_id = "deadbeef000020"
+    guest_token = "zero-allocated-token"
+    root_agent = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    bench = "zero-allocated-bench"
+    data_dir = tmp_path / "data"
+    repo_dir = data_dir / "repo"
+    context_dir = repo_dir / ".context" / "cloudbench"
+    logs_dir = context_dir / "logs"
+    logs_dir.mkdir(parents=True)
+    output = tmp_path / "output"
+    output.mkdir()
+    run_json = context_dir / "run.json"
+    backend_log = logs_dir / "backend.log"
+    services_path = context_dir / "services.json"
+    quiescence = data_dir / "quiescence.json"
+    query_proof = data_dir / "zero-query.json"
+    manifest = output / "manifest.json"
+    receipt = output / "receipt.json"
+    database_name = "victoria_bench_exact_zero"
+    run_json.write_text(
+        json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n"
+    )
+    backend_log.write_text(
+        "[Server] Server started mode=fixture port=3001\n"
+        "[HTTP] POST /api/agents -> 201 method=POST path=/api/agents status=201\n"
+        f"[HTTP] GET /api/agents/{root_agent} -> 200 method=GET "
+        f"path=/api/agents/{root_agent} status=200 agent_id={root_agent}\n"
+        f"[Prisma] db.query agent_id={root_agent} model=BrowserSession "
+        "operation=findMany status=ok\n"
+        "[Server] SIGTERM received, closing server...\n"
+    )
+    services = {
+        "schema_version": 1,
+        "benchmark_mode": True,
+        "worktree": str(repo_dir),
+        "status": "stopped",
+        "run_sh_pid": 99999991,
+        "ports": {"backend": 3001},
+        "services": [{"name": "back-end", "pid": 99999992}],
+        "database": {
+            "container": "",
+            "volume": "",
+            "owned_by_run_sh": True,
+            "use_system_postgres": True,
+            "name": database_name,
+            "port": 5432,
+            "runtime_port": 5432,
+        },
+    }
+    services_path.write_text(json.dumps(services) + "\n")
+    quiescence.write_text(
+        json.dumps(
+            {
+                "schema_version": "cloudbench-guest-quiescence-v1",
+                "version": 1,
+                "state": "quiesced",
+                "machine_id": machine_id,
+                "guest_run_token": guest_token,
+                "reason": "driver-exited-services-stopped",
+                "driver_state": "exited",
+                "driver_pid": None,
+                "driver_process_state": None,
+                "stopped_service_pids": [99999991, 99999992],
+                "backend_port": 3001,
+                "services_sha256": hashlib.sha256(services_path.read_bytes()).hexdigest(),
+                "run_json_sha256": hashlib.sha256(run_json.read_bytes()).hexdigest(),
+                "backend_log_sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest(),
+            }
+        )
+        + "\n"
+    )
+    psql_calls = tmp_path / "psql-calls"
+    fake_psql = tmp_path / "psql"
+    fake_psql.write_text(
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> {shlex.quote(str(psql_calls))}
+case "$*" in
+  *pg_database*) printf '%s\\n' {shlex.quote(database_name)} ;;
+  *'UPDATE "Agent"'*) : ;;
+  *json_build_object*)
+    if [ -e {shlex.quote(str(tmp_path / "deleted"))} ]; then deleted=true; else deleted=false; fi
+    printf '{{"root_exists":true,"root_deleted":%s,"tree_agent_ids":["{root_agent}"],"browser_sessions":[]}}\\n' "$deleted"
+    ;;
+  *) exit 91 ;;
+esac
+case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} ;; esac
+"""
+    )
+    fake_psql.chmod(0o755)
+
+    query = subprocess.run(
+        [
+            sys.executable,
+            str(GUEST_RECOVERY_SCRIPT),
+            "prove-zero-allocation",
+            "--machine-id",
+            machine_id,
+            "--guest-run-token",
+            guest_token,
+            "--services",
+            str(services_path),
+            "--run-json",
+            str(run_json),
+            "--backend-log",
+            str(backend_log),
+            "--quiescence-receipt",
+            str(quiescence),
+            "--receipt",
+            str(query_proof),
+            "--psql-command",
+            str(fake_psql),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert query.returncode == 0, query.stderr
+
+    recover_command = [
+        sys.executable,
+        str(EXACT_SESSION_CLEANUP_SCRIPT),
+        "recover-zero-allocation",
+        "--owner",
+        owner,
+        "--fleet-run-id",
+        "fixture-run",
+        "--bench",
+        bench,
+        "--machine-id",
+        machine_id,
+        "--output-dir",
+        str(output),
+        "--guest-run-token",
+        guest_token,
+        "--run-json",
+        str(run_json),
+        "--backend-log",
+        str(backend_log),
+        "--quiescence-receipt",
+        str(quiescence),
+        "--zero-query-proof",
+        str(query_proof),
+        "--manifest",
+        str(manifest),
+        "--receipt",
+        str(receipt),
+    ]
+    recovered = subprocess.run(recover_command, text=True, capture_output=True, check=False)
+    assert recovered.returncode == 0, recovered.stderr
+    validate_command = list(recover_command)
+    validate_command[2] = "validate-recovery-receipt"
+    validated = subprocess.run(
+        validate_command,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert validated.returncode == 0, validated.stderr
+    proof_value = json.loads(query_proof.read_text())
+    assert proof_value["root_agent_id"] == root_agent
+    assert proof_value["root_disposition"] == "deleted-exact-tree"
+    assert proof_value["browser_sessions"] == []
+    receipt_value = json.loads(receipt.read_text())
+    assert receipt_value["kind"] == "provider-zero-allocated"
+    assert receipt_value["allocation_event_count"] == 0
+    assert receipt_value["browser_session_mutation_count"] == 0
+    assert re.fullmatch(r"[0-9a-f]{64}", receipt_value["zero_query_proof_sha256"])
+    psql_lines = psql_calls.read_text().splitlines()
+    assert any("pg_database" in line and database_name in line for line in psql_lines)
+    assert any(root_agent in line and '"BrowserSession"' in line for line in psql_lines)
+    assert all("Kernel" not in line and "Steel" not in line for line in psql_lines)
+
+
+def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
+    tmp_path: Path,
+) -> None:
+    """Missing terminal lifecycle or any provider allocation remains quarantined."""
+    root_agent = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    bench = "zero-allocated-bench"
+    output = tmp_path / "output"
+    output.mkdir()
+    run_json = tmp_path / "run.json"
+    run_json.write_text(
+        json.dumps({"tasks": [{"name": bench, "agent_id": root_agent}]}) + "\n"
+    )
+    quiescence = tmp_path / "quiescence.json"
+    command_prefix = [
+        sys.executable,
+        str(EXACT_SESSION_CLEANUP_SCRIPT),
+        "recover-zero-allocation",
+        "--owner",
+        "7e" * 16,
+        "--fleet-run-id",
+        "fixture-run",
+        "--bench",
+        bench,
+        "--machine-id",
+        "deadbeef000020",
+        "--output-dir",
+        str(output),
+        "--guest-run-token",
+        "zero-allocated-token",
+        "--run-json",
+        str(run_json),
+        "--quiescence-receipt",
+        str(quiescence),
+    ]
+    cases = {
+        "missing-terminal-boundary": (
+            "[Server] Server started mode=fixture\n"
+            f"[HTTP] GET /api/agents/{root_agent} -> 200 agent_id={root_agent}\n"
+        ),
+        "provider-allocation": (
+            "[Server] Server started mode=fixture\n"
+            f"[HTTP] GET /api/agents/{root_agent} -> 200 agent_id={root_agent}\n"
+            "[Kernel] Created Kernel browser session sessionId=kernel-nonzero\n"
+            "[Server] SIGTERM received, closing server...\n"
+        ),
+        "browser-session-mutation": (
+            "[Server] Server started mode=fixture\n"
+            f"[HTTP] GET /api/agents/{root_agent} -> 200 agent_id={root_agent}\n"
+            f"[Prisma] db.query agent_id={root_agent} model=BrowserSession "
+            "operation=create status=ok\n"
+            "[Server] SIGTERM received, closing server...\n"
+        ),
+    }
+    for label, backend_payload in cases.items():
+        case_root = tmp_path / label
+        case_root.mkdir()
+        backend_log = case_root / "backend.log"
+        backend_log.write_text(backend_payload)
+        quiescence.write_text(
+            json.dumps(
+                {
+                    "schema_version": "cloudbench-guest-quiescence-v1",
+                    "version": 1,
+                    "state": "quiesced",
+                    "machine_id": "deadbeef000020",
+                    "guest_run_token": "zero-allocated-token",
+                    "reason": "driver-exited-services-stopped",
+                    "driver_state": "exited",
+                    "driver_pid": None,
+                    "driver_process_state": None,
+                    "stopped_service_pids": [99999991],
+                    "backend_port": 3001,
+                    "services_sha256": "1" * 64,
+                    "run_json_sha256": hashlib.sha256(run_json.read_bytes()).hexdigest(),
+                    "backend_log_sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest(),
+                }
+            )
+            + "\n"
+        )
+        zero_query = case_root / "zero-query.json"
+        zero_query.write_text(
+            json.dumps(
+                {
+                    "schema_version": "cloudbench-guest-zero-allocation-v1",
+                    "version": 1,
+                    "machine_id": "deadbeef000020",
+                    "guest_run_token": "zero-allocated-token",
+                    "root_agent_id": root_agent,
+                    "root_disposition": "root-absent",
+                    "database_name": "victoria_bench_exact_zero",
+                    "database_state": "present",
+                    "tree_agent_ids": [],
+                    "browser_sessions": [],
+                    "services_sha256": "1" * 64,
+                    "run_json_sha256": hashlib.sha256(run_json.read_bytes()).hexdigest(),
+                    "backend_log_sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest(),
+                    "quiescence_receipt_sha256": hashlib.sha256(
+                        quiescence.read_bytes()
+                    ).hexdigest(),
+                }
+            )
+            + "\n"
+        )
+        result = subprocess.run(
+            [
+                *command_prefix,
+                "--backend-log",
+                str(backend_log),
+                "--zero-query-proof",
+                str(zero_query),
+                "--manifest",
+                str(case_root / "manifest.json"),
+                "--receipt",
+                str(case_root / "receipt.json"),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0, label
+        assert not (case_root / "receipt.json").exists(), label
+
+
 def test_exited_guest_quiescence_requires_stopped_services_and_seals_run_evidence(
     tmp_path: Path,
 ) -> None:
