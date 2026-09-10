@@ -1,11 +1,11 @@
 ---
-description: "Run benchmark/eval tasks through the isolated entrypoint (cloud fleet by default; --local opt-in)."
-argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | [--local] <task-name...> [--full] [--rerun-failed latest]"
+description: "Run local benchmark/eval tasks through the isolated benchmark entrypoint."
+argument-hint: "list | eval [--bench rose-bench|pipeline-e2e] [--agent-only] [--only a,b] | <task-name...> [--full] [--rerun-failed latest]"
 ---
 
 # Benchmark Runner
 
-Use the repository entrypoint for all benchmark and eval runs:
+Use the repository entrypoint for all local benchmark and eval runs:
 
 ```bash
 scripts/run-bench $ARGUMENTS
@@ -14,26 +14,18 @@ scripts/run-bench $ARGUMENTS
 Behavior:
 
 - `scripts/run-bench list` prints the benchmark catalog.
-- `scripts/run-bench <task-name...>` defaults to the **per-bench isolated cloud
-  fleet** (`run-bench-fleet`) — one Fly machine per bench.
-- `scripts/run-bench --local <task-name...>` opts into the local isolated stack
-  (`agents/benchmarks/local.py`) on this machine. Use only when the user
-  explicitly asks for local.
-- `scripts/run-bench eval ...` runs `agents/benchmarks/run_eval_suite.py` via
-  the local isolated stack (eval remains local).
+- `scripts/run-bench <task-name...>` runs benchmark tasks via `agents/benchmarks/local.py`.
+- `scripts/run-bench eval ...` runs `agents/benchmarks/run_eval_suite.py` via the same isolated local stack.
 
-The cloud-fleet path owns per-bench isolation (own backend + Postgres + Temporal
-queue + WMH), synchronized start, and teardown. The `--local` path owns local
-service startup/teardown, per-run ports, per-run Postgres container/volume
-naming through `CONDUCTOR_WORKSPACE_NAME`, frontend and public tunnel URLs,
-Temporal task queue naming, non-load benchmark concurrency, load-test
-serialization, payment fixture setup, failed-agent retention, and local
-diagnostics.
+The entrypoint owns local service startup and teardown, per-run ports, per-run
+Postgres container/volume naming through `CONDUCTOR_WORKSPACE_NAME`, frontend
+and public tunnel URLs, Temporal task queue naming, non-load benchmark
+concurrency, load-test serialization, payment fixture setup, failed-agent
+retention, and local diagnostics.
 
 Do not start `scripts/run.sh` manually for local benchmark work unless the user
 explicitly asks for a shared existing stack. Use `--use-existing` only when
 services are already running and the user wants to reuse `.context/services.json`.
-Never use `--single-box` (disabled; not parallel-safe).
 
 ---
 

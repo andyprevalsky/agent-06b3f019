@@ -421,8 +421,8 @@ Run only through the isolated entrypoint (cloud fleet by default):
 scripts/run-bench <resolved slice-or-task names...>
 ~~~
 
-`scripts/run-bench` already defaults to `run-bench-fleet` and fail-closes on a
-stale/missing infra-canary stamp. It owns `--concurrency N` plus `-k K`/`--runs K`
+`scripts/run-bench` defaults to `run-bench-fleet` and fail-closes on a stale/missing infra-canary stamp.
+It owns `--concurrency N` plus `-k K`/`--runs K`
 when independent repeated trials are required. Never prepend `--local` unless
 Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
 
@@ -544,8 +544,8 @@ use Not required.
   fails, the sub-agent reruns `/rca` and reinserts the task at its original
   frozen rank.
 - **edit:** set Approval to Edit requested, apply the instruction, return the
-  row through the identical owning-boundary verification gate, and ask again
-  at the same frozen rank.
+  row through the identical owning-boundary verification gate, and ask again at
+  the same frozen rank.
 - **reject:** set Approval to Rejected and Fix to Dropped; never deploy that
   fix. The task stays at its original rank and needs a new RCA for a
   different approach.
@@ -558,8 +558,9 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 On each approve, immediately start that task's outcome-proof run on the **cloud
 fleet** (apply the fix in a local code snapshot / worktree, then
 `scripts/run-bench <task>` — never `--local` unless Andy opted in). Do not wait
-to batch approvals or rerun the whole failed subset first. Run `/sync` before every subset or full-slice rerun. The final acceptance run covers the entire
-original slice and also defaults to the cloud fleet.
+to batch approvals or rerun the whole failed subset first.
+Run `/sync` before every subset or full-slice rerun. The final acceptance run
+covers the entire original slice and also defaults to the cloud fleet.
 
 For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
 run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
