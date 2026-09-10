@@ -7816,6 +7816,77 @@ reap_volume vol_owned
         assert not any("volumes list" in call for call in call_log)
 
 
+def test_accepted_pending_volume_does_not_block_later_exact_owner_records(
+    tmp_path: Path,
+) -> None:
+    """One soft-deleted volume cannot serialize an exact owner's cleanup."""
+    fleet = FLEET_SCRIPT.read_text()
+    reaper = _extract_fleet_function(fleet, "reap_registry_clones() {")
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("8d" * 16)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    first_name = "cloudbench-first"
+    second_name = "cloudbench-second"
+    first_machine = "deadbeef000001"
+    second_machine = "deadbeef000002"
+    first_record = clones / first_name
+    second_record = clones / second_name
+    first_record.write_text(
+        f"name={first_name}\nid={first_machine}\nvolume_id=vol_first\n"
+    )
+    second_record.write_text(
+        f"name={second_name}\nid={second_machine}\nvolume_id=vol_second\n"
+    )
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REGISTRY={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+registry_machine_details() {{
+  case "$1" in
+    {first_machine}) printf 'stopped {first_name} fdaa::1\\n' ;;
+    {second_machine}) printf 'stopped {second_name} fdaa::2\\n' ;;
+    *) return 2 ;;
+  esac
+}}
+reap_machine() {{
+  printf 'machine %s\\n' "$1" >> "$CALLS"
+  [ "$1" != {first_machine} ] || return 75
+}}
+reap_volume() {{ printf 'volume %s\\n' "$1" >> "$CALLS"; }}
+fleet_audit_update_registry_clone() {{ printf 'audit %s\\n' "$2" >> "$CALLS"; }}
+registry_retire_absent_stale_pre_volume_records() {{ return 99; }}
+registry_record_is_stale_pre_volume_id() {{ return 99; }}
+machine_volume_id() {{ return 99; }}
+registry_record_machine_identity() {{ return 99; }}
+{reaper}
+
+reap_registry_clones "$REGISTRY" forced
+rc=$?
+[ "$rc" -ne 0 ] || exit 90
+[ -f {shlex.quote(str(first_record))} ] || exit 91
+[ ! -e {shlex.quote(str(second_record))} ] || exit 92
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls.read_text().splitlines() == [
+        f"machine {first_machine}",
+        f"machine {second_machine}",
+        "volume vol_second",
+        f"audit {second_name}",
+    ]
+
+
 def test_reap_volume_durably_captures_bounded_destroy_responses(
     tmp_path: Path,
 ) -> None:
