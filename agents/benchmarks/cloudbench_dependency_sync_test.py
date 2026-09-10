@@ -8451,6 +8451,8 @@ def test_pre_fix_guest_runner_receipt_authorizes_exact_reaper(
         "fleet_registry_cleanup_state() {",
         "registry_owner_alive() {",
         "cloudbench_fsync_directory() {",
+        "cloudbench_seal_guest_evidence_file() {",
+        "cloudbench_fetch_guest_evidence() {",
         "cloudbench_publish_guest_shutdown_confirmation() {",
         "cloudbench_confirm_guest_shutdowns() {",
         "cloudbench_recover_guest_cleanup_receipts() {",
@@ -8545,7 +8547,7 @@ curl() {{
       printf 202
       ;;
     */shutdown-health) printf 500 ;;
-    */repo/.context/cloudbench/cloudbench-interrupt-cleanup-{guest_token}.status)
+    */cloudbench-interrupt-cleanup-{guest_token}.status)
       printf 'version=1\\ntoken={guest_token}\\nstate=clean\\n' > "$output_file"
       printf 200
       ;;
@@ -8597,6 +8599,8 @@ def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
         "registry_meta_value() {",
         "fleet_registry_build_guest_recovery_plan() {",
         "cloudbench_fsync_directory() {",
+        "cloudbench_seal_guest_evidence_file() {",
+        "cloudbench_fetch_guest_evidence() {",
         "cloudbench_publish_guest_shutdown_confirmation() {",
         "cloudbench_confirm_guest_shutdowns() {",
         "cloudbench_recover_guest_cleanup_receipts() {",
@@ -8690,8 +8694,49 @@ esac
 """
     )
     helper.chmod(0o755)
-    guest_helper = tmp_path / "guest-recovery-helper"
-    guest_helper.write_text("#!/usr/bin/env python3\n")
+    guest_helper = GUEST_RECOVERY_SCRIPT
+    state_payload = json.dumps(
+        {
+            "schema_version": "cloudbench-guest-state-v1",
+            "version": 1,
+            "state": "quiesced",
+            "machine_id": machine_id,
+            "guest_run_token": guest_token,
+            "reason": "driver-exited-services-stopped",
+            "driver_state": "exited",
+            "driver_pid": None,
+            "driver_process_state": None,
+            "driver_token_match": False,
+            "driver_descendants": [],
+            "services_manifest": {
+                "exists": True,
+                "regular": True,
+                "symlink": False,
+                "bytes": 100,
+                "within_limit": True,
+            },
+            "run_json": {
+                "exists": True,
+                "regular": True,
+                "symlink": False,
+                "bytes": 100,
+                "within_limit": True,
+            },
+            "backend_log": {
+                "exists": True,
+                "regular": True,
+                "symlink": False,
+                "bytes": 100,
+                "within_limit": True,
+            },
+            "services_status": "stopped",
+            "stopped_service_pids": [99_999_991, 99_999_992],
+            "live_service_pids": [],
+            "backend_port": 3001,
+            "backend_closed": True,
+        },
+        separators=(",", ":"),
+    )
     calls = tmp_path / "calls"
     authorized = tmp_path / "authorized"
 
@@ -8761,6 +8806,12 @@ curl() {{
       [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
       [ "$maximum" = 1048576 ] || {{ printf 413; return; }}
       printf '{{"schema_version":"cloudbench-guest-quiescence-v1"}}\\n' > "$output_file"
+      printf 200
+      ;;
+    */cloudbench-guest-state-{guest_token}.json)
+      [ "$authorization" = "Authorization: Bearer retained-barrier-token" ] || {{ printf 403; return; }}
+      [ "$maximum" = 1048576 ] || {{ printf 413; return; }}
+      printf '%s\\n' {shlex.quote(state_payload)} > "$output_file"
       printf 200
       ;;
     */repo/.context/cloudbench/run.json)
@@ -9173,6 +9224,67 @@ def test_running_guest_is_diagnosed_active_and_never_sealed_quiescent(
     assert value["run_json"]["exists"] is False
     assert value["backend_log"]["exists"] is True
     assert value["reason"] == "exact guest driver is still active"
+    described = subprocess.run(
+        [
+            sys.executable,
+            str(GUEST_RECOVERY_SCRIPT),
+            "describe-state",
+            "--machine-id",
+            "deadbeef000001",
+            "--guest-run-token",
+            run_token,
+            "--receipt",
+            str(state_receipt),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert described.returncode == 0, described.stderr
+    assert described.stdout == "active\trunning\t0\texact guest driver is still active\n"
+
+
+def test_uninspectable_driver_still_seals_fail_closed_state_evidence(
+    tmp_path: Path,
+) -> None:
+    """A malformed driver boundary is unsafe, but remains exactly diagnosable."""
+    data_dir = tmp_path / "data"
+    repo_dir = data_dir / "repo"
+    context_dir = repo_dir / ".context" / "cloudbench"
+    context_dir.mkdir(parents=True)
+    (data_dir / "cloudbench-driver.state").write_text("corrupt\n")
+    receipt = data_dir / "quiescence.json"
+    state_receipt = data_dir / "state.json"
+    command = [
+        sys.executable,
+        str(GUEST_RECOVERY_SCRIPT),
+        "quiesce",
+        "--machine-id",
+        "deadbeef000001",
+        "--guest-run-token",
+        "unsafe-guest-token",
+        "--data-dir",
+        str(data_dir),
+        "--repo-dir",
+        str(repo_dir),
+        "--receipt",
+        str(receipt),
+        "--state-receipt",
+        str(state_receipt),
+    ]
+
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert result.returncode != 0
+    assert "exact guest driver state is not terminal or inspectable" in result.stderr
+    assert not receipt.exists()
+    value = json.loads(state_receipt.read_text())
+    assert value["schema_version"] == "cloudbench-guest-state-v1"
+    assert value["state"] == "unsafe"
+    assert value["driver_state"] == "unreadable"
+    assert value["driver_pid"] is None
+    assert value["driver_descendants"] == []
+    assert value["reason"] == "exact guest driver state is not terminal or inspectable"
 
 
 def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(

@@ -5669,6 +5669,79 @@ finally:
 PY
 }
 
+cloudbench_seal_guest_evidence_file() {  # <temporary> <target> <maximum-bytes>
+    python3 - "$1" "$2" "$3" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+
+temporary = Path(sys.argv[1])
+target = Path(sys.argv[2])
+maximum = int(sys.argv[3])
+if (
+    maximum <= 0
+    or temporary.parent != target.parent
+    or temporary == target
+    or temporary.is_symlink()
+    or not stat.S_ISREG(temporary.lstat().st_mode)
+    or temporary.stat().st_size > maximum
+    or target.parent.is_symlink()
+    or not stat.S_ISDIR(target.parent.stat().st_mode)
+    or (
+        (target.exists() or target.is_symlink())
+        and (target.is_symlink() or not stat.S_ISREG(target.lstat().st_mode))
+    )
+):
+    raise SystemExit(1)
+descriptor = os.open(
+    temporary,
+    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+        raise SystemExit(1)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, target)
+directory = os.open(
+    target.parent,
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+cloudbench_fetch_guest_evidence() {  # <status-var> <proxy-port> <token> <remote-path> <local-path> <maximum> <timeout>
+    local status_var="$1" proxy_port="$2" token="$3" remote_path="$4"
+    local local_path="$5" maximum="$6" timeout="$7" temporary status
+    temporary="$local_path.tmp.$$"
+    rm -f "$temporary"
+    if status="$(curl --noproxy '*' -sS --max-time "$timeout" \
+            --max-filesize "$maximum" -o "$temporary" -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            "http://127.0.0.1:$proxy_port$remote_path" 2>/dev/null)"; then
+        :
+    else
+        status="transport-error"
+    fi
+    if [ "$status" = "200" ]; then
+        if ! cloudbench_seal_guest_evidence_file \
+                "$temporary" "$local_path" "$maximum"; then
+            rm -f "$temporary"
+            status="unsafe-local-evidence"
+        fi
+    else
+        rm -f "$temporary"
+    fi
+    printf -v "$status_var" '%s' "$status"
+}
+
 cloudbench_publish_guest_shutdown_confirmation() {  # <output-dir> <run-id>
     python3 - "$1" "$2" <<'PY'
 import os
@@ -5869,8 +5942,10 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
     local bench machine_id guest_run_token proxy_port output runner_status_code
     local receipt runner_evidence quiescence_evidence run_evidence backend_evidence
-    local manifest guest_log remote_helper remote_quiescence fetch_status temporary
-    local fetch_spec remote_path local_path status_code
+    local state_evidence manifest guest_log remote_helper remote_quiescence
+    local remote_state fetch_status quiescence_status state_summary state_kind
+    local state_driver state_descendants state_reason fetch_spec remote_path
+    local local_path maximum status_code
     local -a identity_args validation_args
     owner="${owner##*/}"
     [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
@@ -5940,16 +6015,13 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             continue
         fi
 
-        temporary="$runner_evidence.tmp.$$"
-        rm -f "$temporary"
-        runner_status_code="$(curl --noproxy '*' -sS --max-time 5 \
-            -o "$temporary" -w '%{http_code}' \
-            "http://127.0.0.1:$proxy_port/repo/.context/cloudbench/cloudbench-interrupt-cleanup-$guest_run_token.status" \
-            2>/dev/null || true)"
+        cloudbench_fetch_guest_evidence runner_status_code \
+            "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
+            "/cloudbench-interrupt-cleanup-$guest_run_token.status" \
+            "$runner_evidence" 65536 5
         case "$runner_status_code" in
             200)
-                if mv "$temporary" "$runner_evidence" \
-                    && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                         recover-runner-receipt "${identity_args[@]}" \
                         --source "$runner_evidence" --receipt "$receipt" \
                     && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
@@ -5962,16 +6034,13 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                     # endregion
                     continue
                 fi
-                rm -f "$temporary"
                 echo "❌ [$bench] private runner cleanup receipt is malformed or mismatched" >&2
                 failed=1
                 continue
                 ;;
             404)
-                rm -f "$temporary"
                 ;;
             *)
-                rm -f "$temporary"
                 echo "❌ [$bench] private runner cleanup receipt is unreadable (HTTP ${runner_status_code:-transport-error})" >&2
                 failed=1
                 continue
@@ -5980,38 +6049,77 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
 
         remote_helper="/data/cloudbench-guest-recovery.py"
         remote_quiescence="/data/cloudbench-guest-quiescence-$guest_run_token.json"
+        remote_state="/data/cloudbench-guest-state-$guest_run_token.json"
+        state_evidence="$output/guest-cleanup.state.json"
         [ -s "$GUEST_RECOVERY_HELPER" ] || {
             echo "❌ [$bench] exact guest quiescence helper is unavailable" >&2
             failed=1
             continue
         }
         : > "$guest_log"
+        quiescence_status=0
         if ! FLY ssh console -a "$APP" --machine "$machine_id" \
                 -C "rm -f '$remote_helper'" >>"$guest_log" 2>&1 \
             || ! FLY ssh sftp put -a "$APP" --machine "$machine_id" -q -m 0755 \
                 "$GUEST_RECOVERY_HELPER" "$remote_helper" >>"$guest_log" 2>&1 \
             || ! FLY ssh console -a "$APP" --machine "$machine_id" \
-                -C "python3 '$remote_helper' quiesce --machine-id '$machine_id' --guest-run-token '$guest_run_token' --receipt '$remote_quiescence'" \
+                -C "python3 '$remote_helper' quiesce --machine-id '$machine_id' --guest-run-token '$guest_run_token' --receipt '$remote_quiescence' --state-receipt '$remote_state'" \
                 >>"$guest_log" 2>&1; then
-            echo "❌ [$bench] exact guest quiescence could not be sealed" >&2
+            quiescence_status=1
+        fi
+        cloudbench_fetch_guest_evidence status_code \
+            "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
+            "/cloudbench-guest-state-$guest_run_token.json" \
+            "$state_evidence" 1048576 30
+        if [ "$status_code" != "200" ]; then
+            echo "❌ [$bench] exact guest process/state evidence is incomplete (HTTP ${status_code:-transport-error})" >&2
             failed=1
             continue
         fi
+        state_summary="$(python3 "$GUEST_RECOVERY_HELPER" describe-state \
+            --machine-id "$machine_id" \
+            --guest-run-token "$guest_run_token" \
+            --receipt "$state_evidence" 2>>"$guest_log")" || {
+            echo "❌ [$bench] exact guest process/state evidence is invalid" >&2
+            failed=1
+            continue
+        }
+        IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
+            <<< "$state_summary"
+        # region agent log
+        _agent_stale_owner_debug_log H23 scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts \
+            "captured exact guest process state before fallback validation" \
+            bench "$bench" machineId "$machine_id" state "$state_kind" \
+            driverState "$state_driver" descendants "$state_descendants"
+        # endregion
+        if [ "$quiescence_status" -ne 0 ]; then
+            if [ "$state_kind" = "active" ]; then
+                echo "❌ [$bench] exact guest run is still active (driver=$state_driver descendants=$state_descendants); retaining quarantine" >&2
+            else
+                echo "❌ [$bench] exact guest quiescence rejected: $state_reason" >&2
+            fi
+            failed=1
+            continue
+        fi
+        [ "$state_kind" = "quiesced" ] || {
+            echo "❌ [$bench] exact guest quiescence state is inconsistent" >&2
+            failed=1
+            continue
+        }
 
         fetch_status=0
         for fetch_spec in \
-            "$remote_quiescence|$quiescence_evidence" \
-            "/repo/.context/cloudbench/run.json|$run_evidence" \
-            "/repo/.context/cloudbench/logs/backend.log|$backend_evidence"; do
+            "/cloudbench-guest-quiescence-$guest_run_token.json|$quiescence_evidence|1048576" \
+            "/repo/.context/cloudbench/run.json|$run_evidence|536870912" \
+            "/repo/.context/cloudbench/logs/backend.log|$backend_evidence|536870912"; do
             remote_path="${fetch_spec%%|*}"
-            local_path="${fetch_spec#*|}"
-            temporary="$local_path.tmp.$$"
-            rm -f "$temporary"
-            status_code="$(curl --noproxy '*' -sS --max-time 30 \
-                -o "$temporary" -w '%{http_code}' \
-                "http://127.0.0.1:$proxy_port$remote_path" 2>/dev/null || true)"
-            if [ "$status_code" != "200" ] || ! mv "$temporary" "$local_path"; then
-                rm -f "$temporary"
+            fetch_spec="${fetch_spec#*|}"
+            local_path="${fetch_spec%%|*}"
+            maximum="${fetch_spec##*|}"
+            cloudbench_fetch_guest_evidence status_code \
+                "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
+                "$remote_path" "$local_path" "$maximum" 30
+            if [ "$status_code" != "200" ]; then
                 fetch_status=1
                 break
             fi

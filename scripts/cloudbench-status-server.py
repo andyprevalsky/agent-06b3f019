@@ -11,6 +11,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,9 @@ from urllib.parse import parse_qs, urlsplit
 SAFE_BARRIER = re.compile(r"[A-Za-z0-9._-]+")
 MAX_BENCH_LOG_CHUNK_BYTES = 262_144
 BENCH_LOG_ANCHOR_BYTES = 4_096
+MAX_RECOVERY_RECEIPT_BYTES = 65_536
+MAX_RECOVERY_STATE_BYTES = 1_048_576
+MAX_RECOVERY_RUN_BYTES = 512 * 1024 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,6 +75,17 @@ def main() -> int:
 
     shutdown_request = root / f"cloudbench-shutdown-{run_token}.request"
     cleanup_ack = root / f"cloudbench-driver-clean-{run_token}.ack"
+    recovery_evidence_limits = {
+        f"/cloudbench-interrupt-cleanup-{run_token}.status": MAX_RECOVERY_RECEIPT_BYTES,
+        f"/cloudbench-guest-quiescence-{run_token}.json": MAX_RECOVERY_STATE_BYTES,
+        f"/cloudbench-guest-state-{run_token}.json": MAX_RECOVERY_STATE_BYTES,
+        "/repo/.context/cloudbench/run.json": MAX_RECOVERY_RUN_BYTES,
+        "/repo/.context/cloudbench/logs/backend.log": MAX_RECOVERY_RUN_BYTES,
+    }
+    recovery_evidence_targets = {
+        root / request_path.removeprefix("/"): maximum
+        for request_path, maximum in recovery_evidence_limits.items()
+    }
 
     def cleanup_acknowledged() -> bool:
         if not run_token:
@@ -175,6 +190,37 @@ def main() -> int:
             if targets_bench_log:
                 self._serve_bench_log_chunk(parsed.query)
                 return
+            recovery_target: Path | None = None
+            recovery_maximum: int | None = None
+            for candidate, maximum in recovery_evidence_targets.items():
+                try:
+                    same_target = (
+                        request_target == candidate.resolve()
+                        or os.path.samefile(request_target, candidate)
+                    )
+                except OSError:
+                    same_target = request_target == candidate.resolve()
+                if same_target:
+                    recovery_target = candidate
+                    recovery_maximum = maximum
+                    break
+            if recovery_target is not None and recovery_maximum is not None:
+                if parsed.query:
+                    self.send_error(400, "recovery evidence does not accept a query")
+                    return
+                if not run_token or not token:
+                    self.send_error(409, "authenticated recovery is not configured")
+                    return
+                supplied = self.headers.get("Authorization", "")
+                expected = f"Bearer {token}"
+                if not hmac.compare_digest(supplied, expected):
+                    self.send_error(403)
+                    return
+                self._serve_recovery_evidence(
+                    recovery_target,
+                    recovery_maximum,
+                )
+                return
             if self.path == "/shutdown-health":
                 if not run_token or not token:
                     self.send_error(409, "guest shutdown is not configured")
@@ -233,6 +279,59 @@ def main() -> int:
                 return
             self.send_response(204)
             self.end_headers()
+
+        def _serve_recovery_evidence(self, target: Path, maximum: int) -> None:
+            """Serve one authenticated, regular, size-bounded exact guest file."""
+            try:
+                resolved = target.resolve(strict=True)
+                resolved.relative_to(root)
+                metadata = target.lstat()
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                self.send_error(404, "exact recovery evidence is unavailable")
+                return
+            if (
+                resolved != target
+                or target.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+            ):
+                self.send_error(409, "exact recovery evidence is unsafe")
+                return
+            if metadata.st_size > maximum:
+                self.send_error(413, "exact recovery evidence is oversized")
+                return
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(resolved, flags)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_dev != metadata.st_dev
+                    or opened.st_ino != metadata.st_ino
+                    or opened.st_size != metadata.st_size
+                    or opened.st_size > maximum
+                ):
+                    os.close(descriptor)
+                    self.send_error(409, "exact recovery evidence changed during read")
+                    return
+            except OSError:
+                self.send_error(404, "exact recovery evidence is unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(opened.st_size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                with os.fdopen(descriptor, "rb") as source:
+                    remaining = opened.st_size
+                    while remaining:
+                        chunk = source.read(min(65_536, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _serve_bench_log_chunk(self, query: str) -> None:
             """Serve one validated, bounded suffix of the append-only run log."""

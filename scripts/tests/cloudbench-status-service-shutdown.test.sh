@@ -101,6 +101,19 @@ for recovery_path in "${recovery_paths[@]}"; do
         || fail "recovery evidence response differed from exact guest file: $recovery_path"
 done
 
+ln -s "$tmp/repo/.context/cloudbench/run.json" "$tmp/recovery-run-alias.json"
+unauthenticated_alias="$(curl -sS -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:$port/recovery-run-alias.json")"
+[ "$unauthenticated_alias" = 403 ] \
+    || fail "recovery evidence alias bypassed authentication with HTTP $unauthenticated_alias"
+authenticated_alias="$(curl -sS -o "$tmp/recovery-alias-response" -w '%{http_code}' \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/recovery-run-alias.json")"
+[ "$authenticated_alias" = 200 ] \
+    || fail "authenticated recovery evidence alias returned HTTP $authenticated_alias"
+cmp "$tmp/recovery-alias-response" "$tmp/repo/.context/cloudbench/run.json" \
+    || fail "authenticated recovery alias differed from exact guest file"
+
 python3 - "$tmp/cloudbench-interrupt-cleanup-$run_token.status" <<'PY'
 from pathlib import Path
 import sys

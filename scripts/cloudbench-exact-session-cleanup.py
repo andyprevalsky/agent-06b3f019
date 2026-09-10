@@ -354,11 +354,8 @@ def validate_quiescence(
         or value.get("state") != "quiesced"
         or value.get("machine_id") != machine_id
         or value.get("guest_run_token") != guest_run_token
-        or value.get("reason") not in {
-            "driver-exited-services-stopped",
-            "running-driver-services-stopped",
-        }
-        or value.get("driver_state") not in {"running", "exited"}
+        or value.get("reason") != "driver-exited-services-stopped"
+        or value.get("driver_state") != "exited"
         or (
             value.get("driver_pid") is not None
             and (not isinstance(value["driver_pid"], int) or value["driver_pid"] <= 1)
