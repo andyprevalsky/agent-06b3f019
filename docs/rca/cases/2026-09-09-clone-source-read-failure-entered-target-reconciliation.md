@@ -10,8 +10,6 @@ first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine
 symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
-  - "ERROR: services evidence has no exact isolated stopped database identity"
-  - "ERROR: durable backend evidence contains no exact provider session identity"
   - "ERROR: exact psql command is unavailable"
   - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
   - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
@@ -50,7 +48,7 @@ sources:
   - commit 59a52e554
   - commit 7af3750c2
   - commit c400e3600
-  - capability stability proof capability-stability-20260910120311-2848604
+  - fleet run capability-stability-20260910120311-2848604
   - commit b9979c5af
   - commit 117328730
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
