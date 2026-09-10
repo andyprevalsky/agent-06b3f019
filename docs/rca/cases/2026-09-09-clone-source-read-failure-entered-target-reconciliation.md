@@ -13,6 +13,8 @@ symptoms:
   - "Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "exact stale-owner registry identity is unsafe"
+  - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
+  - "could not verify owned fleet machine deadbeef000001"
 tags:
   - cloudbench
   - fly-io
@@ -24,6 +26,8 @@ sources:
   - commit 65cb5c022656ed028d7031bfb57bb8ad12e002ac
   - fleet run 20260909-215629-914100
   - fleet run 20260910-002414-1221609
+  - fleet owner 03596f65144d485f8a667fc31f7e3cc6
+  - fleet run 20260910-021331-1465409
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -268,6 +272,122 @@ owner encountered. It adds no provider call, poll, channel, subscription, row,
 shared lock, mutable global, or fan-in; recovery remains independently keyed by
 the exact fleet-owner token.
 
+## Fourth recurrence on 2026-09-10
+
+The lifecycle contract recurred at the next owned boundary after quarantine
+classification was corrected. Exact owner
+`03596f65144d485f8a667fc31f7e3cc6` retained nine started Machines plus one
+pending-destroy Volume after its controller received the required TERM and its
+30-second guest cleanup attempt could not receive acknowledgements. Retaining
+`cleanup_policy=retain` plus `guest-cleanup-unconfirmed` was safe, but
+`--recover-stale-owner` had no sanctioned transition out of that canonical
+state.
+
+The owner metadata preserved run `20260910-021331-1465409` under
+`/tmp/rose-polar-streak-main/.context/fleet/capability-stability-proof/capability-stability-20260910021331-1465395/runs`.
+Its ten exact clone records contained nine Machine-plus-Volume identities and
+one Volume-only identity. Each configured guest output retained `.cid` and
+`status-proxy.port`; the original local status proxies no longer existed.
+
+The first unchanged pre-fix reproduction was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap`.
+It exited 1 through `exact stale-owner cleanup is quarantined pending guest
+acknowledgement` without requesting any guest shutdown. That proved the
+deadlock at the transition owner, independently of Fly.
+
+The next-deeper pre-fix command was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
+-k 'forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids or
+exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep'`. It exited 1:
+the forced reaper emitted `could not verify owned fleet machine
+deadbeef000001`, and the entrypoint still contained both `machines list` and
+`reap_orphaned_fleet_proxies`. The first recovery draft therefore reconnected
+guests but still discovered or swept app-wide neighbors before and after the
+exact owner boundary.
+
+Critical path:
+
+`--recover-stale-owner <exact-token>` → validate same-host dead controller →
+read only that registry and audit → map each Machine record one-to-one to its
+run output → exact `machine status <id>` state/name/private-IP read → exact
+`machine status <id> -d` mount/token/remote-port read → reconnect one existing
+data-plane proxy per exact Machine → token-bound `POST /shutdown` → require
+`GET /shutdown-health` HTTP 204 for every guest → fsync each confirmation →
+atomically publish and fsync `cleanup_policy=reap` before removing and fsyncing
+the quarantine sentinel → exact-ID Machine/Volume, pool-claim, primary-capacity,
+and audit reaping.
+
+The deepest-owned-cause ladder was:
+
+- Quarantine had no recovery transition because guest acknowledgement existed
+  only in the dying controller's live proxy/process state.
+- The first transition draft reconstructed that state from app-wide
+  `machines.json`, provider Machine lists, name resolution, pool/capacity scans,
+  and an orphan-proxy sweep.
+- Those global sources were unnecessary because the exact registry, owner audit,
+  per-output `.cid`, and exact Machine config already formed a complete
+  token-bound recovery capability.
+- The missing invariant was that an exact-owner command must derive every read,
+  side effect, and cleanup target from one sealed owner record before crossing
+  that target's boundary.
+
+The problem class remains a lifecycle-contract inconsistency. Durable ownership
+was exact, but cancellation recovery did not use that exact capability as the
+sole source of truth.
+
+The recovery path now validates regular non-symlink owner/run/output metadata,
+requires a complete one-to-one registry-to-`.cid` mapping and valid local proxy
+port for every Machine, and ignores canonical Volume-only records only for the
+guest phase. It validates each live Machine by exact ID, requires state
+`started`, exact registry name, private IP, exact mounted Volume, safe barrier
+token, safe guest run token, and safe remote status port. Every configured
+Machine must share one barrier token.
+
+It reuses the existing data-plane proxy and
+`cloudbench_confirm_guest_shutdowns` contracts. Requests are sent in parallel
+before polling; HTTP 202/204/409 only means shutdown was requested, while
+`/shutdown-health` HTTP 204 is the sole acknowledgement. No marker is fabricated.
+Only after every marker is fsynced does the registry publish and fsync the
+ordered `reap`-then-sentinel-removal transition. Missing, malformed, absent,
+mismatched, proxy-start, token, transport, or non-204 evidence leaves the owner
+quarantined. Failed acknowledgement also releases only the exact temporary
+proxy PIDs and token-bound listed port leases; it never short-circuits local
+cleanup or scans neighboring leases.
+
+Forced provider reaping now uses `machine status <exact-id>` and exact config
+reads. Volume-only records destroy only their recorded Volume and never resolve
+their clone name. V2 pool claims come only from the owner's audit, capacity
+cleanup addresses only deterministic `<owner>-primary`, and the exact
+entrypoint derives the warm-source guard from that owner audit plus exact source
+config. It performs no Machine inventory, orphan-proxy sweep, neighbor claim
+scan, or reservation-directory scan. Autoscaler temporary probes are unchanged.
+
+The original recovery reproduction now passes. Its six NDJSON events prove the
+ordering: H6 validates two exact local mappings; H12 validates two exact-ID
+Machine states/configs; H7 reconnects two exact proxies; H8 records two
+token-bound shutdown-health acknowledgements with status 0; H9 durably reaches
+`cleanupState=reap`; only then does H10 enter the exact provider reaper.
+
+Permanent fail-closed coverage additionally exercises missing/malformed and
+mismatched `.cid`, missing/malformed `status-proxy.port`, absent/malformed exact
+Machine status, missing/malformed tokens and config, mounted-Volume mismatch,
+proxy startup failure, non-204 shutdown health, mixed
+Machine-plus-Volume/Volume-only ownership, Volume-only audit recovery,
+all-or-nothing proxy-port batch publication, exact capacity/port neighbor
+preservation, and exact v2 pool-claim selection. The complete provider-free
+suite passes: `266 passed` from
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py`; `bash -n
+scripts/run-bench-fleet` also exits 0. No provider resource, benchmark task,
+timeout, or concurrency setting changed.
+
+At 10,000 agents, recovery is O(records in the one exact owner): one bounded
+local mapping read, two exact-ID provider reads, one temporary proxy, and one
+shutdown/health stream per configured guest. Volume-only, pool, capacity, port,
+and final reaping touch only IDs or files named by that owner. There is no
+app-wide provider list, cross-owner resource scan, subscription, channel, row,
+or global result fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -288,6 +408,15 @@ For the third recurrence, the user required the deepest owned fix, a permanent
 failing-before/passing-after cloudbench regression, preservation of existing
 autoscaler probes, and the exact test commands and results. Tests could not
 mutate provider resources or change benchmark tasks, timeouts, or concurrency.
+
+For the fourth recurrence, the user required recovery to reconnect only exact
+owned live guest Machines, use the existing token-bound shutdown/health
+contract, durably prove every acknowledgement before provider reaping, preserve
+mixed and Volume-only registries, and fail closed for every incomplete mapping,
+token, proxy, or HTTP result. They prohibited fabricated acknowledgements,
+neighbor listing/sweeping, out-of-owner cleanup, provider mutations during
+tests, and task/timeout/concurrency changes; the real owner remains for the user
+to recover and verify before instrumentation cleanup.
 
 ## Reusable lesson
 
