@@ -12,7 +12,6 @@ symptoms:
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
   - "ERROR: exact psql command is unavailable"
   - "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_v3g193x1j2gyezx4'"
-  - "destroy accepted for volume vol_v3g193x1j2gyezx4 but exact absence has not converged"
   - "state: pending_destroy after six accepted exact volume destroy calls"
 tags:
   - cloudbench
@@ -56,11 +55,9 @@ sources:
   - commit 5d90c105d
   - commit 4f743b245
   - commit cb7f35bd8
-  - owner 539b11e970334d9db5d401fa167ac59e
+  - fleet run stale-owner-539b11e970334d9db5d401fa167ac59e
   - commit 95ab4d584
   - commit 71197cc5b
-  - https://fly.io/docs/volumes/volume-states/
-  - https://fly.io/docs/about/billing/#volume-billing
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
