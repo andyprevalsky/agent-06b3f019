@@ -1714,6 +1714,22 @@ cloudbench_env_value() { return 0; }
             "driver cleanup evidence interrupt_status=1 cleanup_ack=1"
         )
     finally:
+        def kill_exact_process_tree(pid: int) -> None:
+            children_file = Path(f"/proc/{pid}/task/{pid}/children")
+            try:
+                children = [int(value) for value in children_file.read_text().split()]
+            except (FileNotFoundError, ProcessLookupError):
+                children = []
+            for child_pid in children:
+                kill_exact_process_tree(child_pid)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        driver_pid_file = data_dir / "cloudbench-driver.pid"
+        if driver_pid_file.is_file():
+            kill_exact_process_tree(int(driver_pid_file.read_text()))
         if boot.poll() is None:
             boot.terminate()
             try:

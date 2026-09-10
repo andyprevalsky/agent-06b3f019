@@ -201,7 +201,7 @@ cleanup_stack() {
 trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
-    local signal_rc=0
+    local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
     log "guest shutdown requested; draining benchmark root before stack teardown"
     if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
@@ -214,6 +214,17 @@ request_graceful_shutdown() {
             # asyncio.run translates SIGINT into task cancellation. The benchmark
             # cancellation path can then archive and DELETE the exact root agent,
             # which closes browser sessions and finalizes replays canonically.
+            if [ -r "/proc/$ACTIVE_COMMAND_PID/status" ]; then
+                signal_ignored_mask="$(awk '$1 == "SigIgn:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+                signal_caught_mask="$(awk '$1 == "SigCgt:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+                signal_process_group="$(awk '$1 == "NSpgid:" { print $2; exit }' "/proc/$ACTIVE_COMMAND_PID/status")"
+            fi
+            log "benchmark signal target evidence: pid=$ACTIVE_COMMAND_PID pgid=$signal_process_group ignored=$signal_ignored_mask caught=$signal_caught_mask"
+            # region agent log
+            mkdir -p /opt/cursor/logs 2>/dev/null || true
+            printf '{"hypothesisId":"H15","location":"scripts/cloudbench-run.sh:request_graceful_shutdown-target","message":"captured benchmark signal disposition before interrupt","data":{"ignoredMask":"%s","caughtMask":"%s","processGroup":"%s"},"timestamp":%s}\n' \
+                "$signal_ignored_mask" "$signal_caught_mask" "$signal_process_group" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+            # endregion
             kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || signal_rc=$?
             log "benchmark cancellation signal dispatched: pid=$ACTIVE_COMMAND_PID signal=INT status=$signal_rc"
             # region agent log
