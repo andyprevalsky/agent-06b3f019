@@ -6789,17 +6789,14 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
             | tail -1)"
         case "$target_id" in ''|*[!0-9a-f]*) target_id="" ;; esac
         preallocation_failure=0
-        if [ -z "$target_id" ] \
-            && clone_failure_definitively_unallocated \
-                "$clone_status" "$source_id" "$clone_out"; then
-            preallocation_failure=1
-        fi
         if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ]; then
+            # Classify every exact provider-returned target resource before any
+            # machine-name reconciliation. A rejected VM launch can still own
+            # the forked volume even though no Machine will ever match the
+            # reserved name. Persist that exact ID before cleanup so interruption
+            # remains recoverable without an app-wide volume guess.
             target_volume="$(clone_failure_owned_volume_id "$clone_status" "$clone_out")"
             if [ -n "$target_volume" ]; then
-                # Fly can create the forked volume and then reject VM launch.
-                # Persist the exact provider-returned ID before deletion so an
-                # interrupted cleanup remains recoverable by this owner only.
                 if ! fleet_registry_record_volume "$target_name" "$target_volume"; then
                     echo "❌ could not persist exact owned volume $target_volume for failed clone '$target_name'" >&2
                     return 1
@@ -6813,6 +6810,9 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 fleet_registry_release_name "$target_name" || return 1
                 grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
                 mv "$names_ledger.tmp" "$names_ledger"
+            elif clone_failure_definitively_unallocated \
+                "$clone_status" "$source_id" "$clone_out"; then
+                preallocation_failure=1
             fi
         fi
         if [ -z "$target_id" ] && [ -z "$target_volume" ] \
