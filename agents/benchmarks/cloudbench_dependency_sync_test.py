@@ -7804,6 +7804,239 @@ recover_exact_stale_fleet_owner {owner} || recovery_status=$?
     assert sum("volume_id=" in record.read_text() for record in records) == 10
 
 
+def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap(
+    tmp_path: Path,
+) -> None:
+    """Exact recovery must prove every configured guest ack before provider reap."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "fleet_registry_cleanup_state() {",
+            "registry_owner_alive() {",
+            "fleet_registry_build_guest_recovery_plan() {",
+            "cloudbench_publish_guest_shutdown_confirmation() {",
+            "cloudbench_confirm_guest_shutdowns() {",
+            "fleet_registry_confirm_guest_teardown() {",
+            "cleanup_stale_owner_recovery_proxies() {",
+            "fleet_recovery_reconnect_guest_shutdowns() {",
+            "acquire_registry_recovery_lock() {",
+            "recover_exact_stale_fleet_owner() {",
+        )
+    )
+    owner = "5a" * 16
+    run_id = "20260910-021331-1465409"
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    audit_root = tmp_path / "audits"
+    audit_root.mkdir()
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True)
+    machine_rows = []
+    expected = (
+        (
+            "cloudbench-owned-alpha",
+            "deadbeef000001",
+            "vol_owned_alpha",
+            "bench-alpha",
+            61001,
+            "fdaa::101",
+            "guest-alpha",
+        ),
+        (
+            "cloudbench-owned-beta",
+            "deadbeef000002",
+            "vol_owned_beta",
+            "bench-beta",
+            61002,
+            "fdaa::102",
+            "guest-beta",
+        ),
+    )
+    barrier_token = "barrier-token-exact-owner"
+    for clone_name, machine_id, volume_id, bench, port, private_ip, guest_token in expected:
+        (clones / clone_name).write_text(
+            f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
+        )
+        output = run_dir / bench
+        output.mkdir()
+        (output / ".cid").write_text(f"clone {machine_id}\n")
+        (output / "status-proxy.port").write_text(f"{port}\n")
+        machine_rows.append(
+            {
+                "id": machine_id,
+                "name": clone_name,
+                "state": "started",
+                "private_ip": private_ip,
+                "config": {
+                    "env": {
+                        "CLOUDBENCH_BARRIER_TOKEN": barrier_token,
+                        "CLOUDBENCH_RUN_TOKEN": guest_token,
+                        "CLOUDBENCH_STATUS_PORT": "8011",
+                    }
+                },
+            }
+        )
+    volume_only_name = "cloudbench-owned-volume-only"
+    (clones / volume_only_name).write_text(
+        f"name={volume_only_name}\nvolume_id=vol_owned_only\n"
+    )
+    machine_rows.append(
+        {
+            "id": "neighbor0000001",
+            "name": "cloudbench-neighbor",
+            "state": "started",
+            "private_ip": "fdaa::999",
+            "config": {
+                "env": {
+                    "CLOUDBENCH_BARRIER_TOKEN": "neighbor-token",
+                    "CLOUDBENCH_RUN_TOKEN": "neighbor-run",
+                    "CLOUDBENCH_STATUS_PORT": "8011",
+                }
+            },
+        }
+    )
+    (run_dir / "machines.json").write_text(json.dumps(machine_rows))
+    (registry / "meta").write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=99999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        f"run_id={run_id}\n"
+        f"runs_root={runs_root}\n"
+        "cleanup_policy=retain\n"
+    )
+    (registry / "guest-cleanup-unconfirmed").touch()
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNER_TOKEN={owner}
+FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
+FLEET_REGISTRY_PUBLISHED=0
+KEEP_CLONES=0
+RUN_ID=fixture-controller-run
+CLOUDBENCH_CHILD_TERM_SECONDS=2
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+AUTOSCALER_PORT_LEASE_HELPER=/nonexistent/port-helper
+CALLS={shlex.quote(str(calls))}
+_agent_stale_owner_debug_log() {{ :; }}
+release_cleanup_disk_reserve() {{ return 0; }}
+claim_recovery_status_proxy_ports() {{
+  printf 'claim-ports %s %s\\n' "$2" "$3" >> "$CALLS"
+  printf '62001\\n62002\\n' > "$1"
+}}
+release_recovery_status_proxy_ports() {{
+  printf 'release-ports %s\\n' "$1" >> "$CALLS"
+}}
+start_data_plane_proxy() {{
+  printf 'proxy %s %s %s\\n' "$1" "$2" "$3" >> "$CALLS"
+  sleep 60 &
+  printf -v "$5" '%s' "$!"
+}}
+cloudbench_terminate_and_wait() {{
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+curl() {{
+  local method=GET authorization="" url="" arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      -X) method="$1"; shift ;;
+      -H)
+        case "$1" in Authorization:*) authorization="$1" ;; esac
+        shift
+        ;;
+      http://*) url="$arg" ;;
+    esac
+  done
+  [ "$authorization" = "Authorization: Bearer {barrier_token}" ] || {{
+    printf 'bad-authorization %s\\n' "$authorization" >> "$CALLS"
+    printf 403
+    return
+  }}
+  case "$url" in
+    http://127.0.0.1:62001/shutdown|http://127.0.0.1:62002/shutdown)
+      [ "$method" = POST ] || return 1
+      printf 'shutdown %s\\n' "$url" >> "$CALLS"
+      printf 202
+      ;;
+    http://127.0.0.1:62001/shutdown-health|http://127.0.0.1:62002/shutdown-health)
+      printf 'shutdown-health %s\\n' "$url" >> "$CALLS"
+      printf 204
+      ;;
+    *) printf 'unexpected-url %s\\n' "$url" >> "$CALLS"; printf 404 ;;
+  esac
+}}
+recover_registry_audit_only_fresh() {{
+  [ ! -e "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" ] || return 91
+  [ "$(registry_meta_value "$FLEET_REGISTRY_DIR/meta" cleanup_policy)" = reap ] || return 92
+  printf 'audit-recovery\\n' >> "$CALLS"
+}}
+reap_registry_clones() {{
+  [ ! -e "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" ] || return 93
+  for output in {shlex.quote(str(run_dir))}/bench-alpha {shlex.quote(str(run_dir))}/bench-beta; do
+    [ "$(cat "$output/guest-shutdown.confirmed")" = {run_id} ] || return 94
+  done
+  printf 'provider-reap %s\\n' "$*" >> "$CALLS"
+}}
+recover_exact_pool_claims() {{ printf 'pool-recovery\\n' >> "$CALLS"; }}
+capacity_release_stale_owner_reservations() {{ printf 'capacity-release\\n' >> "$CALLS"; }}
+fleet_audit_finalize_recovered_registry() {{ printf 'audit-finalize\\n' >> "$CALLS"; }}
+fleet_registry_remove_if_empty() {{ printf 'registry-finish\\n' >> "$CALLS"; }}
+{functions}
+
+recover_exact_stale_fleet_owner {owner}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    call_lines = calls.read_text().splitlines()
+    assert "proxy 62001 8011 fdaa::101" in call_lines
+    assert "proxy 62002 8011 fdaa::102" in call_lines
+    assert all("fdaa::999" not in line and "neighbor" not in line for line in call_lines)
+    assert sum(line.startswith("shutdown http://") for line in call_lines) == 2
+    assert sum(line.startswith("shutdown-health http://") for line in call_lines) == 2
+    transition_index = call_lines.index("audit-recovery")
+    assert all(
+        call_lines.index(line) < transition_index
+        for line in call_lines
+        if line.startswith("shutdown-health http://")
+    )
+    assert call_lines[transition_index : transition_index + 6] == [
+        "audit-recovery",
+        f"provider-reap {registry} forced",
+        "pool-recovery",
+        "capacity-release",
+        "audit-finalize",
+        "registry-finish",
+    ]
+    assert not (registry / "guest-cleanup-unconfirmed").exists()
+    assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
+
+
 def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
     tmp_path: Path,
 ) -> None:
