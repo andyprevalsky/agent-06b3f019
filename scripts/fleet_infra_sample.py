@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sample catalog task names for $0 fleet infra probes.
+"""Sample ready catalog task names for fleet stability proofs.
 
 Fleet ``--infra-probe`` still runs catalog preflight, so canaries MUST use
 real unified-catalog names (``tasks.json`` + ``polar_tasks.json``). Fake
@@ -19,10 +19,8 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
 
-from cloudbench_catalog import CatalogError, load_unified_catalog  # noqa: E402
+from cloudbench_catalog import CatalogError, load_unified_catalog
 
 
 def catalog_path(repo_root: Path) -> Path:
@@ -31,7 +29,13 @@ def catalog_path(repo_root: Path) -> Path:
 
 def load_pool(repo_root: Path) -> list[str]:
     tasks = load_unified_catalog(catalog_path(repo_root))
-    names = [str(t["name"]) for t in tasks if isinstance(t, dict) and t.get("name")]
+    names = [
+        str(task["name"])
+        for task in tasks
+        if isinstance(task, dict)
+        and task.get("name")
+        and task.get("status", "ready") == "ready"
+    ]
     if not names:
         raise CatalogError("unified catalog produced an empty name pool")
     return names

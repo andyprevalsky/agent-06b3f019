@@ -129,6 +129,14 @@ independent copies with at most N active; never repeat a task by passing duplica
 names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
 `polar-bench`, and `incomplete`.
 
+For a consecutive full-catalog no-INFRA gate, run
+`scripts/run-bench stability-proof -k K --concurrency N --seed S`. It executes K
+sequential random slices of N isolated ready tasks from the unified first-party
+and Polar catalog. `PASSED`, `FAILED`, and `SKIPPED` terminal batch results
+advance the streak; missing/malformed results and `INFRA_ERROR`, `ERROR`, or
+`CANCELLED` fail closed. Its offline fake-provider regression runs inside the
+existing deploy test path, adding no live benchmark stage, cost, or deploy wait.
+
 Local execution is explicit:
 `scripts/run-bench --local <task...>` or
 `scripts/run-bench --local --rerun-failed latest`. The local wrapper starts an
@@ -143,10 +151,10 @@ down. Checkpoints are local-only:
 Use `scripts/run-bench eval` for the full eval suite. Direct
 `run_benchmark.py --port N` remains the lower-level path for already-running
 services or special cases. The command's selection, `-k`/`--runs`,
-`--concurrency`, isolation identities, and failure propagation are exercised
-with fake provider children inside the existing always-run `Descend Command`
-deploy test; keep that proof offline and `$0`, with no separate live benchmark
-stage or cloud wait added to `/deploy`.
+`--concurrency`, isolation identities, random ready-catalog slicing, terminal
+batch classification, and failure propagation are exercised with fake provider
+children inside existing deploy tests; keep that proof offline and `$0`, with
+no separate live benchmark stage or cloud wait added to `/deploy`.
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment

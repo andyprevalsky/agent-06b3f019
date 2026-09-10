@@ -51,6 +51,10 @@ require_text "PIPELINE_HEAP" "/descend must pipeline approve, cloud-fleet outcom
 require_text "## One benchmark command" "/descend must define one benchmark entrypoint"
 require_text "--concurrency N" "/descend must document bounded benchmark concurrency"
 require_text "-k K" "/descend must document repeated isolated benchmark runs"
+require_text "scripts/run-bench stability-proof -k K --concurrency N --seed S" \
+  "/descend must document the full-catalog no-INFRA command"
+require_text "terminal _batch/run.json classification" \
+  "/descend must classify capability versus INFRA from the terminal batch"
 require_text "distinct controller lock + run ID + machine/volume/queue per instance" \
   "/descend must preserve per-copy isolation"
 require_text 'existing always-run `Descend Command` deploy gate' \
@@ -126,6 +130,7 @@ grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin mu
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
 
 python3 "$ROOT_DIR/scripts/tests/descend-step-log.test.py"
+bash "$ROOT_DIR/scripts/tests/fleet-infra-stability-proof.test.sh"
 
 grep -Fq '`scripts/run-bench` is the one supported entrypoint' "$CLAUDE_RULES" \
   || fail "CLAUDE.md must name the canonical benchmark command"

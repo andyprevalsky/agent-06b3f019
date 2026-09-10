@@ -18,6 +18,12 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+if [[ "${1:-}" == "stability-proof" ]]; then
+    shift
+    exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
+        --capability "$@"
+fi
+
 cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
@@ -84,6 +90,8 @@ Usage: scripts/run-bench <slice-or-task...> [options]
 Selections:
   daily | pre-deploy | rose-bench | polar-bench | incomplete
   or one or more exact benchmark task names
+  stability-proof    Run random ready-catalog slices sequentially; ordinary
+                     benchmark failures advance and any INFRA outcome aborts
 
 Campaign options:
   -k K, -k=K, --runs K, --runs=K

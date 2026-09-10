@@ -7,10 +7,12 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 PROOF="$ROOT_DIR/scripts/run-fleet-infra-stability-proof"
 SAMPLER="$ROOT_DIR/scripts/fleet_infra_sample.py"
+RUN_BENCH="$ROOT_DIR/scripts/run-bench"
 PLAN="$ROOT_DIR/docs/plans/active/fleet-demo-concurrency-e2e.md"
 
 [ -x "$PROOF" ] || fail "run-fleet-infra-stability-proof must be executable"
 [ -f "$SAMPLER" ] || fail "fleet_infra_sample.py must exist"
+[ -x "$RUN_BENCH" ] || fail "run-bench must exist"
 grep -Fq 'run-fleet-infra-stability-proof' "$PLAN" || fail "plan must document the stability proof"
 grep -Fq -- '--infra-probe' "$PROOF" || fail "proof must launch fleets with --infra-probe"
 grep -Fq 'fail closed' "$PROOF" || fail "proof must fail closed on first bad slice"
@@ -91,5 +93,99 @@ PY
 A="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --slice 0)"
 B="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --slice 0)"
 [ "$A" = "$B" ] || fail "sampler must be deterministic for a fixed seed/slice"
+
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+cat >"$tmp/fake-fleet" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+run_dir="$CLOUDBENCH_RUNS_ROOT/fake-$FLEET_STABILITY_SLICE"
+mkdir -p "$run_dir/_batch"
+tasks=()
+for arg in "$@"; do
+  case "$arg" in --*) break ;; *) tasks+=("$arg") ;; esac
+done
+python3 - "$run_dir/_batch/run.json" "$FLEET_STABILITY_SLICE" \
+  "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" "${tasks[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+slice_index = int(sys.argv[2])
+infra_slice = sys.argv[3]
+tasks = []
+for index, name in enumerate(sys.argv[4:]):
+    if infra_slice and slice_index == int(infra_slice):
+        status = "INFRA_ERROR"
+        passed = False
+    elif slice_index == 0 and index == 0:
+        status = "FAILED"
+        passed = False
+    else:
+        status = "PASSED"
+        passed = True
+    tasks.append({"name": name, "status": status, "passed": passed})
+path.write_text(json.dumps({"tasks": tasks}) + "\n")
+PY
+echo "🔏 execution provenance: $run_dir/execution-provenance.json"
+if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
+  || [ "$FLEET_STABILITY_SLICE" = 0 ]; then
+  exit 1
+fi
+SH
+chmod +x "$tmp/fake-fleet"
+
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-pass" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof -k=2 --concurrency=3 --seed 17
+python3 - "$tmp/capability-pass" <<'PY' || fail "capability proof summary invalid"
+import json
+import sys
+from pathlib import Path
+
+summaries = list(Path(sys.argv[1]).glob("*/summary.json"))
+assert len(summaries) == 1, summaries
+summary = json.loads(summaries[0].read_text())
+assert summary["status"] == "passed", summary
+assert summary["runs"] == 2
+assert summary["width"] == 3
+assert summary["passed_slices"] == 2
+assert [item["classification"] for item in summary["slices"]] == [
+    "harness",
+    "pass",
+]
+assert all(len(item["names"]) == 3 for item in summary["slices"])
+PY
+
+set +e
+FLEET_STABILITY_FAKE_INFRA_SLICE=1 \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-infra" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 3 --concurrency 2 --seed 19
+infra_status=$?
+set -e
+[ "$infra_status" -ne 0 ] || fail "capability proof must fail on INFRA"
+python3 - "$tmp/capability-infra" <<'PY' || fail "INFRA reset summary invalid"
+import json
+import sys
+from pathlib import Path
+
+summaries = list(Path(sys.argv[1]).glob("*/summary.json"))
+assert len(summaries) == 1, summaries
+summary = json.loads(summaries[0].read_text())
+assert summary["status"] == "failed", summary
+assert summary["failed_slice"] == 1
+assert summary["passed_slices"] == 1
+assert [item["classification"] for item in summary["slices"]] == [
+    "harness",
+    "infra",
+]
+PY
 
 echo "All fleet infra stability proof structural checks passed."

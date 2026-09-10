@@ -187,6 +187,11 @@ campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
            → one shared serialized infra-canary stamp transaction
            → at most N one-task fleet controllers
            → distinct controller lock + run ID + machine/volume/queue per instance
+  → scripts/run-bench stability-proof -k K --concurrency N --seed S
+      → K sequential random ready-catalog slices, N isolated tasks per slice
+      → terminal _batch/run.json classification
+           ├─ PASSED / FAILED / SKIPPED → record and advance
+           └─ INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
 ~~~
 
 Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
@@ -201,11 +206,21 @@ how many of those one-task fleet controllers may be active. Repetitions default
 to sequential when no concurrency is supplied. Every copy remains isolated;
 never implement `-k` by passing duplicate task names to one fleet.
 
+For a consecutive no-INFRA acceptance gate, use
+`scripts/run-bench stability-proof -k K --concurrency N --seed S`. The sampler
+draws every slice from the unified ready catalog (`tasks.json` plus
+`polar_tasks.json`), and every slice runs to a terminal batch projection before
+the next starts. An ordinary benchmark/evaluator failure counts as a completed
+slice; missing, malformed, `INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
+abort the command so the streak can restart only after RCA and a fix.
+
 The command contract is exercised end to end with fake provider children inside
 the existing always-run `Descend Command` deploy gate: selection, both `-k`
-spellings, concurrency bounds, per-copy identities, and child-failure
-propagation. This must remain an offline `$0` extension of that existing gate;
-never add a separate live benchmark stage or cloud wait to `/deploy`.
+spellings, concurrency bounds, per-copy identities, child-failure propagation,
+ready-catalog random slicing, terminal batch classification, and fail-closed
+INFRA reset. This must remain an offline `$0` extension of the existing
+always-run `Descend Command` deploy gate; never add a separate live benchmark
+stage or cloud wait to `/deploy`.
 
 ## Persistent state
 
