@@ -310,6 +310,45 @@ test('POST /agents/batch — changed payload colliding with stable ID is rejecte
   await deleteTestAgent(parentId, session.user.id);
 });
 
+test('POST /agents/batch — memory defaults on, survives omission on retry, and rejects changes', async () => {
+  const session = await createAnonymousSession('batch-memory-retry');
+  const parentId = await createTestAgent(session.user.id, 'Batch memory retry parent');
+  await prepareTestParentWorkflow(parentId);
+  const child = makeBatchAgent({ parentAgentId: parentId, busId: parentId });
+  const first = await request(`${BASE_URL}/api/agents/batch`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ agents: [child] }),
+  });
+  assert(first.status === 201 || first.status === 207, `Unexpected first status ${first.status}`);
+  trackedAgentIds.add(child.agent_id);
+
+  const retry = await request(`${BASE_URL}/api/agents/batch`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ agents: [child] }),
+  });
+  assert(retry.status === 201 || retry.status === 207, `Unexpected retry status ${retry.status}`);
+  nodeAssert.strictEqual(
+    (await prisma.agent.findUniqueOrThrow({ where: { id: child.agent_id } })).memoryEnabled,
+    true
+  );
+
+  const collision = await request(`${BASE_URL}/api/agents/batch`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ agents: [{ ...child, memory_enabled: false }] }),
+  });
+  assertStatus(collision.status, 409, collision.data);
+  nodeAssert.match(
+    String((collision.data as { error?: string }).error),
+    /changed immutable field memory_enabled/
+  );
+
+  await deleteTestAgent(child.agent_id, session.user.id);
+  await deleteTestAgent(parentId, session.user.id);
+});
+
 test('POST /agents/batch — mixed pending, settled, and new rows reconcile once', async () => {
   const session = await createAnonymousSession('batch-mixed-retry');
   const parentId = await createTestAgent(session.user.id, 'Batch mixed retry parent');

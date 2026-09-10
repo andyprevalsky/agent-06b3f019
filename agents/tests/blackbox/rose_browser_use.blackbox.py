@@ -57,7 +57,7 @@ def test_browser_use_pool_registered():
     assert "rose-1-browser-use" in POOL_REGISTRY
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
-    assert spec.claude_auth_model == "claude-fable-5"
+    assert spec.claude_auth_model == "claude-fable-5-1"
     assert spec.gpt_auth_model == "gpt-5.6-sol"
     # Waterfall is GPT-5.6 Sol → Kimi K3. Opus 4.8 was dropped: it was the
     # priciest layer while scoring below sol on all three AA indices, and the
@@ -2064,7 +2064,7 @@ async def test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert result["mode"] == "waterfall"
-    assert result["actual_model"] == "claude-fable-5-anthropic"
+    assert result["actual_model"] == "claude-fable-5-1-anthropic"
     assert result["gpt_token_error"] == "rate_limit"
     assert result["action"]["action"] == "click"
     assert result["action"]["index"] == 3

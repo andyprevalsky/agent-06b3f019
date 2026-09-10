@@ -24,6 +24,7 @@ What's in here:
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +66,7 @@ VISION_MODELS: frozenset[str] = frozenset({
     "anthropic/claude-sonnet-4.6",
     "anthropic/claude-sonnet-5",
     "anthropic/claude-fable-5",
+    "anthropic/claude-fable-5.1",
     "x-ai/grok-4.1-fast",
     "x-ai/grok-4.1",
 })
@@ -816,6 +818,62 @@ def _add_openrouter_cache_breakpoint(msg: Dict[str, Any]) -> None:
             target["cache_control"] = {"type": "ephemeral"}
 
 
+def _has_openrouter_cache_breakpoint(value: Any) -> bool:
+    """Return whether caller-owned content already selects a cache prefix."""
+    if isinstance(value, dict):
+        if "cache_control" in value:
+            return True
+        return any(_has_openrouter_cache_breakpoint(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_openrouter_cache_breakpoint(item) for item in value)
+    return False
+
+
+def _mark_first_large_completed_tool_prefix(
+    messages: List[Dict[str, Any]],
+    *,
+    minimum_prefix_chars: int,
+) -> bool:
+    """Mark one deterministic completed-tool boundary above a cache floor.
+
+    Gemini through OpenRouter honors only the final explicit breakpoint. A
+    moving tail would therefore create a different cache prefix on every turn.
+    Choosing the earliest complete assistant/tool batch above the conservative
+    size floor keeps the selected prefix fixed as an append-only conversation
+    grows, while never splitting a tool declaration from its results.
+    """
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        if index + 1 < len(messages) and messages[index + 1].get("role") == "tool":
+            continue
+
+        batch_start = index
+        while batch_start > 0 and messages[batch_start - 1].get("role") == "tool":
+            batch_start -= 1
+        declaration_index = batch_start - 1
+        if declaration_index < 0:
+            continue
+        declaration = messages[declaration_index]
+        if declaration.get("role") != "assistant" or not declaration.get("tool_calls"):
+            continue
+
+        prefix_chars = len(
+            json.dumps(
+                messages[: index + 1],
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+        )
+        if prefix_chars < minimum_prefix_chars:
+            continue
+
+        _add_openrouter_cache_breakpoint(message)
+        return True
+    return False
+
+
 def _strip_system_prompt_boundary(msg: Dict[str, Any]) -> None:
     """Remove cache-boundary sentinel text from non-cache system messages."""
     content = msg.get("content")
@@ -936,6 +994,9 @@ def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
     *,
     tools_declared: bool = True,
+    cache_opening_user: bool = False,
+    inject_cache_breakpoints: bool = True,
+    cache_completed_tool_prefix: bool = False,
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR, Anthropic-via-OR).
@@ -944,30 +1005,43 @@ def transform_messages_for_openai(
     first — see `flatten_tool_history_to_text` for the Gemini 400 it avoids.
     Defaults to True so existing callers keep today's behavior.
 
-    cache_control placement contract (waterfall path, OpenRouter-targeted):
+    cache_control placement contract (explicit-cache waterfall models):
 
     - We mark the trailing block of the FIRST system message as a cache
       breakpoint (idempotent — preserves any caller-supplied breakpoints).
-    - We do NOT mark the last user message. Different OR providers interpret
-      the last cache_control marker differently:
-        * Anthropic accepts multiple breakpoints and picks the longest
-          matching prefix.
-        * Gemini-via-OR treats the LAST cache_control as the cache key —
-          marking a per-call dynamic user message there makes every call's
-          cache key unique, defeating the cache.
-      Marking only the stable system prefix gives both providers a usable
-      cache key without trading one off against the other.
+      When the caller supplies a logical provider-cache sequence,
+      ``cache_opening_user`` also marks the FIRST user message. That opening
+      turn is stable for an append-only agent conversation and extends short
+      system prompts past provider minimums.
+    - We do NOT mark the last user message. Explicit-cache providers such as
+      Anthropic accept multiple breakpoints and pick the longest matching
+      prefix, so the stable opening turn is reusable while the conversation
+      tail remains dynamic.
 
     Callers that want additional breakpoints (e.g. message_person stacks a
     static-rules block + a per-user voice block in one system message)
     should set cache_control explicitly on the relevant content blocks
     before calling — those markers are preserved here.
+
+    ``cache_completed_tool_prefix=True`` is the Gemini/OpenRouter policy: when
+    the caller did not provide a marker, select the earliest complete tool turn
+    whose serialized prefix is confidently beyond Gemini 3's 4,096-token
+    minimum. The deterministic boundary remains fixed on later append-only
+    calls. If the conversation is still short, fall back to the stable opening
+    markers used by other explicit-cache providers.
+
+    ``inject_cache_breakpoints=False`` leaves caller-supplied markers intact
+    but does not synthesize new ones (for one-shot calls).
     """
     source = messages if tools_declared else flatten_tool_history_to_text(messages)
     out: List[Dict[str, Any]] = []
+    caller_supplied_breakpoint = _has_openrouter_cache_breakpoint(source)
+    synthesize_cache_breakpoints = inject_cache_breakpoints and not caller_supplied_breakpoint
     declared_tool_names: Dict[str, str] = {}
     for message in source:
-        rewritten = dict(message)
+        # Cache markers mutate nested content blocks, so isolate the outbound
+        # transform from the caller's append-only history.
+        rewritten = copy.deepcopy(message)
         if rewritten.get("role") == "assistant":
             tool_calls = rewritten.get("tool_calls")
             if isinstance(tool_calls, list):
@@ -995,14 +1069,35 @@ def transform_messages_for_openai(
     if not out:
         return out
 
+    if (
+        synthesize_cache_breakpoints
+        and cache_completed_tool_prefix
+        and _mark_first_large_completed_tool_prefix(out, minimum_prefix_chars=20_000)
+    ):
+        for message in out:
+            if message.get("role") == "assistant":
+                _normalize_openai_tool_calls(message)
+            elif message.get("role") == "system":
+                _strip_system_prompt_boundary(message)
+        return out
+
     first_system_seen = False
+    first_user_seen = False
     for m in out:
         if m.get("role") == "system":
-            if not first_system_seen:
+            if synthesize_cache_breakpoints and not first_system_seen:
                 _add_openrouter_cache_breakpoint(m)
-                first_system_seen = True
             else:
                 _strip_system_prompt_boundary(m)
+            first_system_seen = True
+        elif (
+            synthesize_cache_breakpoints
+            and cache_opening_user
+            and m.get("role") == "user"
+            and not first_user_seen
+        ):
+            _add_openrouter_cache_breakpoint(m)
+            first_user_seen = True
         elif m.get("role") == "assistant":
             _normalize_openai_tool_calls(m)
 

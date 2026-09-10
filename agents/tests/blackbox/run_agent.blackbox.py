@@ -1594,20 +1594,16 @@ async def test_run_verifier_dynamic_schema_getter():
 
 
 async def test_completed_browser_output_forces_parent_completion_instead_of_second_browser():
-    """A verified browser result must complete without replacing the tool schema.
+    """A verified browser result must complete without another model turn.
 
     Regression: the simulated Amazon checkout browser returned a terminal,
     schema-complete result, but the unrestricted next root turn spawned a second
     browser session instead of calling attempt_completion. The parent verifier
-    already accepts this exact child output, so the only legal next tool is the
-    completion boundary. The completion instruction + required-tool validation
-    enforce that boundary while preserving the original tool schema; narrowing
-    the schema here invalidates the provider prompt-cache prefix on the handoff
-    turn (captured in browser-smoke agent e8e0e86a-1f16).
+    already accepts this exact child output, so the runtime deterministically
+    dispatches the completion boundary instead of asking a model to repeat it.
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
-    from temporalio.exceptions import ApplicationError
 
     response_schema = {
         "fields": [
@@ -1655,32 +1651,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def mock_execute_activity(fn, args=None, **_kwargs):
         if fn is call_llm_activity:
             llm_calls.append(args)
-            required_tool = args[11]
-            # The real activity rejects a wrong required tool non-retryably;
-            # run_agent, not Temporal, owns the next semantic turn.
-            if len(llm_calls) == 1:
-                raise ApplicationError(
-                    "LLM must call exactly one tool, 'attempt_completion'. Got: ['spawn_agent']",
-                    type="LLMStructuredOutputError",
-                    non_retryable=True,
-                )
-            tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
-            tool_call = {"tool": tool_name}
-            if tool_name == "spawn_agent":
-                tool_call.update(
-                    {
-                        "type": "browser",
-                        "goal": "Complete checkout again",
-                        "start_url": "https://www.amazon.com",
-                        "output_schema": response_schema,
-                    }
-                )
-            return {
-                "response": "",
-                "tool_calls": [tool_call],
-                "detected_tools_ordered": [(tool_name, "next-tool", 1.0)],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            }
+            raise AssertionError("schema-complete child handoff must not call the LLM")
         if fn is check_progress:
             return {
                 "score": 1.0,
@@ -1720,14 +1691,113 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert len(llm_calls) == 2
-    assert llm_calls[0][25] is True
-    assert llm_calls[1][25] is False
-    for call in llm_calls:
-        assert call[2] == ["spawn_agent", "attempt_completion"]
-        assert call[11] == "attempt_completion"
-        assert "already completed" in call[10]
-        assert call[30] == "agent:amazon-parent:call:execute_loop"
+    assert llm_calls == []
+
+
+async def test_completed_code_child_dispatches_parent_completion_without_llm():
+    """A terminal Claude Code result reaches the verifier without a model roundtrip."""
+    response_schema = {
+        "fields": [
+            {"name": "program_output", "type": "str", "required": True},
+            {"name": "step_count", "type": "int", "required": True},
+        ]
+    }
+    child_result = {"program_output": "27 82 41 ... 1", "step_count": 111}
+    context = [
+        {"role": "USER", "text": "Run the program", "timestamp": "2026-09-10T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Claude Code completed successfully",
+            "timestamp": "2026-09-10T00:00:01Z",
+            "metadata": {
+                "toolCallId": "claude-one",
+                "toolName": "spawn_claude_code_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
+                "structured_response": {"output": child_result},
+            },
+        },
+    ]
+
+    def fail_if_llm_called():
+        raise AssertionError("terminal code-child handoff must not call the LLM")
+
+    result, _, executed = await _run_single_iteration(
+        [],
+        [],
+        skip_verification=False,
+        initial_context=context,
+        response_schema=response_schema,
+        verifier_structured_response=child_result,
+        llm_tool_calls_factory=fail_if_llm_called,
+        max_iterations=2,
+    )
+
+    assert result["status"] == "completed"
+    assert result["structured_response"] == child_result
+    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
+
+
+async def test_rejected_completed_child_handoff_returns_control_to_llm():
+    """A rejected synthetic completion is not replayed forever."""
+    cache_steps = []
+
+    async def record_cache_step(_agent_id, step):
+        cache_steps.append(step)
+
+    response_schema = {
+        "fields": [
+            {"name": "purchase_completed", "type": "bool", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    child_result = {
+        "purchase_completed": True,
+        "order_confirmation_id": "111-2222222-3333333",
+    }
+    context = [
+        {"role": "USER", "text": "Buy the item", "timestamp": "2026-09-10T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-09-10T00:00:01Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": child_result,
+            },
+        },
+    ]
+    llm_calls = 0
+
+    def corrective_llm_turn():
+        nonlocal llm_calls
+        llm_calls += 1
+        return [{"tool": "web_search", "query": "correct the rejected handoff"}]
+
+    with patch(
+        "providers.fast_cache.client.ensure_position_context",
+        new=AsyncMock(side_effect=record_cache_step),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [],
+            [],
+            skip_verification=False,
+            initial_context=context,
+            response_schema=response_schema,
+            verifier_score=0.4,
+            verifier_reasoning="The parent still needs corrective work.",
+            verifier_structured_response=child_result,
+            llm_tool_calls_factory=corrective_llm_turn,
+            max_iterations=2,
+        )
+
+    assert result["status"] == "max_iterations"
+    assert llm_calls == 1
+    assert [item["tool_name"] for item in executed] == ["attempt_completion", "web_search"]
+    assert cache_steps == [1], "the synthetic completion must not consume a provider-cache position"
 
 
 async def test_verifier_usage_preserves_cache_sequence_identity():
@@ -1756,8 +1826,34 @@ async def test_verifier_usage_preserves_cache_sequence_identity():
     assert all(call["cache_sequence_id"] == "verifier-sequence" for call in verifier_calls)
 
 
+async def test_verifier_usage_does_not_invent_cache_sequence_identity():
+    """One-shot verifier usage must not pollute the execute cache group."""
+    usage_calls = []
+
+    async def capture_usage(_tokens_in, _tokens_out, _model, **metadata):
+        usage_calls.append(metadata)
+
+    await _run_single_iteration(
+        [{"tool": "web_search", "query": "x"}],
+        [("web_search", "tc-1", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        verifier_score=0.3,
+        verifier_usage={
+            "prompt_tokens": 5,
+            "completion_tokens": 6,
+            "total_tokens": 11,
+        },
+        on_tokens_override=capture_usage,
+    )
+
+    verifier_calls = [call for call in usage_calls if call["call_site"].startswith("verifier_")]
+    assert verifier_calls
+    assert all(call["cache_sequence_id"] is None for call in verifier_calls)
+
+
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
-    """The inline activity path retries instead of dispatching a non-completion tool."""
+    """A schema-complete child dispatches completion without another LLM call."""
     import providers.fast_cache.context as fast_cache_context
 
     response_schema = {
@@ -1907,38 +2003,27 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
 
     assert result["status"] == "completed"
     assert [item["tool_name"] for item in executed] == ["attempt_completion"]
-    assert llm_call_count == 2
-    assert cache_contexts == [(True, True, 1), (False, False, 1)]
-    assert stream_sequences == [1, 2]
-    assert stream_final_sequences == [3]
-    assert response_models == [CustomBrowserAction, CustomBrowserAction]
-    assert [call["gpt_token"] for call in auth_calls] == ["stale-gpt-token", "rotated-gpt-token"]
-    assert [call["gpt_account_id"] for call in auth_calls] == [
-        "stale-gpt-account",
-        "rotated-gpt-account",
-    ]
-    assert auth_calls[1]["gpt_token_source"] == "pool"
-    assert auth_calls[1]["gpt_token_pool_id"] == "pool-token-2"
-    assert usage_reports[0][:3] == (11, 2, "rejected-model")
-    assert usage_reports[0][3]["cache_read_input_tokens"] == 3
-    assert usage_reports[0][3]["gpt_token_rotated"] is True
-    assert usage_reports[1][:3] == (7, 5, "accepted-model")
-    assert event_order.index("llm_1") < event_order.index("usage_rejected-model")
-    assert event_order.index("usage_rejected-model") < event_order.index("pause_check_after_usage")
-    assert event_order.index("pause_check_after_usage") < event_order.index("llm_2")
-    assert result["tokens_in"] >= 18
-    assert result["tokens_out"] >= 7
+    assert llm_call_count == 0
+    assert cache_contexts == []
+    assert stream_sequences == []
+    assert stream_final_sequences == []
+    assert response_models == []
+    assert auth_calls == []
+    assert len(usage_reports) == 1
+    assert usage_reports[0][:3] == (5, 6, None)
+    assert usage_reports[0][3]["call_site"] == "verifier_execute"
+    assert result["tokens_in"] >= 5
+    assert result["tokens_out"] >= 6
 
 
 async def test_pause_after_forced_completion_llm_still_dispatches_attempt_completion():
-    """External PAUSE must not discard an already-returned forced attempt_completion.
+    """Verifier accounting must not discard deterministic attempt_completion.
 
     Regression: gate-subscription-card-mint-admin-bypass pass@5 agent
     b7b53dfb-20b4-4b8e-b019-432a315cee83 — browser child returned schema-complete
-    structured_response; parent logged run_agent.completed_child_forces_completion
-    and the LLM returned attempt_completion; the benchmark timeout PAUSE arrived
-    inside _account_llm_usage before tool dispatch, so EXECUTE ended paused and the
-    agent stayed ACTIVE despite a successful confirm.
+    structured_response; parent logged run_agent.completed_child_forces_completion.
+    Completion is now synthesized before any LLM call, then its verifier result
+    remains terminal even if accounting observes a concurrent pause.
     """
     response_schema = {
         "fields": [
@@ -2327,8 +2412,16 @@ async def run_all_tests():
         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
     )
     await r.record_async(
-        "completed_child_required_tool_bypasses_rejected_fast_cache",
+        "completed_child_bypasses_llm_and_fast_cache",
         test_completed_child_required_tool_is_enforced_inside_direct_activity,
+    )
+    await r.record_async(
+        "completed_code_child_dispatches_parent_completion_without_llm",
+        test_completed_code_child_dispatches_parent_completion_without_llm,
+    )
+    await r.record_async(
+        "rejected_completed_child_handoff_returns_control_to_llm",
+        test_rejected_completed_child_handoff_returns_control_to_llm,
     )
     await r.record_async(
         "pause_after_forced_completion_llm_still_dispatches_attempt_completion",
@@ -2338,6 +2431,10 @@ async def run_all_tests():
     await r.record_async(
         "verifier_usage_preserves_cache_sequence_identity",
         test_verifier_usage_preserves_cache_sequence_identity,
+    )
+    await r.record_async(
+        "verifier_usage_does_not_invent_cache_sequence_identity",
+        test_verifier_usage_does_not_invent_cache_sequence_identity,
     )
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)

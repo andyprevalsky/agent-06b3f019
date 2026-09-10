@@ -8,6 +8,8 @@ import { parseArgs } from "util";
 const BASE = (process.env.ROSE_API_BASE_URL || "").replace(/\/$/, "");
 const API_KEY = process.env.ROSE_API_KEY || "";
 const USER_ID = process.env.ROSE_USER_ID || "";
+const MEMORY_ENABLED =
+  (process.env.ROSE_MEMORY_ENABLED || "false").trim().toLowerCase() === "true";
 
 function usage() {
   console.error(
@@ -31,6 +33,9 @@ async function roseRequest(path, options = {}) {
     "Content-Type": "application/json",
     "X-API-Key": API_KEY,
     "X-User-Id": USER_ID,
+    // This bridge is installed only in the benchmark harness sandbox. The
+    // secret-valued marker keeps work agents classified as benchmark runs.
+    "X-Benchmark-Run": API_KEY,
     ...(options.headers || {}),
   };
   const response = await fetch(url, { ...options, headers });
@@ -62,6 +67,7 @@ async function agentsCreate(args) {
     goal,
     source: "WEB",
     price_limit_cents: Number(args["price-limit-cents"] || 500),
+    memory_enabled: MEMORY_ENABLED,
   };
   if (args["start-phase"]) body.start_phase = args["start-phase"];
   const data = await roseRequest("/api/agents", {

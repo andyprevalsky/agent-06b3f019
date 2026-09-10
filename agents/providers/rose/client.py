@@ -555,7 +555,8 @@ class RoseClient:
         recorded for future Fast Mode runs.
         """
         from providers.fast_cache import client as _fc
-        from providers.fast_cache.context import current_context
+        from providers.fast_cache.context import cache_writes_disabled, current_context
+        from providers.fast_cache.rose_cache import FastCacheLookupError
         from providers.fast_cache.rose_cache import (
             accumulate_chunk as _fc_accumulate,
         )
@@ -612,7 +613,6 @@ class RoseClient:
             stored: Any = None
             hit_key: Any = None
             try:
-                from providers.fast_cache.rose_cache import FastCacheLookupError
                 from providers.fast_cache.rose_cache import lookup_llm_cache
 
                 stored, hit_key = await lookup_llm_cache(
@@ -629,7 +629,8 @@ class RoseClient:
                 stored, hit_key = None, None
                 lookup_failed = True
             if stored is not None:
-                if hit_key and hit_key != key and ctx.should_write:
+                can_promote_alias = str(call_site or "").strip() != "dag_param_populator"
+                if hit_key and hit_key != key and ctx.should_write and can_promote_alias:
                     # Migrate demo-era / drifted keys onto the current fingerprint
                     # so subsequent runs hit without the alias path.
                     try:
@@ -711,8 +712,7 @@ class RoseClient:
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
                 # as cold when the first get-position flakes.
-                from providers.fast_cache.rose_cache import is_july_explore_site
-                from providers.fast_cache.rose_cache import is_july_gp_execute_site
+                from providers.fast_cache.rose_cache import is_july_explore_site, is_july_gp_execute_site
 
                 if (
                     soft is not None
@@ -739,6 +739,11 @@ class RoseClient:
             # loops with cache-status stubs instead of substantive tool evidence.
             logger.info("llm.cache.write_only", call_site=call_site, key=key)
 
+        if ctx.read_enabled and ctx.soft_complete_allowed and cache_writes_disabled():
+            raise FastCacheLookupError(
+                f"Strict read-only benchmark cache miss for {call_site or 'unknown'}; live fallback is disabled"
+            )
+
         structured_response_model = kwargs.get("response_model") is not None
         acc = _fc_empty()
         async for chunk in self._complete_impl(**kwargs):
@@ -755,6 +760,7 @@ class RoseClient:
         messages: List[Dict[str, Any]],
         response_model: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        context_tools: Optional[List[Dict[str, Any]]] = None,  # Declared-only tools legalizing forked tool history (never called)
         tool_choice: Any = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
@@ -1267,6 +1273,7 @@ class RoseClient:
                                 pool_spec=pool_spec,
                                 messages=messages,
                                 tools=claude_auth_tools,
+                                context_tools=context_tools,
                                 tool_choice=claude_auth_tool_choice,
                                 response_format=None if claude_auth_tools else openrouter_response_format,
                                 max_tokens=max_tokens,
@@ -1286,6 +1293,7 @@ class RoseClient:
                                 pool_spec=pool_spec,
                                 messages=messages,
                                 tools=gpt_auth_tools,
+                                context_tools=context_tools,
                                 tool_choice=gpt_auth_tool_choice,
                                 response_format=None if gpt_auth_tools else openrouter_response_format,
                                 temperature=temperature,
@@ -1467,6 +1475,7 @@ class RoseClient:
                             messages=messages,
                             api_key=openai_api_key,
                             tools=gpt_api_key_tools,
+                            context_tools=context_tools,
                             tool_choice=gpt_api_key_tool_choice,
                             response_format=None if gpt_api_key_tools else openrouter_response_format,
                             temperature=temperature,
@@ -1545,6 +1554,7 @@ class RoseClient:
                             messages=messages,
                             api_key=anthropic_api_key,
                             tools=anthropic_api_key_tools,
+                            context_tools=context_tools,
                             tool_choice=anthropic_api_key_tool_choice,
                             response_format=None if anthropic_api_key_tools else openrouter_response_format,
                             max_tokens=max_tokens,
@@ -1623,6 +1633,8 @@ class RoseClient:
                     per_step_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     exclude_anthropic_family=_exclude_anthropic_family,
+                    cache_namespace=cache_namespace,
+                    skip_cache_write=skip_cache_write,
                 )
             ):
                 chunk = _with_timing_if_done(chunk)
@@ -1914,6 +1926,7 @@ async def _try_claude_auth(
     pool_spec: Any,
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any,
     response_format: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
@@ -1938,6 +1951,7 @@ async def _try_claude_auth(
         pool_spec=pool_spec,
         messages=messages,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         response_format=response_format,
         max_tokens=max_tokens,
@@ -1978,6 +1992,7 @@ async def _try_gpt_auth(
     pool_spec: Any,
     messages: List[Dict[str, Any]],
     tools: Optional[List[Dict[str, Any]]],
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any,
     response_format: Optional[Dict[str, Any]],
     temperature: Optional[float],
@@ -1999,6 +2014,7 @@ async def _try_gpt_auth(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
@@ -2034,6 +2050,7 @@ async def _try_openai_api_key(
     messages: List[Dict[str, Any]],
     api_key: str,
     tools: Optional[List[Dict[str, Any]]],
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any,
     response_format: Optional[Dict[str, Any]],
     temperature: Optional[float],
@@ -2056,6 +2073,7 @@ async def _try_openai_api_key(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
@@ -2090,6 +2108,7 @@ async def _try_anthropic_api_key(
     messages: List[Dict[str, Any]],
     api_key: str,
     tools: Optional[List[Dict[str, Any]]],
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any,
     response_format: Optional[Dict[str, Any]],
     max_tokens: Optional[int],
@@ -2112,6 +2131,7 @@ async def _try_anthropic_api_key(
         messages=messages,
         api_key=api_key,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         response_format=response_format,
         max_tokens=max_tokens,

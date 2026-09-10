@@ -10,17 +10,21 @@ first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py — the Tem
 symptoms:
   - browser agent dies at the 120s activity heartbeat timeout
   - "~90s Cloudflare renderer freeze during a bot challenge"
-  - slow or stalling prod agent with no further browser steps
+  - "activity Heartbeat timeout"
+  - "Browser automation failed"
+  - concurrent browser agents die in the same second
 tags:
   - browser-agent
   - steel
   - cloudflare
   - temporal
   - heartbeat
+  - event-loop-starvation
 sources:
   - PR #681
   - memory:project_steel_cloudflare_freeze
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+  - agent 37b7bb31-8db5-4c7e-806d-d31b7891106f
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_activity_heartbeat_survives_event_loop_block
 status: fixed
 ---
 
@@ -63,3 +67,52 @@ None recorded.
 Liveness signals must never be emitted from the subsystem they are reporting on
 — if an activity heartbeat can be blocked by the work it monitors, a legitimate
 stall becomes an unrecoverable timeout.
+
+## Recurrence: 2026-09-09
+
+Agent `37b7bb31-8db5-4c7e-806d-d31b7891106f` spawned 3 then 6 concurrent
+Replicate/ChatGPT browsers. Each wave died in the same second with
+`activity Heartbeat timeout` (03:35:16, 03:41:07, 03:43:53) after 121s–7min
+of useful work — gotos and `read_browser_state` were still finishing. The
+2026-07-02 asyncio keepalive was still on the browser event loop. That is
+the owned incomplete guardrail: liveness still shared the loop it
+monitors. Same-second deaths across mixed-age activities are also
+consistent with worker death or Temporal disconnect; ClickHouse/Fly logs
+were unreachable from this environment, so those siblings stay unexcluded.
+The local repro proves the asyncio keepalive is silent while the loop is
+blocked (`time.sleep`); the thread pump keeps beating. Timeout was not
+raised.
+
+Local repro (asyncio keepalive silent during `time.sleep`; thread pump
+keeps beating):
+
+```bash
+cd agents && source venv/bin/activate
+PYTHONPATH=".:tests/blackbox" python -c "
+import asyncio, importlib.util
+from pathlib import Path
+p=Path('tests/blackbox/spawn_browser_agent_v3.blackbox.py')
+spec=importlib.util.spec_from_file_location('bb', p)
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+async def main():
+    await m.test_asyncio_browser_heartbeat_starves_when_event_loop_blocked()
+    await m.test_browser_activity_heartbeat_survives_event_loop_block()
+    print('ok')
+asyncio.run(main())
+"
+```
+
+Fix: process-local thread pump in
+`agents/domains/spawn_browser_agent_v3/activity_heartbeat.py` (one daemon
+thread, register/unregister per activity). 10k-agent behavior: still one
+thread per worker and the same per-activity heartbeat RPCs; no extra
+thread per browser.
+
+Review cycle 1: `temporalio` 1.18.1 `activity.heartbeat` from the daemon
+thread raises `RuntimeError` (`asyncio.create_task()` with no running
+loop). The first pump swallowed that and the keepalive was silent again.
+`_dispatch` now tries `ctx.run(beat)` on the thread (so injected
+`heartbeat_fn` still works during `time.sleep`); on `RuntimeError` it
+replays via `loop.call_soon_threadsafe` onto the loop captured at
+`register()`. Cemented in
+`test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop`.

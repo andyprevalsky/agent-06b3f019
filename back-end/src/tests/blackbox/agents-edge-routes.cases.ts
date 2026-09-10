@@ -380,24 +380,44 @@ test('POST /agents — X-Benchmark-Run key persists isBenchmark; spoof/absent st
   const unmarkedId = (unmarked.data as { agent_id: string }).agent_id;
 
   const [markedRow, spoofedRow, unmarkedRow] = await Promise.all([
-    prisma.agent.findUnique({ where: { id: markedId }, select: { isBenchmark: true } }),
-    prisma.agent.findUnique({ where: { id: spoofedId }, select: { isBenchmark: true } }),
-    prisma.agent.findUnique({ where: { id: unmarkedId }, select: { isBenchmark: true } }),
+    prisma.agent.findUnique({
+      where: { id: markedId },
+      select: { isBenchmark: true, memoryEnabled: true },
+    }),
+    prisma.agent.findUnique({
+      where: { id: spoofedId },
+      select: { isBenchmark: true, memoryEnabled: true },
+    }),
+    prisma.agent.findUnique({
+      where: { id: unmarkedId },
+      select: { isBenchmark: true, memoryEnabled: true },
+    }),
   ]);
   if (markedRow?.isBenchmark !== true) {
     throw new Error(
       `Expected isBenchmark=true for benchmark-flagged agent, got ${JSON.stringify(markedRow)}`
     );
   }
+  if (markedRow.memoryEnabled !== false) {
+    throw new Error(`Expected benchmark memory default off, got ${JSON.stringify(markedRow)}`);
+  }
   if (spoofedRow?.isBenchmark !== false) {
     throw new Error(
       `Expected isBenchmark=false for spoofed header value, got ${JSON.stringify(spoofedRow)}`
+    );
+  }
+  if (spoofedRow.memoryEnabled !== true) {
+    throw new Error(
+      `Expected spoofed benchmark memory default on, got ${JSON.stringify(spoofedRow)}`
     );
   }
   if (unmarkedRow?.isBenchmark !== false) {
     throw new Error(
       `Expected isBenchmark=false for regular agent, got ${JSON.stringify(unmarkedRow)}`
     );
+  }
+  if (unmarkedRow.memoryEnabled !== true) {
+    throw new Error(`Expected production memory default on, got ${JSON.stringify(unmarkedRow)}`);
   }
   await deleteTestAgent(markedId, session.user.id);
   await deleteTestAgent(spoofedId, session.user.id);

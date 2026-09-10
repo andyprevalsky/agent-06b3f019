@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import textwrap
+import threading
 import time as time_module
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
@@ -653,6 +654,39 @@ def test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
             pre_submit_page,
             {"action": "click", "element_description": "[12] button 'Submit (Protected by Invisible'"},
         ],
+    )
+
+
+def test_visible_result_completion_rewrites_recovery_after_allowed_result():
+    """A successful visible result must beat a redundant recovery request."""
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    result_dom = {
+        "action": "read_browser_state",
+        "result": {
+            "message": (
+                "0.02\nRisk Score (lower = human)\n"
+                "Form submission allowed!\n"
+                '{"action":"form_submit","recommendation":"allow","success":true}'
+            )
+        },
+    }
+    history = [
+        {"action": "click", "element_description": "[567] button 'Submit (Protected by Invisible'"},
+        result_dom,
+    ]
+
+    assert should_force_visible_result_completion(
+        action_name="recover_from_challenge",
+        last_reasoning="",
+        action_entries=history,
+    )
+    assert not should_force_visible_result_completion(
+        action_name="recover_from_challenge",
+        last_reasoning="",
+        action_entries=[history[0]],
     )
 
 
@@ -7805,6 +7839,72 @@ def test_build_usage_items_carries_browser_pool_model():
     assert tool_usage["llm"][0]["tokens_out"] == 40_000
     assert tool_usage["service"][0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
 
+def test_browser_usage_preserves_repeatable_cache_calls():
+    """Browser aggregation must not erase a healthy provider cache sequence."""
+    from benchmarks.llm_usage import aggregate_repeatable_cache_usage
+    from domains.spawn_browser_agent_v3.service import (
+        accumulate_model_usage,
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+
+    sequence_id = "browser-task:task-one:browser_use"
+    usage_by_model: dict = {}
+    browser_calls = (
+        (938, 20, 0, 938),
+        (9_000, 30, 9_000, 0),
+        (10_000, 40, 10_000, 0),
+        (10_435, 50, 10_435, 0),
+    )
+    for input_tokens, output_tokens, cache_read, cache_write in browser_calls:
+        accumulate_model_usage(
+            usage_by_model,
+            "openai/gpt-5.6-sol",
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens=cache_read,
+            cache_creation_input_tokens=cache_write,
+            cache_sequence_id=sequence_id,
+        )
+    # The one-shot verifier uses the same model but no browser cache sequence;
+    # it must remain a separate unsequenced row instead of contaminating the
+    # browser ratchet denominator.
+    accumulate_model_usage(
+        usage_by_model,
+        "openai/gpt-5.6-sol",
+        2_075,
+        25,
+        cache_creation_input_tokens=2_075,
+    )
+    items = build_usage_items(
+        32_448,
+        165,
+        {"input_cents_per_1k": 0.3, "output_cents_per_1k": 1.5},
+        1_000,
+        usage_by_model,
+    )
+    tool_usage = browser_usage_items_to_tool_usage(items)
+    stored_rows = [
+        {"type": "llm", "_benchmark_agent_id": "root", **row}
+        for row in tool_usage["llm"]
+    ]
+
+    assert len(tool_usage["llm"]) == 5
+    assert sum(row["tokens_in"] for row in tool_usage["llm"]) == 32_448
+    assert sum(row["tokens_out"] for row in tool_usage["llm"]) == 165
+    sequenced_rows = [row for row in tool_usage["llm"] if row.get("cache_sequence_id")]
+    verifier_rows = [row for row in tool_usage["llm"] if not row.get("cache_sequence_id")]
+    assert len(sequenced_rows) == 4
+    assert {row["cache_sequence_id"] for row in sequenced_rows} == {sequence_id}
+    assert len(verifier_rows) == 1
+    assert verifier_rows[0]["cache_creation_input_tokens"] == 2_075
+    assert aggregate_repeatable_cache_usage(stored_rows) == {
+        "cache_read_input_tokens": 29_435,
+        "cache_creation_input_tokens": 938,
+        "cache_hit_pct": 96.9,
+    }
+
+
 def test_build_usage_items_emits_one_row_per_actual_model():
     """The llm rows must name the model that ACTUALLY ran inference.
 
@@ -8006,6 +8106,19 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         f"{len(total_increments)} token accumulations but only {len(accumulate_calls)} "
         "accumulate_model_usage calls — some tokens are billed without a real model"
     )
+    live_calls = []
+    for call in accumulate_calls:
+        keyword_values = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg}
+        from_fast_cache = keyword_values.get("from_fast_cache")
+        if isinstance(from_fast_cache, ast.Constant) and from_fast_cache.value is True:
+            continue
+        live_calls.append(call)
+    assert live_calls, "no live accumulate_model_usage calls found"
+    for call in live_calls:
+        keyword_names = {keyword.arg for keyword in call.keywords}
+        assert "cache_sequence_id" in keyword_names, (
+            f"live call site drops provider cache sequence identity: {ast.unparse(call)}"
+        )
 
 def test_get_browser_system_prompt_with_files():
     from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
@@ -13134,6 +13247,78 @@ def test_write_lock_email_send_excludes_resend_controls():
     assert is_email_send_button("Send message\nSend another OTP to email")
     assert is_email_send_button("Send new email verification code\nSend message")
     assert is_email_send_button("Get verification code\nSend message")
+
+
+def test_write_lock_email_send_excludes_ai_composer_submit():
+    """AI composer submits are not outbound email, even after an image upload.
+
+    Agent 37b7bb31 (2026-09-09): clicking ChatGPT ``<button "Send prompt">``
+    after uploading ``sms-inbound-0.png`` was classified as email_send. The
+    write-lock notification asked the user to approve "send a chat message
+    with an uploaded image to ChatGPT requesting an image edit". Submitting a
+    prompt to an in-product AI composer is not composing mail to a third
+    party, so it must not park the agent on write_lock.
+    """
+    from browser_tools.write_lock import is_email_send_button
+    from domains.spawn_browser_agent_v3.service_actions import (
+        _evaluate_element_text_write_lock,
+    )
+
+    chatgpt_url = "https://chatgpt.com/"
+    claude_url = "https://claude.ai/chat/abc"
+
+    # Captured production label. "Send prompt" is never an email action.
+    assert not is_email_send_button("Send prompt")
+    assert not is_email_send_button("Send prompt", chatgpt_url)
+    assert not is_email_send_button("Submit prompt")
+    assert not is_email_send_button("button\nSend prompt")
+
+    # Generic composer submits on AI-assistant hosts are the same class.
+    assert not is_email_send_button("Send", chatgpt_url)
+    assert not is_email_send_button("Send message", claude_url)
+    assert not is_email_send_button("Submit", "https://gemini.google.com/app")
+
+    # Real outbound mail stays locked, including on an AI host if the control
+    # is actually "send email".
+    assert is_email_send_button("Send")
+    assert is_email_send_button("Send email")
+    assert is_email_send_button("Send message")
+    assert is_email_send_button("Send mail")
+    assert is_email_send_button("Send email", chatgpt_url)
+    assert is_email_send_button("Send hotpot photos")
+
+    # A composer label must not unlock a neighbouring real send control.
+    assert is_email_send_button("Send prompt\nSend email")
+    assert is_email_send_button("Send email\nSend prompt")
+    # Same-signal composite: email-only phrase still locks on an AI host.
+    assert is_email_send_button("Send prompt and send email", chatgpt_url)
+    assert is_email_send_button("Submit prompt and send mail", claude_url)
+
+    # Owning click-path boundary: the exact ChatGPT image-edit send must not
+    # mint a write-lock approval.
+    out = _evaluate_element_text_write_lock(
+        element_text="Send prompt",
+        write_lock_approvals=None,
+        current_url=chatgpt_url,
+        system_name="Rose",
+        action_label="click",
+        element_text_for_question="Send prompt",
+    )
+    assert out is None
+
+    # Gmail Send on a mail host still locks through the same evaluator.
+    gmail = _evaluate_element_text_write_lock(
+        element_text="Send",
+        write_lock_approvals=None,
+        current_url="https://mail.google.com/mail/u/0/#inbox?compose=new",
+        system_name="Rose",
+        action_label="click",
+        element_text_for_question="Send",
+    )
+    assert gmail is not None
+    assert gmail["status"] == "needs_write_approval"
+    assert gmail["approval_type"] == "email_send"
+
 
 def test_write_lock_social_domain_excludes_auth_flow_urls():
     """Login/auth/signup pages on social domains are account flows, not social post gates."""
@@ -18942,6 +19127,93 @@ async def test_playwright_page_tracks_browser_use_tab_focus():
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "input_page, humanizer = await _rebind_browser_tab_runtime(" in activity_source
 
+async def test_asyncio_browser_heartbeat_starves_when_event_loop_blocked():
+    """Owning-boundary repro: an asyncio keepalive cannot outlive a blocked loop.
+
+    Agent 37b7bb31 (2026-09-09): 3 then 6 concurrent Replicate/ChatGPT browsers
+    all died in the same second with ``activity Heartbeat timeout`` after
+    121s–7min of useful work. The 2026-07-02 keepalive was an asyncio task on
+    the same loop as CDP/screenshots; ``time.sleep`` here is that starvation.
+    """
+    import contextlib
+
+    calls: list[float] = []
+    stop = asyncio.Event()
+
+    async def _background_heartbeat() -> None:
+        while not stop.is_set():
+            calls.append(time_module.monotonic())
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=0.05)
+
+    task = asyncio.create_task(_background_heartbeat())
+    await asyncio.sleep(0)
+    before = len(calls)
+    time_module.sleep(0.25)
+    during = len(calls)
+    stop.set()
+    await task
+    assert during == before, (
+        f"asyncio keepalive must stay silent while the event loop is blocked, got {before}->{during}"
+    )
+
+
+async def test_browser_activity_heartbeat_survives_event_loop_block():
+    """Thread pump must keep heartbeating while the browser event loop is blocked."""
+    from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
+
+    calls: list[float] = []
+    pump = BrowserActivityHeartbeat(
+        keepalive_seconds=0.05,
+        heartbeat_fn=lambda _msg=None: calls.append(time_module.monotonic()),
+    )
+    token = pump.register()
+    try:
+        before = len(calls)
+        time_module.sleep(0.25)
+        after = len(calls)
+        assert after > before, (
+            f"expected heartbeats during event-loop block, got {before}->{after}"
+        )
+    finally:
+        pump.unregister(token)
+        pump.shutdown()
+
+
+async def test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop():
+    """Temporal 1.18.1 heartbeats use create_task; replay them onto the activity loop."""
+    from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
+
+    calls: list[str] = []
+
+    def flaky_then_ok(msg=None):
+        if threading.current_thread().name == "browser-activity-heartbeat":
+            raise RuntimeError("no running event loop")
+        calls.append(str(msg))
+
+    pump = BrowserActivityHeartbeat(keepalive_seconds=0.05, heartbeat_fn=flaky_then_ok)
+    token = pump.register()
+    try:
+        await asyncio.sleep(0.2)
+        assert calls, "expected heartbeat replayed onto the activity event loop"
+    finally:
+        pump.unregister(token)
+        pump.shutdown()
+
+
+def test_browser_activity_uses_thread_heartbeat_pump():
+    """The browser activity must not emit keepalive from the asyncio loop it monitors."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    assert "start_browser_activity_heartbeat()" in source
+    assert "stop_browser_activity_heartbeat(_heartbeat_token)" in source
+    assert "_background_heartbeat" not in source
+    assert "asyncio.create_task(_background_heartbeat())" not in source
+
+
 async def test_browser_agent_yields_until_user_hands_control_back():
     """The activity must acknowledge ownership and stop acting until release."""
     from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
@@ -19424,6 +19696,10 @@ async def run_all_tests():
         test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score,
     )
     r.record(
+        "visible_result_completion_rewrites_recovery_after_allowed_result",
+        test_visible_result_completion_rewrites_recovery_after_allowed_result,
+    )
+    r.record(
         "visible_result_completion_ignores_post_submit_version_decimal_without_score",
         test_visible_result_completion_ignores_post_submit_version_decimal_without_score,
     )
@@ -19891,6 +20167,22 @@ async def run_all_tests():
         test_playwright_page_tracks_browser_use_tab_focus,
     )
     await r.record_async(
+        "asyncio_browser_heartbeat_starves_when_event_loop_blocked",
+        test_asyncio_browser_heartbeat_starves_when_event_loop_blocked,
+    )
+    await r.record_async(
+        "browser_activity_heartbeat_survives_event_loop_block",
+        test_browser_activity_heartbeat_survives_event_loop_block,
+    )
+    await r.record_async(
+        "browser_activity_heartbeat_replays_runtimeerror_on_activity_loop",
+        test_browser_activity_heartbeat_replays_runtimeerror_on_activity_loop,
+    )
+    r.record(
+        "browser_activity_uses_thread_heartbeat_pump",
+        test_browser_activity_uses_thread_heartbeat_pump,
+    )
+    await r.record_async(
         "browser_agent_yields_for_user_control",
         test_browser_agent_yields_until_user_hands_control_back,
     )
@@ -19948,6 +20240,10 @@ async def run_all_tests():
     r.record(
         "build_usage_items_carries_browser_pool_model",
         test_build_usage_items_carries_browser_pool_model,
+    )
+    r.record(
+        "browser_usage_preserves_repeatable_cache_calls",
+        test_browser_usage_preserves_repeatable_cache_calls,
     )
     r.record(
         "build_usage_items_emits_one_row_per_actual_model",
@@ -20422,6 +20718,10 @@ async def run_all_tests():
     r.record(
         "write_lock_email_send_excludes_resend_controls",
         test_write_lock_email_send_excludes_resend_controls,
+    )
+    r.record(
+        "write_lock_email_send_excludes_ai_composer_submit",
+        test_write_lock_email_send_excludes_ai_composer_submit,
     )
     r.record(
         "write_lock_social_domain_excludes_auth_flow_urls",

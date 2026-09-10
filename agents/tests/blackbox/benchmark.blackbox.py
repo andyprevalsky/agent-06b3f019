@@ -8540,6 +8540,40 @@ def test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace
     assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prod_url
 
 
+def test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_env():
+    """Seed must receive the same OpenRouter fallback the backend preflight accepted."""
+    import benchmarks.run_benchmark as bench
+
+    captured = {}
+
+    def capture_seed(_command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(_command, 0, "", "")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_path = Path(temp_dir) / ".env"
+        env_path.write_text(
+            "DATABASE_URL=postgresql://prod/rose\n"
+            "OPENROUTER_API_KEY=sk-or-test-fallback\n"
+        )
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch.object(bench, "_BACKEND_ENV", str(env_path)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", side_effect=capture_seed),
+        ):
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            assert bench._sync_compute_tokens(tolerate_claude_code_unavailable=True) is True
+
+    assert captured["env"]["SEED_ALLOW_MISSING_CLAUDE_CODE"] == "1"
+    assert captured["env"]["OPENROUTER_API_KEY"] == "sk-or-test-fallback"
+
+
 def test_shared_workspace_compute_source_requires_usable_claude_code():
     """A reachable shared DB without an agent token must not shadow prod."""
     from unittest.mock import patch
@@ -11643,6 +11677,7 @@ async def test_create_agent_sends_write_lock_override_when_env_set():
 
     assert agent_id == "agent-123"
     assert posts[0]["write_lock_enabled"] is False
+    assert posts[0]["memory_enabled"] is False
     assert patches[0]["write_lock_enabled"] is False
 
 
@@ -18167,6 +18202,10 @@ async def run_all_tests():
     r.record(
         "compute_token_source_ignores_isolated_process_target",
         test_compute_token_sync_reads_source_file_not_isolated_process_target,
+    )
+    r.record(
+        "compute_token_sync_propagates_openrouter_claude_fallback",
+        test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_env,
     )
     await r.record_async(
         "anthropic_api_key_fallback_availability_fails_closed",

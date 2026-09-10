@@ -1,0 +1,702 @@
+{
+  "version": 1,
+  "description": "Planner memory A/B scenarios derived from real archived runs. Each scenario measures one improvement dimension: the memory-on plan must satisfy the assertions; 'strict' scenarios additionally expect the memory-off plan to fail them. Held-out scenarios are never used while tuning prompts or thresholds.",
+  "scenarios": [
+    {
+      "name": "blue-bottle-task-skip",
+      "task": "browser-blue-bottle-challenge-recovery",
+      "dimension": "task_skip_discovery",
+      "goal": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.",
+      "memory_bundle": "1cba6647-b233-42f2-aafe-40fd6729494b",
+      "assertions": {
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "order.online",
+            "bluebottlecoffee.com"
+          ]
+        }
+      },
+      "improvement": "strict",
+      "notes": "Without memory the planner must research the store link first (retrieval-to-execution invariant); with memory it opens the known ordering host directly.",
+      "split": "fit"
+    },
+    {
+      "name": "imax-single-session",
+      "task": "browser-imax-group-tickets",
+      "dimension": "single_stateful_session",
+      "goal": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.",
+      "memory_bundle": "e235cd15-b37a-4814-b877-7d949dfbbe60",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "amc"
+          ]
+        }
+      },
+      "improvement": "strict",
+      "notes": "Failures split the flow across browser sessions and exceeded the exact root call limit; memory shows one session end to end.",
+      "split": "held_out"
+    },
+    {
+      "name": "amazon-cart-not-buy-now",
+      "task": "browser-agent-amazon-cookie-payment",
+      "dimension": "constraint_preservation",
+      "goal": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button.",
+      "memory_bundle": "8e32f706-85a3-46c8-a0d3-9f859df5e3c7",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "cart"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The one-session cart path must survive planning (the goal forbids Buy Now; restating that prohibition is correct).",
+      "split": "fit"
+    },
+    {
+      "name": "sauna-service-selection",
+      "task": "browser-alchemy-springs-sauna",
+      "dimension": "service_selection_precision",
+      "goal": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, checkout as guest, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
+      "memory_bundle": "ffec76ff-a59b-475b-8bf3-b16c5d7aebd9",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "sauna garden"
+          ]
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ]
+      },
+      "improvement": "strict",
+      "notes": "Memory carries the exact service name and booking host so no research step is planned.",
+      "split": "held_out"
+    },
+    {
+      "name": "event-ticket-showtime-skip",
+      "task": "browser-event-ticket",
+      "dimension": "discovery_skip_showtimes",
+      "goal": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for next week's Friday. Choose a movie starting between 7:00 PM and 9:00 PM, select an available seat, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
+      "memory_bundle": "1235778a-62ae-4f8b-891b-52fbe8ba43f8",
+      "assertions": {
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "metreon"
+          ]
+        }
+      },
+      "improvement": "strict",
+      "notes": "Showtimes are discovered inside the booking session, not by a separate research task.",
+      "split": "fit"
+    },
+    {
+      "name": "toast-known-ordering-url",
+      "task": "browser-toast-nopa-write-lock",
+      "dimension": "task_skip_known_ordering_url",
+      "goal": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site",
+      "memory_bundle": "a6a6f65b-255f-42f7-a7ff-128d523c53af",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "toasttab.com"
+          ]
+        }
+      },
+      "improvement": "strict",
+      "notes": "The passing run's memory carries the exact Toast ordering URL; with memory the planner opens it directly in one browser session instead of planning a research step first. (The write-lock boundary is a harness gate, not something the planner is expected to restate.)",
+      "split": "held_out"
+    },
+    {
+      "name": "eventim-payment-boundary",
+      "task": "browser-1015-eventim-request-card",
+      "dimension": "terminal_boundary_payment_card",
+      "goal": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, and proceed through checkout. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets. Do not click Buy Now, Place Order, Pay, or any equivalent purchase-submit control until payment credentials have been obtained and entered into the Payment Details fields (via request_payment_card / the one-time card refs after approval). Empty Stripe / Payment Details shells are not a reason to click Buy Now.",
+      "memory_bundle": "fd07c043-90e3-477d-adbc-7630f3e6a772",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "request_payment_card",
+            "payment card",
+            "payment-card"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The plan names the payment-card request as the terminal step.",
+      "split": "fit"
+    },
+    {
+      "name": "instacart-store-pinning",
+      "task": "browser-instacart-grocery-order",
+      "dimension": "store_selection_from_memory",
+      "goal": "Buy these items from Instacart: blueberries, strawberries, 16 oz Cocojune yogurt (prefer plain), pickles, feta cheese, olives, and 12 1L Essentia waters. Add every item to the cart. Do not sign in or create an account. When all items are in the cart, stop.",
+      "memory_bundle": "f5eaf785-29de-457a-81d9-25f0fe4d051e",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "sprouts"
+          ]
+        }
+      },
+      "improvement": "strict",
+      "notes": "The goal names no store; the memory (a different passing run) shows Sprouts as the known-good storefront with its direct URL, so the memory-on plan should go straight to Sprouts with one browser session and no store research.",
+      "split": "held_out",
+      "goal_source": "real run f00ffef6-ff23-4cba-a515-b1b3bcad6bff (2026-09-03); the current tasks.json prompt was rewritten after the passing runs, so the scenario uses a real archived goal of a different lineage than the memory"
+    },
+    {
+      "name": "doordash-saved-address",
+      "task": "browser-doordash-usb-c-cable",
+      "dimension": "prefilled_data_reuse",
+      "goal": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
+      "memory_bundle": "a85b55c7-1fc6-44b1-b153-134a4fb92579",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "saved"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The browser task must reuse the saved delivery address (any phrasing of 'saved ... address').",
+      "split": "fit"
+    },
+    {
+      "name": "amazon-return-orders-path",
+      "task": "browser-amazon-return",
+      "dimension": "navigation_path_hint",
+      "goal": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
+      "memory_bundle": "f0541c31-de30-47d3-9817-d24eea64f314",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "orders",
+            "your orders",
+            "order history"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The plan routes through the orders page.",
+      "split": "held_out"
+    },
+    {
+      "name": "files-in-sub-agents-fanout",
+      "task": "files-in-sub-agents",
+      "dimension": "decomposition_fanout",
+      "goal": "Create 4 color variants of the attached image: red, blue, green, and yellow tinted versions. Spawn 4 general-purpose agents, one for each color variant. Each general-purpose agent must run a code agent to create its assigned image. Return all 4 images.",
+      "memory_bundle": "d3458538-4789-4195-a38f-23385544b6f1",
+      "assertions": {
+        "min_count": {
+          "spawn_general_purpose_agent": 4
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "One sub-agent per color variant, as the passing run did.",
+      "split": "fit"
+    },
+    {
+      "name": "agent-for-each-tool-choice",
+      "task": "agent-for-each",
+      "dimension": "tool_choice_for_each",
+      "goal": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",
+      "memory_bundle": "ed82a033-24d2-4110-8d26-b485808ad5bc",
+      "assertions": {
+        "require_tools": [
+          "spawn_general_purpose_agent_for_each"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "Row-wise work maps to for_each rather than N hand-written tasks.",
+      "split": "held_out"
+    },
+    {
+      "name": "spawn-sub-agents-exact-two",
+      "task": "spawn-sub-agents",
+      "dimension": "decomposition_count_exact",
+      "goal": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+      "memory_bundle": "5a444bb2-6adb-48b8-9ad8-fd976428980c",
+      "assertions": {
+        "count": {
+          "spawn_general_purpose_agent": 2
+        },
+        "no_tools": [
+          "spawn_browser_agent",
+          "spawn_code_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "Exactly two general-purpose agents, one per city.",
+      "split": "fit"
+    },
+    {
+      "name": "parallel-cities-independent",
+      "task": "parallel-tool-calls",
+      "dimension": "parallelism_no_false_deps",
+      "goal": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
+      "memory_bundle": "87e11759-2fc3-4eb1-8044-b81725116168",
+      "assertions": {
+        "min_count": {
+          "spawn_explore_agent": 3
+        },
+        "independent_tools": "spawn_explore_agent"
+      },
+      "improvement": "soft",
+      "notes": "Three city research tasks run without dependency edges between them.",
+      "split": "held_out"
+    },
+    {
+      "name": "plaid-dead-subs-forbidden-tool",
+      "task": "plaid-transactions-dead-subscriptions",
+      "dimension": "forbidden_tool_avoidance",
+      "goal": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
+      "memory_bundle": "634e6d24-c25a-4f07-aced-9b45d83bc49f",
+      "assertions": {
+        "no_tools": [
+          "send_message_to_user_execute_phase",
+          "spawn_browser_agent"
+        ],
+        "require_tools": [
+          "spawn_explore_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "Half the failures called the forbidden user-message tool; memory shows explore-only. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "fit"
+    },
+    {
+      "name": "plaid-doordash-minimal-plan",
+      "task": "plaid-transactions-doordash-count",
+      "dimension": "minimal_plan",
+      "goal": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
+      "memory_bundle": "0a55da16-f622-46da-bc09-2d974fac7e91",
+      "assertions": {
+        "max_tasks": 2,
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "A single explore task answers the question; extra tasks are waste. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "held_out"
+    },
+    {
+      "name": "whatsapp-recall-local-source",
+      "task": "whatsapp-history-recall",
+      "dimension": "local_data_source_selection",
+      "goal": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+      "memory_bundle": "9dec0144-93ad-4eb6-a589-18f2d5cf541b",
+      "assertions": {
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_explore_agent",
+          "any": [
+            "whatsapp"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "WhatsApp history is answered from local message data.",
+      "split": "fit"
+    },
+    {
+      "name": "user-data-documents-source",
+      "task": "user-data-prod-grep",
+      "dimension": "source_documents_grep",
+      "goal": "Run a real prod-data validation of my synced user documents using only local-data Grep through spawned explore agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents using spawn_agent with type=\"explore\". Do not use type=\"general_purpose\", type=\"for_each\", output_schema, or any structured sub-agent schema.\n- An explore agent must call grep directly four times with source=\"documents\", once for each filters.document_source value: chatgpt, claude, apple_notes, and obsidian.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
+      "memory_bundle": "ee6ee668-b89a-483e-a23d-64695e1b1901",
+      "assertions": {
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_explore_agent",
+          "any": [
+            "document"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The documents source is named in the explore task.",
+      "split": "held_out"
+    },
+    {
+      "name": "grep-explore-only",
+      "task": "grep-explore-stress",
+      "dimension": "explore_only_execution",
+      "goal": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
+      "memory_bundle": "b3cf86f5-ab2b-4bb3-a361-cebcfa530353",
+      "assertions": {
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent",
+          "spawn_general_purpose_agent",
+          "spawn_code_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "Explore agents only.",
+      "split": "fit"
+    },
+    {
+      "name": "people-search-criteria-tool",
+      "task": "people-search-criteria",
+      "dimension": "people_search_tool_usage",
+      "goal": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
+      "memory_bundle": "5d430c24-e8c8-488c-ab1d-8c1f87092b94",
+      "assertions": {
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_explore_agent",
+          "any": [
+            "people"
+          ]
+        },
+        "no_tools": [
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "People search runs through explore.",
+      "split": "held_out"
+    },
+    {
+      "name": "people-search-targeted-minimal",
+      "task": "people-search-targeted",
+      "dimension": "targeted_lookup_minimal",
+      "goal": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
+      "memory_bundle": "d44c8470-e2a0-476e-a801-8f6200c84e79",
+      "assertions": {
+        "max_tasks": 2,
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "One targeted lookup; no browser, no fan-out. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "fit"
+    },
+    {
+      "name": "message-person-direct",
+      "task": "message-person",
+      "dimension": "direct_messaging_no_research",
+      "goal": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email.",
+      "memory_bundle": "763fa2d5-cb07-46cb-826e-50c50a85031e",
+      "assertions": {
+        "require_tools": [
+          "message_person"
+        ],
+        "no_tools": [
+          "spawn_explore_agent",
+          "spawn_browser_agent"
+        ],
+        "max_tasks": 2
+      },
+      "improvement": "soft",
+      "notes": "Send directly; no contact research task. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "held_out"
+    },
+    {
+      "name": "message-person-sms-channel",
+      "task": "message-person-agent-sms",
+      "dimension": "channel_selection",
+      "goal": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+      "memory_bundle": "2d1ef194-4052-44c0-87a6-6fad5ce14fb2",
+      "assertions": {
+        "require_tools": [
+          "message_person"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "message_person",
+          "any": [
+            "sms",
+            "text"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "SMS channel named on the message task.",
+      "split": "fit"
+    },
+    {
+      "name": "phone-payment-exact-call",
+      "task": "phone-call-payment",
+      "dimension": "exact_call_count",
+      "goal": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
+      "memory_bundle": "3ae580e9-b1f5-4520-9b13-404ec1c3aca4",
+      "assertions": {
+        "count": {
+          "call_phone_number": 1
+        },
+        "no_tools": [
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "Exactly one call.",
+      "split": "held_out"
+    },
+    {
+      "name": "phone-intake-single-call",
+      "task": "phone-call-client-intake",
+      "dimension": "intake_single_call",
+      "goal": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
+      "memory_bundle": "9b9b7b01-63ab-49fe-bb97-8b9ab765b610",
+      "assertions": {
+        "count": {
+          "call_phone_number": 1
+        },
+        "no_tools": [
+          "message_person",
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "One call, no follow-up messaging task.",
+      "split": "fit"
+    },
+    {
+      "name": "phone-ivr-dtmf-hint",
+      "task": "phone-call-ivr-dtmf",
+      "dimension": "ivr_navigation_hint",
+      "goal": "Call Rose Test Logistics at {callee_phone_number} exactly once and track package 2451338820. Navigate the automated phone menu using the keypad (not spoken digits) to reach package tracking, enter the full ten-digit tracking number 2451338820 using DTMF followed by the pound key, and obtain the delivery status. Do not call back or place a second phone call; if the single call fails, report that failure. Report the exact delivery status and reference code back to me.",
+      "memory_bundle": "953c5d05-c4d0-41bd-a9ac-76692e115f29",
+      "assertions": {
+        "count": {
+          "call_phone_number": 1
+        },
+        "any_goal_contains": {
+          "tool_name": "call_phone_number",
+          "any": [
+            "dtmf",
+            "press",
+            "keypad",
+            "ivr",
+            "2451338820"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "The call task carries the IVR navigation detail.",
+      "split": "held_out"
+    },
+    {
+      "name": "wait-for-trigger-tool",
+      "task": "wait-for-trigger",
+      "dimension": "trigger_tool_selection",
+      "goal": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediately; once the trigger fires, call me and tell me Bitcoin hit the target.",
+      "memory_bundle": "47a026fd-bc3f-4289-9ea6-ae465a930ef4",
+      "assertions": {
+        "require_tools": [
+          "wait_for"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "wait_for is the tool for a price trigger.",
+      "split": "fit"
+    },
+    {
+      "name": "claude-code-agent-selection",
+      "task": "claude-code-agent",
+      "dimension": "code_agent_selection",
+      "goal": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
+      "memory_bundle": "144f7ea6-0b7e-40dc-87d6-e1279dc33632",
+      "assertions": {
+        "require_tools": [
+          "spawn_code_agent"
+        ],
+        "max_tasks": 2,
+        "no_tools": [
+          "spawn_browser_agent",
+          "spawn_explore_agent"
+        ]
+      },
+      "improvement": "soft",
+      "notes": "One code task; no research or browser. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "held_out"
+    },
+    {
+      "name": "cuda-top100-forbidden-agents",
+      "task": "cuda-kernel-github-top100-code-agent",
+      "dimension": "forbidden_agent_types_avoided",
+      "goal": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel libraries, GPU kernel DSLs, CUDA samples/tooling, and inference/runtime projects with substantial hand-written CUDA/Triton/PTX kernels. Exclude one-off research paper demos that only incidentally use CUDA for an unrelated application.\nUse spawn_agent(type='code') / Claude Code (spawn_claude_code_agent) for GitHub discovery, ranking, and verification. Do NOT use spawn_agent(type='general_purpose'), spawn_general_purpose_agent, for_each, or browser agents — they are forbidden for this task and will fail the run. Prefer explore over browser if you need lightweight read-only research.\nSpawn at most one Claude Code session at a time; wait for each session to finish before spawning another (never fan out parallel claude_code / code_execution sessions).\nDo NOT pass github_repo_url / github_repo_link to spawn_claude_code_agent — sandbox GitHub cloning fails for many public repos (GITHUB_ACCESS_DENIED). Discover and verify via the GitHub REST API with the token below inside a code session that has no repo URL.\nGithub API token: {GITHUB_DISPATCH_TOKEN}",
+      "memory_bundle": "e2681fe6-478d-431d-aa9c-f63d8ab1554b",
+      "assertions": {
+        "require_tools": [
+          "spawn_code_agent"
+        ],
+        "no_tools": [
+          "spawn_general_purpose_agent",
+          "spawn_general_purpose_agent_for_each",
+          "spawn_browser_agent"
+        ],
+        "max_tasks": 8
+      },
+      "improvement": "soft",
+      "notes": "Memory shows explore + Claude Code sessions only; general-purpose, for_each and browser agents are forbidden by the goal and absent from the passing run. Compactness was not a grounded expectation (the passing run itself chained several code sessions).",
+      "split": "fit"
+    },
+    {
+      "name": "gmail-source-selection",
+      "task": "gate-source-connect-gmail",
+      "dimension": "integration_source_selection",
+      "goal": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
+      "memory_bundle": "bbe528aa-6e41-4007-9b3a-0563efab92fb",
+      "assertions": {
+        "require_tools": [
+          "spawn_explore_agent"
+        ],
+        "no_tools": [
+          "spawn_browser_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_explore_agent",
+          "any": [
+            "gmail"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "Gmail source is searched through explore, not a browser.",
+      "split": "held_out"
+    },
+    {
+      "name": "x-post-session-reuse",
+      "task": "minted-agent-accounts-x-post",
+      "dimension": "session_reuse",
+      "goal": "Make a post on X.com that says, Hello World\n\nUse the already signed-in X session in the browser if one is available. Do not create a new X account and do not clear or replace existing X cookies. Post the text exactly: Hello World.",
+      "memory_bundle": "f60e976d-03c8-403a-af16-d13c7e09d71c",
+      "assertions": {
+        "count": {
+          "spawn_browser_agent": 1
+        },
+        "no_tools": [
+          "spawn_explore_agent"
+        ],
+        "any_goal_contains": {
+          "tool_name": "spawn_browser_agent",
+          "any": [
+            "x.com",
+            "signed-in",
+            "signed in",
+            "logged in"
+          ]
+        }
+      },
+      "improvement": "soft",
+      "notes": "Reuse the signed-in session; no discovery task. Baseline (memory off) already satisfies this on the first real run; memory must preserve it (measured as non-regression, not strict improvement).",
+      "split": "fit"
+    },
+    {
+      "name": "negative-novel-goal-no-memory",
+      "task": null,
+      "dimension": "negative_control_no_retrieval",
+      "goal": "Draft a two-paragraph thank-you note to my landlord for fixing the heater and email it to me as plain text.",
+      "memory_bundle": null,
+      "assertions": {
+        "memories_retrieved": 0,
+        "min_tasks": 1
+      },
+      "improvement": "control",
+      "notes": "No similar history exists: retrieval must return zero memories and the plan must still be valid.",
+      "split": "held_out"
+    },
+    {
+      "name": "negative-cross-task-no-bleed",
+      "task": null,
+      "dimension": "negative_control_cutoff",
+      "goal": "Book me a haircut at a barbershop near the Ferry Building in San Francisco for Saturday morning.",
+      "memory_bundle": null,
+      "assertions": {
+        "memories_retrieved": 0,
+        "min_tasks": 1
+      },
+      "improvement": "control",
+      "notes": "Shares location words with the Blue Bottle memory; the cutoff must keep it out.",
+      "split": "fit"
+    }
+  ]
+}

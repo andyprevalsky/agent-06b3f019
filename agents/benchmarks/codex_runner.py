@@ -67,6 +67,7 @@ async def _create_codex_anchor_agent(
         "goal": f"Codex harness anchor for benchmark {task_name}",
         "source": "WEB",
         "price_limit_cents": max(price_limit_cents, 50),
+        "memory_enabled": False,
     }
     resp = await session.post(f"{base_url}/api/agents", headers=headers, json=body)
     if resp.status not in (200, 201):
@@ -87,6 +88,7 @@ async def _create_codex_session(
     goal: str,
     rose_api_url: str,
     fast_mode_cache_enabled: Optional[bool],
+    memory_enabled: bool,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "agent_id": anchor_agent_id,
@@ -94,6 +96,7 @@ async def _create_codex_session(
         "user_id": user_id,
         "harness_mode": "rose",
         "rose_api_base_url": rose_api_url,
+        "memory_enabled": memory_enabled,
     }
     if fast_mode_cache_enabled is not None:
         body["fast_mode_cache_enabled"] = fast_mode_cache_enabled
@@ -200,6 +203,7 @@ async def run_codex_task(
                 codex_goal,
                 rose_api_url,
                 fast_mode_cache_enabled,
+                task.memory == "on",
             )
             codex_task_id = session_data["task_id"]
             ws_url = session_data["ws_url"]
@@ -208,9 +212,7 @@ async def run_codex_task(
             codex_output, exit_code = await _poll_codex_ws_until_exit(ws_url, resolved_timeout)
             work_agent_id = parse_work_agent_id(codex_output)
             if not work_agent_id:
-                failure_reason = (
-                    "Codex harness did not print ROSE_WORK_AGENT_ID=<uuid> in terminal output"
-                )
+                failure_reason = "Codex harness did not print ROSE_WORK_AGENT_ID=<uuid> in terminal output"
             elif exit_code not in (0, None):
                 failure_reason = f"Codex process exited with code {exit_code}"
 

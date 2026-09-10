@@ -4365,13 +4365,16 @@ function encryptClaudeEnvelope(plaintext: string): string {
   return Buffer.from(JSON.stringify(envelope), 'utf8').toString('base64');
 }
 
-function buildCredentialPayload(accessToken: string): string {
+function buildCredentialPayload(
+  accessToken: string,
+  expiresAt: number = Date.now() + 60 * 60 * 1000
+): string {
   return encryptClaudeEnvelope(
     JSON.stringify({
       claudeAiOauth: {
         accessToken,
         refreshToken: 'test-refresh',
-        expiresAt: Date.now() + 60 * 60 * 1000,
+        expiresAt,
       },
     })
   );
@@ -4385,14 +4388,19 @@ interface SeededIntegration {
 
 async function seedClaudeIntegration(
   userId: string,
-  opts: { poolingEnabled?: boolean; accessToken?: string; lastUsedAt?: Date | null } = {}
+  opts: {
+    poolingEnabled?: boolean;
+    accessToken?: string;
+    lastUsedAt?: Date | null;
+    expiresAt?: number;
+  } = {}
 ): Promise<SeededIntegration> {
   // The "sk-ant-oat" prefix mirrors real Anthropic OAuth tokens — required so
   // these seeded envelopes pass `hasUsableClaudeCodeEnvelope` and exercise the
   // rotation path under test (placeholder prefixes are now rejected upstream).
   const accessToken =
     opts.accessToken ?? `sk-ant-oat-seed-${crypto.randomBytes(8).toString('hex')}`;
-  const encryptedCredentials = buildCredentialPayload(accessToken);
+  const encryptedCredentials = buildCredentialPayload(accessToken, opts.expiresAt);
 
   const integration = await prisma.integration.upsert({
     where: { userId_name_accountId: { userId, name: 'claude_code', accountId: '' } },
@@ -5178,6 +5186,41 @@ async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() 
     );
   } finally {
     await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
+async function testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh() {
+  const caller = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, {
+    poolingEnabled: false,
+    expiresAt: Date.now() + 30_000,
+  });
+
+  try {
+    const codeCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
+    assert(codeCredential?.source === 'user', "Expected the caller's Claude credential");
+    assert(
+      codeCredential.credentialMode === 'oauth_envelope',
+      'Near-expiry recovery requires the refreshable OAuth envelope'
+    );
+    assert(codeCredential.credentials !== undefined, 'Expected the complete OAuth envelope');
+    const recoveredEnvelope = JSON.parse(codeCredential.credentials) as {
+      claudeAiOauth?: { expiresAt?: number; refreshToken?: string };
+    };
+    assert(
+      recoveredEnvelope.claudeAiOauth?.expiresAt === 0,
+      'A near-expiry sandbox credential must force refresh before its first model request'
+    );
+    assert(
+      recoveredEnvelope.claudeAiOauth?.refreshToken === 'test-refresh',
+      'Forced refresh must preserve the OAuth refresh token'
+    );
+    assert(
+      codeCredential.accessToken === undefined,
+      'A near-expiry access token must not also be injected directly'
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id]);
   }
 }
 
@@ -7078,6 +7121,10 @@ async function runAll() {
     {
       name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
       fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
+    },
+    {
+      name: 'rotation -- near-expiry Claude Code envelope forces refresh',
+      fn: testRotation_nearExpiryClaudeCodeEnvelopeForcesRefresh,
     },
     {
       name: 'rotation -- rate-limit window never shortens',

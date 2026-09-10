@@ -1,5 +1,6 @@
 import {
   applyFastModeInheritance,
+  applyMemoryInheritance,
   applyWorldModelModeInheritance,
   disableFastModeForWorldModel,
 } from './agentExecutionMode';
@@ -36,6 +37,7 @@ export function applyExecutionModeInheritanceForBatch(
     const parent = parentById.get(body.parent_agent_id);
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
+    applyMemoryInheritance(body, parent?.memoryEnabled);
     disableFastModeForWorldModel(body);
   }
 }

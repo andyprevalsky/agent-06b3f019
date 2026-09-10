@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import random
 import re
@@ -54,7 +55,13 @@ from providers.fast_cache.context import (
 from providers.fast_cache.context import (
     set_context as set_fast_cache_context,
 )
-from providers.planner_rag.retrieval import RetrievalResult, insert_reference_plans
+from providers.planner_memory.inject import (
+    build_memory_fork,
+    insert_memory_fork,
+    planner_context_tools,
+)
+from providers.planner_memory.retrieval import DEFAULT_CONFIG as PLANNER_MEMORY_CONFIG
+from providers.planner_memory.retrieval import MemoryRetrieval
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -2647,6 +2654,7 @@ async def call_llm_structured_streaming(
     thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
     effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
     tool_choice: Any = None,  # Optional native-tool choice, including a forced {"name": ...} selection
+    context_tools: Optional[List[Dict[str, Any]]] = None,  # Declared-only tools that legalize forked tool history
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
@@ -2815,6 +2823,7 @@ async def call_llm_structured_streaming(
                     "messages": messages,
                     "response_model": response_model,
                     "tool_choice": tool_choice,
+                    "context_tools": context_tools,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "seed": model_seed,
@@ -2860,6 +2869,7 @@ async def call_llm_structured_streaming(
             messages=messages,
             response_model=response_model,
             tool_choice=tool_choice,
+            context_tools=context_tools,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=model_seed,
@@ -3251,6 +3261,7 @@ async def call_llm_structured_streaming(
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
                 tool_choice=tool_choice,
+                context_tools=context_tools,
                 _is_escalation=True,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
@@ -3504,6 +3515,7 @@ async def call_llm_structured_streaming(
                     thinking=thinking,
                     effort=effort,
                     tool_choice=tool_choice,
+                context_tools=context_tools,
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
@@ -5063,11 +5075,42 @@ def _structured_response_satisfies_schema(
     return True
 
 
-def _completed_child_task_structured_response(
+_COMPLETED_CHILD_SYNTHETIC_PREFIX = "completed-child-attempt-completion-"
+
+
+def _completed_child_handoff_identity(tool_call_id: Any) -> str:
+    """Return a stable, non-reversible identity for a completed child call."""
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return ""
+    return hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _synthetic_completion_handoff_identity(tool_call_id: Any) -> Optional[str]:
+    if not isinstance(tool_call_id, str) or not tool_call_id.startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX):
+        return None
+    suffix = tool_call_id[len(_COMPLETED_CHILD_SYNTHETIC_PREFIX) :]
+    match = re.match(r"^([0-9a-f]{16})-", suffix)
+    return match.group(1) if match else None
+
+
+def _is_rejected_completion_feedback(metadata: Dict[str, Any]) -> bool:
+    if (
+        metadata.get("toolName") != "attempt_completion"
+        or metadata.get("toolStatus") != "FINISHED"
+    ):
+        return False
+    title = str(metadata.get("title") or "")
+    if "Verifier rejected" in title:
+        return True
+    progress_match = re.search(r"Progress:\s*(\d+(?:\.\d+)?)%", title)
+    return bool(progress_match and float(progress_match.group(1)) < 100.0)
+
+
+def _completed_child_task_structured_handoff(
     context: List[Dict[str, Any]],
     response_schema: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Return a completed child task's structured output when it covers the schema.
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    """Return a completed child's structured output and source tool-call id.
 
     This is deliberately narrow: only finished child task completion messages
     from tools that already ran their own verifier qualify. The parent verifier
@@ -5077,12 +5120,40 @@ def _completed_child_task_structured_response(
     if not context or not response_schema:
         return None
 
+    rejected_synthetic_call_ids = {
+        str(metadata.get("toolCallId"))
+        for message in context
+        if isinstance(message, dict)
+        and isinstance((metadata := message.get("metadata")), dict)
+        and _is_rejected_completion_feedback(metadata)
+        and str(metadata.get("toolCallId") or "").startswith(_COMPLETED_CHILD_SYNTHETIC_PREFIX)
+    }
+    rejected_child_identities: set[str] = set()
+    rejected_legacy_handoffs = 0
+    activated_rejections: set[str] = set()
     for message in reversed(context):
         if not isinstance(message, dict):
             continue
         metadata = message.get("metadata")
         if not isinstance(metadata, dict):
             continue
+        tool_calls = metadata.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict) or tool_call.get("tool") != "attempt_completion":
+                    continue
+                synthetic_call_id = str(tool_call.get("tool_call_id") or "")
+                if synthetic_call_id not in rejected_synthetic_call_ids or synthetic_call_id in activated_rejections:
+                    continue
+                activated_rejections.add(synthetic_call_id)
+                rejected_identity = _synthetic_completion_handoff_identity(synthetic_call_id)
+                if rejected_identity:
+                    rejected_child_identities.add(rejected_identity)
+                else:
+                    # Older persisted handoffs did not encode their child id.
+                    # In reverse order each such marker belongs to the first
+                    # qualifying child before it, so skip exactly that child.
+                    rejected_legacy_handoffs += 1
         tool_name = metadata.get("toolName")
         if tool_name not in {"spawn_claude_code_agent", "spawn_browser_agent"}:
             continue
@@ -5096,9 +5167,25 @@ def _completed_child_task_structured_response(
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
             structured_response = structured_response["output"]
         if _structured_response_satisfies_schema(structured_response, response_schema):
-            return structured_response
+            child_tool_call_id = str(metadata.get("toolCallId") or "")
+            child_identity = _completed_child_handoff_identity(child_tool_call_id)
+            if child_identity and child_identity in rejected_child_identities:
+                continue
+            if rejected_legacy_handoffs:
+                rejected_legacy_handoffs -= 1
+                continue
+            return structured_response, child_tool_call_id
 
     return None
+
+
+def _completed_child_task_structured_response(
+    context: List[Dict[str, Any]],
+    response_schema: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return a completed child task's schema-covering structured output."""
+    handoff = _completed_child_task_structured_handoff(context, response_schema)
+    return handoff[0] if handoff else None
 
 
 def _build_verifier_response_model(
@@ -5532,11 +5619,13 @@ async def check_progress(
             try:
                 from providers.fast_cache.client import resolve_agent_fast_mode as _resolve_fm
 
-                _e, _g, _w, _r, resolved_root_goal = await _resolve_fm(agent_id)
+                _e, _g, _w, _r, resolved_root_goal, provider_fast_mode = await _resolve_fm(agent_id)
                 if resolved_root_goal:
                     root_goal = resolved_root_goal
             except Exception:
-                pass
+                provider_fast_mode = True
+        else:
+            provider_fast_mode = True
         set_fast_cache_context(
             FastCacheContext(
                 enabled=fast_mode_cache_enabled,
@@ -5544,6 +5633,7 @@ async def check_progress(
                 base_step=fast_mode_step,
                 write_enabled=fast_cache_should_write,
                 root_goal=root_goal,
+                provider_fast_mode=provider_fast_mode,
             )
         )
 
@@ -5976,8 +6066,8 @@ async def call_llm_activity(
         extra_user_message: Optional user message appended after building messages.
             Used for param population — prompts the LLM to call a specific tool
             without changing system prompt/tools (preserves cache prefix).
-        required_tool: If set, validates the LLM called this tool. Raises ValueError
-            if the tool is not in the response.
+        required_tool: If set, validates the LLM called this tool exactly once.
+            Raises if the tool is missing, mixed, or returned more than once.
         skip_cache_write: If True, skips the automatic trailing message cache
             breakpoint. Explicit prefix markers are preserved.
         force_backend_context: If True, bypasses process-global pending context
@@ -6898,16 +6988,16 @@ def _planner_goal_from_messages(messages: List[Dict[str, Any]], *, fallback: Opt
     return (fallback or "").strip()
 
 
-async def _retrieve_planner_reference_plans(
-    *, goal: str, user_id: Optional[str], agent_id: Optional[str]
-) -> Optional["RetrievalResult"]:
-    """Retrieve reference plans for the planner (traced, best-effort). None when disabled."""
-    from providers.planner_rag import planner_rag_enabled, retrieve_reference_plans
+async def _retrieve_planner_memories(
+    *, goal: str, user_id: Optional[str], agent_id: Optional[str], memory_enabled: bool
+) -> Optional["MemoryRetrieval"]:
+    """Retrieve planner memories (traced, best-effort). None when the agent has memory off."""
+    from providers.planner_memory import planner_memory_available, retrieve_memories
 
-    if not goal or not planner_rag_enabled():
+    if not memory_enabled or not goal or not planner_memory_available():
         return None
-    async with span("planner_rag_retrieve", call_site="planner", agent_id=agent_id, goal_chars=len(goal)):
-        return await retrieve_reference_plans(goal, user_id=user_id, exclude_root_agent_id=agent_id)
+    async with span("planner_memory_retrieve", call_site="planner", agent_id=agent_id, goal_chars=len(goal)):
+        return await retrieve_memories(goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id)
 
 
 @activity.defn
@@ -6934,6 +7024,7 @@ async def call_planner_llm_activity(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_step: int = 0,
+    memory_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Temporal activity for calling the dedicated planner LLM.
@@ -6995,27 +7086,31 @@ async def call_planner_llm_activity(
     # Prepend system message
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     planner_user_id = claude_token_user_id or gpt_token_user_id
-    # Resolve context pointers and retrieve reference plans (RAG over the trace
-    # archive, keyed by the user goal) concurrently. The reference block is
-    # injected as a *user* message after the GOAL message — never into the
-    # system prompt — so the static system prefix / tools cache keys are
-    # byte-identical with or without retrieval (see insert_reference_plans).
-    full_messages, planner_rag = await asyncio.gather(
+    # Resolve context pointers and retrieve planner memories concurrently. The
+    # memories arrive as a forked get_memories tool call + tool result appended
+    # at the END of the context (before any validation-retry tail), so the
+    # cached prefix (tools + static system prompt + conversation) is untouched.
+    planner_goal = _planner_goal_from_messages(messages, fallback=fast_mode_goal)
+    full_messages, planner_memory = await asyncio.gather(
         resolve_pointers_in_messages(full_messages, user_id=planner_user_id),
-        _retrieve_planner_reference_plans(
-            goal=_planner_goal_from_messages(messages, fallback=fast_mode_goal),
+        _retrieve_planner_memories(
+            goal=planner_goal,
             user_id=planner_user_id,
             agent_id=agent_id,
+            memory_enabled=memory_enabled,
         ),
     )
-    if planner_rag is not None:
-        full_messages = insert_reference_plans(full_messages, planner_rag.message)
+    memory_fork = None
+    if planner_memory is not None and planner_memory.hits:
+        memory_fork = build_memory_fork(planner_goal, planner_memory.hits, k=PLANNER_MEMORY_CONFIG.k)
+        full_messages = insert_memory_fork(full_messages, memory_fork)
+    if planner_memory is not None:
         logger.info(
-            f"[TIMING] Planner RAG retrieval: {planner_rag.timing_ms.get('total', 0.0):.1f}ms "
-            f"(index_load={planner_rag.timing_ms.get('index_load', 0.0):.1f}ms, "
-            f"query={planner_rag.timing_ms.get('query', 0.0):.1f}ms, hits={len(planner_rag.hits)}, "
-            f"corpus={planner_rag.corpus_size}, source={planner_rag.source}, "
-            f"injected_chars={len(planner_rag.message or '')})"
+            f"[TIMING] Planner memory retrieval: {planner_memory.timing_ms.get('total', 0.0):.1f}ms "
+            f"(search={planner_memory.timing_ms.get('search', 0.0):.1f}ms, "
+            f"compress={planner_memory.timing_ms.get('compress', 0.0):.1f}ms, hits={len(planner_memory.hits)}, "
+            f"candidates={planner_memory.candidates}, compressed_now={planner_memory.compressed}, "
+            f"injected_chars={len(memory_fork.tool_message['content']) if memory_fork else 0})"
         )
 
     total_chars = sum(len(m.get("content", "")) for m in full_messages)
@@ -7080,6 +7175,9 @@ async def call_planner_llm_activity(
             skip_cache_write=False,
             call_site="planner",
             effort="max",
+            # Constant declared-only toolset: the phase tools (so real tool history in
+            # the pre-plan context stays native) + get_memories. Never callable here.
+            context_tools=planner_context_tools(),
             deadline_s=220.0,
             ttft_timeout_s=120.0,
         )
@@ -7105,7 +7203,17 @@ async def call_planner_llm_activity(
         actual_model = usage.get("actual_model", model)
         return {
             "result": result.model_dump(),
-            "planner_rag": planner_rag.summary() if planner_rag is not None else None,
+            "planner_memory": planner_memory.summary() if planner_memory is not None else None,
+            "planner_memory_enabled": bool(memory_enabled),
+            "planner_memory_injected": (
+                {
+                    "tool_call_id": memory_fork.tool_call_id,
+                    "assistant": memory_fork.assistant_message["content"],
+                    "tool_result": memory_fork.tool_message["content"],
+                }
+                if memory_fork is not None
+                else None
+            ),
             "usage": {
                 "llm": [
                     {

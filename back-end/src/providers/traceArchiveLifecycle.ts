@@ -1,4 +1,5 @@
 import { createLogger } from './logger';
+import { type PlannerMemoryRunInput, upsertPlannerMemoryFromRun } from './plannerMemoryStore';
 import { collectFixture, collectFixtureSnapshot } from './traceArchiveFixture';
 import {
   type EncryptedArtifactMetadata,
@@ -71,6 +72,23 @@ type FinalizeAgentResult = {
 };
 
 const finalizeInFlight = new Map<string, Promise<FinalizeAgentResult>>();
+
+/** Keep the finalized archive authoritative when its derived search index is unavailable. */
+export async function bestEffortIndexPlannerMemory(
+  input: PlannerMemoryRunInput,
+  write: (value: PlannerMemoryRunInput) => Promise<void> = upsertPlannerMemoryFromRun
+): Promise<boolean> {
+  try {
+    await write(input);
+    return true;
+  } catch (error) {
+    log.warn('Planner memory index update failed after trace archive finalization', {
+      root_agent_id: input.rootAgentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
 
 function normalizedWorldModelMode(mode: string | undefined): string {
   const value = (mode ?? 'real').trim().toLowerCase();
@@ -468,6 +486,26 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
       refs,
       input.benchmarkTaskName
     );
+    // Publish the archive independently of this derived retrieval index. A
+    // transient planner-memory write failure must not reject an otherwise
+    // complete archive; later finalization/backfill can repair the row.
+    if (manifest !== null) {
+      const run = encryptedRunMetadata(endFixture);
+      const benchmarkResult = benchmarkResultFromInput(input);
+      await bestEffortIndexPlannerMemory({
+        rootAgentId: input.rootAgentId,
+        userId: endFixture.user_id,
+        goal: typeof run.root_goal === 'string' ? run.root_goal : '',
+        benchmarkTaskName: input.benchmarkTaskName ?? null,
+        rootStatus: typeof run.root_status === 'string' ? run.root_status : null,
+        passed: typeof benchmarkResult?.passed === 'boolean' ? benchmarkResult.passed : null,
+        worldModelMode: normalizedWorldModelMode(input.worldModelMode),
+        agentCreatedAt:
+          typeof run.root_created_at === 'string' || run.root_created_at instanceof Date
+            ? run.root_created_at
+            : null,
+      });
+    }
     log.info('Trace archive finalized', {
       root_agent_id: input.rootAgentId,
       manifest_ref: manifest?.ref ?? null,

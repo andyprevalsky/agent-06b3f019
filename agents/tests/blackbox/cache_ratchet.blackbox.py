@@ -44,6 +44,15 @@ FAILING_CLAUDE_CODE_AGENT_USAGE = [
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 2681,
     },
+    {
+        "type": "llm",
+        "_benchmark_agent_id": "root",
+        "call_site": "verifier_execute",
+        "cache_sequence_id": None,
+        "model": "gpt-5.6-sol-gpt",
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 10089,
+    },
 ]
 
 

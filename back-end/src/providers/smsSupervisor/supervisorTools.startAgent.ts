@@ -10,6 +10,7 @@ import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 import type { FilePointer } from '../storage';
 import type { SupervisorChannel } from './channelDelivery';
+import { plannerMemoryEnabledByDefault } from '../plannerMemoryDefaults';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -48,7 +49,7 @@ export async function commitStartNewAgent(
     attachmentCount: attachments.length,
   });
 
-  let agent: { id: string; fastModeCacheEnabled?: boolean } | undefined;
+  let agent: { id: string; fastModeCacheEnabled?: boolean; memoryEnabled?: boolean } | undefined;
   try {
     agent = await runTransactionWithRetry(async (tx) => {
       const newAgent = await tx.agent.create({
@@ -66,6 +67,9 @@ export async function commitStartNewAgent(
           // Match POST /api/agents default: Fast Mode on so Rose complete
           // calls get provider_fast_mode via the agent flag trickle-down.
           fastModeCacheEnabled: true,
+          // Production SMS-created agents follow the product default. Dedicated
+          // benchmark stacks stay memory-off to keep evals history-independent.
+          memoryEnabled: plannerMemoryEnabledByDefault(),
         },
       });
 
@@ -122,6 +126,7 @@ export async function commitStartNewAgent(
           temporalWorkflowId: true,
           status: true,
           fastModeCacheEnabled: true,
+          memoryEnabled: true,
         },
       });
       if (!existing) {
@@ -149,6 +154,7 @@ export async function commitStartNewAgent(
         agent = {
           id: existing.id,
           fastModeCacheEnabled: existing.fastModeCacheEnabled,
+          memoryEnabled: existing.memoryEnabled,
         };
       } else {
         log.info('start_new_agent commit already done (PK collision)', { provisionalId });
@@ -172,6 +178,10 @@ export async function commitStartNewAgent(
     'fastModeCacheEnabled' in startedAgent && typeof startedAgent.fastModeCacheEnabled === 'boolean'
       ? startedAgent.fastModeCacheEnabled
       : true;
+  const resolvedMemory =
+    'memoryEnabled' in startedAgent && typeof startedAgent.memoryEnabled === 'boolean'
+      ? startedAgent.memoryEnabled
+      : plannerMemoryEnabledByDefault();
 
   // Start Temporal workflow
   try {
@@ -186,6 +196,7 @@ export async function commitStartNewAgent(
       },
       priceLimitCents,
       fastModeCacheEnabled: resolvedFastMode,
+      memoryEnabled: resolvedMemory,
     });
 
     await prisma.agent.update({

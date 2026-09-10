@@ -164,6 +164,36 @@ async def test_populate_raises_on_unknown_tool():
         raise AssertionError("Expected ValueError for unknown tool")
 
 
+async def test_populate_forces_ultra_model():
+    """Param populator always calls rose-1-ultra, ignoring the unused activity model arg."""
+    from domains.param_populator.config import PARAM_POPULATOR_MODEL
+    from domains.param_populator.service import populate_tool_params
+    import domains.param_populator.service as svc
+
+    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
+    seen: dict = {}
+
+    async def fake_fetch_agent_context(agent_id: str):
+        return []
+
+    async def fake_call_llm_structured_streaming(**kwargs):
+        seen.update(kwargs)
+        return _FakePydanticResult([_FakeToolCall({"tool": "web_search", "query": "q"})]), {"total_tokens": 1}, []
+
+    original_fetch = svc.fetch_agent_context
+    original_call = svc.call_llm_structured_streaming
+    svc.fetch_agent_context = fake_fetch_agent_context
+    svc.call_llm_structured_streaming = fake_call_llm_structured_streaming
+    try:
+        await populate_tool_params(tool_name="web_search", goal="Find AI news", agent_id="agent-1")
+    finally:
+        svc.fetch_agent_context = original_fetch
+        svc.call_llm_structured_streaming = original_call
+
+    assert seen["model"] == "rose-labs/rose-1-ultra"
+    assert seen["call_site"] == "dag_param_populator"
+
+
 async def test_populate_happy_path_returns_params_and_usage():
     """populate_tool_params returns {params, usage} on a valid LLM tool call."""
     from domains.param_populator.service import populate_tool_params
@@ -400,6 +430,7 @@ async def run_all_tests():
     r.record("build_prompt_non_spawn_tool_no_ephemeral_warning", test_build_prompt_non_spawn_tool_no_ephemeral_warning)
     r.record("build_prompt_file_attachment_rules_included", test_build_prompt_file_attachment_rules_included)
     await r.record_async("populate_raises_on_unknown_tool", test_populate_raises_on_unknown_tool)
+    await r.record_async("populate_forces_ultra_model", test_populate_forces_ultra_model)
     await r.record_async("populate_happy_path", test_populate_happy_path_returns_params_and_usage)
     await r.record_async("populate_fallback_first_tool_call", test_populate_fallback_to_first_tool_call_on_mismatch)
     await r.record_async("populate_raises_no_tool_calls", test_populate_raises_when_no_tool_calls)

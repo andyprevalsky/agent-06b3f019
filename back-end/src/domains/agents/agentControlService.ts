@@ -131,6 +131,7 @@ export async function startAgentMode(agentId: string, userId: string) {
     },
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    memoryEnabled: agent.memoryEnabled,
     worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
     ...(agent.workflowMaxIterations !== null ? { maxIterations: agent.workflowMaxIterations } : {}),
     ...(agent.workflowContextGates !== null

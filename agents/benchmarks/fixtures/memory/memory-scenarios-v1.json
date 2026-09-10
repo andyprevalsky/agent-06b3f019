@@ -1,0 +1,2358 @@
+{
+  "name": "memory-scenarios-v1",
+  "description": "One compressed passing run per scenario task (agents/benchmarks/memory_scenarios.json); the memory fed to the memory-on arm.",
+  "built_at": "2026-09-09T21:17:44.815045+00:00",
+  "rows": [
+    {
+      "id": "1cba6647-b233-42f2-aafe-40fd6729494b",
+      "goal": "Order a 16oz iced vanilla bean shakerato with almond or oat milk for pickup from Blue Bottle Coffee at the Ferry Building in San Francisco. Use guest checkout and place the order immediately. Confirm order total and pickup time.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-blue-bottle-challenge-recovery",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-29T21:27:11.895Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://bluebottlecoffee.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://bluebottlecoffee.com/ with instructions to use one browser, guest checkout, earliest pickup, and stop after requesting a payment card.",
+            "result": "Blue Bottle site opened in the single permitted browser agent."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Navigated to https://bluebottlecoffee.com/us/eng/cafes/ferry-bu and dismissed the cookie notice.",
+            "result": "Ferry Building cafe page became usable."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Opened local pickup, searched “Ferry Building San Franci,” and selected “1 Ferry Building San Francisco.”",
+            "result": "Ferry Building was selected for ASAP/earliest available pickup."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Followed the Blue Bottle pickup-ordering link and recovered the browser challenge.",
+            "result": "The merchant ordering menu loaded."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Opened Iced Beverages and Specialty Beverages, selected one vanilla bean shakerato, chose 16 oz and oat milk, and added it to the cart.",
+            "result": "The configured drink was added at $12.00."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked “Checkout $12.00.”",
+            "result": "Merchant checkout opened."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Closed optional login and completed the required guest contact fields without signing in.",
+            "result": "Guest checkout advanced to payment."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_browser_agent",
+            "action": "Selected Credit/Debit Card and requested the one-time payment card.",
+            "result": "Payment card was requested for the confirmed $12.25 total."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Inspected network requests for “order.online” and attempted completion at 50% progress.",
+            "why_it_failed": "The verifier rejected completion because checkout and the payment-card request had not been reached.",
+            "steps_wasted": 3
+          },
+          {
+            "tried": "Opened a new tab while handling the ordering-site browser challenge; the first recovery failed.",
+            "why_it_failed": "The challenge initially blocked the menu, requiring the ordering link to be followed again and recovery to succeed.",
+            "steps_wasted": 2
+          }
+        ],
+        "pitfalls": [
+          "Do not call attempt_completion before reaching payment and requesting the one-time card.",
+          "The ordering site may trigger a browser challenge; recover within the same browser agent rather than spawning another.",
+          "Dismiss the cookie notice before interacting with the cafe page.",
+          "Close the optional login prompt to continue as a guest.",
+          "Stop after requesting the card; do not submit payment or place the order."
+        ],
+        "terminal_condition": "Stopped at the payment boundary after requesting a one-time card for $12.25, with ASAP pickup selected; payment was not submitted and the order was not placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "1cba6647-b233-42f2-aafe-40fd6729494b",
+        "rows_in": 31,
+        "rows_total": 102
+      }
+    },
+    {
+      "id": "e235cd15-b37a-4814-b877-7d949dfbbe60",
+      "goal": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-imax-group-tickets",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T08:32:23.370Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.amctheatres.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened the AMC homepage.",
+            "result": "AMC ticketing site loaded in the single browser session."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Searched for AMC Metreon 16, selected the theater, continued, and clicked Get Tickets.",
+            "result": "Showtimes for AMC Metreon 16 were displayed."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Selected Tue, Sep 1 and filtered Premium Offerings to IMAX at AMC.",
+            "result": "Remaining IMAX showtimes for that night were shown."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked the earliest remaining IMAX listing, 6:00 pm Almost Full.",
+            "result": "The seat-selection page opened."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Selected AMC Club Rocker seats A24, A23, and A22, closed the consent banner, and continued.",
+            "result": "Three directly adjacent seats in row A were reserved."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked Add Adult Ticket three times and continued.",
+            "result": "The order contained three adult tickets."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Continued without adding optional extras and entered the account-holder contact email at checkout.",
+            "result": "Checkout reached the payment stage with only the ticket order."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_browser_agent",
+            "action": "Requested a one-time payment card for the displayed total of $95.94.",
+            "result": "The payment card request succeeded; no payment was submitted."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Selected IMAX at AMC directly before using the Premium Offerings dropdown.",
+            "why_it_failed": "The first format-selection action returned an error; selecting it from the dropdown succeeded.",
+            "steps_wasted": 2
+          },
+          {
+            "tried": "Clicked the 6:00 pm showtime once and inspected the page.",
+            "why_it_failed": "The first click did not advance, so the same showtime had to be clicked again.",
+            "steps_wasted": 2
+          },
+          {
+            "tried": "Captured a screenshot before closing the consent banner.",
+            "why_it_failed": "The screenshot was unnecessary; closing the banner was the action needed to continue.",
+            "steps_wasted": 1
+          },
+          {
+            "tried": "Opened and inspected a new tab, then switched back to AMC.",
+            "why_it_failed": "The extra tab did not contribute to reaching the payment-card request.",
+            "steps_wasted": 3
+          }
+        ],
+        "pitfalls": [
+          "Use only one browser agent; do not restart with a second agent.",
+          "Select IMAX at AMC through the Premium Offerings dropdown if direct selection errors.",
+          "The earliest IMAX show was almost full, so verify three adjacent seats before proceeding.",
+          "Close the consent banner if it obstructs Continue.",
+          "Stop after requesting the payment card; do not submit payment or create an order confirmation."
+        ],
+        "terminal_condition": "Stopped after a one-time payment card was requested for $95.94; payment was not submitted and no order confirmation was created.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "e235cd15-b37a-4814-b877-7d949dfbbe60",
+        "rows_in": 48,
+        "rows_total": 139
+      }
+    },
+    {
+      "id": "8e32f706-85a3-46c8-a0d3-9f859df5e3c7",
+      "goal": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button.",
+      "benchmark_task_name": "browser-agent-amazon-cookie-payment",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-20T21:38:11.701Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.amazon.com"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://www.amazon.com.",
+            "result": "Amazon loaded."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Typed \"black beanie\" into the Amazon search field and submitted the search.",
+            "result": "Search results were displayed."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Scrolled 800px and clicked the \"Men's Iconic A18 Watch Cap Bea…\" result.",
+            "result": "The selected beanie's product request was initiated."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Read requests matching '/dp/B002G9UDYG' and opened https://www.amazon.com/dp/B002G9UDYG.",
+            "result": "The beanie product page loaded."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked the Add to Cart control, not Buy Now.",
+            "result": "The beanie was added to the cart."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked \"Go to Cart\" and proceeded using the cart flow.",
+            "result": "The Amazon cart opened."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked the proceed-to-checkout control and then \"Continue to checkout\".",
+            "result": "Checkout advanced to an Amazon password prompt."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked the password field.",
+            "result": "The action returned an error and checkout did not advance."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Captured a screenshot after clicking the product result.",
+            "why_it_failed": "It did not advance navigation; the product URL was recovered from network requests instead.",
+            "steps_wasted": 1
+          },
+          {
+            "tried": "Inspected cart requests, clicked Add to Cart again, inspected requests again, then decreased the cart quantity.",
+            "why_it_failed": "The retry created an extra unit, and decreasing quantity only undid that duplicate.",
+            "steps_wasted": 4
+          }
+        ],
+        "pitfalls": [
+          "Do not retry Add to Cart without checking the cart; this run had to remove an extra unit.",
+          "Confirm the selected color is black and the price is under $35 before adding it.",
+          "Use Add to Cart rather than Buy Now.",
+          "Verify the Amazon session is still authenticated before checkout; this run encountered a password prompt."
+        ],
+        "terminal_condition": "Stopped at an Amazon checkout password prompt after the password-field click errored; no Place Order action appears in the transcript.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "8e32f706-85a3-46c8-a0d3-9f859df5e3c7",
+        "rows_in": 19,
+        "rows_total": 90
+      }
+    },
+    {
+      "id": "ffec76ff-a59b-475b-8bf3-b16c5d7aebd9",
+      "goal": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, checkout as guest, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-alchemy-springs-sauna",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-26T20:40:42.884Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.alchemysprings.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://www.alchemysprings.com/ in the single permitted browser session.",
+            "result": "The official Alchemy Springs site loaded."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked \"VISIT HERE\", opened the booking view, and selected \"Sun 30\" for Sunday, August 30, 2026.",
+            "result": "Sunday's available session listings appeared."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Scrolled to the standard Sauna Garden listing and clicked \"Book now\" for the earliest eligible start from 10:00 AM through 2:00 PM.",
+            "result": "The merchant booking flow opened in a new tab without selecting extras."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Switched to the newly opened booking tab.",
+            "result": "The guest checkout form became available."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Selected \"Alchemy Springs\" as the home location.",
+            "result": "The required guest contact fields were enabled."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Entered the required guest name, email, email confirmation, and phone details.",
+            "result": "Guest checkout was ready for payment."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Requested a one-time payment card for the displayed $50.65 total.",
+            "result": "The run reached the payment boundary without submitting payment."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "The first attempt to type into the first-name field failed, followed by a browser-state refresh and successful retry.",
+            "why_it_failed": "The initial typing action returned an error.",
+            "steps_wasted": 2
+          }
+        ],
+        "pitfalls": [
+          "Use only one browser agent for the entire run.",
+          "The \"Book now\" action opens a new tab; switch to it before continuing.",
+          "Select \"Alchemy Springs\" as the home location before filling the guest form.",
+          "If a guest field rejects typing, reread browser state before retrying.",
+          "Stop after requesting the one-time payment card; do not submit payment or place the booking."
+        ],
+        "terminal_condition": "Stopped after requesting a one-time payment card for $50.65; payment was not submitted and no booking confirmation was produced.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "ffec76ff-a59b-475b-8bf3-b16c5d7aebd9",
+        "rows_in": 37,
+        "rows_total": 87
+      }
+    },
+    {
+      "id": "1235778a-62ae-4f8b-891b-52fbe8ba43f8",
+      "goal": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for next week's Friday. Choose a movie starting between 7:00 PM and 9:00 PM, select an available seat, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-event-ticket",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-03T10:32:08.089Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.amctheatres.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened AMC's website with one browser agent.",
+            "result": "AMC website loaded."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Navigated to the San Francisco theater listing and selected 2026-09-11.",
+            "result": "Showtimes for the required Friday were displayed."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Selected the 7:15 PM showtime at AMC Metreon 16.",
+            "result": "Opened seat selection for a show within the 7:00–9:00 PM window."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Selected an available AMC Signature Recliner seat and clicked Continue.",
+            "result": "The selected seat was reserved for ticket selection."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked Add Adult Ticket, then Continue.",
+            "result": "One adult ticket was added."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked the remaining Continue controls without selecting concessions, memberships, donations, or upgrades.",
+            "result": "Reached merchant checkout with the ticket configuration intact."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Requested a one-time payment card for $21.68.",
+            "result": "Payment card request was initiated for an amount under $30."
+          },
+          {
+            "step": 8,
+            "tool": "request_user_approval",
+            "action": "Requested user approval at the payment boundary.",
+            "result": "Approval request entered IN_PROGRESS state."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Automatic browser challenge recovery, followed by state reads and an open-new-tab/switch-tab loop.",
+            "why_it_failed": "Challenge recovery errored and the extra-tab loop made no merchant checkout progress; the agent returned to the existing session.",
+            "steps_wasted": 5
+          }
+        ],
+        "pitfalls": [
+          "Use only one browser agent even if browser challenge recovery fails.",
+          "Select the exact date before choosing the 7:15 PM showtime.",
+          "Request the one-time card only at checkout; do not submit payment or place the order."
+        ],
+        "terminal_condition": "Stopped with user approval IN_PROGRESS after requesting a $21.68 payment card; payment was not submitted and no order was placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "1235778a-62ae-4f8b-891b-52fbe8ba43f8",
+        "rows_in": 31,
+        "rows_total": 85
+      }
+    },
+    {
+      "id": "a6a6f65b-255f-42f7-a7ff-128d523c53af",
+      "goal": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-toast-nopa-write-lock",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T15:52:04.050Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          },
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://order.toasttab.com/online/nopafish"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Searched for the official Nopa Fish Ferry Building Toast menu and the requested sandwich.",
+            "result": "Found the official Toast URL and verified The Rocky Sandwich at $21.00."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://order.toasttab.com/online/nopafish using the single browser agent.",
+            "result": "The Nopa Fish Toast ordering page loaded."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Chose “Schedule your order for later,” selected 11:15 AM, and clicked Confirm.",
+            "result": "The pickup time was set and the menu became available."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Opened “The Rocky Sandwich Fried Local.”",
+            "result": "The sandwich detail page opened."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked “Add to Cart $21.00,” leaving exactly one sandwich in the cart.",
+            "result": "The cart contained one requested sandwich."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked “Checkout $23.94.”",
+            "result": "Toast merchant checkout loaded with $23.94 due."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Scrolled to the payment section and requested a one-time payment card for $23.94.",
+            "result": "The payment card was requested without submitting payment."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Reopened the item page and added the sandwich again, then navigated the cart and removed the duplicate.",
+            "why_it_failed": "The retry created quantity 2, and a later stale cart-button click errored; the cart had to be restored to quantity 1.",
+            "steps_wasted": 18
+          }
+        ],
+        "pitfalls": [
+          "After the first successful Add to Cart, do not reopen and add the item again; that creates quantity 2.",
+          "Verify the cart has exactly one sandwich and shows $23.94 before checkout.",
+          "Do not reuse the cart-count button after closing its panel; the recorded retry errored.",
+          "Use only one browser agent and stop after requesting the payment card; do not submit payment or place the order."
+        ],
+        "terminal_condition": "Stopped after “Payment card requested ($23.94)” at Toast checkout; payment was not submitted and the order was not placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "a6a6f65b-255f-42f7-a7ff-128d523c53af",
+        "rows_in": 45,
+        "rows_total": 110
+      }
+    },
+    {
+      "id": "fd07c043-90e3-477d-adbc-7630f3e6a772",
+      "goal": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, and proceed through checkout. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets. Do not click Buy Now, Place Order, Pay, or any equivalent purchase-submit control until payment credentials have been obtained and entered into the Payment Details fields (via request_payment_card / the one-time card refs after approval). Empty Stripe / Payment Details shells are not a reason to click Buy Now.\n\nOperational constraints for this payment-boundary benchmark: Use exactly one browser agent for the entire task. Do not spawn a second browser agent if the first fails — report the failure instead. Direct the browser to reach merchant checkout and request a one-time payment card via request_payment_card. Do not instruct the browser to submit payment, complete the purchase, or return a booking or order confirmation ID.",
+      "benchmark_task_name": "browser-1015-eventim-request-card",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-26T20:25:17.336Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://1015.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://1015.com/ in the single browser agent.",
+            "result": "Loaded the official 1015 Folsom site."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Opened the official Chase West ticket link at https://wl.eventim.us/event/chase-west/695639?affl",
+            "result": "Reached an Eventim US event with purchasable inventory."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Selected quantity 1 from the cheapest available ticket tier's quantity dropdown.",
+            "result": "Added one ticket to the checkout selection."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked CHECKOUT.",
+            "result": "Advanced into the Eventim checkout flow."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Clicked Checkout as Guest.",
+            "result": "Continued without creating or using an Eventim account."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Recovered the browser challenge in the same browser agent.",
+            "result": "Restored access to the merchant checkout."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Requested a one-time payment card for $31.13.",
+            "result": "Reached the payment-card approval boundary without submitting the purchase."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Use only one browser agent; recover Eventim challenges within that agent rather than spawning another.",
+          "Use the official 1015 link to wl.eventim.us and avoid resale marketplaces.",
+          "Do not click the final purchase-submit control before approved card details are entered."
+        ],
+        "terminal_condition": "Payment card requested for $31.13; stopped at the payment-card boundary with no purchase submitted.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "fd07c043-90e3-477d-adbc-7630f3e6a772",
+        "rows_in": 16,
+        "rows_total": 59
+      }
+    },
+    {
+      "id": "f5eaf785-29de-457a-81d9-25f0fe4d051e",
+      "goal": "On Instacart, shop only at Sprouts Farmers Market (do not switch to another store). Buy these items: blueberries, strawberries, 16 oz Cocojune yogurt (prefer plain), pickles, feta cheese, olives, and 12 1L Essentia waters. Add every item to the cart. Do not sign in or create an account. After each item is fully added at its required quantity, call evaluate once while that item's product name, size, price, and final quantity are still visible so progress is saved for verification (for example, set all 12 Essentia waters first, then evaluate — do not call evaluate after every single quantity click). Do not open the cart panel or cart page (unsigned sessions often cannot). When the cart badge shows all items added, stop.",
+      "benchmark_task_name": "browser-instacart-grocery-order",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-22T15:25:42.657Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.instacart.com/store/sprouts/storefront"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened the Sprouts Farmers Market storefront and dismissed the initial overlay with Escape.",
+            "result": "Reached the unsigned Sprouts shopping interface."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Searched “blueberries,” added one, then evaluated once with the product name, size, price, and final quantity visible.",
+            "result": "Blueberries at quantity 1 were saved for verification."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Selected and added strawberries, then evaluated once while their details and final quantity remained visible.",
+            "result": "Strawberries at quantity 1 were saved for verification."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Searched “Cocojune yogurt 16 oz,” added one 16 oz yogurt, then evaluated once with its details visible.",
+            "result": "The 16 oz Cocojune yogurt at quantity 1 was saved for verification."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Searched “pickles,” added one, then evaluated once while the product details and final quantity remained visible.",
+            "result": "Pickles at quantity 1 were saved for verification."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Searched “feta cheese,” added one, then evaluated once while the product details and final quantity remained visible.",
+            "result": "Feta cheese at quantity 1 was saved for verification."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "Selected and added olives, then evaluated once while the product details and final quantity remained visible.",
+            "result": "Olives at quantity 1 were saved for verification."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_browser_agent",
+            "action": "Searched “Essentia water 1L,” added it, set the final quantity to exactly 12, then evaluated once with its details visible.",
+            "result": "Twelve 1L Essentia waters were verified; progress reached 100% and the task completed."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Clicked the “Log in $0 delivery fee on you” promotion twice, then dismissed the login UI with Escape.",
+            "why_it_failed": "Signing in was prohibited and unnecessary for the unsigned cart workflow.",
+            "steps_wasted": 3
+          },
+          {
+            "tried": "Navigated to two direct search_v3 URLs and inspected search-related network requests.",
+            "why_it_failed": "This exploration did not add products; the storefront search input was the successful route.",
+            "steps_wasted": 4
+          }
+        ],
+        "pitfalls": [
+          "Do not click the login promotion; remain unsigned and dismiss login UI with Escape.",
+          "Use the Sprouts storefront search input instead of direct search_v3 URLs or network inspection.",
+          "Evaluate exactly once per item only after its final quantity is set and its details remain visible.",
+          "Set all 12 Essentia waters before evaluating; do not evaluate after each increment.",
+          "Stay at Sprouts and do not open the cart panel or cart page."
+        ],
+        "terminal_condition": "Stopped at “✓ Task Completed” with Progress 100% after all requested quantities were added; no cart panel or page was opened and no order was placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "f5eaf785-29de-457a-81d9-25f0fe4d051e",
+        "rows_in": 37,
+        "rows_total": 106
+      }
+    },
+    {
+      "id": "a85b55c7-1fc6-44b1-b153-134a4fb92579",
+      "goal": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
+      "benchmark_task_name": "browser-doordash-usb-c-cable",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-20T20:46:53.133Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.doordash.com/"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened DoorDash at https://www.doordash.com/.",
+            "result": "The saved session loaded with one item already in the cart."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Opened the cart and retained exactly one item for checkout.",
+            "result": "The cart remained at one qualifying cable."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Returned home, opened \"1 items in cart,\" clicked \"Checkout,\" then \"Continue to checkout.\"",
+            "result": "The checkout page became usable."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Opened the line item \"Apple USB-C 240W 6.6' Woven Ch…\" in checkout.",
+            "result": "Confirmed one USB-C cable meeting the 6-foot, 60W, and $30 item-price limits."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_browser_agent",
+            "action": "Selected \"2:19 PM-2:35 PM Direct to you.\"",
+            "result": "The earliest shown delivery window was selected."
+          },
+          {
+            "step": 6,
+            "tool": "request_user_approval",
+            "action": "Requested approval to place the order.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_browser_agent",
+            "action": "After write permission was granted, submitted the DoorDash order.",
+            "result": "Checkout completed for the single qualifying cable."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_browser_agent",
+            "action": "Selected \"Refund,\" then \"Save\" and \"Done\" for unavailable-item handling, and opened \"Order details.\"",
+            "result": "A nonqualifying substitute was prevented; the run reached 100% and \"✓ Task Completed.\""
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Searched for \"USB-C to USB-C cable 6 ft\" on the store-search route, then returned to the existing cart.",
+            "why_it_failed": "No search result was used; the qualifying cable was already in the cart.",
+            "steps_wasted": 4
+          },
+          {
+            "tried": "Opened https://www.doordash.com/checkout directly, attempted challenge recovery, and inspected cart network requests.",
+            "why_it_failed": "The route did not yield a stable checkout, so the agent returned home and used cart > Checkout > Continue instead.",
+            "steps_wasted": 5
+          },
+          {
+            "tried": "Attempted another browser challenge recovery after continuing to checkout.",
+            "why_it_failed": "Recovery reported failure, but the checkout remained interactive, so the agent resumed without restarting.",
+            "steps_wasted": 1
+          }
+        ],
+        "pitfalls": [
+          "The desired cable was already in the cart; repeating store search added no value.",
+          "Direct navigation to /checkout triggered challenge handling; the cart Checkout flow was more reliable.",
+          "A challenge-recovery error did not mean the checkout page was unusable.",
+          "Verify quantity one and the 240W, 6.6-foot USB-C cable before purchase.",
+          "Choose the earliest Direct to you window and use Refund for unavailable-item handling to avoid substitutions."
+        ],
+        "terminal_condition": "Stopped after Order details were opened and the run showed \"✓ Task Completed\" and \"✅ Task Complete\"; the DoorDash order had been placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "a85b55c7-1fc6-44b1-b153-134a4fb92579",
+        "rows_in": 43,
+        "rows_total": 110
+      }
+    },
+    {
+      "id": "f0541c31-de30-47d3-9817-d24eea64f314",
+      "goal": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
+      "benchmark_task_name": "browser-amazon-return",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-07-28T00:04:04.354Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://www.amazon.com/gp/css/order-history"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Open https://www.amazon.com/gp/css/order-history and inspect orders for the qualifying recent delivered physical item.",
+            "result": "Amazon order history opened."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Click \"Return or replace items\" for the selected eligible item.",
+            "result": "The return workflow opened."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_browser_agent",
+            "action": "Select \"Changed Mind\", then \"My needs changed\", answer \"Yes\", and continue.",
+            "result": "The required return-reason and condition questions were completed."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Select \"Advance refund to your Visa\" and continue.",
+            "result": "Refund to the original payment method was selected."
+          },
+          {
+            "step": 5,
+            "tool": "request_user_approval",
+            "action": "Request approval for the write action that would finalize the return.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_browser_agent",
+            "action": "Resume with write permission and complete the remaining return-method and confirmation flow using the requested drop-off preference if offered.",
+            "result": "Write permission was granted and the browser reported \"✓ Task Completed\"."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Opened \"View invoice\" and then closed it.",
+            "why_it_failed": "The invoice did not advance the return workflow and was immediately dismissed.",
+            "steps_wasted": 2
+          }
+        ],
+        "pitfalls": [
+          "Finalizing the return required user approval and write permission.",
+          "The original-payment option appeared as \"Advance refund to your Visa\".",
+          "Avoid opening \"View invoice\"; it does not advance the return."
+        ],
+        "terminal_condition": "Amazon return completed; the browser stopped after reporting \"✓ Task Completed\".",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "f0541c31-de30-47d3-9817-d24eea64f314",
+        "rows_in": 27,
+        "rows_total": 87
+      }
+    },
+    {
+      "id": "d3458538-4789-4195-a38f-23385544b6f1",
+      "goal": "Create 4 color variants of the attached image: red, blue, green, and yellow tinted versions. Spawn 4 general-purpose agents, one for each color variant. Each general-purpose agent must run a code agent to create its assigned image. Return all 4 images.",
+      "benchmark_task_name": "files-in-sub-agents",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T13:27:38.174Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_general_purpose_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Spawned a general-purpose agent assigned only the red-tinted variant of rs.jpeg and required code-agent execution.",
+            "result": "The red sub-agent completed its assigned variant."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Spawned a general-purpose agent assigned only the blue-tinted variant of rs.jpeg and required code-agent execution.",
+            "result": "The blue sub-agent completed its assigned variant."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Spawned a general-purpose agent assigned only the green-tinted variant of rs.jpeg and required code-agent execution.",
+            "result": "The green sub-agent completed its assigned variant."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Spawned a general-purpose agent assigned only the yellow-tinted variant of rs.jpeg and required code-agent execution.",
+            "result": "The yellow sub-agent completed its assigned variant."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_code_agent",
+            "action": "The red agent attached rs.jpeg and requested a visible, luminance-preserving red tint with original dimensions and details preserved.",
+            "result": "The code workflow completed the red-tinted image."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_code_agent",
+            "action": "The yellow agent attached rs.jpeg and requested a yellow/gold tint while preserving dimensions, composition, detail, and contrast.",
+            "result": "The code workflow completed the yellow-tinted image."
+          },
+          {
+            "step": 7,
+            "tool": "spawn_code_agent",
+            "action": "The green agent attached rs.jpeg and requested a visible green tint while preserving dimensions, composition, detail, and contrast.",
+            "result": "The code workflow completed the green-tinted image."
+          },
+          {
+            "step": 8,
+            "tool": "spawn_code_agent",
+            "action": "The blue agent attached rs.jpeg and requested a visible blue tint while preserving dimensions, composition, detail, and contrast.",
+            "result": "The code workflow completed the blue-tinted image; all four variants were then returned."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Use exactly four general-purpose agents, one per color; each must invoke a code agent.",
+          "Attach the source under its exact filename, rs.jpeg, to every code-agent task.",
+          "Wait for all four sub-agents and code workflows to complete before returning the images."
+        ],
+        "terminal_condition": "Completion summary showed “✅ Task Complete”; red, blue, green, and yellow tinted images were returned.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "d3458538-4789-4195-a38f-23385544b6f1",
+        "rows_in": 46,
+        "rows_total": 121
+      }
+    },
+    {
+      "id": "ed82a033-24d2-4110-8d26-b485808ad5bc",
+      "goal": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",
+      "benchmark_task_name": "agent-for-each",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T04:25:32.137Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_claude_code_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_claude_code_agent",
+            "action": "Read the attached CSV and extracted its 12 entity rows and disambiguating fields.",
+            "result": "Produced the complete entity list needed for per-row research."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_general_purpose_agent_for_each",
+            "action": "Launched one general-purpose agent for every extracted entity, with instructions to find a credible web-sourced fact.",
+            "result": "The batch covered all 12 CSV entities and reported for_each complete."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Each assigned agent disambiguated its entity, researched public web sources, and returned one interesting fact.",
+            "result": "Returned a web-supported fact for every entity."
+          },
+          {
+            "step": 4,
+            "tool": "completion_summary",
+            "action": "Collected the per-entity findings and presented them as the final summary.",
+            "result": "The task was marked complete."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Initially researched the CSV rows with explore agents, including a follow-up for one ambiguous company.",
+            "why_it_failed": "Explore agents did not satisfy the explicit requirement to spawn a general-purpose agent for each entity, so all rows were redone.",
+            "steps_wasted": 26
+          }
+        ],
+        "pitfalls": [
+          "Use spawn_general_purpose_agent_for_each from the outset; explore agents do not meet the requested agent type.",
+          "Verify that every extracted CSV row receives its own agent assignment before compiling the summary.",
+          "Use all supplied row fields to disambiguate entities, especially when a city has a typo or a domain does not match the listed name.",
+          "Wait for the for_each batch to report complete before finalizing the summary.",
+          "Prefer credible primary sources and fetch the supporting page when search snippets are insufficient."
+        ],
+        "terminal_condition": "All 12 per-entity general-purpose agents completed, their facts were summarized, and the run ended with Task Complete.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "ed82a033-24d2-4110-8d26-b485808ad5bc",
+        "rows_in": 70,
+        "rows_total": 460
+      }
+    },
+    {
+      "id": "5a444bb2-6adb-48b8-9ad8-fd976428980c",
+      "goal": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
+      "benchmark_task_name": "spawn-sub-agents",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-09T00:33:50.253Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_general_purpose_agent",
+            "start_url": null
+          },
+          {
+            "tool": "spawn_general_purpose_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Started the Tokyo-only agent, requiring explore-agent web research, no browser/code tools, and a numeric-only answer.",
+            "result": "The Tokyo population task began with Tokyo Metropolis as the specified scope."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_explore_agent",
+            "action": "Researched Tokyo Metropolis, including the official Tokyo Statistics page at https://www.toukei.metro.tokyo.lg.jp/jsuikei/js-index.htm.",
+            "result": "The Tokyo general-purpose agent returned only the numeric population value."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_general_purpose_agent",
+            "action": "Started the New York City-only agent with the same research and numeric-only constraints.",
+            "result": "The NYC task began with the five-borough city proper as the specified scope."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_explore_agent",
+            "action": "Researched the latest authoritative New York City population estimate using web search.",
+            "result": "The NYC general-purpose agent returned only the numeric population value."
+          },
+          {
+            "step": 5,
+            "tool": "reasoning",
+            "action": "Multiplied the two numeric population values after both agents completed.",
+            "result": "Produced the requested population product."
+          },
+          {
+            "step": 6,
+            "tool": "attempt_completion",
+            "action": "Reported the final product.",
+            "result": "The run was accepted and marked Task Complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Use spawn_general_purpose_agent exactly twice, once for each city.",
+          "Each general-purpose agent must invoke explore-agent web research internally.",
+          "Do not use a browser agent, Claude Code, or a code sandbox.",
+          "Disambiguate Tokyo as Tokyo Metropolis and NYC as the five-borough city proper.",
+          "Ensure each city agent returns only a numeric value before multiplying."
+        ],
+        "terminal_condition": "Final product reported; the run ended with ✅ Task Complete.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "5a444bb2-6adb-48b8-9ad8-fd976428980c",
+        "rows_in": 36,
+        "rows_total": 71
+      }
+    },
+    {
+      "id": "87e11759-2fc3-4eb1-8044-b81725116168",
+      "goal": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
+      "benchmark_task_name": "parallel-tool-calls",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-09T00:33:50.254Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          },
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          },
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Launched an Austin, Texas explorer to research current cost of living, best neighborhoods, and weather.",
+            "result": "Returned sourced 2025–2026 findings for Austin."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_explore_agent",
+            "action": "Launched a Denver, Colorado explorer in parallel to research cost of living, best neighborhoods, and weather.",
+            "result": "Returned sourced 2025–2026 findings for Denver."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_explore_agent",
+            "action": "Launched a Lisbon, Portugal explorer in parallel to research cost of living, best neighborhoods, and weather.",
+            "result": "Returned sourced 2025–2026 findings for Lisbon."
+          },
+          {
+            "step": 4,
+            "tool": "attempt_completion",
+            "action": "Synthesized the three city reports into the requested comparison table.",
+            "result": "Delivered the completed city comparison and marked progress at 100%."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Spawn one explore sub-agent per city, preferably together in parallel.",
+          "Do not use Claude Code, a browser agent, or a code sandbox.",
+          "Ensure every city covers all three requested topics before synthesizing the table."
+        ],
+        "terminal_condition": "Task completed with a synthesized comparison table for Austin, Denver, and Lisbon.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "87e11759-2fc3-4eb1-8044-b81725116168",
+        "rows_in": 70,
+        "rows_total": 136
+      }
+    },
+    {
+      "id": "634e6d24-c25a-4f07-aced-9b45d83bc49f",
+      "goal": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.\n\nCritical tool restrictions (enforced by the evaluator):\n- Do not call these forbidden tools: `spawn_browser_agent`, `spawn_claude_code_agent`, `send_message_to_user_execute_phase`.\n- Put the final answer in attempt_completion (and any response schema fields); do not use progress-message tools to deliver results.",
+      "benchmark_task_name": "plaid-transactions-dead-subscriptions",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T14:36:37.067Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Spawned three explore agents restricted to local transactions and nested status=\"posted\" filters for subscription, streaming, Prime, and developer-tool patterns.",
+            "result": "Agents began parallel searches using only permitted local transaction data."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Searched posted transactions for monthly, recurring, membership, premium, annual, subscription, Prime, Netflix, Spotify, and developer-tool terms.",
+            "result": "Found the broad set of subscription-like charges needed for merchant-level review."
+          },
+          {
+            "step": 3,
+            "tool": "grep",
+            "action": "Retrieved focused histories for GitHub, StreamNest Premium, CloudBox Storage, MeditatePro, and Benchmark Gym Membership.",
+            "result": "Established charge dates and recurrence evidence for candidate and developer-tool classification."
+          },
+          {
+            "step": 4,
+            "tool": "grep",
+            "action": "Searched 2026 dates and broad subscription merchant terms to verify whether monthly services had any posted charge in 2026.",
+            "result": "Separated stopped-billing monthly services from active or recent recurring services."
+          },
+          {
+            "step": 5,
+            "tool": "grep",
+            "action": "Searched Netflix/Spotify variants and separate Prime, Prime Video, AMZN, and Amazon patterns.",
+            "result": "Verified Amazon Prime and Amazon Prime Video separately and checked the named streaming services."
+          },
+          {
+            "step": 6,
+            "tool": "reasoning",
+            "action": "Applied the 2026-07-03 rules: monthly with no 2026 charge as dead, annual within 400 days as recent, and developer tools as excluded.",
+            "result": "Produced refund-prep candidates and active/recent or developer-tool exclusions without inferring usage."
+          },
+          {
+            "step": 7,
+            "tool": "attempt_completion",
+            "action": "Returned the merchant evidence, refund-candidate rationale, and excluded active/recent or developer-tool subscriptions.",
+            "result": "Completed the refund-prep list without contacting merchants or requesting refunds."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Initial broad and merchant-specific grep formulations for subscriptions, Prime, Spotify, and Netflix.",
+            "why_it_failed": "Five grep calls returned errors; compatible retries later succeeded.",
+            "steps_wasted": 5
+          },
+          {
+            "tried": "A final verification batch using broad subscription and known-merchant regex patterns.",
+            "why_it_failed": "Four grep calls errored before the verification searches were retried successfully.",
+            "steps_wasted": 4
+          }
+        ],
+        "pitfalls": [
+          "Use grep only through explore agents with source=\"transactions\" and nested status=\"posted\" filters.",
+          "Do not exclude monthly services merely because transaction data cannot prove usage; no 2026 charge means stopped billing/dead.",
+          "Keep Amazon Prime and Amazon Prime Video separate when evaluating recency.",
+          "Treat annual charges within 400 days as active/recent, not dead.",
+          "Exclude developer-tool subscriptions and distinguish stopped billing from still active and should cancel."
+        ],
+        "terminal_condition": "Stopped after returning a refund-prep list; no merchant was contacted and no refund was requested.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "634e6d24-c25a-4f07-aced-9b45d83bc49f",
+        "rows_in": 54,
+        "rows_total": 91
+      }
+    },
+    {
+      "id": "0a55da16-f622-46da-bc09-2d974fac7e91",
+      "goal": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.\n\nCritical tool restrictions (enforced by the evaluator):\n- Do not call these forbidden tools: `spawn_browser_agent`, `spawn_claude_code_agent`, `send_message_to_user_execute_phase`.\n- Put the final answer in attempt_completion (and any response schema fields); do not use progress-message tools to deliver results.",
+      "benchmark_task_name": "plaid-transactions-doordash-count",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T11:22:09.391Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Started a local-only explore agent and instructed it to run the required case-insensitive DoorDash transaction query with posted 2025 filters.",
+            "result": "The explore agent began the transaction-only investigation."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Searched source=\"transactions\" for pattern=\"doordash\" with -i=true and filters since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".",
+            "result": "The filtered grep returned the matched transaction evidence used to count rows."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_explore_agent",
+            "action": "Requested citation-ready local transaction evidence after earlier final answers were rejected.",
+            "result": "The agent gathered fuller DoorDash transaction evidence for the final citation."
+          },
+          {
+            "step": 4,
+            "tool": "grep",
+            "action": "Repeated DoorDash searches to expose complete matching transaction records.",
+            "result": "Returned the transaction records used to support the exact count."
+          },
+          {
+            "step": 5,
+            "tool": "attempt_completion",
+            "action": "Submitted the exact posted 2025 DoorDash order count with transaction grep evidence.",
+            "result": "Verifier reported Progress: 100%, followed by Task Complete."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Three malformed grep calls during query and evidence troubleshooting.",
+            "why_it_failed": "Each call returned an error instead of usable transaction evidence.",
+            "steps_wasted": 3
+          },
+          {
+            "tried": "Broad all-local-data, dot-pattern, and unrelated-merchant searches to inspect record structure.",
+            "why_it_failed": "They did not directly satisfy the required DoorDash transaction query and were only troubleshooting.",
+            "steps_wasted": 6
+          },
+          {
+            "tried": "A second explore pass that repeated the filtered query and inspected general transaction metadata.",
+            "why_it_failed": "Its resulting completion was still rejected and did not finish the task.",
+            "steps_wasted": 8
+          },
+          {
+            "tried": "Three premature attempt_completion submissions plus a wait_for retry.",
+            "why_it_failed": "The verifier rejected the submissions at 50%, and wait_for errored.",
+            "steps_wasted": 8
+          }
+        ],
+        "pitfalls": [
+          "Keep source=\"transactions\" on every required grep; broad searches titled “all local data” do not prove that restriction.",
+          "Use the nested since, until, and posted filters exactly; malformed filter calls errored.",
+          "Count matched transaction rows rather than snippets, paginating with head_limit and offset if needed.",
+          "Include citation-ready grep evidence with the exact count before calling attempt_completion.",
+          "Do not retry attempt_completion or wait_for until the transaction evidence is complete."
+        ],
+        "terminal_condition": "attempt_completion reached Progress: 100%, then completion_summary marked Task Complete.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "0a55da16-f622-46da-bc09-2d974fac7e91",
+        "rows_in": 45,
+        "rows_total": 72
+      }
+    },
+    {
+      "id": "9dec0144-93ad-4eb6-a589-18f2d5cf541b",
+      "goal": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+      "benchmark_task_name": "whatsapp-history-recall",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-02T22:03:49.701Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Delegated extraction of the latest message, most-contacted person, total message count, and date range from actual WhatsApp data.",
+            "result": "The explore agent began analyzing the user's WhatsApp records."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Searched messages using the candidate top-contact identifier.",
+            "result": "Provided message evidence for identifying the most-contacted person."
+          },
+          {
+            "step": 3,
+            "tool": "grep",
+            "action": "Searched network records for the contact represented in the WhatsApp data.",
+            "result": "Supported resolving the contact identifier to a person."
+          },
+          {
+            "step": 4,
+            "tool": "grep",
+            "action": "Searched messages for the candidate date-range boundary.",
+            "result": "Verified the WhatsApp history boundary used in the answer."
+          },
+          {
+            "step": 5,
+            "tool": "grep",
+            "action": "Searched messages for the candidate latest-message text.",
+            "result": "Verified the exact final WhatsApp message."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_explore_agent",
+            "action": "Returned the consolidated WhatsApp findings to the parent run.",
+            "result": "Produced all requested values: latest message, top contact, total count, and start/end dates."
+          },
+          {
+            "step": 7,
+            "tool": "attempt_completion",
+            "action": "Submitted a final response containing answers to all three questions.",
+            "result": "Completion reached 100% and the task was marked complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Resolve contact identifiers through network records before reporting a person's name.",
+          "Verify the latest message and date boundaries directly against message records.",
+          "Include all three requested answers in the final response."
+        ],
+        "terminal_condition": "Task completed at 100%; the final response delivered all three WhatsApp answers.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "9dec0144-93ad-4eb6-a589-18f2d5cf541b",
+        "rows_in": 14,
+        "rows_total": 24
+      }
+    },
+    {
+      "id": "ee6ee668-b89a-483e-a23d-64695e1b1901",
+      "goal": "Run a real prod-data validation of my synced user documents using only local-data Grep through spawned explore agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents using spawn_agent with type=\"explore\". Do not use type=\"general_purpose\", type=\"for_each\", output_schema, or any structured sub-agent schema.\n- An explore agent must call grep directly four times with source=\"documents\", once for each filters.document_source value: chatgpt, claude, apple_notes, and obsidian.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
+      "benchmark_task_name": "user-data-prod-grep",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-20T20:53:40.411Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Spawned an explore agent to validate synced prod documents using only direct local-data grep calls.",
+            "result": "The explore agent ran the provider-specific document validation."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Searched source=\"documents\" with filters.document_source=\"chatgpt\".",
+            "result": "The search finished and supplied the ChatGPT evidence/path or no-evidence state for the checklist."
+          },
+          {
+            "step": 3,
+            "tool": "grep",
+            "action": "Searched source=\"documents\" with filters.document_source=\"claude\".",
+            "result": "The search finished and supplied the Claude evidence/path or no-evidence state for the checklist."
+          },
+          {
+            "step": 4,
+            "tool": "grep",
+            "action": "Searched source=\"documents\" with filters.document_source=\"apple_notes\".",
+            "result": "The search finished and supplied the Apple Notes evidence/path or no-evidence state for the checklist."
+          },
+          {
+            "step": 5,
+            "tool": "grep",
+            "action": "Searched source=\"documents\" with filters.document_source=\"obsidian\".",
+            "result": "The search finished and supplied the Obsidian evidence/path or no-evidence state for the checklist."
+          },
+          {
+            "step": 6,
+            "tool": "attempt_completion",
+            "action": "Submitted the completed prod-data validation after all four provider searches.",
+            "result": "Progress reached 100%, and the run was marked Task Complete."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "An initial documents grep using the recent project/goal/preference/tool regex.",
+            "why_it_failed": "The grep tool returned ERROR, so the agent retried and then completed the provider searches.",
+            "steps_wasted": 2
+          }
+        ],
+        "pitfalls": [
+          "Use spawn_explore_agent with type=\"explore\"; do not use forbidden browser, web, messaging, or Claude Code tools.",
+          "Call grep directly with source=\"documents\" and a distinct document_source filter for each required provider.",
+          "If a grep errors, retry it; only completed searches can support the final provider checklist.",
+          "Do not invent evidence when a provider has no synced documents; report the no-evidence state.",
+          "Preserve exact snippets and returned document paths in the PASS/VERIFY checklist."
+        ],
+        "terminal_condition": "Task Complete after attempt_completion reached 100% with the four-provider PASS/VERIFY validation submitted.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "ee6ee668-b89a-483e-a23d-64695e1b1901",
+        "rows_in": 17,
+        "rows_total": 28
+      }
+    },
+    {
+      "id": "b3cf86f5-ab2b-4bb3-a361-cebcfa530353",
+      "goal": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
+      "benchmark_task_name": "grep-explore-stress",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-09T19:28:28.692Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Spawned 10 separate explore agents in the first action, one for each required Grep assignment; no progress, web, browser, or messaging tools were used.",
+            "result": "All required assignments were delegated to explore agents and returned FINISHED."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Called Grep with source omitted and pattern \"Aurora|Mara Voss|Atlas handoff|Ledger entry|Lighthouse\".",
+            "result": "Produced evidence across messages, network, and agent_network for omitted-source coverage."
+          },
+          {
+            "step": 3,
+            "tool": "grep",
+            "action": "Searched source=\"messages\" using regex \"Aurora.*budget\" and case-insensitive pattern \"LIGHTHOUSE\" with \"-i\":true.",
+            "result": "Returned Aurora budget evidence from \"Quarterly Lighthouse Brief\" and mixed-case Lighthouse evidence."
+          },
+          {
+            "step": 4,
+            "tool": "grep",
+            "action": "Ran message Greps with multiline:true, \"-A\", \"-B\" plus context, \"-n\":false, and pagination pattern \"Ledger entry\", head_limit:3, offset:20.",
+            "result": "Returned START-to-END, surrounding context, unnumbered output, and \"Ledger entry 21: offset target confirmed\"."
+          },
+          {
+            "step": 5,
+            "tool": "grep",
+            "action": "Searched source=\"network\" with \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\".",
+            "result": "The required exact alternation was exercised; its initial result exposed only the Northstar company field."
+          },
+          {
+            "step": 6,
+            "tool": "spawn_explore_agent",
+            "action": "Spawned a network-only follow-up agent to inspect Mara Voss using direct record and field Greps after the partial alternation result.",
+            "result": "Recovered the additional network-field evidence needed to assess company, title, relation, and frequency output."
+          },
+          {
+            "step": 7,
+            "tool": "grep",
+            "action": "Searched source=\"agent_network\" for \"Atlas handoff\" evidence.",
+            "result": "Returned USER, ASSISTANT, and TOOL Atlas handoff matches with role and location metadata."
+          },
+          {
+            "step": 8,
+            "tool": "attempt_completion",
+            "action": "Submitted one final 10-item checklist with PASS or FAIL, source, flags, exact Grep evidence, and agent-network role/location metadata.",
+            "result": "completion_summary reported \"✅ Task Complete\"."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Repeated network recovery patterns for Mara Voss, Principal, Cartographer, Northstar, benchmark verification, the record ID, and \":\".",
+            "why_it_failed": "Early retries were partial and did not individually prove every required field, so the follow-up continued through record-wide inspection.",
+            "steps_wasted": 10
+          }
+        ],
+        "pitfalls": [
+          "Keep source truly omitted for assignment 1; do not replace omission with source=\"all\".",
+          "Spawn all required explore agents before any other action and avoid prohibited progress, web, browser, and messaging tools.",
+          "Do not mark the network item PASS when only the company field is visible; title, relation, and frequency evidence must also appear.",
+          "For pagination, use pattern \"Ledger entry\", head_limit:3, offset:20 and verify entry 21 exactly.",
+          "For agent_network, retain both message role and location metadata; text alone is insufficient."
+        ],
+        "terminal_condition": "Stopped after attempt_completion; completion_summary showed \"✅ Task Complete\" and the final checklist had been submitted.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "b3cf86f5-ab2b-4bb3-a361-cebcfa530353",
+        "rows_in": 70,
+        "rows_total": 124
+      }
+    },
+    {
+      "id": "5d430c24-e8c8-488c-ab1d-8c1f87092b94",
+      "goal": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
+      "benchmark_task_name": "people-search-criteria",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-07-27T20:36:38.662Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Launched one broad public-web discovery for Bay Area VC partners investing in AI infrastructure.",
+            "result": "The explore agent began a criteria-based candidate search rather than researching one firm as the discovery method."
+          },
+          {
+            "step": 2,
+            "tool": "people_search",
+            "action": "Called the dedicated people search with mode=\"discover\" for current senior VC partners matching the role, sector, and geography criteria.",
+            "result": "Produced the broad candidate pool required by the goal."
+          },
+          {
+            "step": 3,
+            "tool": "web_search",
+            "action": "Collected public-web evidence for candidate titles, Bay Area ties, and AI-infrastructure investment focus.",
+            "result": "Assembled supporting evidence for the fixed candidate pool."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_explore_agent",
+            "action": "Ran one batched eligibility audit of AI-infrastructure investment relevance across the candidate pool.",
+            "result": "Confirmed candidates whose firms or portfolios matched AI infrastructure."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_explore_agent",
+            "action": "Ran one batched audit of current partner roles and San Francisco Bay Area geography.",
+            "result": "Confirmed the remaining role and location requirements for five people."
+          },
+          {
+            "step": 6,
+            "tool": "attempt_completion",
+            "action": "Submitted the five-person report with a one-line firm or investment-focus description for each person.",
+            "result": "Completion reached 100%, and the task was marked complete."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Repeated web_fetch attempts on firm bios, press releases, homepages, and LinkedIn profiles, plus agent retries that surfaced the same fetch error.",
+            "why_it_failed": "The pages could not be fetched; successful web_search evidence and batched audits were used instead.",
+            "steps_wasted": 28
+          },
+          {
+            "tried": "An agent attempted completion before its evidence task had returned an acceptable result.",
+            "why_it_failed": "The completion result was rejected, so research continued.",
+            "steps_wasted": 1
+          }
+        ],
+        "pitfalls": [
+          "The broad discovery must use people_search with mode=\"discover\" inside an explore-agent run; plain web_search is insufficient.",
+          "Keep discovery broad and validation batched; the run spent many searches on individual candidates before returning to fixed-pool audits.",
+          "Do not repeatedly web_fetch inaccessible firm or LinkedIn pages; use accessible public-web search evidence instead.",
+          "Validate all three criteria: current partner status, Bay Area base, and AI-infrastructure investment relevance.",
+          "Do not use browser agents, Claude Code, or code sandboxes."
+        ],
+        "terminal_condition": "Stopped after attempt_completion reached 100% and completion_summary marked Task Complete; the five-person report was delivered.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "5d430c24-e8c8-488c-ab1d-8c1f87092b94",
+        "rows_in": 70,
+        "rows_total": 155
+      }
+    },
+    {
+      "id": "d44c8470-e2a0-476e-a801-8f6200c84e79",
+      "goal": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
+      "benchmark_task_name": "people-search-targeted",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T15:35:10.182Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "set_plan",
+            "action": "Set a plan to enrich Andy Prevalsky’s professional profile.",
+            "result": "Plan was accepted."
+          },
+          {
+            "step": 2,
+            "tool": "attempt_completion",
+            "action": "Transitioned from planning to execution.",
+            "result": "Execute phase began."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_explore_agent",
+            "action": "Asked the explore agent to find Andy Prevalsky’s current public profile as founder of Rose Labs.",
+            "result": "The explore agent began the required research."
+          },
+          {
+            "step": 4,
+            "tool": "people_search",
+            "action": "Searched Andy Prevalsky / Rose Labs with mode=\"enrich\".",
+            "result": "Returned a usable enriched professional profile."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_explore_agent",
+            "action": "Returned the profile directly from the successful people_search result.",
+            "result": "Research completed without supplemental web search or fetch."
+          },
+          {
+            "step": 6,
+            "tool": "attempt_completion",
+            "action": "Reported the current title, company, location, LinkedIn URL, and source link.",
+            "result": "Progress reached 100%."
+          },
+          {
+            "step": 7,
+            "tool": "completion_summary",
+            "action": "Closed the run after reporting the requested profile.",
+            "result": "Task marked complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Use spawn_explore_agent; browser agents and code tools were prohibited.",
+          "The explore agent must call people_search with mode=\"enrich\" for Andy Prevalsky / Rose Labs.",
+          "After a usable people_search result, finish immediately without supplemental web_search or web_fetch."
+        ],
+        "terminal_condition": "Task completed after reporting the enriched professional profile and source.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "d44c8470-e2a0-476e-a801-8f6200c84e79",
+        "rows_in": 11,
+        "rows_total": 20
+      }
+    },
+    {
+      "id": "763fa2d5-cb07-46cb-826e-50c50a85031e",
+      "goal": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email.",
+      "benchmark_task_name": "message-person",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-07-27T04:37:43.955Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "message_person",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "message_person",
+            "action": "Initiated a friendly iMessage to [PHONE] stating this is the Rose iMessage send bench.",
+            "result": "The send proceeded to user approval."
+          },
+          {
+            "step": 2,
+            "tool": "request_user_approval",
+            "action": "Received user approval to send the message.",
+            "result": "Approval granted."
+          },
+          {
+            "step": 3,
+            "tool": "message_person",
+            "action": "Sent the approved message via iMessage, not email.",
+            "result": "iMessage sent to [PHONE]."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "User approval is required before the iMessage is sent.",
+          "Use iMessage rather than email."
+        ],
+        "terminal_condition": "iMessage sent to [PHONE]; task marked complete.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "763fa2d5-cb07-46cb-826e-50c50a85031e",
+        "rows_in": 7,
+        "rows_total": 16
+      }
+    },
+    {
+      "id": "2d1ef194-4052-44c0-87a6-6fad5ce14fb2",
+      "goal": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+      "benchmark_task_name": "message-person-agent-sms",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T14:31:37.720Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "message_person",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "message_person",
+            "action": "Send via agent_sms to [PHONE]: \"Hi! This is the Rose agent SMS send bench.\"",
+            "result": "The send entered the required approval flow."
+          },
+          {
+            "step": 2,
+            "tool": "request_user_approval",
+            "action": "Request approval for the outbound agent SMS.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 3,
+            "tool": "message_person",
+            "action": "Complete the approved agent_sms send from the agent phone.",
+            "result": "Agent SMS sent to [PHONE]."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_explore_agent",
+            "action": "Retrieve the sent message's explicit agent SMS ID from recent communications or logs.",
+            "result": "Grounding for the outbound agent_sms message was returned."
+          },
+          {
+            "step": 5,
+            "tool": "attempt_completion",
+            "action": "Submit completion with the grounded send evidence.",
+            "result": "Verifier reported 100% progress."
+          },
+          {
+            "step": 6,
+            "tool": "completion_summary",
+            "action": "Finalize the completed task.",
+            "result": "Task Complete."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Submitted completion immediately after the SMS was sent.",
+            "why_it_failed": "The verifier rejected it at 0%; grounded outbound message metadata still had to be retrieved.",
+            "steps_wasted": 2
+          }
+        ],
+        "pitfalls": [
+          "Use agent_sms from the agent phone; do not use the user's iMessage relay or email.",
+          "Outbound agent SMS requires user approval before it is sent.",
+          "Include grounded outbound message metadata when completing; the first completion without it was rejected.",
+          "Do not confuse the agent SMS message ID with a tool call ID or context run ID."
+        ],
+        "terminal_condition": "Task Complete after verifier reached 100%; the agent SMS was sent to [PHONE].",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "2d1ef194-4052-44c0-87a6-6fad5ce14fb2",
+        "rows_in": 16,
+        "rows_total": 29
+      }
+    },
+    {
+      "id": "3ae580e9-b1f5-4520-9b13-404ec1c3aca4",
+      "goal": "Call Rose Test Florist at +14159416744 exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number [REDACTED-PAN], expiration 12/30, CVC [REDACTED], billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
+      "benchmark_task_name": "phone-call-payment",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T15:39:08.919Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "call_phone_number",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "call_phone_number",
+            "action": "Called Rose Test Florist at [PHONE] once to order a dozen red roses with delivery.",
+            "result": "The single phone call was initiated."
+          },
+          {
+            "step": 2,
+            "tool": "request_user_approval",
+            "action": "Requested approval to complete the card payment during the active call.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 3,
+            "tool": "call_phone_number",
+            "action": "Continued the same call through ordering, payment confirmation, and receipt of the order confirmation code.",
+            "result": "The call completed successfully without a second call."
+          },
+          {
+            "step": 4,
+            "tool": "attempt_completion",
+            "action": "Reported the order confirmation code and total charged.",
+            "result": "Task progress reached 100%, followed by Task Complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Place exactly one call; if it fails, report failure rather than calling back.",
+          "Keep the call active until payment is confirmed and the confirmation code is obtained.",
+          "Preserve spelled letters in alphanumeric confirmation codes exactly."
+        ],
+        "terminal_condition": "Single call completed; payment and order were confirmed, and the confirmation code and total were reported.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "3ae580e9-b1f5-4520-9b13-404ec1c3aca4",
+        "rows_in": 8,
+        "rows_total": 15
+      }
+    },
+    {
+      "id": "9b9b7b01-63ab-49fe-bb97-8b9ab765b610",
+      "goal": "Call our new client at +16199153156 exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
+      "benchmark_task_name": "phone-call-client-intake",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T15:36:32.838Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "call_phone_number",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "request_user_approval",
+            "action": "Requested authorization to call [PHONE] once.",
+            "result": "User approval received."
+          },
+          {
+            "step": 2,
+            "tool": "call_phone_number",
+            "action": "Placed the single approved call to [PHONE] and collected the requested client details.",
+            "result": "Call completed successfully; no second call was placed."
+          },
+          {
+            "step": 3,
+            "tool": "attempt_completion",
+            "action": "Reported the client's exact full name and complete mailing address.",
+            "result": "Progress reached 100%, followed by Task Complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Obtain user approval before placing the phone call.",
+          "Do not retry or call back; the goal permits exactly one phone call."
+        ],
+        "terminal_condition": "Task completed after one successful call and reporting the exact full name and complete mailing address.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "9b9b7b01-63ab-49fe-bb97-8b9ab765b610",
+        "rows_in": 8,
+        "rows_total": 15
+      }
+    },
+    {
+      "id": "953c5d05-c4d0-41bd-a9ac-76692e115f29",
+      "goal": "Call Rose Test Logistics at +16199153156 exactly once and track package 2451338820. Navigate the automated phone menu using the keypad (not spoken digits) to reach package tracking, enter the full ten-digit tracking number 2451338820 using DTMF followed by the pound key, and obtain the delivery status. Do not call back or place a second phone call; if the single call fails, report that failure. Report the exact delivery status and reference code back to me.",
+      "benchmark_task_name": "phone-call-ivr-dtmf",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-02T18:18:37.982Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "call_phone_number",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "call_phone_number",
+            "action": "Initiated the only call to [PHONE] for package tracking.",
+            "result": "The call workflow paused for required user approval."
+          },
+          {
+            "step": 2,
+            "tool": "request_user_approval",
+            "action": "Obtained approval to place the phone call.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 3,
+            "tool": "call_phone_number",
+            "action": "On the same call, selected package tracking by keypad and sent DTMF 2451338820 followed by pound.",
+            "result": "The call completed and returned the delivery status and reference code; their values are not visible in the bounded transcript."
+          },
+          {
+            "step": 4,
+            "tool": "attempt_completion",
+            "action": "Reported the delivery status and reference code to the user.",
+            "result": "Progress reached 100%, and the task was marked complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Place exactly one call; do not retry or call back after a failure.",
+          "Use keypad DTMF rather than spoken digits.",
+          "Send all ten tracking digits, 2451338820, followed by the pound key.",
+          "Capture and report both the exact delivery status and reference code."
+        ],
+        "terminal_condition": "Single approved call completed; delivery status and reference code were reported, with no second call placed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "953c5d05-c4d0-41bd-a9ac-76692e115f29",
+        "rows_in": 8,
+        "rows_total": 18
+      }
+    },
+    {
+      "id": "47a026fd-bc3f-4289-9ea6-ae465a930ef4",
+      "goal": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediately; once the trigger fires, call me and tell me Bitcoin hit the target.",
+      "benchmark_task_name": "wait-for-trigger",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-01T12:55:44.512Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "wait_for",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "wait_for",
+            "action": "Check current Bitcoin USD price and trigger once reliable market data confirms BTC is at least $10.",
+            "result": "After one check, wait_for returned ERROR: condition not met."
+          },
+          {
+            "step": 2,
+            "tool": "call_phone_number",
+            "action": "Invoked call_phone_number after the wait_for attempt.",
+            "result": "A user approval request was opened and remained IN_PROGRESS."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "Three spawn_explore_agent operations and one web_search attempted to verify the current BTC/USD price.",
+            "why_it_failed": "They did not make wait_for recognize the condition; it reported not met after one check.",
+            "steps_wasted": 4
+          }
+        ],
+        "pitfalls": [
+          "wait_for explicitly reported that the condition was not met, so the trigger did not actually fire.",
+          "call_phone_number required user approval and did not complete the call during the run."
+        ],
+        "terminal_condition": "Stopped at user approval for call_phone_number; the phone call was not completed.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "47a026fd-bc3f-4289-9ea6-ae465a930ef4",
+        "rows_in": 10,
+        "rows_total": 17
+      }
+    },
+    {
+      "id": "144f7ea6-0b7e-40dc-87d6-e1279dc33632",
+      "goal": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
+      "benchmark_task_name": "claude-code-agent",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-09T00:37:41.645Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_code_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_code_agent",
+            "action": "Asked Claude Code to write and run Python for Collatz from 27, printing 27 through 1 and the transformation count.",
+            "result": "The coding task ran and returned Task Completed."
+          },
+          {
+            "step": 2,
+            "tool": "attempt_completion",
+            "action": "Submitted the completed Claude Code task for final evaluation.",
+            "result": "Progress reached 100% and the run was marked Task Complete."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Count transformations as steps, not the number of printed sequence values.",
+          "Print both endpoints: start with 27 and continue through 1."
+        ],
+        "terminal_condition": "Task Complete at 100%; the program was written and run successfully.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "144f7ea6-0b7e-40dc-87d6-e1279dc33632",
+        "rows_in": 9,
+        "rows_total": 21
+      }
+    },
+    {
+      "id": "e2681fe6-478d-431d-aa9c-f63d8ab1554b",
+      "goal": "what are all the top 100 repos on github where people are developing cuda kernels or cuda kernel adjacent\nPrefer kernel libraries, GPU kernel DSLs, CUDA samples/tooling, and inference/runtime projects with substantial hand-written CUDA/Triton/PTX kernels. Exclude one-off research paper demos that only incidentally use CUDA for an unrelated application.\nUse spawn_agent(type='code') / Claude Code (spawn_claude_code_agent) for GitHub discovery, ranking, and verification. Do NOT use spawn_agent(type='general_purpose'), spawn_general_purpose_agent, for_each, or browser agents — they are forbidden for this task and will fail the run. Prefer explore over browser if you need lightweight read-only research.\nSpawn at most one Claude Code session at a time; wait for each session to finish before spawning another (never fan out parallel claude_code / code_execution sessions).\nDo NOT pass github_repo_url / github_repo_link to spawn_claude_code_agent — sandbox GitHub cloning fails for many public repos (GITHUB_ACCESS_DENIED). Discover and verify via the GitHub REST API with the token below inside a code session that has no repo URL.\nGithub API token: [REDACTED]",
+      "benchmark_task_name": "cuda-kernel-github-top100-code-agent",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-09-04T23:58:29.374Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          },
+          {
+            "tool": "spawn_claude_code_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "set_plan",
+            "action": "Planned discovery, ranking, and verification for 100 CUDA-kernel or kernel-adjacent GitHub repositories.",
+            "result": "Created the execution plan titled “Top 100 GitHub CUDA-Kernel Development Repos”."
+          },
+          {
+            "step": 2,
+            "tool": "attempt_completion",
+            "action": "Advanced from planning into execution.",
+            "result": "Execute phase began."
+          },
+          {
+            "step": 3,
+            "tool": "spawn_explore_agent",
+            "action": "Compiled a seed list of established repositories focused on CUDA kernels and adjacent tooling.",
+            "result": "Returned seed research for the main discovery process."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_claude_code_agent",
+            "action": "Ran the main sequential code session to discover, filter, rank, and verify repositories through the GitHub REST API without a repo URL.",
+            "result": "After extended processing and continuation past an incomplete status, the task completed."
+          },
+          {
+            "step": 5,
+            "tool": "spawn_claude_code_agent",
+            "action": "Ran a second, non-overlapping code session to audit and refine the repository results.",
+            "result": "The verification session completed successfully."
+          },
+          {
+            "step": 6,
+            "tool": "attempt_completion",
+            "action": "Submitted the completed top-100 repository result.",
+            "result": "Progress reached 100%."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Do not use browser agents, general-purpose agents, or for_each; this run succeeded with explore and Claude Code only.",
+          "Do not pass a repository URL to Claude Code; perform GitHub discovery through the REST API inside a URL-less session.",
+          "Keep Claude Code sessions sequential; the successful run never fanned them out in parallel.",
+          "The main code session was long and showed “Task Incomplete” mid-run; continue it rather than treating that status as the final outcome."
+        ],
+        "terminal_condition": "Stopped at 100% with “Task Complete” after submitting the top-100 repository answer.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "e2681fe6-478d-431d-aa9c-f63d8ab1554b",
+        "rows_in": 70,
+        "rows_total": 111
+      }
+    },
+    {
+      "id": "bbe528aa-6e41-4007-9b3a-0563efab92fb",
+      "goal": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
+      "benchmark_task_name": "gate-source-connect-gmail",
+      "passed": true,
+      "root_status": "ACTIVE",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-07-24T03:09:49.566Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_explore_agent",
+            "start_url": null
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_explore_agent",
+            "action": "Delegated a Gmail-source search for the latest message mentioning renewal clause, renewal, auto-renewal, or contract renewal.",
+            "result": "The explorer began locating relevant Gmail messages and extracting the clause and message metadata."
+          },
+          {
+            "step": 2,
+            "tool": "grep",
+            "action": "Searched all local data for \"renewal clause|auto-renewal|contract renewal|renewal\".",
+            "result": "Produced renewal-related matches used to identify the latest relevant Gmail message."
+          },
+          {
+            "step": 3,
+            "tool": "reasoning",
+            "action": "Selected the latest matching Gmail message and summarized its renewal clause from the retrieved content.",
+            "result": "Returned the requested renewal-clause summary."
+          }
+        ],
+        "detours": [
+          {
+            "tried": "The delegated explore-agent call ultimately returned an ERROR after producing intermediate search results.",
+            "why_it_failed": "It did not provide a clean terminal tool result, so the run relied on findings emitted before the error.",
+            "steps_wasted": 1
+          }
+        ],
+        "pitfalls": [
+          "The source must be verified as Gmail; matches from unrelated local data do not satisfy the goal.",
+          "Preserve intermediate grep findings because the explore agent may error after useful retrieval."
+        ],
+        "terminal_condition": "Returned a summary of the renewal clause from the latest matching Gmail message.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "bbe528aa-6e41-4007-9b3a-0563efab92fb",
+        "rows_in": 8,
+        "rows_total": 14
+      }
+    },
+    {
+      "id": "f60e976d-03c8-403a-af16-d13c7e09d71c",
+      "goal": "Make a post on X.com that says, Hello World\n\nUse the already signed-in X session in the browser if one is available. Do not create a new X account and do not clear or replace existing X cookies. Post the text exactly: Hello World.",
+      "benchmark_task_name": "minted-agent-accounts-x-post",
+      "passed": true,
+      "root_status": "COMPLETED",
+      "world_model_mode": "real",
+      "agent_created_at": "2026-08-21T23:18:24.818Z",
+      "critical_path": {
+        "outcome": "passed",
+        "entry_points": [
+          {
+            "tool": "spawn_browser_agent",
+            "start_url": "https://x.com/home"
+          }
+        ],
+        "critical_path": [
+          {
+            "step": 1,
+            "tool": "spawn_browser_agent",
+            "action": "Opened https://x.com/home using the existing browser session.",
+            "result": "X home loaded with the available signed-in session."
+          },
+          {
+            "step": 2,
+            "tool": "spawn_browser_agent",
+            "action": "Typed exactly \"Hello World\" into the Post text field.",
+            "result": "The post was composed with the required text."
+          },
+          {
+            "step": 3,
+            "tool": "request_user_approval",
+            "action": "Requested approval for the external write action.",
+            "result": "User approval was received."
+          },
+          {
+            "step": 4,
+            "tool": "spawn_browser_agent",
+            "action": "Continued after write permission was granted and published the composed post.",
+            "result": "The task was reported complete and browser automation finished."
+          }
+        ],
+        "detours": [],
+        "pitfalls": [
+          "Obtain user approval before publishing the post.",
+          "Enter the text exactly as \"Hello World\".",
+          "Use the existing signed-in session; do not create an account or alter X cookies."
+        ],
+        "terminal_condition": "Post published successfully; browser automation and the task were marked complete.",
+        "first_unmet_requirement": null
+      },
+      "compressor_version": "cp-v7",
+      "source": {
+        "bundle": "f60e976d-03c8-403a-af16-d13c7e09d71c",
+        "rows_in": 17,
+        "rows_total": 45
+      }
+    }
+  ]
+}

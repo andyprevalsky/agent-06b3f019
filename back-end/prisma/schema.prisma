@@ -65,6 +65,7 @@ model Agent {
   writeLockEnabled                 Boolean                   @default(true)
   fastModeCacheEnabled             Boolean                   @default(true)
   worldModelMode                   String                    @default("real")
+  memoryEnabled                    Boolean                   @default(true)
   isBenchmark                      Boolean                   @default(false)
   githubRepoUrl                    String?
   parent                           Agent?                    @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
@@ -1577,4 +1578,33 @@ model AgentQueuePointer {
   surfaceHash String
   updatedBy   String?
   updatedAt   DateTime @updatedAt
+}
+
+// Planner memory: one row per finalized root trace bundle (written in the same
+// finalize path that publishes the R2 manifest, so the table and the archive
+// never drift). `criticalPath` is filled lazily on first retrieval (cache, no
+// TTL): the worker reads the bundle, compresses the trajectory once, and
+// stores the result here. Retrieval is one indexed FTS query per planner call.
+model PlannerMemory {
+  id                String    @id
+  userId            String?
+  goal              String
+  goalTokens        String[]  @default([])
+  benchmarkTaskName String?
+  rootStatus        String?
+  passed            Boolean?
+  worldModelMode    String    @default("real")
+  agentCreatedAt    DateTime?
+  archivedAt        DateTime  @default(now())
+  criticalPath      Json?
+  compressorVersion String?
+  compressedAt      DateTime?
+  compressionLeaseId    String?
+  compressionLeaseUntil DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([benchmarkTaskName])
+  @@index([userId])
+  @@index([passed, archivedAt])
 }

@@ -98,6 +98,7 @@ from benchmarks.phone_callee import (
     phone_search_text,
     resolve_callee_prompt,
 )
+from benchmarks.plan_assertions import evaluate_plan_assertions, find_accepted_plan
 from benchmarks.polar_catalog import (
     is_polar_bench_task,
     polar_browser_step_budget,
@@ -2419,6 +2420,8 @@ async def create_agent(
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
+    # Planner memory is an explicit per-run A/B flag: default off for every benchmark.
+    body["memory_enabled"] = task.memory == "on"
     if task.response_schema:
         body["response_schema"] = task.response_schema
 
@@ -3988,6 +3991,18 @@ async def poll_agent(
             data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
             data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
 
+        if task.success_on_plan:
+            accepted_plan = find_accepted_plan(messages)
+            if accepted_plan is not None:
+                # Plan-only A/B: the accepted plan is the deliverable. Pause the
+                # agent right here so the DAG never executes (no browser sessions,
+                # no spend beyond planning); the runner deletes it after grading.
+                data["_benchmark"]["plan"] = accepted_plan
+                if status not in TERMINAL_STATUSES and not await pause_agent(base_url, agent_id):
+                    print(f"    ⚠ Could not pause plan-only agent {agent_id[:12]} after its plan was accepted")
+                print(f"    ✅ Plan accepted ({len(accepted_plan.get('tasks') or [])} tasks) — plan-only task stops here")
+                return data, approvals_triggered, approvals_resolved, None
+
         if step_budget and status not in TERMINAL_STATUSES:
             browser_steps = _agent_class_step_counts(data).get("browser", {})
             used_steps = max(browser_steps.values()) if browser_steps else 0
@@ -4957,6 +4972,13 @@ def evaluate_task(
         if observed >= expected:
             return True, None
         return False, f"Expected {expected} approval requests, observed {observed}"
+
+    if task.success_on_plan:
+        plan = data.get("_benchmark", {}).get("plan") or find_accepted_plan(data.get("messages") or [])
+        if plan:
+            data.setdefault("_benchmark", {})["plan"] = plan
+            return True, None
+        return False, "Expected an accepted plan (plan-only task) but none was observed"
 
     if task.success_on_payment_card_request:
         benchmark_state = data.get("_benchmark", {})
@@ -6206,6 +6228,17 @@ def _sync_compute_tokens(
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     if tolerate_claude_code_unavailable:
         env["SEED_ALLOW_MISSING_CLAUDE_CODE"] = "1"
+        # The running backend is the source of truth for fallback readiness,
+        # and it accepts either its shared Anthropic key or the OpenRouter
+        # Anthropic-compatible gateway.  ``--compute-tokens-only`` deliberately
+        # does not load back-end/.env, so carry only those two already-configured
+        # candidates into the seed subprocess.  Otherwise the backend can prove
+        # OpenRouter ready while seed-local sees neither key and rejects the same
+        # fallback contract before any benchmark agent is created.
+        for fallback_env_name in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"):
+            fallback_value = load_env_var(fallback_env_name, _BACKEND_ENV)
+            if fallback_value:
+                env[fallback_env_name] = fallback_value
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
@@ -7283,6 +7316,41 @@ LIVE_FIXTURE_APPLIERS = {
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
 )
+
+
+async def _apply_memory_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
+    """Load the task's planner-memory fixtures into the local stack's history table.
+
+    A memory fixture (agents/benchmarks/fixtures/memory/<name>.json) is a set of
+    pre-compressed PlannerMemory rows built from real passing bundles. Rows are
+    upserted through the internal API so the memory-on arm retrieves exactly the
+    declared history. Local stacks only: a prod base_url already holds the real
+    history and must never receive fixture rows.
+    """
+    names = list((task.environment or {}).get("memory_fixtures") or [])
+    if not names or task.memory != "on":
+        return []
+    if not _is_local_base_url(base_url):
+        print(f"    🧠 memory fixtures {names} skipped (non-local base_url uses the real history table)")
+        return []
+    from scripts.build_memory_fixture import load_fixture
+
+    headers = {**(await _api_headers())}
+    applied: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for name in names:
+            fixture = load_fixture(name)
+            for row in fixture.get("rows", []):
+                body = {k: v for k, v in row.items() if k in {
+                    "goal", "benchmark_task_name", "passed", "root_status", "world_model_mode",
+                    "agent_created_at", "critical_path", "compressor_version",
+                }}
+                resp = await client.put(f"{base_url}/api/planner-memory/{row['id']}", headers=headers, json=body)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"memory fixture {name}: upsert {row['id']} failed {resp.status_code} {resp.text[:200]}")
+            applied.append({"fixture": name, "rows": len(fixture.get("rows", []))})
+            print(f"    🧠 memory fixture {name}: {len(fixture.get('rows', []))} row(s) loaded")
+    return applied
 
 
 async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
@@ -11273,6 +11341,13 @@ def _run_declared_static_check(
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
+        if check_type == "plan_shape":
+            plan = benchmark_state.get("plan") or find_accepted_plan(data.get("messages") or [])
+            assertions = {k: v for k, v in check.items() if k != "type"}
+            ok, failures = evaluate_plan_assertions(plan, assertions)
+            if not ok:
+                return False, "Plan shape: " + "; ".join(failures)
+            continue
         if check_type == "expected_payment_receipt":
             required_when = check.get("required_when_attention_kinds")
             observed_kind = benchmark_state.get("attention_request_kind_seen")
@@ -12059,6 +12134,9 @@ async def run_single_task(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
+        if memory_fixture_manifests:
+            live_fixture_manifests.append({"kind": "memory", "fixtures": memory_fixture_manifests})
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")

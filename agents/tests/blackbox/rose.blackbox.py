@@ -215,13 +215,21 @@ def test_pool_registry_lookup():
     assert lite.gpt_auth_model == "gpt-5.6-terra"
     assert len(lite.waterfall) >= 1
     assert ultra.name == "rose-1-ultra"
-    assert ultra.claude_auth_model.startswith("claude-")
+    from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
+    from providers.rose.pools import PARAM_POPULATOR_MODEL
+
+    assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
+    assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
+    assert ultra.claude_auth_model == "claude-fable-5-1"
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
-    # Anthropic dropped: sol leads (cheaper AND higher-scoring than opus-4.8),
-    # kimi-k3 backs it from a different vendor.
+    # OpenRouter fable 5.1 is $10/$50 per M vs sol $2/$10, so the paid
+    # waterfall stays sol -> kimi. claudeAuth is the only fable 5.1 hop.
     assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert "anthropic/claude-fable-5.1" not in ultra.waterfall
+    assert browser_use.claude_auth_model == "claude-fable-5-1"
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
     assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
     assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
     assert lite.waterfall != ultra.waterfall
@@ -976,10 +984,8 @@ def test_reconstruct_agent_response_handles_non_dict_input():
 
 
 def test_transform_messages_for_openai_adds_cache_breakpoints():
-    """Cache-control contract for the OR waterfall path: only the first system
-    message's trailing block gets marked. The last user message must NOT be
-    marked because Gemini-via-OR uses the LAST cache_control as the cache key,
-    which would defeat caching when that block is per-call dynamic.
+    """Cache-control contract for unscoped OR helper calls: only the first
+    system message is marked, never a mutable user tail.
     """
     msgs = [
         {"role": "system", "content": "you are helpful"},
@@ -997,6 +1003,29 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert out[2] == {"role": "assistant", "content": "hi"}
     # Original not mutated
     assert msgs[0]["content"] == "you are helpful"
+    assert msgs[1]["content"] == "hello"
+
+
+def test_transform_messages_for_openai_marks_explicit_cache_conversation_prefix():
+    """Explicit-cache providers may include the stable opening turn.
+
+    The opening user goal remains byte-identical across an agent task's later
+    turns. The mutable conversation tail must remain outside the breakpoint.
+    """
+    msgs = [
+        {"role": "system", "content": "stable rules"},
+        {"role": "user", "content": "stable task goal"},
+        {"role": "assistant", "content": "working"},
+        {"role": "tool", "content": "dynamic result"},
+    ]
+
+    out = transform_messages_for_openai(msgs, cache_opening_user=True)
+
+    assert out[1]["content"] == [
+        {"type": "text", "text": "stable task goal", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert out[-1] == {"role": "tool", "content": "dynamic result"}
+    assert msgs[1]["content"] == "stable task goal", "callers' messages must not be mutated"
 
 
 def test_transform_messages_for_openai_stamps_tool_call_type():
@@ -1158,6 +1187,75 @@ def test_build_anthropic_body_identity_and_cache_block():
     cached_blocks = [b for b in sys if "cache_control" in b]
     assert len(cached_blocks) == 1
     assert cached_blocks[0]["cache_control"] == {"type": "ephemeral", "scope": "global"}
+
+
+_SPAWN_AGENT_TOOL = [
+    {
+        "name": "spawn_agent",
+        "description": "spawn",
+        "input_schema": {"type": "object", "properties": {}},
+    }
+]
+
+
+def test_fable_5_1_downgrades_named_tool_choice_to_auto():
+    """claude-fable-5-1 400s on tool_choice type tool/any (Anthropic docs)."""
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-fable-5-1"
+    assert body["tool_choice"] == {
+        "type": "auto",
+        "disable_parallel_tool_use": True,
+    }
+
+
+def test_fable_5_1_downgrades_any_tool_choice_to_auto():
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-browser-use"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-fable-5-1"
+    assert body["tool_choice"] == {"type": "auto"}
+
+
+def test_sonnet_and_legacy_fable_5_keep_named_tool_choice():
+    sonnet = build_anthropic_body(
+        pool_spec=get_pool("rose-1-lite"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert sonnet["tool_choice"]["type"] == "tool"
+    assert sonnet["tool_choice"]["name"] == "spawn_agent"
+
+    legacy = build_anthropic_body(
+        pool_spec=PoolSpec(
+            name="rose-1-ultra",
+            claude_auth_model="claude-fable-5",
+            gpt_auth_model="gpt-5.6-sol",
+            waterfall=(),
+        ),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice={"name": "spawn_agent"},
+        response_format=None,
+        max_tokens=128,
+    )
+    assert legacy["model"] == "claude-fable-5"
+    assert legacy["tool_choice"]["type"] == "tool"
+    assert legacy["tool_choice"]["name"] == "spawn_agent"
 
 
 def test_build_anthropic_body_provider_fast_mode_supported_opus_only():
@@ -2903,6 +3001,183 @@ def test_build_openrouter_body_includes_optionals():
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42
     assert body["seed"] == 7
+
+
+def test_build_openrouter_body_uses_logical_sequence_for_sticky_routing():
+    sequence_id = "agent:parent:task:explore-a:call:explore_agent"
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "stable task goal"},
+        ],
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace=sequence_id,
+    )
+
+    assert body["session_id"] == sequence_id
+
+
+def _gemini_completed_tool_messages():
+    return [
+        {"role": "system", "content": "stable rules"},
+        {"role": "user", "content": "stable task goal"},
+        {
+            "role": "assistant",
+            "content": "researching",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "web_search", "arguments": '{"query":"facts"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": "x" * 21_000,
+        },
+    ]
+
+
+def test_build_openrouter_body_pins_large_gemini_completed_tool_prefix():
+    """Gemini keeps one fixed explicit marker as append-only history grows."""
+    sequence_id = "agent:parent:task:explore-a:call:explore_agent"
+    messages = _gemini_completed_tool_messages()
+    original_messages = json.loads(json.dumps(messages))
+    first_body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=messages,
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace=sequence_id,
+    )
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "content": "continuing",
+                "tool_calls": [
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": '{"query":"more"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-2", "content": "new result"},
+        ]
+    )
+    second_body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=messages,
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace=sequence_id,
+    )
+
+    first_marker = first_body["messages"][3]["content"][-1]["cache_control"]
+    second_marker = second_body["messages"][3]["content"][-1]["cache_control"]
+    assert first_marker == second_marker == {"type": "ephemeral"}
+    assert json.dumps(first_body["messages"]).count('"cache_control"') == 1
+    assert json.dumps(second_body["messages"]).count('"cache_control"') == 1
+    assert first_body["messages"] == second_body["messages"][:4]
+    assert first_body["session_id"] == second_body["session_id"] == sequence_id
+    assert original_messages == messages[:4], "outbound cache transforms mutated the caller's nested history"
+
+
+def test_build_openrouter_body_keeps_gemini_2_5_explicit():
+    body = build_openrouter_body(
+        model="google/gemini-2.5-flash",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "stable task goal"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-2.5-sequence",
+    )
+
+    assert "cache_control" in json.dumps(body["messages"])
+
+
+def test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini():
+    marker = {"type": "ephemeral"}
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "large stable reference", "cache_control": marker}],
+            },
+            {"role": "user", "content": "question"},
+            *_gemini_completed_tool_messages()[2:],
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-sequence",
+    )
+
+    assert body["messages"][0]["content"][0]["cache_control"] == marker
+    assert json.dumps(body["messages"]).count('"cache_control"') == 1
+
+
+def test_build_openrouter_body_skip_cache_write_suppresses_synthesized_gemini_marker():
+    body = build_openrouter_body(
+        model="google/gemini-3.6-flash",
+        messages=_gemini_completed_tool_messages(),
+        tools=[{"type": "function", "function": {"name": "web_search"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="gemini-sequence",
+        skip_cache_write=True,
+    )
+
+    assert "cache_control" not in json.dumps(body["messages"])
+
+
+def test_build_openrouter_body_retains_explicit_model_breakpoints():
+    body = build_openrouter_body(
+        model="anthropic/claude-haiku-4.5",
+        messages=[
+            {"role": "system", "content": "stable rules"},
+            {"role": "user", "content": "task goal"},
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+        cache_namespace="anthropic-sequence",
+    )
+
+    assert "cache_control" in json.dumps(body["messages"])
 
 
 TOOL_HISTORY_MESSAGES = [
@@ -6175,12 +6450,14 @@ async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth(
                 pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "Use a browser child"}],
                 response_model=_AgentAction,
+                cache_namespace="agent:parent:task:explore-a:call:explore_agent",
             )
         )
 
     assert any(chunk.kind == "tool_call" for chunk in chunks)
     assert captured["response_format"] is None
     assert captured["tool_choice"] == "any"
+    assert captured["cache_namespace"] == "agent:parent:task:explore-a:call:explore_agent"
     assert {tool["name"] for tool in captured["tools"]} == {
         "spawn_agent",
         "attempt_completion",
@@ -6327,6 +6604,10 @@ async def run_all_tests():
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
     r.record(
+        "openai_messages_stable_conversation_cache_prefix",
+        test_transform_messages_for_openai_marks_explicit_cache_conversation_prefix,
+    )
+    r.record(
         "openai_messages_tool_call_type_discriminator",
         test_transform_messages_for_openai_stamps_tool_call_type,
     )
@@ -6430,6 +6711,30 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record(
+        "openrouter_body_logical_sequence_sticky_routing",
+        test_build_openrouter_body_uses_logical_sequence_for_sticky_routing,
+    )
+    r.record(
+        "openrouter_body_gemini_fixed_completed_tool_prefix",
+        test_build_openrouter_body_pins_large_gemini_completed_tool_prefix,
+    )
+    r.record(
+        "openrouter_body_gemini_2_5_explicit_prompt_cache",
+        test_build_openrouter_body_keeps_gemini_2_5_explicit,
+    )
+    r.record(
+        "openrouter_body_gemini_caller_cache_breakpoint",
+        test_build_openrouter_body_preserves_caller_cache_breakpoints_for_gemini,
+    )
+    r.record(
+        "openrouter_body_gemini_skip_cache_write",
+        test_build_openrouter_body_skip_cache_write_suppresses_synthesized_gemini_marker,
+    )
+    r.record(
+        "openrouter_body_explicit_model_cache_breakpoint",
+        test_build_openrouter_body_retains_explicit_model_breakpoints,
+    )
     r.record(
         "named_tool_choice_degrades_only_for_google",
         test_named_tool_choice_degrades_only_for_google_routes,
@@ -6606,6 +6911,18 @@ async def run_all_tests():
     r.record(
         "anthropic_body_native_tools_force_any_with_parallel",
         test_build_anthropic_body_native_tools_force_any_with_parallel,
+    )
+    r.record(
+        "fable_5_1_downgrades_named_tool_choice_to_auto",
+        test_fable_5_1_downgrades_named_tool_choice_to_auto,
+    )
+    r.record(
+        "fable_5_1_downgrades_any_tool_choice_to_auto",
+        test_fable_5_1_downgrades_any_tool_choice_to_auto,
+    )
+    r.record(
+        "sonnet_and_legacy_fable_5_keep_named_tool_choice",
+        test_sonnet_and_legacy_fable_5_keep_named_tool_choice,
     )
     r.record(
         "anthropic_body_never_sets_thinking_by_default",

@@ -28,6 +28,7 @@ export async function findExistingAgentsByIds(agentIds: string[], userId: string
       responseSchema: true,
       fastModeCacheEnabled: true,
       worldModelMode: true,
+      memoryEnabled: true,
       priceLimitCents: true,
       workflowMaxIterations: true,
       workflowContextGates: true,

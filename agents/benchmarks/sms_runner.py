@@ -134,9 +134,7 @@ def _read_transcript(deps: SmsRunnerDeps, user_id: str) -> list[dict]:
     ``SmsSession.messages`` is a JSON *string* wrapped in jsonb (see
     sessionStore.ts), so it needs one unwrap before parsing.
     """
-    raw = deps.run_sql(
-        'SELECT messages FROM "SmsSession" WHERE "userId" = ' f"{deps.sql_literal(user_id)};"
-    ).strip()
+    raw = deps.run_sql(f'SELECT messages FROM "SmsSession" WHERE "userId" = {deps.sql_literal(user_id)};').strip()
     if not raw:
         return []
     try:
@@ -166,9 +164,7 @@ def _read_spend_state(deps: SmsRunnerDeps, user_id: str) -> SpendState:
 
 
 def _user_phone(deps: SmsRunnerDeps, user_id: str) -> str:
-    phone = deps.run_sql(
-        'SELECT phone FROM "User" WHERE "userId" = ' f"{deps.sql_literal(user_id)};"
-    ).strip()
+    phone = deps.run_sql(f'SELECT phone FROM "User" WHERE "userId" = {deps.sql_literal(user_id)};').strip()
     if not phone:
         raise RuntimeError(
             f"Benchmark user {user_id} has no phone number; the SMS supervisor cannot be driven "
@@ -236,9 +232,9 @@ def _seed_agents(deps: SmsRunnerDeps, user_id: str, seed_agents: list[dict]) -> 
         tree_cost_cents = int(agent.get("tree_cost_cents", 0))
         row = deps.run_sql(
             'INSERT INTO "Agent" (id, "userId", goal, status, progress, source, "isBenchmark", '
-            '"priceLimitCents", "treeCostCents", "createdAt", "updatedAt") VALUES (gen_random_uuid(), '
+            '"memoryEnabled", "priceLimitCents", "treeCostCents", "createdAt", "updatedAt") VALUES (gen_random_uuid(), '
             f"{deps.sql_literal(user_id)}, {deps.sql_literal(goal)}, "
-            f"{deps.sql_literal(status)}::\"AgentStatus\", {progress}, 'SMS'::\"AgentSource\", true, "
+            f'{deps.sql_literal(status)}::"AgentStatus", {progress}, \'SMS\'::"AgentSource", true, false, '
             f"{price_limit_cents}, {tree_cost_cents}, NOW(), NOW()) RETURNING id;"
         ).strip()
         if row:
@@ -366,9 +362,7 @@ def _backend_log_size() -> int:
 
 
 def _live_agent_ids(deps: SmsRunnerDeps, user_id: str) -> set[str]:
-    rows = deps.run_sql(
-        f'SELECT id FROM "Agent" WHERE "userId" = {deps.sql_literal(user_id)};'
-    ).strip()
+    rows = deps.run_sql(f'SELECT id FROM "Agent" WHERE "userId" = {deps.sql_literal(user_id)};').strip()
     return {line.strip() for line in rows.splitlines() if line.strip()}
 
 
@@ -432,9 +426,7 @@ async def _drive_turn(
         timeout=aiohttp.ClientTimeout(total=30),
     ) as response:
         if response.status != 200:
-            raise RuntimeError(
-                f"Inbound SMS webhook returned {response.status}: {(await response.text())[:300]}"
-            )
+            raise RuntimeError(f"Inbound SMS webhook returned {response.status}: {(await response.text())[:300]}")
 
     outbound: list[str] = []
     lifecycle: list[str] = []
@@ -446,16 +438,9 @@ async def _drive_turn(
         # what the per-turn budget governs. `lifecycle` is an agent announcing
         # itself on its own channel; scoring those against the supervisor's
         # budget marks correct behavior as spam (it did, before this split).
-        fresh = [
-            entry for entry in _read_transcript(deps, user_id)[baseline:]
-            if entry.get("role") == "assistant"
-        ]
-        current = [
-            str(e.get("content") or "") for e in fresh if e.get("origin") != "agent-lifecycle"
-        ]
-        current_lifecycle = [
-            str(e.get("content") or "") for e in fresh if e.get("origin") == "agent-lifecycle"
-        ]
+        fresh = [entry for entry in _read_transcript(deps, user_id)[baseline:] if entry.get("role") == "assistant"]
+        current = [str(e.get("content") or "") for e in fresh if e.get("origin") != "agent-lifecycle"]
+        current_lifecycle = [str(e.get("content") or "") for e in fresh if e.get("origin") == "agent-lifecycle"]
         if len(current) != len(outbound) or len(current_lifecycle) != len(lifecycle):
             outbound = current
             lifecycle = current_lifecycle
@@ -567,10 +552,7 @@ def run_sms_static_check(evaluator: dict, turns: list[SmsTurn]) -> tuple[bool, s
                     continue
                 spawned = turn.spend_after.agent_count - turn.spend_before.agent_count
                 if spawned != expected:
-                    return False, (
-                        f"Turn {index} ({turn.inbound!r}) started {spawned} agent(s), expected "
-                        f"{expected}"
-                    )
+                    return False, (f"Turn {index} ({turn.inbound!r}) started {spawned} agent(s), expected {expected}")
             continue
         if check_type == "sms_lifecycle_announced":
             # Starting work the user never hears about is its own failure, and it
@@ -667,12 +649,10 @@ Clarification of the declared criteria: {evaluator.get("judge_prompt", "")}
 """
 
 
-async def run_sms_llm_judge(
-    task: BenchmarkTask, evaluator: dict, turns: list[SmsTurn], scenario: dict
-) -> dict:
+async def run_sms_llm_judge(task: BenchmarkTask, evaluator: dict, turns: list[SmsTurn], scenario: dict) -> dict:
     """Judge the SMS trajectory itself — what the human's phone actually showed."""
-    from helpers.llm import check_progress
     from benchmarks.run_benchmark import _benchmark_judge_claude_auth_kwargs
+    from helpers.llm import check_progress
 
     claude_auth = await _benchmark_judge_claude_auth_kwargs()
     return await check_progress(
@@ -790,9 +770,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
                 for message in result.outbound:
                     print(f"       ↳ {message[:140]}")
 
-        passed, failure_reason, evaluator_results = await evaluate_sms_turns(
-            task, turns, build_judge_scenario(script)
-        )
+        passed, failure_reason, evaluator_results = await evaluate_sms_turns(task, turns, build_judge_scenario(script))
     except Exception as exc:  # noqa: BLE001 — a harness error is a task failure, not a crash
         execution_error = True
         passed = False

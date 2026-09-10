@@ -58,7 +58,7 @@ def _load_upstream_otel_adapter_class():
         except ModuleNotFoundError:
             pass
     reference = Path(__file__).resolve().parents[3] / ".context" / "reference" / "world-model-harness"
-    if not reference.exists():
+    if not (reference / "wmh" / "core" / "types.py").is_file():
         from wmh.ingest.otel_genai import OtelGenAIAdapter
 
         return OtelGenAIAdapter

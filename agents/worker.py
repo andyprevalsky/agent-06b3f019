@@ -35,6 +35,7 @@ if not os.getenv("BACKEND_API_KEY"):
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
 from config import load_config
+from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.gate.repo import (
     create_gate_request_activity,
@@ -44,7 +45,6 @@ from domains.gate.repo import (
     source_status_activity,
 )
 from domains.grep.repo import fetch_local_data_summary, grep_activity
-from domains.api_request.repo import api_request_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
 from domains.message_person.repo import (
     fetch_recent_messages_activity,
@@ -140,7 +140,6 @@ from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_generation import resolve_production_task_queue
 from helpers.world_model_runtime import world_model_step_activity
-from providers.planner_rag import warm_index as warm_planner_rag_index
 from temporal_connection import temporal_connect_options
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -1212,7 +1211,6 @@ async def main():
     # Warm the planner-RAG index (one encrypted object from the archive
     # backend) so the first set_plan on this worker does not pay the cold
     # load. Best-effort: retrieval degrades to "no reference plans".
-    asyncio.create_task(warm_planner_rag_index())
 
     # Create worker with all workflows and activities
     shutdown_grace_seconds = parse_shutdown_grace_seconds(

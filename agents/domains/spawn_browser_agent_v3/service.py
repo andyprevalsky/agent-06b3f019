@@ -742,6 +742,7 @@ def build_browser_task_prompt(goal: str) -> str:
 # calls in the usage ledger. It contains NUL so it can never collide with a real
 # model name, and it must NEVER escape into an emitted usage row.
 _FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+_CACHE_SEQUENCE_LEDGER_MARKER = "\x00cache_sequence:"
 
 
 def accumulate_model_usage(
@@ -752,6 +753,7 @@ def accumulate_model_usage(
     cache_read_input_tokens: int = 0,
     cache_creation_input_tokens: int = 0,
     from_fast_cache: bool = False,
+    cache_sequence_id: Optional[str] = None,
 ) -> None:
     """Add one LLM call's tokens to the per-actual-model usage ledger.
 
@@ -770,11 +772,22 @@ def accumulate_model_usage(
     into a model's paid bucket would make every paid token on that model free.
     The ledger key is therefore (actual_model, from_fast_cache); each bucket
     carries its own `model` so the emitted row still reports the plain name.
+
+    Calls carrying a provider cache sequence remain separate ledger rows. The
+    benchmark ratchet needs every inference in that sequence (including its
+    first write) to measure genuine within-run reuse; collapsing those calls
+    into one per-model row destroys both their multiplicity and identity.
     """
     model = str(actual_model or "")
     # NUL can never occur in a model name, so this cannot collide with a real
     # model whose name happens to end in the marker text.
     key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
+    sequence_id = str(cache_sequence_id or "").strip()
+    if sequence_id:
+        key = (
+            f"{key}{_CACHE_SEQUENCE_LEDGER_MARKER}{sequence_id}"
+            f"\x00call:{len(usage_by_model)}"
+        )
     bucket = usage_by_model.setdefault(
         key,
         {
@@ -784,6 +797,7 @@ def accumulate_model_usage(
             "cache_read_input_tokens": 0,
             "cache_creation_input_tokens": 0,
             "from_fast_cache": 1 if from_fast_cache else 0,
+            **({"cache_sequence_id": sequence_id} if sequence_id else {}),
         },
     )
     bucket["input_tokens"] += int(input_tokens or 0)
@@ -832,8 +846,11 @@ def build_browser_llm_usage_items(
         raw_model = (usage or {}).get("model")
         if raw_model is None:
             # Hand-built ledger (no `model` key): the key IS the model name.
-            # Strip the marker defensively so it can never reach a usage row.
+            # Strip internal markers defensively so they can never reach a
+            # usage row, even when a test or legacy caller constructs the
+            # ledger without going through `accumulate_model_usage`.
             model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+            model = model.split(_CACHE_SEQUENCE_LEDGER_MARKER, 1)[0]
         else:
             model = str(raw_model)
         items.append(
@@ -856,6 +873,11 @@ def build_browser_llm_usage_items(
                 "cache_read_input_tokens": int((usage or {}).get("cache_read_input_tokens") or 0),
                 "cache_creation_input_tokens": int((usage or {}).get("cache_creation_input_tokens") or 0),
                 "from_fast_cache": bool((usage or {}).get("from_fast_cache")),
+                **(
+                    {"cache_sequence_id": str((usage or {}).get("cache_sequence_id"))}
+                    if (usage or {}).get("cache_sequence_id")
+                    else {}
+                ),
             }
         )
     return items
@@ -931,6 +953,11 @@ def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]
                     # Propagate fast-cache replay so replayed browser
                     # steps bill $0 instead of their replayed tokens.
                     "from_fast_cache": item.get("from_fast_cache", False),
+                    **(
+                        {"cache_sequence_id": item.get("cache_sequence_id")}
+                        if item.get("cache_sequence_id")
+                        else {}
+                    ),
                 }
             )
         else:

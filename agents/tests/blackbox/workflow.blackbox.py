@@ -6597,6 +6597,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-approval-jit"
     wf.user_id = "user-1"
+    wf.model = "rose-labs/rose-1-lite"
     wf.current_phase = "EXECUTE"
     wf.fast_mode_cache_enabled = True
     wf.fast_cache_goal = "Call the restaurant and book dinner"
@@ -6690,6 +6691,10 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         ]
         assert len(llm_args) <= len(positional_params)
         assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
+        from domains.param_populator.config import PARAM_POPULATOR_MODEL
+
+        assert llm_args[1] == PARAM_POPULATOR_MODEL
+        assert llm_args[1] != wf.model
         assert llm_args[8] == "approval_param_populator"
         assert llm_args[9] == "stable system prompt"
         assert "its 1:45pm local time" in llm_args[10]

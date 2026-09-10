@@ -394,6 +394,7 @@ def build_codex_responses_body(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -429,6 +430,10 @@ def build_codex_responses_body(
     }
     body["instructions"] = instructions
     responses_tools = _responses_tools(tools)
+    # Responses input may retain historical function_call/output items without
+    # re-declaring those functions. Definitions in body.tools are selectable,
+    # so context-only tools must never be added to that callable set.
+    del context_tools
     if responses_tools:
         body["tools"] = responses_tools
     if response_format:
@@ -452,6 +457,7 @@ async def gpt_auth_complete(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -469,6 +475,7 @@ async def gpt_auth_complete(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
@@ -557,6 +564,7 @@ async def openai_api_key_complete(
     messages: List[Dict[str, Any]],
     response_format: Optional[Dict[str, Any]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    context_tools: Optional[List[Dict[str, Any]]] = None,
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
@@ -575,6 +583,7 @@ async def openai_api_key_complete(
         messages=messages,
         response_format=response_format,
         tools=tools,
+        context_tools=context_tools,
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
