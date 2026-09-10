@@ -1667,6 +1667,7 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -3019,13 +3020,15 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
 fi
 assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
+fi
 
 # Cooperative predeploy cancellation walks only the poller/waiter descendant
 # tree; the paid controller has already been reparented into its own session.
 # Drive a controller that ignores TERM after crossing provider allocation. The
-# identity-fenced waiter must escalate to KILL. Because no guest cleanup was
-# acknowledged, out-of-process recovery must retain the exact durable owner
-# instead of converting controller death into machine-destroy authority.
+# identity-fenced waiter must escalate to KILL. No in-process guest cleanup can
+# run after that boundary, so the out-of-process recovery entrypoint must execute
+# from the real script in source order, reconnect the exact guest, prove its
+# shutdown acknowledgement, and only then reap exact durable ownership.
 reset_fake_state
 rm -f "$POOL_A" "$POOL_B"
 rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
@@ -3151,14 +3154,11 @@ PIDS=()
 [ "$cancel_wait_status" -ne 0 ] ||
     fail "canceled detached wait unexpectedly returned success"
 
-[ -d "$cancel_target_registry" ] ||
-    fail "unacknowledged detached cancellation discarded its exact owner registry"
-[ "$(sed -n 's/^cleanup_policy=//p' "$cancel_target_registry/meta")" = retain ] ||
-    fail "unacknowledged detached cancellation made its owner registry reapable"
-[ -e "$cancel_target_registry/guest-cleanup-unconfirmed" ] ||
-    fail "unacknowledged detached cancellation lost its guest-cleanup quarantine"
-fake_machine_exists "$cancel_owned_id" ||
-    fail "out-of-process recovery destroyed an unacknowledged guest machine"
+[ ! -e "$cancel_target_registry" ] ||
+    fail "acknowledged exact cancellation recovery retained its owner registry"
+if fake_machine_exists "$cancel_owned_id"; then
+    fail "acknowledged exact cancellation recovery retained its owned guest machine"
+fi
 FAKE_STATE="$FAKE_DIR/state.json" OWNED_VOLUME="$cancel_owned_volume" python3 - <<'PY' ||
 import json
 import os
@@ -3166,18 +3166,16 @@ import os
 with open(os.environ["FAKE_STATE"]) as handle:
     volumes = json.load(handle)["volumes"]
 raise SystemExit(
-    0 if any(item.get("id") == os.environ["OWNED_VOLUME"] for item in volumes) else 1
+    0 if not any(item.get("id") == os.environ["OWNED_VOLUME"] for item in volumes) else 1
 )
 PY
-    fail "out-of-process recovery destroyed an unacknowledged guest volume"
-if grep -qE "^machine destroy ${cancel_owned_id}( |$)" "$FAKE_DIR/journal.log"; then
-    fail "unacknowledged guest machine crossed the provider reap boundary"
-fi
-if grep -qE "^volumes destroy ${cancel_owned_volume}( |$)" "$FAKE_DIR/journal.log"; then
-    fail "unacknowledged guest volume crossed the provider reap boundary"
-fi
-[ -f "$TMP_ROOT/capacity-reservations/reservations/${cancel_owner_token}-primary" ] ||
-    fail "unacknowledged detached cancellation released its durable capacity ownership"
+    fail "acknowledged exact cancellation recovery retained its owned guest volume"
+grep -qE "^machine destroy (.* )?${cancel_owned_id}( |$)" "$FAKE_DIR/journal.log" ||
+    fail "acknowledged exact cancellation recovery did not reap its owned guest machine"
+grep -qE "^volumes destroy ${cancel_owned_volume}( |$)" "$FAKE_DIR/journal.log" ||
+    fail "acknowledged exact cancellation recovery did not reap its owned guest volume"
+[ ! -e "$TMP_ROOT/capacity-reservations/reservations/${cancel_owner_token}-primary" ] ||
+    fail "acknowledged exact cancellation recovery retained its durable capacity ownership"
 FAKE_STATE="$FAKE_DIR/state.json" NEIGHBOR_VOLUME="$neighbor_volume" python3 - <<'PY' ||
 import json
 import os
@@ -3195,22 +3193,28 @@ assert_no_controller_script_snapshots "detached cancellation recovery"
 cancel_detached_log="$(sed -n 's/^    log: tail -f //p' "$cancel_launcher_log" | tail -1)"
 [ -n "$cancel_detached_log" ] ||
     fail "TERM-resistant cancellation did not publish its detached controller log"
-grep -qF "exact stale-owner cleanup is quarantined pending guest acknowledgement" "$cancel_launcher_log" ||
-    fail "SIGKILL recovery did not classify the canonical exact owner as cleanup-unconfirmed"
-grep -qF "exact stale fleet ownership recovery failed" "$cancel_launcher_log" ||
-    fail "out-of-process recovery did not report retained exact ownership"
-if grep -qF "exact stale fleet ownership reconciled" "$cancel_launcher_log"; then
-    fail "unacknowledged guest ownership was reported as safely reconciled"
+grep -qF "reconnecting exact owned guests for authenticated cleanup acknowledgement" \
+    "$cancel_launcher_log" ||
+    fail "real exact-owner entrypoint did not enter guest shutdown recovery"
+grep -qF "every guest acknowledged browser/session cleanup before fleet machine teardown" \
+    "$cancel_launcher_log" ||
+    fail "real exact-owner entrypoint did not prove guest shutdown acknowledgement"
+grep -qF "exact stale fleet ownership reconciled" "$cancel_launcher_log" ||
+    fail "out-of-process recovery did not report reconciled exact ownership"
+if grep -qF "command not found" "$cancel_launcher_log" \
+    || grep -qF "exact stale fleet ownership recovery failed" "$cancel_launcher_log"; then
+    fail "real exact-owner entrypoint failed after validating its exact guests"
 fi
-# This is a hermetic fake-provider fixture: remove only the exact retained test
-# owner after proving production recovery refused it, then reset fake inventory.
-remove_fake_machine_and_volume_exact "$cancel_owned_id" "$cancel_owned_volume" ||
-    fail "could not exact-clean the retained cancellation fixture"
-rm -rf "$cancel_target_registry" "$neighbor_registry"
+rm -rf "$neighbor_registry"
 rm -f "$TMP_ROOT/capacity-reservations/reservations/${cancel_owner_token}-"* \
     "$WS_A/.context/fleet/runs"/detached-*.owner \
     "$WS_A/.context/fleet/runs"/detached-*.status 2>/dev/null || true
-echo "PASS: scenario 2-cancel — SIGKILL before guest acknowledgement retained exact machine, volume, registry, and capacity ownership"
+echo "PASS: scenario 2-cancel — real source-ordered recovery acknowledged and reaped only exact canceled ownership"
+
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ]; then
+    echo "All exact stale-owner recovery ordering checks passed."
+    exit 0
+fi
 
 # A freshly cloned Machine can already have its provider-authoritative 6PN
 # address while its derived .internal hostname is absent from Fly DNS. The
