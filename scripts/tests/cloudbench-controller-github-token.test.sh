@@ -82,7 +82,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'No controller GitHub token for warm-source git-sync' \
   "warm git-sync must fail closed when no controller token is available"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_github_token_b64' \
+  'token="$(cloudbench_controller_github_token "$ROOT_DIR"' \
   "fleet worker token resolution must use the shared controller resolver"
 # Stronger: refresh-deps must enter the one request-scoped token delivery path,
 # and that path must export the token before invoking the guest fetch helper.
