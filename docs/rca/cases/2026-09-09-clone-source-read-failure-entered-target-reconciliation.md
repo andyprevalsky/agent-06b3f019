@@ -13,6 +13,9 @@ symptoms:
   - "exact stale-owner registry identity is unsafe"
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
   - "driver exited without cleanup acknowledgement"
+  - "ERROR: services evidence has no exact isolated stopped database identity"
+  - "ERROR: durable backend evidence contains no exact provider session identity"
+  - "exact provider cleanup or authoritative zero-allocation proof is incomplete"
 tags:
   - cloudbench
   - fly-io
@@ -38,6 +41,11 @@ sources:
   - commit f6609222b
   - commit fb887cc1f
   - commit d8d17dd2d
+  - commit a8f76d258
+  - commit 8003c8524
+  - commit 1527b074a
+  - commit 650ab1085
+  - commit 78fb850cc
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -839,6 +847,82 @@ exact database/root/tree query stream per quiesced zero guest. It performs no
 provider inventory, app-wide Machine list, cross-owner database/session scan,
 shared poller, lock, row, channel, subscription, or global fan-in.
 
+## Eleventh recurrence on 2026-09-10
+
+The v7 exact-owner rerun safely finished the three active-guest transitions but
+left `parallel-tool-calls` and `polar-bu-066` quarantined. The three
+`ERROR: exact Machine is not proven stopped` messages were intermediate poll
+states, not terminal failures: H21 later recorded exact provider cleanup for
+Machines `2862102a194e38`, `865463eb495118`, and `e82e291c433d58`, and each
+retained output contains its stopped-Machine proof and positive cleanup receipt.
+H13's successful exact status reads and those receipts reject the hypothesis
+that Fly's status rendering blocked recovery.
+
+H20 confirmed that Machines `2862595b6d4328` and `d896269c97e048` were
+quiesced with sealed run and backend evidence. Their exact guest recovery logs
+then failed at `services evidence has no exact isolated stopped database
+identity`, before any database catalog or root-tree query. Read-only,
+Machine-pinned inspection of only those two owner-recorded IDs showed the same
+contradictory shape in both `services.json` files:
+`use_system_postgres=true`, `owned_by_run_sh=true`, an exact isolated
+`victoria_bench_<run>` name, and nonempty nominal
+`victoria-db-<run>`/`victoria-pgdata-<run>` labels.
+
+The critical path was:
+
+`run.sh` database-mode selection → `write_services_manifest` →
+Machine-local sealed `services.json` → exact guest `parse_zero_services` →
+named database catalog read → exact root/tree and `BrowserSession` query →
+hashed zero-allocation receipt → exact-owner teardown authorization.
+
+The first bad boundary was `write_services_manifest`: it serialized nominal
+Docker identifiers even when the selected backend was system Postgres.
+`parse_zero_services` then required those inactive fields to be empty, so the
+immutable legacy producer and the recovery consumer disagreed before reaching
+the positive exact-root proof. This is a logical inconsistency in the database
+ownership contract, not missing provider evidence.
+
+The deepest owned cause is that the manifest accumulated backend-independent
+resource labels instead of deriving identity from the selected backend mode.
+The sibling failure is any future system-Postgres run whose stale Docker labels
+cause a consumer to select or reject the wrong ownership semantics. New
+manifests now derive `container` and `volume` from
+`use_system_postgres`, making both empty in system mode. Recovery accepts old
+nonempty labels only when the container and volume have the same bounded safe
+suffix and that suffix deterministically maps to the exact isolated database
+name. Missing, mixed, mismatched, and wrong-database label forms still fail
+closed before `psql`.
+
+The permanent pre-fix command was:
+
+`agents/venv/bin/pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py -k
+'quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt or
+system_postgres_services_manifest_omits_inactive_docker_identity'`.
+
+It exited 1 with two failures: the captured legacy manifest produced
+`ERROR: services evidence has no exact isolated stopped database identity`, and
+the real manifest publisher emitted both inactive Docker labels. After the fix,
+the expanded unchanged acceptance command, including four adversarial identity
+forms, exits 0 with `7 passed`. The complete dependency-sync suite passes all
+283 tests; the status-service, fleet canary, cloudbench environment,
+multi-workstream lifecycle, controller-token, autoscale, fetch, guest-token,
+app-env-lock, seed-budget, restore-readiness, and orphan-proxy suites pass; Bash
+and Python syntax checks pass.
+
+No real provider cleanup was run during verification. Investigation performed
+only read-only, exact-ID inspection of the two Machines already recorded under
+owner `03596f65144d485f8a667fc31f7e3cc6`. The registry remains quarantined until
+the user reruns:
+
+`bash scripts/run-bench-fleet --recover-stale-owner
+03596f65144d485f8a667fc31f7e3cc6`.
+
+At 10,000 agents, publication remains O(1) per isolated stack and recovery
+remains O(resources in one exact owner). The change adds no provider inventory,
+cross-owner query, global poller, shared row, lock, channel, subscription, or
+fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -915,6 +999,12 @@ They prohibited provider-wide listing, task-name inference, cleanup while a
 guest could still allocate, weakened incomplete-evidence quarantine, and any
 benchmark task, timeout, or concurrency change. They retained ownership of the
 real cleanup rerun.
+
+For the eleventh recurrence, the user required permanent regressions before the
+fix, no weakening of fail-closed ownership, the complete relevant suites, and a
+pushed recovery branch. They prohibited benchmark task, timeout, or concurrency
+changes and any sweep or destruction outside exact owner
+`03596f65144d485f8a667fc31f7e3cc6`; they retained ownership of the live rerun.
 
 ## Reusable lesson
 
