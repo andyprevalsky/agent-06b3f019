@@ -9373,8 +9373,10 @@ def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
         + "\n"
     )
     psql_calls = tmp_path / "psql-calls"
-    fake_psql = tmp_path / "psql"
-    fake_psql.write_text(
+    postgres_common = tmp_path / "usr" / "share" / "postgresql-common"
+    postgres_common.mkdir(parents=True)
+    fake_psql_target = postgres_common / "pg_wrapper"
+    fake_psql_target.write_text(
         f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {shlex.quote(str(psql_calls))}
 case "$*" in
@@ -9389,7 +9391,11 @@ esac
 case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} ;; esac
 """
     )
-    fake_psql.chmod(0o755)
+    fake_psql_target.chmod(0o755)
+    psql_bin = tmp_path / "usr" / "bin"
+    psql_bin.mkdir(parents=True)
+    fake_psql = psql_bin / "psql"
+    fake_psql.symlink_to("../share/postgresql-common/pg_wrapper")
 
     query = subprocess.run(
         [
