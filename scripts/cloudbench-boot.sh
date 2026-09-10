@@ -29,13 +29,15 @@ set -uo pipefail
 # boot transport before any staged Python helper starts.
 export PYTHONDONTWRITEBYTECODE=1
 
-LOG=/data/bench.log
-REPO=/data/repo
+DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"
+LOG="$DATA_DIR/bench.log"
+REPO="${CLOUDBENCH_REPO_DIR:-$DATA_DIR/repo}"
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
-DRIVER_PID_FILE=/data/cloudbench-driver.pid
-DRIVER_STATE_FILE=/data/cloudbench-driver.state
-SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
-CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+DRIVER_PID_FILE="$DATA_DIR/cloudbench-driver.pid"
+DRIVER_STATE_FILE="$DATA_DIR/cloudbench-driver.state"
+SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 
 publish_driver_state() {
     local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
@@ -75,7 +77,7 @@ fi
 # fails (no set -e here) and the whole run produces an empty log. Wait until /data
 # is actually writable before doing anything that touches it.
 for _w in $(seq 1 120); do
-    if touch /data/.cbwtest 2>/dev/null; then rm -f /data/.cbwtest 2>/dev/null; break; fi
+    if touch "$DATA_DIR/.cbwtest" 2>/dev/null; then rm -f "$DATA_DIR/.cbwtest" 2>/dev/null; break; fi
     sleep 1
 done
 
@@ -88,7 +90,7 @@ publish_driver_state booting || exit 1
 
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
 # actually booted into the driver (replaces the old ssh-written RUNSTAMP).
-rm -f /data/bench.log.generation
+rm -f "$DATA_DIR/bench.log.generation"
 printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
 
 # Data-plane status server: serve /data (which holds bench.log) over HTTP so the
@@ -104,7 +106,7 @@ fi
 pkill -f "cloudbench-status-server.py.*--port $STATUS_PORT" 2>/dev/null || true
 setsid python3 "$STATUS_SERVER_SCRIPT" \
     --port "$STATUS_PORT" \
-    --directory /data \
+    --directory "$DATA_DIR" \
     --barrier "${CLOUDBENCH_START_BARRIER:-}" \
     --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
     >/dev/null 2>&1 </dev/null &
@@ -176,6 +178,17 @@ publish_driver_state running || exit 1
 wait "$driver_pid"
 driver_rc=$?
 rm -f "$DRIVER_PID_FILE"
+interrupt_status_present=0
+cleanup_ack_present=0
+[ -s "$INTERRUPT_CLEANUP_STATUS_FILE" ] && interrupt_status_present=1
+[ -s "$CLEANUP_ACK_FILE" ] && cleanup_ack_present=1
+printf '[boot %s] driver cleanup evidence interrupt_status=%s cleanup_ack=%s\n' \
+    "$(date -u +%H:%M:%S)" "$interrupt_status_present" "$cleanup_ack_present" >> "$LOG"
+# region agent log
+mkdir -p /opt/cursor/logs 2>/dev/null || true
+printf '{"hypothesisId":"H18","location":"scripts/cloudbench-boot.sh:driver-exit","message":"captured durable cleanup evidence at driver exit","data":{"driverStatus":%s,"interruptStatusPresent":%s,"cleanupAckPresent":%s},"timestamp":%s}\n' \
+    "$driver_rc" "$interrupt_status_present" "$cleanup_ack_present" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+# endregion
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
 # `exited` is the terminal evidence seal consumed by the controller. Publish it

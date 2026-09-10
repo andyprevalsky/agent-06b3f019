@@ -12635,6 +12635,36 @@ async def run_single_task(
 
     except asyncio.CancelledError:
         duration = time.time() - start
+        cancelled_agent_deleted = False
+        # region agent log
+        try:
+            Path("/opt/cursor/logs").mkdir(parents=True, exist_ok=True)
+            with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
+                debug_log.write(
+                    json.dumps(
+                        {
+                            "hypothesisId": "H14",
+                            "location": "agents/benchmarks/run_benchmark.py:run_single_task-cancel",
+                            "message": "runner received cancellation with cleanup contract environment",
+                            "data": {
+                                "task": task.name,
+                                "hasAgent": bool(agent_id),
+                                "keepFailedAgents": keep_failed_agents,
+                                "statusFileConfigured": bool(
+                                    os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE")
+                                ),
+                                "tokenConfigured": bool(
+                                    os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_TOKEN")
+                                ),
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # endregion
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
         if realtime_monitor:
             await realtime_monitor.stop()
@@ -12681,11 +12711,38 @@ async def run_single_task(
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
+                    cancelled_agent_deleted = True
                     print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
                 else:
                     print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
             except Exception:
                 print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
+        print(
+            "    Interrupt cleanup evidence: "
+            f"agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
+        )
+        # region agent log
+        try:
+            with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
+                debug_log.write(
+                    json.dumps(
+                        {
+                            "hypothesisId": "H16",
+                            "location": "agents/benchmarks/run_benchmark.py:run_single_task-cancel-exit",
+                            "message": "runner cancellation handler reached task exit",
+                            "data": {
+                                "task": task.name,
+                                "hasAgent": bool(agent_id),
+                                "deleteConfirmed": cancelled_agent_deleted,
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # endregion
         return TaskResult(
             name=task.name,
             passed=False,

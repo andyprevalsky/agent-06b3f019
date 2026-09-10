@@ -54,9 +54,10 @@ set -uo pipefail
 # create sibling bytecode while consuming that immutable bundle on the guest.
 export PYTHONDONTWRITEBYTECODE=1
 
-REPO_DIR="${CLOUDBENCH_REPO_DIR:-/data/repo}"
+DATA_DIR="${CLOUDBENCH_DATA_DIR:-/data}"
+REPO_DIR="${CLOUDBENCH_REPO_DIR:-$DATA_DIR/repo}"
 DEPS_DIR="${CLOUDBENCH_DEPS_DIR:-/app}"           # baked dependency donor image.
-WMH_DIR="${CLOUDBENCH_WMH_DIR:-/data/world-model}"
+WMH_DIR="${CLOUDBENCH_WMH_DIR:-$DATA_DIR/world-model}"
 APP_USER=rose
 CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
@@ -100,7 +101,7 @@ CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
 CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
 CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
-STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"
+STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-$DATA_DIR/cloudbench-cache/victoria-seed.dump}"
 
 if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
     [ -s "$EXECUTION_PROVENANCE_SCRIPT" ] \
@@ -137,9 +138,9 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
-CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
-SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
-INTERRUPT_CLEANUP_STATUS_FILE="/data/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
+SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_SIGNALLED=0
 ACTIVE_COMMAND_STARTING=0
@@ -148,7 +149,7 @@ STACK_PID=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token state_clean=0 token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
@@ -157,6 +158,14 @@ publish_cleanup_ack() {
             "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
             "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        [ "$cleanup_state" = "clean" ] && state_clean=1
+        [ "$cleanup_token" = "$CLOUDBENCH_RUN_TOKEN" ] && token_matches=1
+        log "benchmark root cleanup evidence: state=${cleanup_state:-missing} token_match=$token_matches"
+        # region agent log
+        mkdir -p /opt/cursor/logs 2>/dev/null || true
+        printf '{"hypothesisId":"H17","location":"scripts/cloudbench-run.sh:publish_cleanup_ack","message":"evaluated runner cleanup evidence before guest ack","data":{"stateClean":%s,"tokenMatches":%s},"timestamp":%s}\n' \
+            "$state_clean" "$token_matches" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+        # endregion
         if [ "$cleanup_state" != "clean" ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ]; then
             log "FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
@@ -192,6 +201,7 @@ cleanup_stack() {
 trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
+    local signal_rc=0
     log "guest shutdown requested; draining benchmark root before stack teardown"
     if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
@@ -204,7 +214,13 @@ request_graceful_shutdown() {
             # asyncio.run translates SIGINT into task cancellation. The benchmark
             # cancellation path can then archive and DELETE the exact root agent,
             # which closes browser sessions and finalizes replays canonically.
-            kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || true
+            kill -INT "$ACTIVE_COMMAND_PID" 2>/dev/null || signal_rc=$?
+            log "benchmark cancellation signal dispatched: pid=$ACTIVE_COMMAND_PID signal=INT status=$signal_rc"
+            # region agent log
+            mkdir -p /opt/cursor/logs 2>/dev/null || true
+            printf '{"hypothesisId":"H15","location":"scripts/cloudbench-run.sh:request_graceful_shutdown","message":"dispatched interrupt to active benchmark process","data":{"signalStatus":%s},"timestamp":%s}\n' \
+                "$signal_rc" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+            # endregion
         fi
         return
     fi
@@ -492,10 +508,10 @@ rm -rf "$CONTEXT_DIR"
 mkdir -p "$CONTEXT_DIR"
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
-printf '%s\n' "$$" > /data/cloudbench-driver.pid
+printf '%s\n' "$$" > "$DATA_DIR/cloudbench-driver.pid"
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
-    rm -f "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
-        "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+    rm -f "$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
+        "$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
 fi
 
 # ── 1. git-sync the branch/sha under test ───────────────────────────────────
@@ -599,7 +615,7 @@ if [ ! -f "$STATUS_SERVER_SCRIPT" ]; then
     finish 1
 fi
 setsid python3 "$STATUS_SERVER_SCRIPT" \
-    --directory /data \
+    --directory "$DATA_DIR" \
     --port "$CLOUDBENCH_STATUS_PORT" \
     --barrier "$CLOUDBENCH_START_BARRIER" \
     --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
@@ -918,7 +934,7 @@ fi
 # The DB warm-start dump lives on the /data volume (persists across stop/start +
 # fork) but must be writable by $APP_USER — /data itself is root-owned and
 # /data/repo gets `git reset --hard`'d, so use a dedicated cache dir we chown.
-mkdir -p /data/cloudbench-cache && chown "$APP_USER:$APP_USER" /data/cloudbench-cache 2>/dev/null || true
+mkdir -p "$DATA_DIR/cloudbench-cache" && chown "$APP_USER:$APP_USER" "$DATA_DIR/cloudbench-cache" 2>/dev/null || true
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
@@ -1029,8 +1045,8 @@ wait_for_benchmark_frontend_url || finish 1
 # The controller releases all machines together, so slow database/bootstrap
 # work cannot turn a nominally parallel batch into serial benchmark execution.
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
-    BARRIER_READY="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready"
-    BARRIER_RELEASE="/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
+    BARRIER_READY="$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready"
+    BARRIER_RELEASE="$DATA_DIR/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
     touch "$BARRIER_READY"
     log "synchronized start barrier ready: $CLOUDBENCH_START_BARRIER"
     BARRIER_RELEASED=false

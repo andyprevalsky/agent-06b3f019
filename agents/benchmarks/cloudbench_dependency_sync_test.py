@@ -1388,6 +1388,346 @@ def test_boot_launch_wires_ipv6_status_server_and_driver_health() -> None:
     )
 
 
+def test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack(
+    tmp_path: Path,
+) -> None:
+    """Execute boot -> driver trap -> runner cancellation, not extracted helpers."""
+    import urllib.error
+    import urllib.request
+
+    data_dir = tmp_path / "data"
+    repo = data_dir / "repo"
+    fake_bin = tmp_path / "bin"
+    controls = tmp_path / "controls"
+    for directory in (
+        repo / ".git",
+        repo / "agents/benchmarks",
+        repo / "agents/venv/bin",
+        repo / "back-end",
+        repo / "scripts",
+        data_dir / "world-model/models/test-model",
+        data_dir / "cloudbench-cache",
+        fake_bin,
+        controls,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    def write_executable(path: Path, content: str) -> None:
+        path.write_text(content)
+        path.chmod(0o755)
+
+    status_pid_file = tmp_path / "status.pid"
+    delete_marker = tmp_path / "delete.confirmed"
+    status_wrapper = controls / "status-wrapper.py"
+    status_wrapper.write_text(
+        "import os, runpy\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['CLOUDBENCH_TEST_STATUS_PID_FILE']).write_text(f'{os.getpid()}\\n')\n"
+        f"runpy.run_path({str(STATUS_SERVER_SCRIPT)!r}, run_name='__main__')\n"
+    )
+    write_executable(
+        fake_bin / "pkill",
+        """#!/usr/bin/env bash
+set -u
+case "$*" in
+  *cloudbench-status-server.py*)
+    if [ -s "$CLOUDBENCH_TEST_STATUS_PID_FILE" ]; then
+      pid="$(cat "$CLOUDBENCH_TEST_STATUS_PID_FILE")"
+      kill "$pid" 2>/dev/null || true
+    fi
+    ;;
+esac
+exit 0
+""",
+    )
+    write_executable(
+        fake_bin / "gosu",
+        """#!/usr/bin/env bash
+set -eu
+shift
+exec "$@"
+""",
+    )
+    for command in ("git", "pg_ctlcluster", "pg_isready", "service", "su", "find", "chown"):
+        write_executable(fake_bin / command, "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(
+        fake_bin / "pg_lsclusters",
+        "#!/usr/bin/env bash\nprintf '15 main 5432 online postgres /tmp /tmp\\n'\n",
+    )
+    write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nexit 0\n")
+
+    write_executable(
+        repo / "scripts/run.sh",
+        """#!/usr/bin/env bash
+set -u
+mkdir -p "$BENCHMARK_CONTEXT_DIR"
+printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+""",
+    )
+    runner_wrapper = repo / "agents/benchmarks/run_benchmark.py"
+    runner_wrapper.write_text(
+        f"""import asyncio
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {str(ROOT / "agents")!r})
+import benchmarks.run_benchmark as runner
+
+
+async def fake_main_async(_args):
+    task = runner.get_task_by_name("parallel-tool-calls")
+    task.tags = []
+
+    async def return_none(*_args, **_kwargs):
+        return None
+
+    async def create_agent(*_args, **_kwargs):
+        return "root-agent"
+
+    async def subscribe(*_args, **_kwargs):
+        return "fixture"
+
+    async def get_tree(*_args, **_kwargs):
+        return []
+
+    async def poll_forever(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    async def get_agent(*_args, **_kwargs):
+        return {{"agent": {{"status": "RUNNING", "progress": 0}}, "messages": []}}
+
+    async def collect_logs(*_args, **_kwargs):
+        return {{"messages": []}}
+
+    async def finalize(*_args, **_kwargs):
+        return None, None
+
+    async def headers():
+        return {{"X-API-Key": "fixture"}}
+
+    class Response:
+        status_code = 204
+
+    class Client:
+        def __init__(self, timeout):
+            assert timeout == 30
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def delete(self, _url, *, headers):
+            assert headers == {{"X-API-Key": "fixture"}}
+            Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).write_text("204\\n")
+            return Response()
+
+    runner.create_agent = create_agent
+    runner.subscribe_supabase_realtime_agent = subscribe
+    runner.get_agent_tree = get_tree
+    runner.post_world_model_update_events = return_none
+    runner.archive_agent_start = return_none
+    runner.poll_agent = poll_forever
+    runner.get_agent = get_agent
+    runner.collect_logs = collect_logs
+    runner.finalize_archive_and_score_world_model = finalize
+    runner.ensure_payment_lifecycle_cleanup = return_none
+    runner._apply_live_fixtures = return_none
+    runner._restore_live_fixture_scenarios_async = return_none
+    runner._api_headers = headers
+    runner.httpx.AsyncClient = Client
+    await runner.run_single_task(
+        "http://127.0.0.1:39999",
+        task,
+        keep_failed_agents=True,
+    )
+
+
+runner.main_async = fake_main_async
+runner.main()
+"""
+    )
+    write_executable(
+        repo / "agents/venv/bin/python",
+        f"""#!/usr/bin/env bash
+set -eu
+if [ "${{1:-}}" = "-c" ]; then
+  exit 10
+fi
+exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
+""",
+    )
+    (repo / "agents/benchmarks/tasks.json").write_text("{}\n")
+    (data_dir / "world-model/build.manifest.json").write_text("{}\n")
+    (data_dir / "cloudbench-cache/victoria-seed.dump").write_text("fixture\n")
+
+    write_executable(controls / "fetch.sh", "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(controls / "sync-deps.sh", "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(controls / "sync-prisma.sh", "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(controls / "current-artifact.py", "#!/usr/bin/env python3\n")
+    write_executable(controls / "prepare-patch.sh", "#!/usr/bin/env bash\nexit 0\n")
+    write_executable(
+        controls / "catalog.py",
+        "#!/usr/bin/env python3\nimport sys\nsys.exit(10 if sys.argv[1] == 'requires-gate' else 0)\n",
+    )
+    write_executable(
+        controls / "target.py",
+        "#!/usr/bin/env python3\nimport sys\nprint('local')\nprint('--port')\nprint(sys.argv[2])\n",
+    )
+    (controls / "env.sh").write_text(
+        """cloudbench_verify_env_file() { return 0; }
+cloudbench_require_agentcard_org_oauth() { return 0; }
+cloudbench_validate_browser_provider_contract() { return 0; }
+cloudbench_env_value() { return 0; }
+"""
+    )
+    (controls / "seed-budget.sh").write_text(
+        "stack_wait_budget_seconds() { printf '5\\n'; }\n"
+    )
+
+    def unused_tcp_port() -> int:
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            return int(reservation.getsockname()[1])
+
+    status_port = unused_tcp_port()
+    dashboard_port = unused_tcp_port()
+    base_port = unused_tcp_port()
+    run_token = f"boot-driver-{os.getpid()}"
+    auth_token = f"auth-{os.getpid()}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "CLOUDBENCH_BOOT": "1",
+            "CLOUDBENCH_RUN_TOKEN": run_token,
+            "CLOUDBENCH_BARRIER_TOKEN": auth_token,
+            "CLOUDBENCH_DATA_DIR": str(data_dir),
+            "CLOUDBENCH_REPO_DIR": str(repo),
+            "CLOUDBENCH_RUN_SCRIPT": str(DRIVER_SCRIPT),
+            "CLOUDBENCH_FETCH_REF_SCRIPT": str(controls / "fetch.sh"),
+            "CLOUDBENCH_STATUS_SERVER_SCRIPT": str(status_wrapper),
+            "CLOUDBENCH_SYNC_DEPS_SCRIPT": str(controls / "sync-deps.sh"),
+            "CLOUDBENCH_SYNC_PRISMA_SCRIPT": str(controls / "sync-prisma.sh"),
+            "CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT": str(
+                controls / "current-artifact.py"
+            ),
+            "CLOUDBENCH_PREPARE_PATCH_SCRIPT": str(controls / "prepare-patch.sh"),
+            "CLOUDBENCH_BENCHMARK_TARGET_SCRIPT": str(controls / "target.py"),
+            "CLOUDBENCH_CATALOG_SCRIPT": str(controls / "catalog.py"),
+            "CLOUDBENCH_ENV_HELPER": str(controls / "env.sh"),
+            "CLOUDBENCH_SEED_BUDGET_LIB": str(controls / "seed-budget.sh"),
+            "CLOUDBENCH_DEPS_DIR": str(tmp_path / "deps"),
+            "CLOUDBENCH_WMH_DIR": str(data_dir / "world-model"),
+            "CLOUDBENCH_SEED_DUMP_PATH": str(
+                data_dir / "cloudbench-cache/victoria-seed.dump"
+            ),
+            "CLOUDBENCH_STATUS_PORT": str(status_port),
+            "CLOUDBENCH_TEST_STATUS_PID_FILE": str(status_pid_file),
+            "CLOUDBENCH_TEST_DELETE_MARKER": str(delete_marker),
+            "CLOUDBENCH_HEARTBEAT_SECONDS": "30",
+            "BENCH_DASHPORT": str(dashboard_port),
+            "CONDUCTOR_PORT": str(base_port),
+            "CONDUCTOR_WORKSPACE_NAME": "boot-driver-fixture",
+            "BENCH_TASKS": "parallel-tool-calls",
+            "BENCH_SIMULATE": "1",
+            "WMH_MODEL_NAME": "test-model",
+            "AGENTS_ENV_B64": base64.b64encode(b"fixture=1\n").decode(),
+            "BACKEND_ENV_B64": base64.b64encode(b"fixture=1\n").decode(),
+            "CLOUDBENCH_BROWSER_PROVIDER": "kernel",
+        }
+    )
+    boot = subprocess.Popen(
+        ["bash", str(BOOT_SCRIPT)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def request(path: str, *, method: str = "GET") -> int:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{status_port}{path}",
+            method=method,
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=1) as response:
+                return int(response.status)
+        except urllib.error.HTTPError as exc:
+            return int(exc.code)
+
+    try:
+        startup_deadline = time.monotonic() + 15
+        driver_health = 0
+        while time.monotonic() < startup_deadline:
+            if boot.poll() is not None:
+                break
+            try:
+                driver_health = request("/driver-health")
+            except (OSError, urllib.error.URLError):
+                driver_health = 0
+            if driver_health == 204:
+                break
+            time.sleep(0.05)
+        bench_log = data_dir / "bench.log"
+        assert driver_health == 204, (
+            f"actual boot/driver did not become healthy; boot={boot.poll()} "
+            f"log={bench_log.read_text() if bench_log.exists() else '<missing>'}"
+        )
+
+        assert request("/shutdown", method="POST") == 202
+        cleanup_deadline = time.monotonic() + 15
+        cleanup_health = 0
+        while time.monotonic() < cleanup_deadline:
+            cleanup_health = request("/shutdown-health")
+            if cleanup_health in {204, 500}:
+                break
+            time.sleep(0.05)
+
+        log_text = bench_log.read_text()
+        assert cleanup_health == 204, (
+            "actual boot/driver trap did not receive a canonical runner cleanup "
+            f"ack (HTTP {cleanup_health})\n{log_text[-6000:]}"
+        )
+        assert delete_marker.read_text() == "204\n"
+        cleanup_status = (
+            data_dir / f"cloudbench-interrupt-cleanup-{run_token}.status"
+        ).read_text()
+        assert f"token={run_token}" in cleanup_status
+        assert "state=clean" in cleanup_status
+        assert (
+            data_dir / f"cloudbench-driver-clean-{run_token}.ack"
+        ).read_text() == f"{run_token}\n"
+        assert (data_dir / "cloudbench-driver.state").read_text() == "exited\n"
+        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index(
+            "Deleted cancelled agent"
+        )
+        assert log_text.index("Deleted cancelled agent") < log_text.index(
+            "benchmark root cleanup evidence: state=clean"
+        )
+        assert log_text.index("benchmark root cleanup evidence: state=clean") < log_text.index(
+            "driver cleanup evidence interrupt_status=1 cleanup_ack=1"
+        )
+    finally:
+        if boot.poll() is None:
+            boot.terminate()
+            try:
+                boot.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                boot.kill()
+                boot.wait(timeout=2)
+        if status_pid_file.is_file():
+            status_pid = int(status_pid_file.read_text())
+            try:
+                os.kill(status_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
 def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
     """The requested ref is product code under test, not a source of driver
     control helpers. Both launch transports must stage the same co-versioned
