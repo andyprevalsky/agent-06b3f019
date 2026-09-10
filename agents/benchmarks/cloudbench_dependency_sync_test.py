@@ -8530,6 +8530,7 @@ fi
         assert result.returncode == 0, f"{mode}: {result.stderr}{result.stdout}"
         call_lines = calls.read_text().splitlines()
         assert "proxy-start" in call_lines
+        assert sum(line.startswith("release ") for line in call_lines) == 1
         if mode == "non-204-health":
             assert any(line.endswith("/shutdown") for line in call_lines)
             assert any(line.endswith("/shutdown-health") for line in call_lines)

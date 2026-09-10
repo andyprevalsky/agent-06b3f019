@@ -5734,7 +5734,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local machine_id volume_id output preferred_port private_ip remote_port guest_run_token
     local guest_barrier_token details detail_status state actual_name configuration
     local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
-    local recovery_index shutdown_status
+    local recovery_index shutdown_status proxy_cleanup_status
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
@@ -5891,7 +5891,12 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         "completed token-bound stale-owner shutdown health contract" guestCount "$guest_count" \
         status "$shutdown_status"
     # endregion
-    if [ "$shutdown_status" -ne 0 ] || ! cleanup_stale_owner_recovery_proxies; then
+    if cleanup_stale_owner_recovery_proxies; then
+        proxy_cleanup_status=0
+    else
+        proxy_cleanup_status=$?
+    fi
+    if [ "$shutdown_status" -ne 0 ] || [ "$proxy_cleanup_status" -ne 0 ]; then
         RUN_ID="$save_run"
         CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
         return 1
@@ -6276,7 +6281,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                     echo "❌ could not persist exact owned volume $target_volume for failed clone '$target_name'" >&2
                     return 1
                 fi
-                if ! reap_volume "$target_volume"; then
+                if ! reap_volume "$target_volume" "$diagnostic_log"; then
                     echo "❌ failed clone volume $target_volume could not be reaped; retaining exact ownership" >&2
                     return 1
                 fi
