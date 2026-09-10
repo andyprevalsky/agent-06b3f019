@@ -31,6 +31,10 @@ sources:
   - commit d8d1dc8dc
   - commit 59307b5aa
   - commit 458f9ae51
+  - commit a41d77751
+  - commit 4333f47dd
+  - commit 74c3e8006
+  - commit de67d9499
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
@@ -678,6 +682,83 @@ reads, and one idempotent call per durably named provider session. It adds no
 inventory, neighboring-session read, global sweep, fan-in, shared lock,
 subscription, row, channel, or polling work.
 
+## Ninth recurrence on 2026-09-10
+
+The unchanged real v5 recovery reconnected all nine exact guest proxies but
+again exited 1. Six `POST /shutdown` calls returned HTTP 500 and three remained
+pending. Fallback then reported `exact guest quiescence could not be sealed` for
+`polar-odysseys-47b251d71185`, `polar-odysseys-753ce2163f6e`, and
+`polar-odysseys-7e31dc76193f`, and `exact guest run evidence is incomplete` for
+the other six outputs. H19, H20, and H21 were absent; H22 recorded
+`guestCount=9,recoveredCount=0,status=1`.
+
+The exact retained owner lives at
+`/workspace/.git/cloudbench-fleet-ownership/03596f65144d485f8a667fc31f7e3cc6`,
+while its outputs live under the metadata-selected root
+`/tmp/rose-polar-streak-main/.context/fleet/capability-stability-proof/capability-stability-20260910021331-1465395/runs`.
+Machine-pinned proxy reads proved that the runner receipt, when present, is
+`/data/cloudbench-interrupt-cleanup-<token>.status`; `run.json` and the backend
+log are `/data/repo/.context/cloudbench/run.json` and
+`/data/repo/.context/cloudbench/logs/backend.log`.
+
+Two proxy mappings were wrong. Recovery requested the runner receipt from
+`/repo/.context/cloudbench/cloudbench-interrupt-cleanup-<token>.status`, a path
+that does not exist. It then reused guest-absolute
+`/data/cloudbench-guest-quiescence-<token>.json` as the URL beneath a server
+already rooted at `/data`, effectively requesting `/data/data/...`. Because the
+quiescence transfer was first in the fetch loop, that 404 prevented the valid
+`/repo/.context/cloudbench/run.json` and backend-log URLs from ever being read.
+The prior synthetic fallback test supplied the same mistaken path shape and
+therefore could not expose the retained-owner layout mismatch.
+
+Exact process inspection rejected the competing hypothesis that all three
+quiescence failures were path or parser errors. Machines `2862102a194e38`,
+`865463eb495118`, and `e82e291c433d58` each still had a live
+token-matched driver and a live `run_benchmark.py` descendant; their services
+were stopped but no terminal `run.json` existed. They are active runs, not a
+timeout-derived quiescence verdict. The other six guests had exited and retained
+terminal run/backend evidence, but none had a valid private clean receipt.
+`parallel-tool-calls` and `polar-bu-066` each had root-agent-bound backend
+evidence with zero exact provider session IDs, so they remain explicitly
+quarantined. No absence of an ID is interpreted as clean.
+
+The permanent pre-fix retained-layout command was
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths`.
+It exited 1 because the old request omitted the bearer token and reached the
+wrong private-receipt path. The active-state regression also exited 1 because
+the helper had no `--state-receipt` contract, and the status-service regression
+observed HTTP 200 for unauthenticated recovery evidence.
+
+Recovery now maps guest `/data` paths separately from their `/data`-rooted proxy
+URLs. Every read sends the exact barrier bearer token, applies a per-file byte
+ceiling, writes into the actual retained output directory, fsyncs the regular
+temporary file, atomically replaces the local evidence target, and fsyncs the
+directory before a proxy may close. The status server authenticates and
+size-bounds the exact allowlist, routes aliases through the same protected
+boundary, rejects symlinks and non-regular files, and verifies the opened inode.
+
+The guest helper now atomically emits an exact Machine/token-bound state receipt
+on both success and failure. It records driver PID/state/token ownership,
+bounded descendant identities, services-manifest state, terminal artifact
+state, live service PIDs, and backend-port closure. Only
+`driver-exited-services-stopped` can authorize exact provider cleanup; active,
+unsafe, malformed, incomplete, and ID-less states retain quarantine. H23
+records the validated state classification without treating a recovery deadline
+as quiescence.
+
+The unchanged retained-layout regression now passes, as do active and
+uninspectable-state fail-closed cases, the status-service authentication test,
+all 274 dependency-sync tests, fleet infra-canary, Bash/Python syntax checks,
+and the complete multi-workstream lifecycle suite. No real provider cleanup was
+run during verification, and no benchmark task, timeout, concurrency, prompt,
+evaluator, or provider behavior changed.
+
+At 10,000 agents, the repair remains O(files and processes in one exact guest):
+one bounded process-table snapshot during an explicit stale-owner recovery,
+five bounded reads through that guest's isolated proxy, and one atomic local
+seal per file. It adds no app-wide inventory, cross-owner session read, shared
+poller, row, lock, channel, subscription, or fan-in.
+
 ## Human feedback
 
 The user required both occurrences to receive the deepest generalizable ordering
@@ -736,6 +817,14 @@ from driver exit, fabricating acknowledgements, listing or sweeping neighboring
 resources, providerful tests, and any task, timeout, or concurrency change.
 They retained ownership of the real cleanup command and required any missing
 provider ID to be reported as a trace-capture gap.
+
+For the ninth recurrence, the user required inspection of H19-H22 and the
+command's actual retained-owner/guest evidence locations, bounded authenticated
+fetches before exact proxy release, atomic local sealing, and explicit
+active-versus-quiescent process evidence. They required valid private clean
+receipts or explicit quarantine for `parallel-tool-calls` and `polar-bu-066`,
+an actual-layout regression, fail-closed exact-only cleanup, no fabricated
+receipts, and no task, timeout, or concurrency changes.
 
 ## Reusable lesson
 
