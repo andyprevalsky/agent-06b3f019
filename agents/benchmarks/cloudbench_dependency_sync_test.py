@@ -9196,10 +9196,12 @@ elif command != "validate-recovery-receipt":
     exact_helper.chmod(0o755)
     guest_helper = tmp_path / "guest-helper"
     guest_helper.write_text(
-        """#!/usr/bin/env bash
-set -eu
-[ "$1" = describe-state ]
-printf 'quiesced\\texited\\t0\\tdriver-exited-services-stopped\\n'
+        """#!/usr/bin/env python3
+import sys
+
+if sys.argv[1] != "describe-state":
+    raise SystemExit(93)
+print("quiesced\\texited\\t0\\tdriver-exited-services-stopped")
 """
     )
     guest_helper.chmod(0o755)
