@@ -27,7 +27,6 @@ sources:
   - fleet run 20260909-215629-914100
   - fleet run 20260910-002414-1221609
   - fleet run 20260910-021331-1465409
-  - exact stale owner 03596f65144d485f8a667fc31f7e3cc6
   - commit 8562f093a
   - commit d8d1dc8dc
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
