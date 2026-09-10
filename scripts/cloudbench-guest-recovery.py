@@ -40,6 +40,21 @@ def regular_file(path: Path) -> bool:
     return stat.S_ISREG(metadata.st_mode) and not path.is_symlink()
 
 
+def executable_file(path: Path) -> bool:
+    if not path.is_absolute():
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not resolved.is_symlink()
+        and os.access(path, os.X_OK)
+    )
+
+
 def plain_directory(path: Path) -> bool:
     try:
         metadata = path.lstat()
@@ -898,11 +913,7 @@ def run_exact_psql(
     port: int,
     sql: str,
 ) -> str:
-    if (
-        not Path(command).is_absolute()
-        or not regular_file(Path(command))
-        or not os.access(command, os.X_OK)
-    ):
+    if not executable_file(Path(command)):
         raise GuestRecoveryError("exact psql command is unavailable")
     environment = os.environ.copy()
     environment["PGPASSWORD"] = "postgres"
