@@ -99,6 +99,12 @@ def main() -> int:
             return False
         return hmac.compare_digest(recorded, run_token.encode())
 
+    def read_driver_state() -> str:
+        try:
+            return (root / "cloudbench-driver.state").read_text().strip()
+        except OSError:
+            return ""
+
     def read_driver_pid() -> int | None:
         try:
             pid = int((root / "cloudbench-driver.pid").read_text().strip())
@@ -141,15 +147,19 @@ def main() -> int:
                     return
                 shutdown_request.touch(exist_ok=True)
                 if cleanup_acknowledged():
-                    self.send_response(204)
+                    driver_state = read_driver_state()
+                    if driver_state == "exited":
+                        self.send_response(204)
+                    elif driver_state in {"booting", "running"}:
+                        self.send_response(202)
+                    else:
+                        self.send_error(503, "acknowledged driver state is invalid")
+                        return
                     self.end_headers()
                     return
                 driver_pid = read_driver_pid()
                 if driver_pid is None:
-                    try:
-                        driver_state = (root / "cloudbench-driver.state").read_text().strip()
-                    except OSError:
-                        driver_state = ""
+                    driver_state = read_driver_state()
                     if driver_state == "exited":
                         self.send_error(500, "driver exited without cleanup acknowledgement")
                         return
@@ -236,22 +246,25 @@ def main() -> int:
                 if cleanup_acknowledged():
                     # region agent log
                     try:
-                        observed_state = (root / "cloudbench-driver.state").read_text().strip()
+                        observed_state = read_driver_state()
                         with open("/opt/cursor/logs/debug.log", "a") as handle:
                             handle.write(json.dumps({"hypothesisId": "G,J", "location": "scripts/cloudbench-status-server.py:shutdown-health", "message": "cleanup acknowledged response state", "data": {"driverState": observed_state}, "timestamp": int(time.time() * 1000)}) + "\n")
                     except OSError:
                         pass
                     # endregion
-                    self.send_response(204)
+                    if observed_state == "exited":
+                        self.send_response(204)
+                    elif observed_state in {"booting", "running"}:
+                        self.send_response(202)
+                    else:
+                        self.send_error(503, "acknowledged driver state is invalid")
+                        return
                     self.end_headers()
                     return
                 if not shutdown_request.exists():
                     self.send_error(409, "guest shutdown was not requested")
                     return
-                try:
-                    driver_state = (root / "cloudbench-driver.state").read_text().strip()
-                except OSError:
-                    driver_state = ""
+                driver_state = read_driver_state()
                 if driver_state == "exited":
                     self.send_error(500, "driver exited without cleanup acknowledgement")
                     return
@@ -264,10 +277,7 @@ def main() -> int:
             if self.path != "/driver-health":
                 super().do_GET()
                 return
-            try:
-                state = (root / "cloudbench-driver.state").read_text().strip()
-            except OSError:
-                state = ""
+            state = read_driver_state()
             if state in {"", "booting"}:
                 self.send_error(425, "driver has not launched")
                 return
