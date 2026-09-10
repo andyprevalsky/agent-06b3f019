@@ -141,6 +141,7 @@ step() { log "STEP $*"; }
 CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
 SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
 INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_SIGNALLED=0
 ACTIVE_COMMAND_STARTING=0
@@ -149,15 +150,15 @@ STACK_PID=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token state_clean=0 token_matches=0
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary state_clean=0 token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
     if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
         cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
-            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+            "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
-            "$INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+            "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         [ "$cleanup_state" = "clean" ] && state_clean=1
         [ "$cleanup_token" = "$CLOUDBENCH_RUN_TOKEN" ] && token_matches=1
         log "benchmark root cleanup evidence: state=${cleanup_state:-missing} token_match=$token_matches"
@@ -166,6 +167,17 @@ publish_cleanup_ack() {
         printf '{"hypothesisId":"H17","location":"scripts/cloudbench-run.sh:publish_cleanup_ack","message":"evaluated runner cleanup evidence before guest ack","data":{"stateClean":%s,"tokenMatches":%s},"timestamp":%s}\n' \
             "$state_clean" "$token_matches" "$(date +%s%3N)" >> /opt/cursor/logs/debug.log 2>/dev/null || true
         # endregion
+        case "$cleanup_state:$token_matches" in
+            pending:1|clean:1|failed:1)
+                cleanup_status_temporary="${INTERRUPT_CLEANUP_STATUS_FILE}.tmp.$$"
+                if ! cp "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" "$cleanup_status_temporary" \
+                    || ! mv -f "$cleanup_status_temporary" "$INTERRUPT_CLEANUP_STATUS_FILE"; then
+                    rm -f "$cleanup_status_temporary"
+                    log "FATAL: could not persist benchmark root cleanup evidence"
+                    return 1
+                fi
+                ;;
+        esac
         if [ "$cleanup_state" != "clean" ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ]; then
             log "FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
@@ -1190,7 +1202,7 @@ log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
 touch "$RUN_OUTPUT_MARKER"
-rm -f "$INTERRUPT_CLEANUP_STATUS_FILE"
+rm -f "$INTERRUPT_CLEANUP_STATUS_FILE" "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE"
 set +e
 # Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
 # prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
@@ -1201,7 +1213,7 @@ export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
 export BENCHMARK_ISOLATED_RUN=true
 export BENCHMARK_ISOLATED_BROWSER_PROFILES=true
 export BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT=true
-export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$INTERRUPT_CLEANUP_STATUS_FILE'
+export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE'
 export BENCHMARK_INTERRUPT_CLEANUP_TOKEN='$CLOUDBENCH_RUN_TOKEN'
 export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'

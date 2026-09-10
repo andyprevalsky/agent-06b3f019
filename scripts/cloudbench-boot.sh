@@ -169,8 +169,15 @@ if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
     publish_driver_state exited || exit 1
     exec sleep infinity
 fi
+# This supervisor is itself a non-interactive shell. Without monitor mode, Bash
+# starts an asynchronous driver with SIGINT/SIGQUIT ignored; that inherited
+# disposition cannot be reset by the driver's inner heartbeat wrapper, so the
+# benchmark process silently ignores owner cancellation. Give the driver a
+# normal signal disposition before it launches any descendants.
+set -m
 bash "$DRIVER" >> "$LOG" 2>&1 &
 driver_pid=$!
+set +m
 driver_pid_temporary="${DRIVER_PID_FILE}.tmp.$$"
 printf '%s\n' "$driver_pid" > "$driver_pid_temporary" \
     && mv -f "$driver_pid_temporary" "$DRIVER_PID_FILE"

@@ -148,6 +148,111 @@ STALL_THRESHOLD = 120  # seconds without new messages/agents across ENTIRE tree 
 AGENT_STALL_SECONDS = max(240, PLANNER_ACTIVITY_TIMEOUT_SECONDS * PLANNER_ACTIVITY_MAX_ATTEMPTS + 30)
 TREE_POLL_INTERVAL = 15  # seconds between tree-level polls (more expensive than root-only)
 
+# Cloud guests may acknowledge teardown only after every interrupted root has
+# crossed the canonical DELETE boundary. The driver supplies a runner-writable,
+# run-scoped status path and independently verifies the token before publishing
+# the root-owned guest acknowledgement.
+_INTERRUPT_CLEANUP_STARTED = 0
+_INTERRUPT_CLEANUP_COMPLETED = 0
+
+
+def _interrupt_cleanup_contract() -> tuple[Path, str] | None:
+    status_file = os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE", "").strip()
+    token = os.environ.get("BENCHMARK_INTERRUPT_CLEANUP_TOKEN", "").strip()
+    if not status_file and not token:
+        return None
+    path = Path(status_file)
+    if (
+        not status_file
+        or not path.is_absolute()
+        or re.fullmatch(r"[A-Za-z0-9._-]+", token) is None
+    ):
+        raise RuntimeError("invalid benchmark interrupt-cleanup contract")
+    return path, token
+
+
+def _publish_interrupt_cleanup_status(state: str) -> None:
+    contract = _interrupt_cleanup_contract()
+    if contract is None:
+        return
+    if state not in {"pending", "clean", "failed"}:
+        raise ValueError(f"invalid interrupt-cleanup state: {state}")
+    status_file, token = contract
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = status_file.with_name(
+        f".{status_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            handle.write("version=1\n")
+            handle.write(f"token={token}\n")
+            handle.write(f"state={state}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, status_file)
+        directory_fd = os.open(status_file.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _begin_interrupt_cleanup() -> bool:
+    global _INTERRUPT_CLEANUP_STARTED
+    if _interrupt_cleanup_contract() is None:
+        return False
+    _INTERRUPT_CLEANUP_STARTED += 1
+    _publish_interrupt_cleanup_status("pending")
+    print(
+        "    Benchmark interrupt cleanup status: "
+        f"state=pending started={_INTERRUPT_CLEANUP_STARTED}"
+    )
+    return True
+
+
+def _complete_interrupt_cleanup() -> None:
+    global _INTERRUPT_CLEANUP_COMPLETED
+    _INTERRUPT_CLEANUP_COMPLETED += 1
+
+
+def _finalize_interrupt_cleanup_status() -> None:
+    """Publish one fail-closed run verdict after all interrupted tasks drain."""
+    if _interrupt_cleanup_contract() is None or _INTERRUPT_CLEANUP_STARTED == 0:
+        return
+    clean = _INTERRUPT_CLEANUP_COMPLETED == _INTERRUPT_CLEANUP_STARTED
+    state = "clean" if clean else "failed"
+    _publish_interrupt_cleanup_status(state)
+    print(
+        "  Benchmark interrupt cleanup status: "
+        f"state={state} started={_INTERRUPT_CLEANUP_STARTED} "
+        f"completed={_INTERRUPT_CLEANUP_COMPLETED}"
+    )
+    # region agent log
+    try:
+        Path("/opt/cursor/logs").mkdir(parents=True, exist_ok=True)
+        with Path("/opt/cursor/logs/debug.log").open("a", encoding="utf-8") as debug_log:
+            debug_log.write(
+                json.dumps(
+                    {
+                        "hypothesisId": "H14",
+                        "location": "agents/benchmarks/run_benchmark.py:finalize-interrupt-cleanup",
+                        "message": "published run-level interrupt cleanup verdict",
+                        "data": {
+                            "state": state,
+                            "started": _INTERRUPT_CLEANUP_STARTED,
+                            "completed": _INTERRUPT_CLEANUP_COMPLETED,
+                        },
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # endregion
+
 
 def agent_stall_limit_seconds(task: "BenchmarkTask") -> int:
     """Per-task early-fail silence budget for non-terminal leaves.
@@ -2477,7 +2582,11 @@ async def delete_agent(base_url: str, agent_id: str) -> None:
     """DELETE /api/agents/:id"""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
-        await client.delete(f"{base_url}/api/agents/{agent_id}", headers=headers)
+        response = await client.delete(f"{base_url}/api/agents/{agent_id}", headers=headers)
+        if response.status_code != 204:
+            raise RuntimeError(
+                f"Failed to delete agent {agent_id}: HTTP {response.status_code}"
+            )
 
 
 async def get_tool_usage(base_url: str, agent_id: str) -> dict:
@@ -5133,6 +5242,16 @@ def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bo
     if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
         return False
     return passed or not keep_failed_agents
+
+
+def _should_delete_cancelled_agent(keep_failed_agents: bool) -> bool:
+    """Owner interruption overrides diagnostic retention, never explicit audit retention."""
+    if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
+        return False
+    return (
+        not keep_failed_agents
+        or os.environ.get("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT") == "true"
+    )
 
 
 def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
@@ -11986,6 +12105,8 @@ async def run_single_task(
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
     live_fixture_manifests: list[dict] = []
+    interrupt_cleanup_started = False
+    interrupt_cleanup_ready = False
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -12635,6 +12756,7 @@ async def run_single_task(
 
     except asyncio.CancelledError:
         duration = time.time() - start
+        interrupt_cleanup_started = _begin_interrupt_cleanup()
         cancelled_agent_deleted = False
         # region agent log
         try:
@@ -12708,15 +12830,25 @@ async def run_single_task(
                 failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
             )
             await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
-            try:
-                if not keep_failed_agents:
-                    await delete_agent(base_url, agent_id)
-                    cancelled_agent_deleted = True
-                    print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
-                else:
-                    print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
-            except Exception:
-                print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
+            if interrupt_cleanup_started:
+                if not _should_delete_cancelled_agent(keep_failed_agents):
+                    raise RuntimeError(
+                        "owner-requested benchmark teardown cannot retain the cancelled agent"
+                    )
+                await delete_agent(base_url, agent_id)
+                cancelled_agent_deleted = True
+                print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+            else:
+                try:
+                    if _should_delete_cancelled_agent(keep_failed_agents):
+                        await delete_agent(base_url, agent_id)
+                        cancelled_agent_deleted = True
+                        print(f"    🗑  Deleted cancelled agent {agent_id[:12]}")
+                    else:
+                        print(f"    🧪 Keeping cancelled agent {agent_id[:12]} for diagnostics")
+                except Exception:
+                    print(f"    ⚠ Failed to delete cancelled agent {agent_id[:12]}")
+        interrupt_cleanup_ready = interrupt_cleanup_started
         print(
             "    Interrupt cleanup evidence: "
             f"agent_present={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
@@ -12851,6 +12983,8 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
             os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
+        if interrupt_cleanup_ready:
+            _complete_interrupt_cleanup()
 
 
 def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
@@ -14516,7 +14650,10 @@ def main():
         os.environ["BENCHMARK_HARNESS"] = args.harness
     _apply_world_model_cli_env(args, parser)
 
-    asyncio.run(main_async(args))
+    try:
+        asyncio.run(main_async(args))
+    finally:
+        _finalize_interrupt_cleanup_status()
 
 
 if __name__ == "__main__":
