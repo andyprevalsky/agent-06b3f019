@@ -7887,6 +7887,94 @@ rc=$?
     ]
 
 
+def test_exact_owner_recovery_records_provider_retained_terminal_volume(
+    tmp_path: Path,
+) -> None:
+    """Provider-retained deletion is terminal without pretending exact absence."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+            "registry_meta_value() {",
+            "reap_registry_clones() {",
+        )
+    )
+
+    for state in ("pending_destroy", "destroyed"):
+        ownership_root = tmp_path / state / "ownership"
+        registry = ownership_root / ("9d" * 16)
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        (registry / "meta").write_text("version=2\n")
+        clone_name = f"cloudbench-{state.replace('_', '-')}"
+        machine_id = "deadbeef000001"
+        volume_id = f"vol_{state}"
+        record = clones / clone_name
+        record.write_text(
+            f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
+        )
+        calls = tmp_path / state / "provider.calls"
+        audit = tmp_path / state / "audit.calls"
+        script = f"""set -uo pipefail
+APP=bench-app
+WARM_ID=feedface000001
+WARM_VOLUME_ID=vol_warm
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REGISTRY={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+AUDIT={shlex.quote(str(audit))}
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "volumes destroy")
+      [ "$3" = {volume_id} ] || return 99
+      printf 'Destroyed volume ID: %s\n' "$3"
+      return 0 ;;
+    "volumes show")
+      [ "$3" = {volume_id} ] || return 98
+      printf '%s\n' '{{"id":"{volume_id}","state":"{state}","attached_machine_id":null,"host_status":"ok"}}'
+      return 0 ;;
+    *) return 97 ;;
+  esac
+}}
+registry_machine_details() {{ return 1; }}
+fleet_audit_update_registry_clone() {{ printf '%s\n' "$*" >> "$AUDIT"; }}
+registry_retire_absent_stale_pre_volume_records() {{ return 99; }}
+registry_record_is_stale_pre_volume_id() {{ return 99; }}
+registry_record_machine_identity() {{ return 99; }}
+registry_resolve_name() {{ return 99; }}
+registry_runner_count() {{ return 99; }}
+machine_volume_id() {{ return 99; }}
+{functions}
+
+reap_registry_clones "$REGISTRY" forced
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode == 0, (
+            state,
+            result.stderr,
+            result.stdout,
+        )
+        assert not record.exists()
+        assert audit.read_text().strip().endswith(
+            f"{clone_name} {machine_id} {volume_id} destroyed-provider-retained"
+        )
+        assert calls.read_text().splitlines() == [
+            f"volumes destroy {volume_id} -a bench-app --yes",
+            f"volumes show {volume_id} -a bench-app --json",
+        ]
+
+
 def test_reap_volume_durably_captures_bounded_destroy_responses(
     tmp_path: Path,
 ) -> None:
