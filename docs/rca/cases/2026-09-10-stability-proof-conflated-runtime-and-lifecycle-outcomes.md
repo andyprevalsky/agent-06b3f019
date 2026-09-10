@@ -95,6 +95,31 @@ At 10,000 agents, outcome publication is constant work per task and audit hashin
 is linear in the exact owned fleet ledger. There is no provider-wide sweep or
 shared hot database row.
 
+## Review recurrence: publication and cancellation boundaries
+
+The first PR review reproduced additional false terminal-state boundaries.
+An empty aggregate could report success, failed sidecar publication left stale
+terminal artifacts, and atomic rename alone did not durably flush the artifact
+or parent directory. Aggregate publication now flushes both, rejects an empty
+task set as success, and removes all three terminal artifacts after a rejected
+publication. Five injected publication failures and an empty-task subprocess
+case cover those transitions.
+
+The proof previously parsed a log written by an asynchronous process
+substitution. A delayed writer reproduced classification before the final
+receipt reached disk. A foreground pipeline now waits for `tee`, preserves the
+controller's exit code, and rejects a failed log writer. The unchanged proof
+regression covers delayed and failed writes.
+
+Campaign cancellation previously classified a cooperative signalled child as
+passed, exposed negative subprocess signal codes, and repeated its shutdown
+window during delayed reap. It now records successful signal delivery, marks
+those jobs cancelled, normalizes signal exit codes, and requests teardown once.
+The three executable campaign cases in `descend-command.test.sh` failed before
+the change and pass afterwards. Completed siblings retain their outcomes.
+
+These offline tests are review evidence, not live stability-slice credit.
+
 ## Human feedback
 
 The user required finishing PR #1299 and explicitly said to stop asking for

@@ -23,6 +23,7 @@ SAFE_AGENT = re.compile(
     re.IGNORECASE,
 )
 SAFE_DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SCHEMA = "cloudbench-guest-quiescence-v1"
 STATE_SCHEMA = "cloudbench-guest-state-v1"
 ZERO_SCHEMA = "cloudbench-guest-zero-allocation-v1"
@@ -721,8 +722,7 @@ def describe_state(args: argparse.Namespace) -> int:
     state_kind = value["state"]
     if (
         state_kind == "exited"
-        and value["reason"]
-        == "missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json"
+        and value["reason"].startswith("missing regular exact guest evidence: ")
         and value["services_status"] == "stopped"
         and stopped_pids
         and not live_pids
@@ -778,7 +778,7 @@ def parse_zero_run(path: Path) -> tuple[str, str]:
 def validate_zero_backend(path: Path, root_agent_id: str) -> tuple[str, str]:
     payload = read_bytes(path, maximum=512 * 1024 * 1024)
     try:
-        text = payload.decode("utf-8")
+        text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise GuestRecoveryError("backend evidence is not UTF-8") from error
     lines = [line for line in text.splitlines() if line.strip()]

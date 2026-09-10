@@ -54,9 +54,12 @@ export interface LiveViewVisibleStreamRect {
 
 export function isSteelLiveViewUrl(url: string): boolean {
   try {
-    return new URL(url).hostname.toLowerCase().includes('steel');
+    const hostname = new URL(url).hostname.toLowerCase();
+    return ['steel.dev', 'steelbrowser.com'].some(
+      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+    );
   } catch {
-    return url.toLowerCase().includes('steel');
+    return false;
   }
 }
 

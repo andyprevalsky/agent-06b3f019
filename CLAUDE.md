@@ -114,6 +114,10 @@ does not provide their `mapfile`/associative-array operations.
 Backend/frontend dependencies may require a newer Node than the Mac app; use
 an installed compatible Node (22.13.0 was verified) for those packages and
 retain 20.10.0 for `mac-app`.
+Keep the Mac awake during long validations. `caffeinate -is` prevents idle sleep,
+but closing the lid on battery can still suspend the controller and local
+WebSockets while cloud tasks continue. Check `pmset -g log` before treating a
+long wall-clock gap as a provider timeout.
 
 If npm workspace resolution fails, use each package’s committed lockfile with
 `npm ci --workspaces=false` in `back-end/` and `front-end/`, as documented in
@@ -158,6 +162,12 @@ isolated PG15 database, preserve its row content, and validate with
 PG15 container and verify a restore/read-back. Never publish a coverage database
 or replace the reviewed WhatsApp history with a production cold sync. See
 `docs/rca/cases/2026-08-20-poisoned-canonical-seed-missing-whatsapp-history.md`.
+Local system-Postgres benches need the matching client tools on `PATH` after
+selecting Node. For a Homebrew PostgreSQL 17 server, prepend
+`/opt/homebrew/opt/postgresql@17/bin`; a PostgreSQL 18 client from Postgres.app
+otherwise selects a different canonical cache key. If a PG17 cache is missing,
+restore the reviewed canonical fixture into an isolated PG17 database, verify
+table content and a dump/restore round trip, then publish that version's key.
 
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 

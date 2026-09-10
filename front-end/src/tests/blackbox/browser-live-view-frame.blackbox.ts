@@ -48,6 +48,26 @@ describe('live-view window vs display contract', () => {
     expect(resolveLiveViewDisplaySize(KERNEL_LIVE)).toEqual(LIVE_VIEW_CONTENT_VIEWPORT);
     expect(resolveLiveViewChromeCrop(KERNEL_LIVE)).toBeNull();
   });
+
+  it.each([
+    'https://notsteel.example/player',
+    'https://steel.dev.example/player',
+    'https://connect.steelbrowser.com.example/player',
+    'https://example.com/player?provider=steel',
+    'https://connect.steel.dev@example.com/player',
+    'not a URL containing steel',
+  ])('keeps non-Steel or malformed URL %s uncropped', (url) => {
+    expect(resolveLiveViewWindowSize(url)).toEqual(KERNEL_LIVE_VIEW_WINDOW);
+    expect(resolveLiveViewChromeCrop(url)).toBeNull();
+  });
+
+  it.each(['https://CONNECT.STEEL.DEV/player', 'https://connect.steelbrowser.com/player'])(
+    'preserves the official Steel player crop for %s',
+    (url) => {
+      expect(resolveLiveViewWindowSize(url)).toEqual(STEEL_LIVE_VIEW_WINDOW);
+      expect(resolveLiveViewChromeCrop(url)?.offsetY).toBe(STEEL_CHROME_CROP.y);
+    },
+  );
 });
 
 describe('Steel chrome crop (display-only)', () => {

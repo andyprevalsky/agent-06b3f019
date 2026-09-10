@@ -244,14 +244,7 @@ def main() -> int:
                     self.send_error(403)
                     return
                 if cleanup_acknowledged():
-                    # region agent log
-                    try:
-                        observed_state = read_driver_state()
-                        with open("/opt/cursor/logs/debug.log", "a") as handle:
-                            handle.write(json.dumps({"hypothesisId": "G,J", "location": "scripts/cloudbench-status-server.py:shutdown-health", "message": "cleanup acknowledged response state", "data": {"driverState": observed_state}, "timestamp": int(time.time() * 1000)}) + "\n")
-                    except OSError:
-                        pass
-                    # endregion
+                    observed_state = read_driver_state()
                     if observed_state == "exited":
                         self.send_response(204)
                     elif observed_state in {"booting", "running"}:
@@ -323,27 +316,30 @@ def main() -> int:
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             try:
                 descriptor = os.open(resolved, flags)
-                opened = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_dev != metadata.st_dev
-                    or opened.st_ino != metadata.st_ino
-                    or opened.st_size != metadata.st_size
-                    or opened.st_size > maximum
-                ):
-                    os.close(descriptor)
-                    self.send_error(409, "exact recovery evidence changed during read")
-                    return
             except OSError:
                 self.send_error(404, "exact recovery evidence is unavailable")
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(opened.st_size))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
             try:
                 with os.fdopen(descriptor, "rb") as source:
+                    try:
+                        opened = os.fstat(source.fileno())
+                    except OSError:
+                        self.send_error(404, "exact recovery evidence is unavailable")
+                        return
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or opened.st_dev != metadata.st_dev
+                        or opened.st_ino != metadata.st_ino
+                        or opened.st_size != metadata.st_size
+                        or opened.st_size > maximum
+                    ):
+                        self.send_error(409, "exact recovery evidence changed during read")
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Length", str(opened.st_size))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
                     remaining = opened.st_size
                     while remaining:
                         chunk = source.read(min(65_536, remaining))

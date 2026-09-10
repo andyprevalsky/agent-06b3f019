@@ -54,6 +54,7 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
         if process.poll() is None:
             try:
                 os.killpg(process_id, signal.SIGTERM)
+                job["_terminated_by_campaign"] = True
             except ProcessLookupError:
                 pass
     deadline = time.monotonic() + 30
@@ -71,6 +72,7 @@ def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
         if process.poll() is None:
             try:
                 os.killpg(process_id, signal.SIGKILL)
+                job["_terminated_by_campaign"] = True
             except ProcessLookupError:
                 pass
 
@@ -148,6 +150,7 @@ def main() -> int:
     pending = deque(jobs)
     active: dict[int, dict[str, object]] = {}
     stop_signal = 0
+    termination_requested = False
 
     def request_stop(signum: int, _frame: object) -> None:
         nonlocal stop_signal
@@ -211,7 +214,8 @@ def main() -> int:
                 )
                 write_json_atomic(summary_path, state)
 
-            if stop_signal:
+            if stop_signal and not termination_requested:
+                termination_requested = True
                 terminate_owned_children(active)
 
             for process_id, job in list(active.items()):
@@ -220,10 +224,15 @@ def main() -> int:
                 exit_code = process.poll()
                 if exit_code is None:
                     continue
+                if exit_code < 0:
+                    exit_code = 128 - exit_code
                 handle = job.pop("_log_handle")
                 handle.close()
                 job.pop("_process")
-                job["status"] = "passed" if exit_code == 0 else "failed"
+                job["status"] = (
+                    "cancelled" if job.pop("_terminated_by_campaign", False)
+                    else "passed" if exit_code == 0 else "failed"
+                )
                 job["controller_exit_code"] = exit_code
                 job["finished_at"] = utc_now()
                 job["wall_clock_seconds"] = round(
@@ -259,7 +268,7 @@ def main() -> int:
                 break
             time.sleep(0.1)
     finally:
-        if active:
+        if active and not termination_requested:
             terminate_owned_children(active)
         for job in active.values():
             handle = job.get("_log_handle")

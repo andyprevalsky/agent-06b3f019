@@ -202,8 +202,16 @@ def _terminal_report_card(result: dict, fleet_dir: Path) -> dict:
 def _write_json_atomic(path: Path, value: dict) -> None:
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     try:
-        temporary.write_text(json.dumps(value, indent=2) + "\n")
+        with temporary.open("w") as handle:
+            handle.write(json.dumps(value, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         temporary.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -355,7 +363,7 @@ def aggregate(
     }
     result["status"] = (
         "passed"
-        if passed == len(tasks) and (controller_exit_code is None or controller_exit_code == 0)
+        if tasks and passed == len(tasks) and (controller_exit_code is None or controller_exit_code == 0)
         else "failed"
     )
     if controller_exit_code is not None:
@@ -366,13 +374,7 @@ def aggregate(
     return result
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("fleet_dir", type=Path)
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--expected-execution-provenance-file", type=Path)
-    parser.add_argument("--expected-execution-task-matrix-file", type=Path)
-    args = parser.parse_args()
+def _publish_aggregate(args: argparse.Namespace) -> int:
     expected_execution_provenance = None
     expected_execution_task_matrix = None
     if (args.expected_execution_provenance_file is None) != (
@@ -427,7 +429,6 @@ def main() -> int:
             controller_exit_code,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        output.unlink(missing_ok=True)
         print(f"aggregate rejected child execution provenance: {exc}", file=sys.stderr)
         return 1
     report_card = _terminal_report_card(result, fleet_dir)
@@ -439,6 +440,25 @@ def main() -> int:
     }
     _write_json_atomic(output.with_name("llm-usage.json"), usage_artifact)
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("fleet_dir", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--expected-execution-provenance-file", type=Path)
+    parser.add_argument("--expected-execution-task-matrix-file", type=Path)
+    args = parser.parse_args()
+    status = 1
+    try:
+        status = _publish_aggregate(args)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"aggregate publication failed: {exc}", file=sys.stderr)
+    finally:
+        if status != 0:
+            for path in (args.output, args.output.with_name("report-card.json"), args.output.with_name("llm-usage.json")):
+                path.unlink(missing_ok=True)
+    return status
 
 
 if __name__ == "__main__":

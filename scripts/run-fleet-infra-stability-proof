@@ -380,7 +380,8 @@ set +e
           "${BENCHES[@]}" \
           --timeout "$TIMEOUT" \
           --foreground \
-          > >(tee "$SLICE_LOG") 2>&1
+          2>&1 | tee "$SLICE_LOG"
+      slice_pipe_status=("${PIPESTATUS[@]}")
     else
       FLEET_STABILITY_SLICE="$i" \
       CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
@@ -389,12 +390,17 @@ set +e
           --infra-probe \
           --timeout "$TIMEOUT" \
           --foreground \
-          > >(tee "$SLICE_LOG") 2>&1
+          2>&1 | tee "$SLICE_LOG"
+      slice_pipe_status=("${PIPESTATUS[@]}")
     fi
-    rc=$?
+    rc="${slice_pipe_status[0]}"
     set -e
 
-    if [ "$MODE" = capability ]; then
+    if [ "${slice_pipe_status[1]}" -ne 0 ]; then
+      echo "❌ slice log publication failed" >&2
+      classification=infra
+      batch_path=""
+    elif [ "$MODE" = capability ]; then
       classification_line="$(classify_capability_slice "$SLICE_LOG" "$slice_owner_token" "$rc" "${BENCHES[@]}")"
       IFS=$'\t' read -r classification batch_path <<< "$classification_line"
     elif [ "$rc" -eq 0 ]; then

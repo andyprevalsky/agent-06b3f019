@@ -80,6 +80,32 @@ At 10,000 agents this adds no per-agent polling or shared fan-in. There is one
 status service per active guest and work occurs only on run teardown, so cost is
 O(active guests) and remains bounded by fleet concurrency.
 
+## Review recurrence: evidence and acknowledgement publication
+
+Review reproduced a failed boot-state write being masked by a best-effort debug
+log and interruption evidence being copied before its destination directory
+existed. The temporary debug blocks were removed; state publication again
+returns the actual write/rename result, and acknowledgement publication creates
+the evidence directory before copying the exact runner receipt. Clean, pending,
+and failed receipts remain distinguishable; only clean evidence permits an ACK.
+
+Recovery responses also leaked an open descriptor when metadata reads or HTTP
+headers failed. A context manager now owns the descriptor across validation,
+headers, and streaming. Injected metadata and disconnect failures verify closure.
+The existing authenticated HTTP lifecycle regression caught a misplaced state
+read during debug removal; the corrected GET and POST acknowledgement branches
+each read driver state independently of diagnostics.
+
+The companion `cloudbench_recovery_review_test.py` exercises raw-byte digest
+binding, canonical UUID identity, ANSI-coloured provider markers, and custom
+guest run paths. Validation and hashing now use the same bounded query bytes;
+case normalization does not change raw evidence digests; formatted allocation
+evidence cannot prove zero allocation; and a custom missing run path still
+requires the complete stopped-service, absent-run, closed-backend fence.
+
+All cases run in the standard controller gates. They do not replace live fleet
+acceptance or authorize deletion from missing evidence alone.
+
 ## Human feedback
 
 The user required ten consecutive 10-task slices with no INFRA result. Any

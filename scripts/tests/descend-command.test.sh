@@ -252,4 +252,156 @@ for invalid in '-k=0' '--runs=bad' '--concurrency=0'; do
     || fail "$invalid must explain its positive-integer contract"
 done
 
+# CAMPAIGN_LIFECYCLE_REGRESSIONS_BEGIN
+python3 - "$ROOT_DIR" <<'PY'
+import argparse
+import importlib.util
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+campaign_script = Path(sys.argv.pop()) / "scripts" / "run-bench-campaign.py"
+
+
+class CampaignLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts" / "run-bench").write_text('''#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  signalled) kill -TERM "$$" ;;
+  waiting)
+    trap 'exit 0' TERM
+    touch "$RUN_BENCH_CAMPAIGN_ROOT/child-ready"
+    while :; do sleep 0.1; done
+    ;;
+  passed|queued) exit 0 ;;
+  *) exit 99 ;;
+esac
+''')
+        self.environment = {
+            **os.environ,
+            "RUN_BENCH_CAMPAIGN_ROOT": str(self.root),
+            "RUN_BENCH_CAMPAIGN_ID": "lifecycle",
+        }
+
+    def command(self, *tasks):
+        return [
+            sys.executable, str(campaign_script), "--root", str(self.root),
+            "--runs", "1", "--concurrency", "1",
+            *[argument for task in tasks for argument in ("--task", task)],
+        ]
+
+    def summary(self):
+        return json.loads((self.root / "lifecycle" / "summary.json").read_text())
+
+    def test_child_signal_has_shell_exit_status(self):
+        completed = subprocess.run(
+            self.command("signalled"), env=self.environment,
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(completed.returncode, 143, completed.stdout + completed.stderr)
+        summary = self.summary()
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["jobs"][0]["controller_exit_code"], 143)
+        self.assertEqual(summary["jobs"][0]["status"], "failed")
+
+    def test_campaign_cancel_marks_active_and_queued_jobs(self):
+        process = subprocess.Popen(
+            self.command("passed", "waiting", "queued"), env=self.environment,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "child-ready").exists():
+                self.assertIsNone(process.poll(), "campaign exited before its child was ready")
+                self.assertLess(time.monotonic(), deadline, "child never became ready")
+                time.sleep(0.02)
+            process.send_signal(signal.SIGTERM)
+            output, _ = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, output)
+            summary = self.summary()
+            self.assertEqual(summary["status"], "cancelled")
+            self.assertEqual(
+                [job["status"] for job in summary["jobs"]],
+                ["passed", "cancelled", "cancelled"],
+            )
+            # A cooperative active child exits cleanly after TERM; its actual
+            # exit code must not erase the campaign's cancellation disposition.
+            self.assertEqual(summary["jobs"][1]["controller_exit_code"], 0)
+            self.assertNotIn("_terminated_by_campaign", json.dumps(summary))
+        finally:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=35)
+
+    def test_stop_runs_one_bounded_teardown_before_delayed_reap(self):
+        spec = importlib.util.spec_from_file_location("campaign_lifecycle", campaign_script)
+        campaign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(campaign)
+        handlers = {}
+        child = None
+        clock = 0
+        signals = []
+
+        class DelayedReapProcess:
+            pid = 777
+
+            def __init__(self, *_args, **_kwargs):
+                nonlocal child
+                child = self
+                self.killed = False
+                self.polls_after_kill = 0
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+            def poll(self):
+                if not self.killed:
+                    return None
+                self.polls_after_kill += 1
+                return None if self.polls_after_kill == 1 else -signal.SIGKILL
+
+        def killpg(pid, signum):
+            self.assertEqual(pid, child.pid)
+            signals.append(signum)
+            if signum == signal.SIGKILL:
+                child.killed = True
+
+        def monotonic():
+            nonlocal clock
+            clock += 31
+            return clock
+
+        args = argparse.Namespace(
+            root=self.root, runs=1, concurrency=1, task=["waiting"], forward_arg=[]
+        )
+        with (
+            patch.dict(os.environ, self.environment),
+            patch.object(campaign, "parse_args", return_value=args),
+            patch.object(campaign.subprocess, "Popen", DelayedReapProcess),
+            patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
+            patch.object(campaign.os, "killpg", side_effect=killpg),
+            patch.object(campaign.time, "monotonic", side_effect=monotonic),
+            patch.object(campaign.time, "sleep"),
+            patch.object(campaign, "terminate_owned_children", wraps=campaign.terminate_owned_children) as teardown,
+        ):
+            self.assertEqual(campaign.main(), 143)
+        self.assertEqual(teardown.call_count, 1, "stop repeated its full shutdown window")
+        self.assertEqual(signals, [signal.SIGTERM, signal.SIGKILL])
+        self.assertEqual(self.summary()["jobs"][0]["status"], "cancelled")
+
+
+unittest.main()
+PY
+# CAMPAIGN_LIFECYCLE_REGRESSIONS_END
+
 echo "All /descend command checks passed."

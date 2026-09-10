@@ -204,6 +204,36 @@ fi
 SH
 chmod +x "$tmp/fake-fleet"
 
+mkdir "$tmp/slow-log-bin"
+cat >"$tmp/slow-log-bin/tee" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */slice-*.log)
+    sleep 1
+    "$FLEET_TEST_REAL_TEE" "$@"
+    exit "${FLEET_TEST_TEE_EXIT:-0}"
+    ;;
+esac
+exec "$FLEET_TEST_REAL_TEE" "$@"
+SH
+chmod +x "$tmp/slow-log-bin/tee"
+real_tee="$(command -v tee)"
+for log_exit in 0 1; do
+  proof_exit=0
+  PATH="$tmp/slow-log-bin:$PATH" FLEET_TEST_REAL_TEE="$real_tee" \
+  FLEET_TEST_TEE_EXIT="$log_exit" \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/log-drain-$log_exit" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/log-drain-$log_exit.log" 2>&1 || proof_exit=$?
+  if [ "$log_exit" -eq 0 ]; then
+    [ "$proof_exit" -eq 0 ] || fail "classification raced the slice log writer"
+  else
+    [ "$proof_exit" -ne 0 ] || fail "slice log publication failure was accepted"
+  fi
+done
+
 # A fresh nested canary shares stdout with its parent, so the last provenance
 # line belongs to a different controller. Select the exact parent identity.
 FLEET_STABILITY_FAKE_NESTED_PROVENANCE=canary \

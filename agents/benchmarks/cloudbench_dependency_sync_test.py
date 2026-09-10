@@ -2234,6 +2234,40 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     assert "continue" in patch_upload
 
 
+def test_boot_driver_state_write_failure_is_not_masked_by_logging(tmp_path: Path) -> None:
+    publish = _extract_fleet_function(BOOT_SCRIPT.read_text(), "publish_driver_state() {")
+    result = subprocess.run(
+        ["bash", "-c", f'''set -uo pipefail
+{publish}
+DRIVER_STATE_FILE={shlex.quote(str(tmp_path / 'absent' / 'state'))}
+CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / 'ack'))}
+publish_driver_state running
+'''], text=True, capture_output=True, check=False,
+    )
+    assert result.returncode != 0, "failed state publication must stop its caller"
+
+
+@pytest.mark.parametrize("state", ["clean", "pending", "failed"])
+def test_driver_cleanup_persists_evidence_in_fresh_data_directory(tmp_path: Path, state: str) -> None:
+    publish = _extract_fleet_function(DRIVER_SCRIPT.read_text(), "publish_cleanup_ack() {")
+    receipt = tmp_path / "runner.status"
+    receipt.write_text(f"state={state}\ntoken=fixture\n")
+    data = tmp_path / "fresh-data"
+    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+log() {{ :; }}
+{publish}
+CLOUDBENCH_RUN_TOKEN=fixture
+ACTIVE_COMMAND_SIGNALLED=1
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(receipt))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(data / 'interrupt.status'))}
+CLEANUP_ACK_FILE={shlex.quote(str(data / 'cleanup.ack'))}
+publish_cleanup_ack
+'''], text=True, capture_output=True, check=False)
+    assert (data / "interrupt.status").read_bytes() == receipt.read_bytes()
+    assert (result.returncode == 0) == (state == "clean")
+    assert (data / "cleanup.ack").exists() == (state == "clean")
+
+
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
     """Updating the executing repo script can shift bytes under Bash itself."""
     cloud = CLOUD_SCRIPT.read_text()
@@ -6437,6 +6471,127 @@ def test_fleet_terminal_projection_uses_two_archives_and_one_terminal_task_list(
     cleanup = _extract_fleet_function(fleet_source, "cleanup() {")
     assert 'finalize_terminal_projection "$ec"' in cleanup
     assert "trap cleanup EXIT" in fleet_source
+
+
+def _load_reviewed_cloudbench_module(path: Path):
+    spec = importlib.util.spec_from_file_location(path.stem.replace("-", "_"), path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_fleet_terminal_projection_empty_tasks_cannot_pass(tmp_path: Path) -> None:
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    (batch / "benches.json").write_text("[]")
+    result = subprocess.run(
+        [sys.executable, str(AGGREGATE_SCRIPT), str(tmp_path), str(batch / "run.json")],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads((batch / "run.json").read_text())["status"] == "failed"
+
+
+@pytest.mark.parametrize("failure", ["aggregate", "report-card.json", "llm-usage.json", "fsync", "invalid-controller"])
+def test_fleet_terminal_projection_rejection_removes_all_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    module = _load_reviewed_cloudbench_module(AGGREGATE_SCRIPT)
+    batch = tmp_path / "_batch"
+    batch.mkdir()
+    (batch / "benches.json").write_text("[]")
+    artifacts = [batch / name for name in ("run.json", "report-card.json", "llm-usage.json")]
+    for path in artifacts:
+        path.write_text('{"stale": true}')
+    monkeypatch.setattr(sys, "argv", [str(AGGREGATE_SCRIPT), str(tmp_path), str(artifacts[0])])
+    monkeypatch.delenv("CLOUDBENCH_CONTROLLER_ELAPSED_SECONDS", raising=False)
+    monkeypatch.delenv("CLOUDBENCH_CONTROLLER_EXIT_CODE", raising=False)
+
+    def fail(*args, **kwargs):
+        raise OSError("injected publication failure")
+
+    if failure == "aggregate":
+        monkeypatch.setattr(module, "aggregate", fail)
+    elif failure == "fsync":
+        monkeypatch.setattr(module.os, "fsync", fail)
+    elif failure == "invalid-controller":
+        monkeypatch.setenv("CLOUDBENCH_CONTROLLER_EXIT_CODE", "invalid")
+    else:
+        write = module._write_json_atomic
+
+        def fail_after_write(path, value):
+            write(path, value)
+            if path.name == failure:
+                fail()
+
+        monkeypatch.setattr(module, "_write_json_atomic", fail_after_write)
+    try:
+        status = module.main()
+    except OSError:
+        status = 1
+    assert status != 0
+    assert not any(path.exists() for path in artifacts), "rejected aggregate left terminal artifacts"
+
+
+@pytest.mark.parametrize("failure", ["headers", "fstat"])
+def test_status_recovery_read_closes_descriptor_on_response_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from types import SimpleNamespace
+
+    module = _load_reviewed_cloudbench_module(STATUS_SERVER_SCRIPT)
+    captured = {}
+
+    class Server:
+        def __init__(self, address, handler):
+            captured["handler"] = handler
+
+        def serve_forever(self):
+            pass
+
+    monkeypatch.setattr(module, "ThreadingHTTPServer", Server)
+    monkeypatch.setattr(module, "parse_args", lambda: SimpleNamespace(
+        directory=str(tmp_path), port=0, bind="127.0.0.1", barrier="", run_token="fixture", ready_file="",
+    ))
+    assert module.main() == 0
+    handler = object.__new__(captured["handler"])
+    handler.send_response = lambda *args: None
+    handler.send_header = lambda *args: None
+    handler.send_error = lambda *args: None
+
+    def fail_headers():
+        raise BrokenPipeError("client disconnected while reading headers")
+
+    handler.end_headers = fail_headers
+    target = tmp_path / "receipt.status"
+    target.write_text("state=clean\n")
+    real_open, real_fstat = os.open, os.fstat
+
+    def track_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        captured["descriptor"] = descriptor
+        return descriptor
+
+    def fail_fstat(descriptor):
+        raise OSError("descriptor metadata read failed")
+
+    monkeypatch.setattr(module.os, "open", track_open)
+    if failure == "fstat":
+        monkeypatch.setattr(module.os, "fstat", fail_fstat)
+    try:
+        try:
+            handler._serve_recovery_evidence(target, 1024)
+        except BrokenPipeError:
+            pass
+        with pytest.raises(OSError):
+            real_fstat(captured["descriptor"])
+    finally:
+        if "descriptor" in captured:
+            try:
+                os.close(captured["descriptor"])
+            except OSError:
+                pass
 
 
 @pytest.mark.parametrize("outcome", ["SKIPPED", "ERROR", "CANCELLED", "INFRA_ERROR"])

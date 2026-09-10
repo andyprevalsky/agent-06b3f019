@@ -149,7 +149,7 @@ claim_script_snapshot_ownership() {
 }
 
 cleanup_owned_script_snapshot() {
-    local owner_start current_start
+    local owner_start
     local -a cleanup_args
     [ "${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE:-borrow}" = "owner" ] || return 0
     [ -e "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] || return 0
@@ -157,15 +157,8 @@ cleanup_owned_script_snapshot() {
     # at EXIT can disagree with the marker under load even for the same PID,
     # which then blocks exact snapshot removal after an otherwise-green fleet.
     owner_start="${CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_PID_START:-}"
-    current_start="$(script_snapshot_current_pid_start)"
     if [ -z "$owner_start" ]; then
-        owner_start="$current_start"
-    elif [ -n "$current_start" ] && [ "$current_start" != "$owner_start" ]; then
-        # region agent log
-        printf '{"hypothesisId":"C","location":"scripts/run-bench-fleet:cleanup_owned_script_snapshot","message":"snapshot self identity mismatch","data":{"pid":"%s","sealedStart":"%s","currentStart":"%s"},"timestamp":%s}\n' \
-            "$$" "$owner_start" "$current_start" "$(($(date +%s) * 1000))" \
-            >> /opt/cursor/logs/debug.log 2>/dev/null || true
-        # endregion
+        owner_start="$(script_snapshot_current_pid_start)"
     fi
     [ -n "$owner_start" ] || return 1
     cleanup_args=(
@@ -1393,11 +1386,6 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
                 INVENTORY_REFRESH_LOCK_OWNER_PID_START="$owner_start"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK="$lock"
                 export CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN="$token"
-                # region agent log
-                printf '{"hypothesisId":"A","location":"scripts/run-bench-fleet:inventory_refresh_lock_acquire","message":"inventory lock acquired","data":{"pid":"%s","pidStart":"%s"},"timestamp":%s}\n' \
-                    "$owner_pid" "$owner_start" "$(($(date +%s) * 1000))" \
-                    >> /opt/cursor/logs/debug.log 2>/dev/null || true
-                # endregion
                 return 0
             fi
         fi
@@ -1442,24 +1430,16 @@ inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-gene
 }
 
 inventory_refresh_lock_release() {
-    local lock="$INVENTORY_REFRESH_LOCK" owner_pid owner_start
+    local lock="$INVENTORY_REFRESH_LOCK" owner_pid
     local lock_host lock_pid lock_start lock_token
     local sealed_owner_pid sealed_owner_start
     owner_pid="${BASHPID:-$$}"
-    owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
     sealed_owner_pid="${INVENTORY_REFRESH_LOCK_OWNER_PID:-}"
     sealed_owner_start="${INVENTORY_REFRESH_LOCK_OWNER_PID_START:-}"
     lock_host="$(registry_meta_value "$lock" host)"
     lock_pid="$(registry_meta_value "$lock" pid)"
     lock_start="$(registry_meta_value "$lock" pid_start)"
     lock_token="$(registry_meta_value "$lock" token)"
-    # region agent log
-    printf '{"hypothesisId":"A","location":"scripts/run-bench-fleet:inventory_refresh_lock_release","message":"inventory lock release identity","data":{"pid":"%s","lockPid":"%s","currentStart":"%s","lockStart":"%s","hostMatch":%s,"tokenMatch":%s},"timestamp":%s}\n' \
-        "$owner_pid" "$lock_pid" "$owner_start" "$lock_start" \
-        "$([ "$lock_host" = "$FLEET_OWNER_HOST" ] && printf true || printf false)" \
-        "$([ "$lock_token" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] && printf true || printf false)" \
-        "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-    # endregion
     [ "$lock_host" = "$FLEET_OWNER_HOST" ] \
         && [ "$owner_pid" = "$sealed_owner_pid" ] \
         && [ "$lock_pid" = "$sealed_owner_pid" ] \
@@ -1761,10 +1741,6 @@ volume_inventory_contains_id() {  # <volume-id>; stdout=exact state; 0=present, 
     local vol="$1" volume status
     volume="$(FLY volumes show "$vol" -a "$APP" --json 2>&1)"
     status=$?
-    # region agent log
-    CLOUDBENCH_DEBUG_VOLUME="$vol" CLOUDBENCH_DEBUG_STATUS="$status" \
-        CLOUDBENCH_DEBUG_RESPONSE="${volume:0:200}" python3 -c 'import json,os,time; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"A,B","location":"scripts/run-bench-fleet:volume_inventory_contains_id","message":"exact volume lifecycle response","data":{"volume":os.environ["CLOUDBENCH_DEBUG_VOLUME"],"status":int(os.environ["CLOUDBENCH_DEBUG_STATUS"]),"response":os.environ["CLOUDBENCH_DEBUG_RESPONSE"]},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-    # endregion
     if [ "$status" -ne 0 ]; then
         case "$volume" in
             *"failed to get volume $vol: volume not found"*) return 1 ;;
@@ -1845,11 +1821,6 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         else
             lifecycle_rc=$?
         fi
-        # region agent log
-        CLOUDBENCH_DEBUG_VOLUME="$vol" CLOUDBENCH_DEBUG_ATTEMPT="$i" \
-            CLOUDBENCH_DEBUG_DESTROY_RC="$destroy_rc" CLOUDBENCH_DEBUG_LIFECYCLE_RC="$lifecycle_rc" \
-            CLOUDBENCH_DEBUG_STATE="${state:0:80}" python3 -c 'import json,os,time; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"A,B,C","location":"scripts/run-bench-fleet:reap_volume","message":"volume cleanup lifecycle observation","data":{"volume":os.environ["CLOUDBENCH_DEBUG_VOLUME"],"attempt":int(os.environ["CLOUDBENCH_DEBUG_ATTEMPT"]),"destroyStatus":int(os.environ["CLOUDBENCH_DEBUG_DESTROY_RC"]),"lifecycleStatus":int(os.environ["CLOUDBENCH_DEBUG_LIFECYCLE_RC"]),"state":os.environ["CLOUDBENCH_DEBUG_STATE"]},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-        # endregion
         if [ "$lifecycle_rc" -eq 1 ]; then
             rm -f "$destroy_capture"
             return 0
@@ -1858,11 +1829,6 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
             case "$state" in
                 pending_destroy|destroyed)
                     if [ "$destroy_rc" -eq 0 ]; then
-                        # region agent log
-                        printf '{"hypothesisId":"D","location":"scripts/run-bench-fleet:reap_volume","message":"provider-retained terminal deletion receipt","data":{"volume":"%s","state":"%s","attempt":%s},"timestamp":%s}\n' \
-                            "$vol" "$state" "$i" "$(($(date +%s) * 1000))" \
-                            >> /opt/cursor/logs/debug.log 2>/dev/null || true
-                        # endregion
                         rm -f "$destroy_capture"
                         return 74
                     fi
@@ -1885,19 +1851,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     # only exact not-found returns 0.
     if [ "$destroy_accepted" -eq 1 ] && [ "$destroy_ambiguous" -eq 0 ] \
         && [ "$lifecycle_ambiguous" -eq 0 ]; then
-        # region agent log
-        printf '{"hypothesisId":"A,B","location":"scripts/run-bench-fleet:reap_volume","message":"destroy accepted while exact absence remains pending","data":{"volume":"%s","destroyAccepted":%s,"destroyAmbiguous":%s,"lifecycleAmbiguous":%s},"timestamp":%s}\n' \
-            "$vol" "$destroy_accepted" "$destroy_ambiguous" "$lifecycle_ambiguous" \
-            "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-        # endregion
         echo "  ⚠️ destroy accepted for volume $vol but exact absence has not converged — retaining exact ownership" >&2
         return 75
     fi
-    # region agent log
-    printf '{"hypothesisId":"D","location":"scripts/run-bench-fleet:reap_volume","message":"destroy or exact lifecycle remained ambiguous","data":{"volume":"%s","destroyAccepted":%s,"destroyAmbiguous":%s,"lifecycleAmbiguous":%s},"timestamp":%s}\n' \
-        "$vol" "$destroy_accepted" "$destroy_ambiguous" "$lifecycle_ambiguous" \
-        "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-    # endregion
     echo "  ⚠️ could not destroy volume $vol — exact-owner recovery retained: flyctl volumes destroy $vol -a $APP" >&2
     return 1
 }
@@ -1952,11 +1908,6 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
         fi
         [ "$detail_status" -eq 0 ] \
             && state="$(printf '%s' "$details" | awk '{print $1}')"
-        # region agent log
-        CLOUDBENCH_DEBUG_MACHINE="$id" CLOUDBENCH_DEBUG_ATTEMPT="$i" \
-            CLOUDBENCH_DEBUG_DETAIL_STATUS="$detail_status" CLOUDBENCH_DEBUG_STATE="${state:0:80}" \
-            python3 -c 'import json,os,time; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"C,D","location":"scripts/run-bench-fleet:reap_machine","message":"machine destroy convergence branch","data":{"machine":os.environ["CLOUDBENCH_DEBUG_MACHINE"],"attempt":int(os.environ["CLOUDBENCH_DEBUG_ATTEMPT"]),"detailStatus":int(os.environ["CLOUDBENCH_DEBUG_DETAIL_STATUS"]),"state":os.environ["CLOUDBENCH_DEBUG_STATE"]},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-        # endregion
         if [ "$detail_status" -eq 1 ]; then
             if [ -n "$diagnostic_log" ]; then
                 printf '[%s] worker exactly absent after destroy attempt %s/5\n' \
@@ -5712,20 +5663,6 @@ for candidate in run_dir.iterdir():
     if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
         raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
-# region agent log
-worker_ledger_ids: dict[str, list[str]] = {}
-for candidate in run_dir.iterdir():
-    worker_ledger = candidate / "worker-clones.ids"
-    if plain_directory(candidate) and regular_file(worker_ledger):
-        worker_ledger_ids[candidate.name] = worker_ledger.read_text(
-            encoding="utf-8"
-        ).splitlines()
-try:
-    with open("/opt/cursor/logs/debug.log", "a") as handle:
-        handle.write(json.dumps({"hypothesisId": "G,H,I", "location": "scripts/run-bench-fleet:fleet_registry_build_guest_recovery_plan", "message": "exact recovery output and worker mapping", "data": {"registryMachineIds": sorted(machine_records), "outputMachineIds": sorted(output_by_machine), "workerLedgers": worker_ledger_ids}, "timestamp": int(time.time() * 1000)}) + "\n")
-except OSError:
-    pass
-# endregion
 
 output_machine_by_path = {
     output: machine_id
@@ -6316,14 +6253,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 "/cloudbench-interrupt-cleanup-$guest_run_token.status" \
                 "$runner_evidence" 65536 5
         fi
-        # region agent log
-        CLOUDBENCH_DEBUG_RUNNER_EVIDENCE="$runner_evidence" \
-            CLOUDBENCH_DEBUG_RUNNER_STATUS="$runner_status_code" \
-            CLOUDBENCH_DEBUG_RUNNER_TOKEN="$guest_run_token" \
-            CLOUDBENCH_DEBUG_RUNNER_BENCH="$bench" \
-            CLOUDBENCH_DEBUG_RUNNER_MACHINE="$machine_id" \
-            python3 -c 'import json,os,time; p=os.environ["CLOUDBENCH_DEBUG_RUNNER_EVIDENCE"]; f={}; [f.setdefault(k,v) for k,s,v in (line.partition("=") for line in (open(p).read().splitlines() if os.path.isfile(p) else [])) if s]; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"J,K,L","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"runner cleanup lifecycle subtype","data":{"bench":os.environ["CLOUDBENCH_DEBUG_RUNNER_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_RUNNER_MACHINE"],"httpStatus":os.environ["CLOUDBENCH_DEBUG_RUNNER_STATUS"],"fields":sorted(f),"version":f.get("version"),"state":f.get("state"),"tokenMatch":f.get("token")==os.environ["CLOUDBENCH_DEBUG_RUNNER_TOKEN"]},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-        # endregion
         case "$runner_status_code" in
             200)
                 runner_lifecycle="$(python3 "$EXACT_SESSION_CLEANUP_HELPER" \
@@ -6430,42 +6359,6 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
-        # region agent log
-        CLOUDBENCH_DEBUG_STATE_EVIDENCE="$state_evidence" \
-            CLOUDBENCH_DEBUG_STATE_KIND="$state_kind" \
-            CLOUDBENCH_DEBUG_STATE_DRIVER="$state_driver" \
-            CLOUDBENCH_DEBUG_STATE_DESCENDANTS="$state_descendants" \
-            CLOUDBENCH_DEBUG_STATE_REASON="$state_reason" \
-            CLOUDBENCH_DEBUG_STATE_BENCH="$bench" \
-            CLOUDBENCH_DEBUG_STATE_MACHINE="$machine_id" \
-            python3 -c 'import json,os,time; p=json.load(open(os.environ["CLOUDBENCH_DEBUG_STATE_EVIDENCE"])); open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"M,N,O","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"exact guest recovery state branch","data":{"bench":os.environ["CLOUDBENCH_DEBUG_STATE_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_STATE_MACHINE"],"kind":os.environ["CLOUDBENCH_DEBUG_STATE_KIND"],"driver":os.environ["CLOUDBENCH_DEBUG_STATE_DRIVER"],"descendants":os.environ["CLOUDBENCH_DEBUG_STATE_DESCENDANTS"],"reason":os.environ["CLOUDBENCH_DEBUG_STATE_REASON"],"servicesStatus":p.get("services_status"),"liveServiceCount":len(p.get("live_service_pids",[])),"backendClosed":p.get("backend_closed"),"runWithinLimit":p.get("run_json",{}).get("within_limit"),"backendWithinLimit":p.get("backend_log",{}).get("within_limit")},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-        # endregion
-        # region agent log
-        if [ "$state_kind" = "exited" ] \
-            && [ "$state_reason" = "missing regular exact guest evidence: /data/repo/.context/cloudbench/run.json" ]; then
-            debug_manifest_status="backend-unreadable"
-            cloudbench_fetch_guest_evidence status_code \
-                "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
-                "/repo/.context/cloudbench/logs/backend.log" \
-                "$backend_evidence" 536870912 30
-            if [ "$status_code" = "200" ]; then
-                if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                        build-active-provider-manifest \
-                        "${identity_args[@]}" \
-                        --backend-log "$backend_evidence" \
-                        --manifest "$manifest"; then
-                    debug_manifest_status="exact-manifest"
-                else
-                    debug_manifest_status="manifest-rejected"
-                fi
-            fi
-            CLOUDBENCH_DEBUG_MANIFEST="$manifest" \
-                CLOUDBENCH_DEBUG_MANIFEST_STATUS="$debug_manifest_status" \
-                CLOUDBENCH_DEBUG_MANIFEST_BENCH="$bench" \
-                CLOUDBENCH_DEBUG_MANIFEST_MACHINE="$machine_id" \
-                python3 -c 'import json,os,time; p=json.load(open(os.environ["CLOUDBENCH_DEBUG_MANIFEST"])) if os.path.isfile(os.environ["CLOUDBENCH_DEBUG_MANIFEST"]) else {}; s=p.get("sessions",{}); e=p.get("evidence",{}); open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"M,N,O","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"exited guest provider identity candidate","data":{"bench":os.environ["CLOUDBENCH_DEBUG_MANIFEST_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_MANIFEST_MACHINE"],"status":os.environ["CLOUDBENCH_DEBUG_MANIFEST_STATUS"],"kind":p.get("kind"),"rootAgentBound":isinstance(p.get("root_agent_id"),str),"kernelSessionCount":len(s.get("kernel",[])),"steelSessionCount":len(s.get("steel",[])),"allocationEventCount":e.get("allocation_event_count"),"browserSessionMutationCount":e.get("browser_session_mutation_count")},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-        fi
-        # endregion
         if [ "$quiescence_status" -ne 0 ]; then
             if [ "$state_kind" = "active" ] \
                 || [ "$state_kind" = "exited-no-run" ]; then
@@ -6911,13 +6804,6 @@ for record in (audit / "expected-fresh").iterdir():
         raise ValueError("unsafe exact recovery source record")
     expected[record.name] = value["source_machine_id"]
 sources = set(expected.values())
-# region agent log
-try:
-    with open("/opt/cursor/logs/debug.log", "a") as handle:
-        handle.write(json.dumps({"hypothesisId": "E", "location": "scripts/run-bench-fleet:resolve_exact_recovery_warm_identity", "message": "exact recovery source graph", "data": {"recordCount": len(list((audit / "expected-fresh").iterdir())), "sourceCount": len(sources), "sources": sorted(sources)}, "timestamp": int(time.time() * 1000)}) + "\n")
-except OSError:
-    pass
-# endregion
 fresh_required = {
     "version", "fleet_owner_token", "run_id", "app", "clone_name", "source",
     "source_machine_id", "machine_id", "volume_id", "disposition",
@@ -7276,11 +7162,6 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 fi
                 reap_status=0
                 reap_volume "$target_volume" "$diagnostic_log" || reap_status=$?
-                # region agent log
-                printf '{"hypothesisId":"A,B,C","location":"scripts/run-bench-fleet:clone_machine_target","message":"owned failed-clone volume cleanup classified","data":{"volume":"%s","cloneName":"%s","attempt":%s,"reapStatus":%s},"timestamp":%s}\n' \
-                    "$target_volume" "$target_name" "$attempt" "$reap_status" \
-                    "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
-                # endregion
                 case "$reap_status" in
                     0|74)
                         terminal_disposition=destroyed-verified-absent
@@ -10120,11 +10001,6 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
             [ "$machine_reap_status" -eq 74 ] || rc=1
         fi
     fi
-    # region agent log
-    CLOUDBENCH_DEBUG_MACHINE="$cleanup_wid" CLOUDBENCH_DEBUG_VOLUME="${volume_id:-}" \
-        CLOUDBENCH_DEBUG_REAP_STATUS="$machine_reap_status" CLOUDBENCH_DEBUG_CLEANUP_STATUS="$rc" \
-        python3 -c 'import json,os,time; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"C,D","location":"scripts/run-bench-fleet:cleanup_failed_worker","message":"failed worker machine cleanup result","data":{"machine":os.environ["CLOUDBENCH_DEBUG_MACHINE"],"volume":os.environ["CLOUDBENCH_DEBUG_VOLUME"],"machineReapStatus":int(os.environ["CLOUDBENCH_DEBUG_REAP_STATUS"]),"cleanupStatus":int(os.environ["CLOUDBENCH_DEBUG_CLEANUP_STATUS"])},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
-    # endregion
     terminal_disposition=destroyed-verified-absent
     [ "$machine_reap_status" -eq 74 ] \
         && terminal_disposition=destroyed-provider-retained

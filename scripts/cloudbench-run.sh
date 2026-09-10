@@ -154,6 +154,7 @@ publish_cleanup_ack() {
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
+    mkdir -p "${CLEANUP_ACK_FILE%/*}" "${INTERRUPT_CLEANUP_STATUS_FILE%/*}" || return 1
     if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
         cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
@@ -177,7 +178,6 @@ publish_cleanup_ack() {
             return 1
         fi
     fi
-    mkdir -p "${CLEANUP_ACK_FILE%/*}" || return 1
     printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
         && mv -f "$temporary" "$CLEANUP_ACK_FILE"
 }

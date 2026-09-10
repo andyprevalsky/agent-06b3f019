@@ -141,8 +141,7 @@ def parse_runner_status(payload: bytes, expected_token: str) -> dict[str, str]:
     return parsed
 
 
-def read_json_object(path: Path, *, maximum: int = 16 * 1024 * 1024) -> dict[str, Any]:
-    payload = read_bytes(path, maximum=maximum)
+def parse_json_object(payload: bytes, path: Path) -> dict[str, Any]:
     try:
         value = json.loads(payload)
     except (TypeError, ValueError) as error:
@@ -150,6 +149,10 @@ def read_json_object(path: Path, *, maximum: int = 16 * 1024 * 1024) -> dict[str
     if not isinstance(value, dict):
         raise CleanupEvidenceError(f"JSON evidence is not an object: {path}")
     return value
+
+
+def read_json_object(path: Path, *, maximum: int = 16 * 1024 * 1024) -> dict[str, Any]:
+    return parse_json_object(read_bytes(path, maximum=maximum), path)
 
 
 def validate_existing(path: Path, expected: dict[str, Any]) -> bool:
@@ -211,7 +214,7 @@ def parse_run_identity(path: Path, bench: str) -> tuple[str, str]:
     root_agent_id = matches[0].get("agent_id")
     if not isinstance(root_agent_id, str) or SAFE_AGENT.fullmatch(root_agent_id) is None:
         raise CleanupEvidenceError("run record has no exact root agent")
-    return root_agent_id, sha256_bytes(payload)
+    return root_agent_id.lower(), sha256_bytes(payload)
 
 
 def add_session(sessions: dict[str, set[str]], provider: str, session_id: str) -> None:
@@ -289,7 +292,7 @@ def read_backend_evidence(path: Path, root_agent_id: str) -> tuple[str, str]:
         text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise CleanupEvidenceError("backend log is not UTF-8") from error
-    if root_agent_id not in text:
+    if root_agent_id.lower() not in text.lower():
         raise CleanupEvidenceError("backend log is not bound to the exact root agent")
     return text, sha256_bytes(payload)
 
@@ -653,7 +656,8 @@ def validate_zero_query_proof(
     quiescence_sha: str,
 ) -> tuple[dict[str, Any], str]:
     query_path = Path(args.zero_query_proof)
-    query = read_json_object(query_path, maximum=1024 * 1024)
+    query_payload = read_bytes(query_path, maximum=1024 * 1024)
+    query = parse_json_object(query_payload, query_path)
     required = {
         "schema_version",
         "version",
@@ -722,7 +726,7 @@ def validate_zero_query_proof(
         raise CleanupEvidenceError(
             "zero-allocation query proof is not exact, positive, and root-bound"
         )
-    return query, sha256_bytes(read_bytes(query_path, maximum=1024 * 1024))
+    return query, sha256_bytes(query_payload)
 
 
 def zero_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:

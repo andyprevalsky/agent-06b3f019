@@ -415,7 +415,7 @@ cloudbench_detach_reexec() {  # cloudbench_detach_reexec <log-file> <argv...>
   # launcher exit). macOS ships no setsid(1), so use Python's os.setsid.
   local log="$1"; shift
   python3 - "$log" "$@" <<'PY'
-import json, os, sys, time
+import os, sys
 log, *argv = sys.argv[1:]
 if os.fork():
     sys.exit(0)
@@ -425,22 +425,6 @@ os.dup2(fd, 1)
 os.dup2(fd, 2)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
-# region agent log
-try:
-    inherited = sorted(
-        int(value) for value in os.listdir("/proc/self/fd") if int(value) > 2
-    )
-    with open("/opt/cursor/logs/debug.log", "a", encoding="utf-8") as debug:
-        debug.write(json.dumps({
-            "hypothesisId": "B",
-            "location": "scripts/lib/cloudbench-env.sh:cloudbench_detach_reexec",
-            "message": "detached child descriptors before exec",
-            "data": {"fds": inherited},
-            "timestamp": int(time.time() * 1000),
-        }) + "\n")
-except OSError:
-    pass
-# endregion
 for directory in ("/proc/self/fd", "/dev/fd"):
     try:
         inherited_descriptors = os.listdir(directory)
