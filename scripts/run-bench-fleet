@@ -5403,6 +5403,7 @@ PY
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
     python3 - "$registry" "$plan" "$APP" <<'PY'
+import os
 from pathlib import Path
 import re
 import stat

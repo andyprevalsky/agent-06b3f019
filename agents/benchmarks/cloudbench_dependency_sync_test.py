@@ -13227,6 +13227,7 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     timeout loop: a stopped box left flyctl SSH hung for 2h22m beyond its 7200s
     ceiling, and 30 simultaneous fallbacks recreate the control-plane burst."""
     cloud = CLOUD_SCRIPT.read_text()
+    environment_helpers = ENV_HELPER_SCRIPT.read_text()
     # On-box status server over /data, and a data-plane proxy to it.
     assert "REMOTE_STATUS_PORT" in cloud
     assert "cloudbench-status-server.py" in cloud
@@ -13263,7 +13264,10 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     )
     # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
     assert 'cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"' in cloud
-    assert 'flyctl proxy "$local_port:$remote_port"' in cloud
+    assert 'flyctl proxy "$local_port:$remote_port"' in environment_helpers
+    assert "cloudbench_start_data_plane_proxy" in _extract_fleet_function(
+        cloud, "start_data_plane_proxy() {"
+    )
     assert 'FLY proxy "$local_port:$remote_port"' not in cloud
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
 
