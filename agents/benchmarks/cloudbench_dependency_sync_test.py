@@ -9419,10 +9419,16 @@ def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
     ]
 
 
-def test_active_legacy_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
+@pytest.mark.parametrize(
+    "guest_state",
+    ("active", "exited-no-run"),
+    ids=("active", "exited-without-final-run"),
+)
+def test_runless_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
     tmp_path: Path,
+    guest_state: str,
 ) -> None:
-    """An immutable active guest is fenced by exact Machine stop before cleanup."""
+    """A runless exact guest is fenced by exact Machine stop before cleanup."""
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -9459,13 +9465,9 @@ def test_active_legacy_guest_seals_sessions_then_stops_exact_machine_before_clea
         f"[Kernel] Created Kernel browser session sessionId={kernel_session} "
         "contextId=context-exact\n"
     )
-    state_payload = json.dumps(
-        {
-            "schema_version": "cloudbench-guest-state-v1",
-            "version": 1,
+    if guest_state == "active":
+        state_fields: dict[str, object] = {
             "state": "active",
-            "machine_id": machine_id,
-            "guest_run_token": guest_token,
             "reason": "exact guest driver is still active",
             "driver_state": "running",
             "driver_pid": 99999991,
@@ -9479,6 +9481,36 @@ def test_active_legacy_guest_seals_sessions_then_stops_exact_machine_before_clea
                     "command": "run_benchmark.py",
                 }
             ],
+            "services_status": None,
+            "stopped_service_pids": [],
+            "live_service_pids": [],
+            "backend_port": None,
+            "backend_closed": None,
+        }
+    else:
+        state_fields = {
+            "state": "exited",
+            "reason": (
+                "missing regular exact guest evidence: "
+                "/data/repo/.context/cloudbench/run.json"
+            ),
+            "driver_state": "exited",
+            "driver_pid": None,
+            "driver_process_state": None,
+            "driver_token_match": False,
+            "driver_descendants": [],
+            "services_status": "stopped",
+            "stopped_service_pids": [99999991, 99999992],
+            "live_service_pids": [],
+            "backend_port": 3001,
+            "backend_closed": True,
+        }
+    state_payload = json.dumps(
+        {
+            "schema_version": "cloudbench-guest-state-v1",
+            "version": 1,
+            "machine_id": machine_id,
+            "guest_run_token": guest_token,
             "services_manifest": {
                 "exists": True,
                 "regular": True,
@@ -9500,11 +9532,7 @@ def test_active_legacy_guest_seals_sessions_then_stops_exact_machine_before_clea
                 "bytes": len(backend_log),
                 "within_limit": True,
             },
-            "services_status": None,
-            "stopped_service_pids": [],
-            "live_service_pids": [],
-            "backend_port": None,
-            "backend_closed": None,
+            **state_fields,
         },
         separators=(",", ":"),
     )
@@ -9632,6 +9660,7 @@ cloudbench_recover_guest_cleanup_receipts "$REGISTRY"
     assert call_lines.index("machine-stop") < call_lines.index("machine-status-stopped")
     assert call_lines.index("machine-status-stopped") < call_lines.index("provider-delete")
     assert (output / "guest-shutdown.confirmed").read_text() == "fixture-run\n"
+    assert not (output / "guest-cleanup.run.json").exists()
     assert all("machines list" not in line for line in call_lines)
 
 
