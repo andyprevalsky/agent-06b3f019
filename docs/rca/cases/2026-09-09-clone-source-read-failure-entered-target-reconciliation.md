@@ -1,16 +1,18 @@
 ---
 id: 2026-09-09-clone-source-read-failure-entered-target-reconciliation
 date: 2026-09-09
-title: A clone source-read rejection entered target-allocation reconciliation and amplified the provider rate limit
+title: Clone failure ownership was classified only after target machine-name reconciliation
 surface: infra
 component: cloudbench-fleet-clone-ownership
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: scripts/run-bench-fleet clone_failure_definitively_unallocated and clone_machine_target collapsed source-read rejection and ambiguous post-allocation failure into the same missing-target-ID path
+first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine_id_for_clone_name before classifying and durably recording an exact provider-returned target volume
 symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "unresolved clone name 'cloudbench-…'; inspect with: flyctl machines list"
   - "Error: could not get machine 683e47df5094d8: failed to get VM 683e47df5094d8: resource_exhausted: rate limit exceeded"
+  - "provider-owned volume failure crossed into target machine-name reconciliation"
+  - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
 tags:
   - cloudbench
   - fly-io
@@ -21,7 +23,8 @@ tags:
 sources:
   - commit 65cb5c022656ed028d7031bfb57bb8ad12e002ac
   - fleet run 20260909-215629-914100
-repro: scripts/tests/cloudbench-multi-workstream.test.sh
+  - fleet run 20260910-002414-1221609
+repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: fixed
 ---
 
@@ -107,12 +110,122 @@ attempt and removes up to one provider inventory refresh per pre-allocation
 failure. It adds no channel, subscription, lock, poller, row, or shared mutable
 state.
 
+## Recurrence on 2026-09-10
+
+The same lifecycle-contract problem recurred one boundary later. A real clone
+attempt returned no Machine ID but did return exact target volume
+`vol_vz8m80el8w7dwqxv` in:
+
+`Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)`.
+
+The focused pre-fix replay
+`agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_failed_clone_captures_owned_volume_before_machine_name_reconciliation`
+exited 1 with `provider-owned volume failure crossed into target machine-name
+reconciliation`. Its runtime call order was `clone-name lookup entered`, then
+`volumes destroy`, then `volumes show`.
+
+H1 was confirmed: `clone_machine_target` parsed and recorded the exact volume
+only after `machine_id_for_clone_name`. H2 was confirmed: `reap_volume`
+redirected every destroy response to `/dev/null`, so the owning boundary could
+not distinguish a provider rejection from an accepted asynchronous transition.
+H3, loss of exact ownership, was rejected: the replay completed with zero owner
+records only after exact lifecycle success, while the live failed run retained
+the exact owner and reported that it could not reap the same volume. The
+provider-specific reason for the live destroy rejection remains inconclusive
+because the pre-fix boundary discarded it; no provider-specific fallback was
+added.
+
+The deepest owned cause was still the original one: clone outcome classification
+was not one ordered ownership decision. Exact target-resource evidence remained
+an ad hoc cleanup predicate below machine reconciliation, so adding the first
+pre-allocation classifier did not fix all sibling outcomes.
+
+`clone_machine_target` now classifies an exact provider-returned volume first,
+atomically records it in the owner registry, and performs exact-volume teardown
+without entering either machine-name lookup path. Only outcomes with neither an
+authoritative Machine ID nor an exact volume proceed to machine reconciliation.
+`reap_volume` now captures every destroy command's return code and at most 200
+response bytes in the owning diagnostic log; failures without a diagnostic log
+are surfaced on stderr. Exact lifecycle reads remain the only success authority,
+so response capture adds no silent fallback and ownership remains fail-closed.
+
+The unchanged replay now passes with call order `volumes destroy`, `volumes
+show`, no clone-name lookup, one durable receipt
+`id=vol_vz8m80el8w7dwqxv rc=1 response=<empty>`, and zero owner records only
+after the exact `pending_destroy` receipt. A separate permanent case proves a
+400-byte provider rejection is truncated in each of six bounded receipts and
+that a nonterminal exact lifecycle retains ownership. The replay's empty destroy
+response plus terminal lifecycle does not support an additional
+provider-rejection fix.
+
+At 10,000 agents, this adds one O(1) local transcript classification and one
+short-lived response-capture file per concurrent volume cleanup. It adds no
+provider call, shared lock, subscription, row, or fan-in; diagnostic growth is
+bounded to six 200-byte excerpts per cleanup.
+
+## Second recurrence on 2026-09-10
+
+The lifecycle-contract inconsistency recurred at stale-owner recovery. Clone
+allocation intentionally publishes two exact `owned` identity forms:
+Machine-plus-Volume after a successful VM allocation, and Volume-only when Fly
+created a target Volume but rejected the VM launch. The audit writer accepted
+both, but `recover_registry_audit_only_fresh` still required every `owned`
+record to contain a Machine ID. Its sibling shared-audit updater independently
+encoded the same obsolete Machine-plus-Volume-only rule.
+
+The unchanged pre-fix command
+`/workspace/agents/venv/bin/pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py::test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper`
+exited 1 with `FAIL: volume-only owned audit was rejected before registry
+reaper` and `assert 91 == 0`. Runtime instrumentation proved that the v2 owner
+identity and dead-owner classification were valid, the recovery lock was
+acquired, and audit recovery loaded `disposition=owned`,
+`machineId=""`, `volumeId="vol_vz8m80el8w7dwqxv"`. It then emitted
+`machine identity invariant rejected audit record`; the registry-reaper entry
+event was absent.
+
+This is a second recurrence of the archived lifecycle-contract problem and a
+relative at the audit-only recovery boundary. Archive searches for `volume-only
+owned audit rejected registry reaper` and `clone allocation audit identity
+machine volume stale owner recovery` selected this case plus the
+default-volume-list and registry-retirement relatives. The first recurrence
+fixed classification order at clone allocation but did not make the resulting
+identity algebra authoritative for every later consumer.
+
+The canonical invariant now requires an exact Volume for every `owned` record
+and permits its Machine ID to be either absent or valid hexadecimal. Recovery
+validates a Machine-plus-Volume identity through the existing audit-first
+repair transaction. A Volume-only identity is accepted only when the extant
+exact-owner registry record is a regular non-symlink file containing exactly
+the matching `name` and `volume_id` fields produced by
+`fleet_registry_record_volume`; missing, partial, conflicting, duplicate,
+extra-field, malformed, and special-inode identities remain fail-closed. The
+shared-audit updater now applies the same Volume-required/Machine-optional
+contract.
+
+The unchanged reproduction now passes and its post-fix log reaches
+`entered registry clone reaper` in forced mode. The adjacent permanent
+fail-closed regression passes six noncanonical forms, while the existing
+Machine-plus-Volume crash-window regression remains green. No provider call,
+task definition, timeout, or concurrency setting changed. At 10,000 agents,
+recovery performs one bounded, local, O(1) validation per volume-only owner
+record and adds no provider traffic, polling, shared lock, row, channel,
+subscription, or fan-in.
+
 ## Human feedback
 
-The user required the deepest generalizable fix, the exact unchanged reproduction
-to pass, permanent consistently-run coverage, and an RCA case/index. They
-prohibited benchmark task, timeout, and concurrency changes; prohibited commits;
-and required a read-only inspection of exact campaign ownership/provider residue.
+The user required both occurrences to receive the deepest generalizable ordering
+fix, the exact unchanged reproduction to pass, permanent consistently-run
+coverage, an RCA case/index update, and bounded owning-boundary destroy-response
+capture. They prohibited weakening fail-closed ownership, changing benchmark
+tasks/timeouts/concurrency, provider mutations, and commits.
+
+For the second recurrence, the user required `owned` identities to accept
+exactly the Machine-plus-Volume and Volume-only forms already emitted by clone
+allocation while keeping empty and ambiguous forms fail-closed. They required
+the existing regression to remain unchanged, the correct archive case to be
+appended rather than forked, focused and full suites plus archive validation,
+preservation of autoscaler probes and stability-proof edits, and no provider
+resource mutation or commit.
 
 ## Reusable lesson
 

@@ -4117,8 +4117,6 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
 
 def test_data_plane_proxy_waits_for_accepted_lifecycle_response(tmp_path: Path) -> None:
     """A live proxy PID is not ready until the remote status service answers HTTP."""
-    import http.client
-
     cloud = CLOUD_SCRIPT.read_text()
     accepted = _extract_fleet_function(
         cloud, "status_proxy_lifecycle_response_accepted() {"
@@ -5420,17 +5418,27 @@ exit 0
     assert cloner.index('reap_volume "$target_volume"') < cloner.index(
         'fleet_registry_release_name "$target_name"'
     )
-    assert (
-        'if [ -z "$target_id" ] && [ "$preallocation_failure" -eq 0 ]; then'
-        in cloner
+    volume_classification = cloner.index(
+        'target_volume="$(clone_failure_owned_volume_id "$clone_status" "$clone_out")"'
     )
+    durable_volume = cloner.index(
+        'fleet_registry_record_volume "$target_name" "$target_volume"',
+        volume_classification,
+    )
+    name_reconciliation = cloner.index(
+        'target_id="$(machine_id_for_clone_name "$target_name" "$deadline")"'
+    )
+    assert volume_classification < durable_volume < name_reconciliation
 
 
-def test_failed_clone_reaps_only_its_provider_returned_volume(tmp_path: Path) -> None:
+def test_failed_clone_captures_owned_volume_before_machine_name_reconciliation(
+    tmp_path: Path,
+) -> None:
     """A provider-created volume from a rejected VM launch is still owned.
 
-    The exact ID returned by that clone attempt must be durably recorded and
-    reaped. No app-wide volume listing or neighbor-volume deletion is allowed.
+    The exact ID returned by that clone attempt must be classified before any
+    machine-name reconciliation, durably recorded, and reaped. No app-wide
+    volume listing or neighbor-volume deletion is allowed.
     """
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
@@ -5457,9 +5465,9 @@ def test_failed_clone_reaps_only_its_provider_returned_volume(tmp_path: Path) ->
     script = f"""set -uo pipefail
 APP=bench-app
 REGION=iad
-WARM_ID=871535c0322758
+WARM_ID=683e47df5094d8
 WARM_VOLUME_ID=vol_warm
-SNAP_ID=snapshot-1
+SNAP_ID=vs_D7yODvl0BVgi9JajQpkR
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
@@ -5467,7 +5475,7 @@ CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 python3() {{
   case "$*" in
-    *uuid.uuid4*) printf '%s\n' ff94c207ec984ab8922dfc65 ;;
+    *uuid.uuid4*) printf '%s\n' 54c419a2a76f4b27bfc46694 ;;
     *) command python3 "$@" ;;
   esac
 }}
@@ -5475,23 +5483,26 @@ FLY() {{
   case "$1 $2" in
     "machine clone")
       printf "%s\n" \
-        'Cloning Machine 871535c0322758 into region iad' \
-        'Creating new volume from snapshot: vs_JO5KLvjwP8XuQG4X927' \
+        'Cloning Machine 683e47df5094d8 into region iad' \
+        'Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR' \
         'Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...' \
-        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vp2q8xeydwjm79w4' (Request ID: 01M1XBMTXS1C4PWJAXJ66YHV08-iad)" >&2
+        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)" >&2
       return 1 ;;
     "volumes destroy")
       printf '%s\n' "$*" >> "$CALLS"
-      [ "$3" = vol_vp2q8xeydwjm79w4 ] || return 99
+      [ "$3" = vol_vz8m80el8w7dwqxv ] || return 99
       return 1 ;;
     "volumes show")
       printf '%s\n' "$*" >> "$CALLS"
-      printf '%s\n' '{{"id":"vol_vp2q8xeydwjm79w4","state":"pending_destroy"}}'
+      printf '%s\n' '{{"id":"vol_vz8m80el8w7dwqxv","state":"pending_destroy"}}'
       return 0 ;;
   esac
   return 99
 }}
-machine_id_for_clone_name() {{ return 1; }}
+machine_id_for_clone_name() {{
+  printf 'clone-name lookup entered: %s\n' "$1" >> "$CALLS"
+  return 1
+}}
 registry_resolve_name() {{ return 1; }}
 fleet_audit_record_fresh_clone() {{ return 0; }}
 fleet_audit_update_fresh_clone() {{ return 0; }}
@@ -5508,19 +5519,32 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
         timeout=10,
     )
 
+    call_log = calls.read_text().splitlines()
+    owner_records = list((registry / "clones").iterdir())
     assert result.returncode == 0, result.stderr + result.stdout
-    assert calls.read_text().splitlines() == [
-        "volumes destroy vol_vp2q8xeydwjm79w4 -a bench-app --yes",
-        "volumes show vol_vp2q8xeydwjm79w4 -a bench-app --json",
+    assert not any("clone-name lookup entered" in call for call in call_log), (
+        "provider-owned volume failure crossed into target machine-name reconciliation: "
+        f"{call_log}"
+    )
+    assert call_log == [
+        "volumes destroy vol_vz8m80el8w7dwqxv -a bench-app --yes",
+        "volumes show vol_vz8m80el8w7dwqxv -a bench-app --json",
     ]
-    assert ledger.with_suffix(".log").read_text().splitlines() == [
-        "clone name=cloudbench-ff94c207ec984ab8922dfc65 source=871535c0322758 status=1 attempt=1/1",
-        "Cloning Machine 871535c0322758 into region iad",
-        "Creating new volume from snapshot: vs_JO5KLvjwP8XuQG4X927",
+    diagnostic_lines = ledger.with_suffix(".log").read_text().splitlines()
+    assert diagnostic_lines[:5] == [
+        "clone name=cloudbench-54c419a2a76f4b27bfc46694 source=683e47df5094d8 status=1 attempt=1/1",
+        "Cloning Machine 683e47df5094d8 into region iad",
+        "Creating new volume from snapshot: vs_D7yODvl0BVgi9JajQpkR",
         "Provisioning a new Machine with image registry.fly.io/fixture-bench-app:cloudbench-warm-local-20260716-1935@sha256:6bc0b02589f731a02d8baf5236272f5d402c4c09adf4560272b2e396c78bf68a...",
-        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vp2q8xeydwjm79w4' (Request ID: 01M1XBMTXS1C4PWJAXJ66YHV08-iad)",
+        "Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_vz8m80el8w7dwqxv' (Request ID: 01M24BSMAJSAD16GZG888ECDZG-lax)",
     ]
-    assert not any((registry / "clones").iterdir()), (
+    assert len(diagnostic_lines) == 6
+    assert re.fullmatch(
+        r"\[[^]]+\] volume destroy attempt 1/6 "
+        r"id=vol_vz8m80el8w7dwqxv rc=1 response=<empty>",
+        diagnostic_lines[-1],
+    )
+    assert not owner_records, (
         "successful exact-volume cleanup must retire its owner record"
     )
 
@@ -7286,6 +7310,70 @@ reap_volume vol_owned
         assert not any("volumes list" in call for call in call_log)
 
 
+def test_reap_volume_durably_captures_bounded_destroy_responses(
+    tmp_path: Path,
+) -> None:
+    """The owning boundary must preserve provider rejection evidence."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "volume_inventory_contains_id() {",
+            "reap_volume() {",
+        )
+    )
+    calls = tmp_path / "provider.calls"
+    diagnostic_log = tmp_path / "owned.log"
+    script = f"""set -uo pipefail
+APP=bench-app
+WARM_VOLUME_ID=vol_warm
+CALLS={shlex.quote(str(calls))}
+DIAGNOSTIC_LOG={shlex.quote(str(diagnostic_log))}
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "volumes destroy")
+      python3 - <<'PY' >&2
+print("DESTROY_PROVIDER_SENTINEL: provider rejected deletion " + ("x" * 400))
+PY
+      return 37 ;;
+    "volumes show")
+      printf '{{"id":"vol_owned","state":"created"}}\n'
+      return 0 ;;
+  esac
+  return 99
+}}
+{helpers}
+reap_volume vol_owned "$DIAGNOSTIC_LOG"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 1, result.stderr + result.stdout
+    call_log = calls.read_text().splitlines()
+    assert call_log.count(
+        "volumes destroy vol_owned -a bench-app --yes"
+    ) == 6
+    assert call_log.count(
+        "volumes show vol_owned -a bench-app --json"
+    ) == 6
+    response_lines = diagnostic_log.read_text().splitlines()
+    assert len(response_lines) == 6
+    for attempt, line in enumerate(response_lines, start=1):
+        assert f"volume destroy attempt {attempt}/6 id=vol_owned rc=37" in line
+        assert "response=DESTROY_PROVIDER_SENTINEL: provider rejected deletion" in line
+        assert re.search(r" \[truncated; \d+ bytes total\]$", line)
+        assert len(line) < 400
+    assert "DESTROY_PROVIDER_SENTINEL" not in result.stderr
+    assert "DESTROY_PROVIDER_SENTINEL" not in result.stdout
+
+
 def test_reap_volume_retains_authority_when_restore_reappears_after_absence(
     tmp_path: Path,
 ) -> None:
@@ -7619,6 +7707,249 @@ grep -Fxq "$REG {clone_name}   not-allocated-verified" "$AUDIT_CALLS" || exit 25
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
+    tmp_path: Path,
+) -> None:
+    """A failed clone may own an exact volume without ever allocating a Machine.
+
+    Audit-only crash-window recovery must accept that complete volume-only
+    identity so the registry reaper can terminalize the exact owned volume.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "registry_owner_alive() {",
+            "recover_registry_audit_only_fresh() {",
+            "reap_registry_clones() {",
+            "fleet_registry_remove_if_empty() {",
+            "acquire_registry_recovery_lock() {",
+            "release_cleanup_disk_reserve() {",
+            "recover_exact_stale_fleet_owner() {",
+        )
+    )
+    owner = "6a7697fabc1e45d8891d8b2d835e02c7"
+    clone_name = "cloudbench-54c419a2a76f4b27bfc46694"
+    volume_id = "vol_vz8m80el8w7dwqxv"
+    source_id = "683e47df5094d8"
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    audit_root = tmp_path / "audits"
+    audit = audit_root / owner
+    for directory in (audit / "fresh", audit / "expected-fresh", audit / "by-machine-id"):
+        directory.mkdir(parents=True, exist_ok=True)
+    (registry / "meta").write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=99999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        f"audit_dir={audit}\n"
+        "cleanup_policy=reap\n"
+    )
+    (audit / "meta").write_text(
+        "version=1\n"
+        f"fleet_owner_token={owner}\n"
+        "app=bench-app\n"
+    )
+    (audit / "expected-fresh" / clone_name).write_text(
+        f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
+    )
+    (audit / "fresh" / clone_name).write_text(
+        "version=1\n"
+        f"fleet_owner_token={owner}\n"
+        "run_id=fixture-run\n"
+        "app=bench-app\n"
+        f"clone_name={clone_name}\n"
+        "source=fresh-clone\n"
+        f"source_machine_id={source_id}\n"
+        "machine_id=\n"
+        f"volume_id={volume_id}\n"
+        "disposition=owned\n"
+    )
+    record = clones / clone_name
+    record.write_text(f"name={clone_name}\nvolume_id={volume_id}\n")
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNER_TOKEN={owner}
+REGISTRY={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+registry_resolve_name() {{ return 1; }}
+registry_record_is_stale_phantom() {{ return 99; }}
+registry_record_machine_identity() {{
+  printf 'unexpected machine identity repair: %s\n' "$*" >> "$CALLS"
+  return 99
+}}
+registry_retire_absent_stale_pre_volume_records() {{ return 99; }}
+reap_volume() {{
+  printf 'reap_volume %s\n' "$1" >> "$CALLS"
+  [ "$1" = {volume_id} ]
+}}
+fleet_audit_update_registry_clone() {{
+  printf 'audit_update %s\n' "$*" >> "$CALLS"
+  [ "$1" = "$REGISTRY" ] \
+    && [ "$2" = {clone_name} ] \
+    && [ -z "$3" ] \
+    && [ "$4" = {volume_id} ] \
+    && [ "$5" = destroyed-verified-absent ]
+}}
+recover_exact_pool_claims() {{
+  printf 'recover_exact_pool_claims\n' >> "$CALLS"
+}}
+capacity_release_stale_owner_reservations() {{
+  printf 'capacity_release %s\n' "$*" >> "$CALLS"
+}}
+fleet_audit_finalize_recovered_registry() {{
+  printf 'audit_finalize %s\n' "$*" >> "$CALLS"
+}}
+{functions}
+
+if ! recover_exact_stale_fleet_owner {owner}; then
+  echo "FAIL: volume-only owned audit was rejected before registry reaper" >&2
+  exit 91
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert calls.read_text().splitlines() == [
+        f"reap_volume {volume_id}",
+        (
+            f"audit_update {registry} {clone_name}  {volume_id} "
+            "destroyed-verified-absent"
+        ),
+        "recover_exact_pool_claims",
+        f"capacity_release {registry / 'meta'} {owner}-",
+        f"audit_finalize {registry}",
+    ]
+    assert not record.exists()
+
+
+def test_audit_only_recovery_rejects_noncanonical_owned_identities(
+    tmp_path: Path,
+) -> None:
+    """Owned recovery accepts only exact volume-only or machine+volume forms."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "registry_meta_value() {",
+            "recover_registry_audit_only_fresh() {",
+        )
+    )
+    owner = "7" * 32
+    clone_name = "cloudbench-owned-invariant"
+    source_id = "683e47df5094d8"
+    volume_id = "vol_exact"
+    cases = (
+        ("empty", "", "", f"name={clone_name}\n"),
+        ("missing-registry", "", volume_id, None),
+        ("partial-registry", "", volume_id, f"name={clone_name}\n"),
+        (
+            "conflicting-volume",
+            "",
+            volume_id,
+            f"name={clone_name}\nvolume_id=vol_other\n",
+        ),
+        (
+            "ambiguous-empty-machine-field",
+            "",
+            volume_id,
+            f"name={clone_name}\nid=\nvolume_id={volume_id}\n",
+        ),
+        (
+            "malformed-machine",
+            "not-hex",
+            volume_id,
+            f"name={clone_name}\nid=not-hex\nvolume_id={volume_id}\n",
+        ),
+    )
+
+    for label, machine_id, audit_volume_id, record_payload in cases:
+        case_root = tmp_path / label
+        ownership_root = case_root / "ownership"
+        registry = ownership_root / owner
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        audit_root = case_root / "audits"
+        audit = audit_root / owner
+        for directory in (
+            audit / "fresh",
+            audit / "expected-fresh",
+            audit / "by-machine-id",
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+        (registry / "meta").write_text(
+            "version=2\n"
+            "app=bench-app\n"
+            f"fleet_owner_token={owner}\n"
+            f"audit_dir={audit}\n"
+        )
+        (audit / "meta").write_text(
+            f"fleet_owner_token={owner}\napp=bench-app\n"
+        )
+        (audit / "expected-fresh" / clone_name).write_text(
+            f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
+        )
+        (audit / "fresh" / clone_name).write_text(
+            "version=1\n"
+            f"fleet_owner_token={owner}\n"
+            "run_id=fixture-run\n"
+            "app=bench-app\n"
+            f"clone_name={clone_name}\n"
+            "source=fresh-clone\n"
+            f"source_machine_id={source_id}\n"
+            f"machine_id={machine_id}\n"
+            f"volume_id={audit_volume_id}\n"
+            "disposition=owned\n"
+        )
+        if record_payload is not None:
+            (clones / clone_name).write_text(record_payload)
+        unexpected = case_root / "unexpected-provider-or-repair-call"
+        script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+REGISTRY={shlex.quote(str(registry))}
+UNEXPECTED={shlex.quote(str(unexpected))}
+registry_resolve_name() {{ touch "$UNEXPECTED"; return 99; }}
+registry_record_is_stale_phantom() {{ touch "$UNEXPECTED"; return 99; }}
+registry_record_machine_identity() {{ touch "$UNEXPECTED"; return 99; }}
+fleet_audit_update_registry_clone() {{ touch "$UNEXPECTED"; return 99; }}
+{functions}
+if recover_registry_audit_only_fresh "$REGISTRY"; then
+  exit 90
+fi
+[ ! -e "$UNEXPECTED" ] || exit 91
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 0, (
+            f"{label}: {result.stderr}{result.stdout}"
+        )
 
 
 def test_stale_registry_identity_promotes_original_audit_before_publish_and_retries(

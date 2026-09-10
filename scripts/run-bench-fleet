@@ -1699,8 +1699,9 @@ print(state.strip().lower())
 ' "$vol" <<< "$volume"
 }
 
-reap_volume() {  # reap_volume <volume_id> — destroy a clone's forked volume
-    local vol="$1" i lifecycle_rc state
+reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone's forked volume
+    local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
+    local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     [ -n "$vol" ] || return 0
     if [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; then
         echo "  ❌ refusing to destroy warm source volume $vol" >&2
@@ -1711,21 +1712,59 @@ reap_volume() {  # reap_volume <volume_id> — destroy a clone's forked volume
     # so no count of app-wide list absences is a deletion receipt. Poll this
     # exact ID instead and retire ownership only from an explicit terminal
     # lifecycle state or an exact-ID not-found response.
+    destroy_capture="$(mktemp "${TMPDIR:-/tmp}/cloudbench-volume-destroy.XXXXXX")" || {
+        echo "  ❌ could not allocate bounded response capture for volume $vol; retaining exact ownership" >&2
+        return 1
+    }
     for i in 1 2 3 4 5 6; do
-        FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || true
+        : > "$destroy_capture" || {
+            rm -f "$destroy_capture"
+            echo "  ❌ could not reset response capture for volume $vol; retaining exact ownership" >&2
+            return 1
+        }
+        if FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
+            destroy_rc=0
+        else
+            destroy_rc=$?
+        fi
+        destroy_bytes="$(wc -c < "$destroy_capture" | tr -d ' ')"
+        destroy_excerpt="$(head -c 200 "$destroy_capture" | tr '\r\n' '  ')"
+        destroy_suffix=""
+        [ "$destroy_bytes" -le 200 ] || destroy_suffix=" [truncated; ${destroy_bytes} bytes total]"
+        [ -n "$destroy_excerpt" ] || destroy_excerpt="<empty>"
+        if [ -n "$diagnostic_log" ]; then
+            if ! printf '[%s] volume destroy attempt %s/6 id=%s rc=%s response=%s%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                "$i" "$vol" "$destroy_rc" "$destroy_excerpt" "$destroy_suffix" \
+                >> "$diagnostic_log"; then
+                rm -f "$destroy_capture"
+                echo "  ❌ could not persist destroy response for volume $vol; retaining exact ownership" >&2
+                return 1
+            fi
+        elif [ "$destroy_rc" -ne 0 ]; then
+            printf '  ⚠️ volume destroy attempt %s/6 id=%s rc=%s response=%s%s\n' \
+                "$i" "$vol" "$destroy_rc" "$destroy_excerpt" "$destroy_suffix" >&2
+        fi
         if state="$(volume_inventory_contains_id "$vol")"; then
             lifecycle_rc=0
         else
             lifecycle_rc=$?
         fi
-        [ "$lifecycle_rc" -eq 1 ] && return 0
+        if [ "$lifecycle_rc" -eq 1 ]; then
+            rm -f "$destroy_capture"
+            return 0
+        fi
         if [ "$lifecycle_rc" -eq 0 ]; then
             case "$state" in
-                pending_destroy|destroyed) return 0 ;;
+                pending_destroy|destroyed)
+                    rm -f "$destroy_capture"
+                    return 0
+                    ;;
             esac
         fi
         sleep 3
     done
+    rm -f "$destroy_capture"
     echo "  ⚠️ could not destroy volume $vol — exact-owner recovery retained: flyctl volumes destroy $vol -a $APP" >&2
     return 1
 }
@@ -1793,7 +1832,7 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
                     "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
                     >> "$diagnostic_log" 2>/dev/null || true
             fi
-            reap_volume "$vol"
+            reap_volume "$vol" "$diagnostic_log"
             return $?
         fi
         if [ -n "$diagnostic_log" ]; then
@@ -1848,7 +1887,7 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
         echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
-    reap_volume "$vol"
+    reap_volume "$vol" "$diagnostic_log"
 }
 
 registry_meta_value() {  # registry_meta_value <meta-file> <key>
@@ -2137,7 +2176,7 @@ if volume_id and not re.fullmatch(r"[A-Za-z0-9_-]+", volume_id):
     raise SystemExit(1)
 if disposition not in {"owned", "destroyed-verified-absent", "not-allocated-verified"}:
     raise SystemExit(1)
-if disposition == "owned" and (not machine_id or not volume_id):
+if disposition == "owned" and not volume_id:
     raise SystemExit(1)
 record_path = audit / "fresh" / clone_name.name
 fields = {}
@@ -4115,9 +4154,58 @@ recover_registry_audit_only_fresh() {  # <v2-registry>; repair audit-before-regi
                 ;;
             *) return 1 ;;
         esac
-        case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
-        case "$volume_id" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+        # Canonical exact-owned identity invariant. Clone allocation can own
+        # either a Machine plus its Volume or only the provider-returned Volume
+        # when VM launch failed after volume creation. An owned record without a
+        # Volume is never exact teardown authority.
+        case "$volume_id" in
+            ''|*[!a-zA-Z0-9_-]*)
+                return 1
+                ;;
+        esac
+        case "$id" in *[!0-9a-f]*) return 1 ;; esac
         record="$registry/clones/$clone_name"
+        if [ -z "$id" ]; then
+            # Volume-only ownership is registry-first at allocation time. It is
+            # complete only when the extant exact-owner record is field-shape
+            # equivalent to fleet_registry_record_volume output. Missing,
+            # partial, conflicting, duplicate-key, extra-field, symlink, and
+            # special-inode records remain fail-closed; unlike the audit-first
+            # Machine path there is no publication crash window to reconstruct.
+            [ -f "$record" ] && [ ! -L "$record" ] || return 1
+            python3 - "$record" "$clone_name" "$volume_id" <<'PY' || return 1
+import os
+import stat
+import sys
+
+path, clone_name, volume_id = sys.argv[1:]
+nofollow = getattr(os, "O_NOFOLLOW", 0)
+metadata = os.lstat(path)
+if not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit(1)
+fd = os.open(path, os.O_RDONLY | nofollow)
+try:
+    payload = os.read(fd, 65537)
+finally:
+    os.close(fd)
+if len(payload) > 65536:
+    raise SystemExit(1)
+try:
+    lines = payload.decode().splitlines()
+except UnicodeDecodeError:
+    raise SystemExit(1)
+fields = {}
+for raw in lines:
+    key, separator, value = raw.partition("=")
+    if not separator or key in fields:
+        raise SystemExit(1)
+    fields[key] = value
+if fields != {"name": clone_name, "volume_id": volume_id}:
+    raise SystemExit(1)
+PY
+            echo "🧭 verified audit-only volume ownership $volume_id (name=$clone_name)"
+            continue
+        fi
         if [ ! -e "$record" ] && [ ! -L "$record" ]; then
             # The shared audit is already exact ownership authority. Publish a
             # name-only recovery record first, then use the same audit-first
