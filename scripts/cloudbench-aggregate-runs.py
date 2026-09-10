@@ -85,7 +85,7 @@ def merge_usage_breakdowns(breakdowns) -> dict:
 def _display_status(task: dict) -> str:
     if bool(task.get("passed")):
         return "passed"
-    status = str(task.get("status") or "").upper()
+    status = str(task.get("benchmark_status") or task.get("status") or "").upper()
     if status == "SKIPPED":
         return "skipped"
     if status in {"INFRA_ERROR", "ERROR", "CANCELLED"}:

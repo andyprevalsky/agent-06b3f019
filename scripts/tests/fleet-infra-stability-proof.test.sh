@@ -172,16 +172,26 @@ if teardown != "missing":
         "version": 1, "fleet_owner_token": owner, "run_id": run_dir.name,
         "workspace_root": workspace, "status": teardown,
         "audit_sha256": digest.hexdigest(),
-        "controller_exit_code": 1 if slice_index == 0 or infra_slice == str(slice_index) else 0,
+        "controller_exit_code": int(os.environ["FLEET_STABILITY_FAKE_EXIT"]) if os.environ.get("FLEET_STABILITY_FAKE_EXIT") else 1 if slice_index == 0 or infra_slice == str(slice_index) else 0,
     }))
 PY
 echo "🔏 execution provenance: $run_dir/execution-provenance.json"
+if [ -n "${FLEET_STABILITY_FAKE_EXIT:-}" ]; then exit "$FLEET_STABILITY_FAKE_EXIT"; fi
 if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
   || [ "$FLEET_STABILITY_SLICE" = 0 ]; then
   exit 1
 fi
 SH
 chmod +x "$tmp/fake-fleet"
+
+if FLEET_STABILITY_FAKE_EXIT=143 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/cancelled-controller" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/cancelled-controller.log" 2>&1; then
+  fail "ordinary task outcomes must not mask an interrupted controller"
+fi
 
 for teardown in failed missing; do
   if FLEET_STABILITY_FAKE_TEARDOWN="$teardown" \

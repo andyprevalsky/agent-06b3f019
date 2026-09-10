@@ -8901,6 +8901,7 @@ except (OSError, ValueError, KeyError):
 verified = (
     teardown == "0" and retained != "1" and completed == "1"
     and autoscaler == "0" and len(audit_digest) == 64
+    and exit_code in ("0", "1")
     and bool(registry) and not Path(registry).exists() and not Path(registry).is_symlink()
 )
 target = root / "_batch/lifecycle.json"

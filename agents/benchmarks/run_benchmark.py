@@ -8580,7 +8580,14 @@ def _aggregate_benchmark_status(passed: bool, *results: TaskResult) -> str:
     """Preserve child harness failures when grading a composite benchmark."""
     for result in results:
         outcome = result.benchmark_status if result.benchmark_status is not None else result.status
-        if outcome in ("ERROR", "CANCELLED", "INFRA"):
+        if not isinstance(outcome, str):
+            return "ERROR"
+        outcome = outcome.upper()
+        if outcome not in {"PASSED", "FAILED", "SKIPPED", "ERROR", "CANCELLED", "INFRA_ERROR"}:
+            return "ERROR"
+        if type(result.passed) is not bool or result.passed != (outcome == "PASSED"):
+            return "ERROR"
+        if outcome in {"ERROR", "CANCELLED", "INFRA_ERROR"}:
             return outcome
     return "PASSED" if passed else "FAILED"
 

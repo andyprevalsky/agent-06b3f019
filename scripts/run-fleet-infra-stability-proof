@@ -262,6 +262,7 @@ try:
     if (receipt.get("version") != 1 or receipt.get("status") != "verified"
         or type(receipt.get("controller_exit_code")) is not int
         or receipt["controller_exit_code"] != int(controller_exit)
+        or receipt["controller_exit_code"] not in (0, 1)
         or metadata.get("version") != "1"
         or metadata.get("status") != "provider-teardown-verified"
         or binding.get("path") != str(source)):

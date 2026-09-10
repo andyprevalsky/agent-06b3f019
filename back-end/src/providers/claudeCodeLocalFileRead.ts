@@ -19,14 +19,11 @@ function isCanonicalPathInsideRoot(root: string, candidate: string): boolean {
 }
 
 function resolveOpenDescriptorPath(descriptor: number): string {
-  const descriptorPath =
-    process.platform === 'linux' ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
-  try {
-    const resolved = realpathSync.native(descriptorPath);
-    if (resolved !== descriptorPath) return resolved;
-  } catch {
-    // Darwin's descriptor filesystem may not expose the vnode path to realpath.
+  if (process.platform === 'linux') {
+    return realpathSync.native(`/proc/self/fd/${descriptor}`);
   }
+  // Darwin realpath can return a synthetic /dev/fd/<basename>, which is not
+  // the opened vnode's filesystem path. Resolve that vnode through lsof.
   if (process.platform === 'darwin') {
     const output = execFileSync(
       '/usr/sbin/lsof',

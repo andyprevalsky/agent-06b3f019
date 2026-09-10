@@ -85,3 +85,20 @@ lifecycle verification, and exact owned-resource cleanup reporting.
 ## Reusable lesson
 
 Close every inherited descriptor above stderr before execing a detached helper; a new session alone does not detach launcher I/O ownership.
+
+
+## Recurrence: isolated fleet runner retained the controller lock
+
+During PR #1299 completion on September 10, the unchanged Linux multi-workstream
+scenario 2-cancel failed with `FATAL controller lock failed without a live owner`.
+The earlier fix covered detached Hub helpers but missed
+`run_fleet_child_supervised`: its Python launcher called setsid/exec while
+retaining the inherited flock descriptor. Killing the controller group left
+that separately supervised runner holding the dead controller's lock.
+
+Close descriptors above stderr before setsid/exec in this third launcher.
+The existing real-source ordered-recovery scenario failed before and passed
+after; the complete `scripts/tests/cloudbench-multi-workstream.test.sh` then
+passed through scenario 16. Evidence: `.context/acceptance/linux-exact-recovery-repro.log`,
+`linux-exact-recovery-fixed.log`, and `linux-multi-workstream-final-tests.log`.
+The general class and descriptor-ownership lesson above are unchanged.

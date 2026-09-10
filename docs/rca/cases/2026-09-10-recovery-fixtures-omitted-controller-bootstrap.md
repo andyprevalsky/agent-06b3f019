@@ -95,3 +95,18 @@ that work continue without repeated permission questions.
 When testing extracted shell functions, reproduce the controller bootstrap
 state as well as the provider fixture; nounset failures can otherwise hide the
 behavior being asserted and strand fixture children holding output pipes.
+
+
+## Additional fixture bootstrap mismatch
+
+The full multi-workstream fixture also supplied `fake-token`, below the current
+controller token-shape minimum. Replacing it with the still-inert
+`fake-offline-fleet-token` restores the fixture's credential bootstrap contract;
+no real token is used. The full Linux shell suite passed through scenario 16.
+
+Full agents coverage also exposed two compute-refresh fixtures that mocked the
+credential sync but left the subsequently added local database discovery live.
+They attempted `psql` on the Linux test host. The fixtures now explicitly model
+no local credential overlay and an inactive optional cost gate; their funded
+fallback and sync-argument assertions are unchanged. Coverage's dump artifact
+directory is writable in the container, matching normal repository setup.

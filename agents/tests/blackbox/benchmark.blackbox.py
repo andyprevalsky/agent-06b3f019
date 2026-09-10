@@ -9165,7 +9165,7 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
     assert loaded.task_results[0].payment_lifecycle["orgTransfer"]["releasedCents"] == 4396
 
 
-def test_declared_judge_errors_are_not_evaluator_rejections():
+async def test_declared_judge_errors_are_not_evaluator_rejections():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     import benchmarks.run_benchmark as bench
@@ -9181,14 +9181,14 @@ def test_declared_judge_errors_are_not_evaluator_rejections():
     ):
         with patch.object(module, helper, AsyncMock(side_effect=RuntimeError("judge unavailable"))):
             try:
-                asyncio.run(run())
+                await run()
             except RuntimeError as error:
                 assert "judge unavailable" in str(error)
             else:
                 raise AssertionError(f"{helper}: execution error became a criterion failure")
 
 
-def test_sms_runner_harness_error_has_explicit_error_outcome():
+async def test_sms_runner_harness_error_has_explicit_error_outcome():
     from types import SimpleNamespace
     import benchmarks.sms_runner as sms
 
@@ -9199,12 +9199,12 @@ def test_sms_runner_harness_error_has_explicit_error_outcome():
         stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
         stack.enter_context(patch.object(sms, "_cleanup"))
         stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
-        result = asyncio.run(sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error"), deps))
+        result = await sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error"), deps)
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
 
-def test_codex_runner_harness_error_has_explicit_error_outcome():
+async def test_codex_runner_harness_error_has_explicit_error_outcome():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     import benchmarks.codex_runner as codex
@@ -9215,21 +9215,25 @@ def test_codex_runner_harness_error_has_explicit_error_outcome():
         api_headers=AsyncMock(return_value={}),
     )
     with patch.object(codex, "_create_codex_anchor_agent", AsyncMock(side_effect=RuntimeError("backend unavailable"))):
-        result = asyncio.run(codex.run_codex_task(
+        result = await codex.run_codex_task(
             "http://127.0.0.1:32001", get_task_by_name("claude-code-agent"), deps, "test goal"
-        ))
+        )
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
 
-def test_minted_benchmark_preserves_child_harness_outcomes():
+async def test_minted_benchmark_preserves_child_harness_outcomes():
     """A cancelled or broken child cannot become an ordinary aggregate failure."""
     from unittest.mock import AsyncMock
     import benchmarks.run_benchmark as bench
     from benchmarks.results import TaskResult
 
     for stage in ("biometrics", "post"):
-        for outcome in ("FAILED", "ERROR", "CANCELLED"):
+        for outcome, expected in (
+            ("FAILED", "FAILED"), ("ERROR", "ERROR"), ("CANCELLED", "CANCELLED"),
+            ("INFRA_ERROR", "INFRA_ERROR"), ([], "ERROR"), ("UNRECOGNIZED", "ERROR"),
+            ("PASSED", "ERROR"),
+        ):
             child = TaskResult(
                 name="child", passed=False, agent_id="child-agent", status="ACTIVE",
                 benchmark_status=outcome, progress_score=0, duration_seconds=1,
@@ -9252,11 +9256,11 @@ def test_minted_benchmark_preserves_child_harness_outcomes():
                     stack.enter_context(patch.object(bench, name, return_value=value))
                 stack.enter_context(patch.object(bench, "_run_auth_bundle_biometrics_gate", AsyncMock(return_value=child)))
                 stack.enter_context(patch.object(bench, "run_single_task", AsyncMock(return_value=child)))
-                result = asyncio.run(bench.run_minted_agent_account_task(
+                result = await bench.run_minted_agent_account_task(
                     "http://127.0.0.1:32001", bench.get_task_by_name("minted-agent-accounts-x")
-                ))
+                )
             assert result.passed is False
-            assert result.benchmark_status == outcome, (stage, outcome, result.benchmark_status)
+            assert result.benchmark_status == expected, (stage, outcome, result.benchmark_status)
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -10916,7 +10920,11 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
 
         # Excluding the Anthropic family takes a different refresh branch entirely
         # (gpt-only, no cooldown probe), so pin the mode this test describes.
-        with anthropic_family(excluded=False):
+        with (
+            anthropic_family(excluded=False),
+            patch.object(bench, "_local_victoria_database_url", return_value=None),
+            patch.object(bench, "_require_compute_tokens_enabled", return_value=False),
+        ):
             refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
             if asyncio.iscoroutine(refresh):
                 await refresh
@@ -10953,6 +10961,9 @@ async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
             {"BENCHMARK_BASE_IMAGE_NAME": "base:any-frozen-snapshot"},
             clear=False,
         ),
+        anthropic_family(excluded=False),
+        patch.object(bench, "_local_victoria_database_url", return_value=None),
+        patch.object(bench, "_require_compute_tokens_enabled", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True) as sync,
         patch.object(
             bench,
@@ -18063,13 +18074,13 @@ async def run_all_tests():
         "benchmark_run_serializes_world_model_fidelity",
         test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields,
     )
-    r.record(
+    await r.record_async(
         "declared_judge_execution_error",
         test_declared_judge_errors_are_not_evaluator_rejections,
     )
-    r.record("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
-    r.record("codex_runner_harness_error_outcome", test_codex_runner_harness_error_has_explicit_error_outcome)
-    r.record(
+    await r.record_async("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
+    await r.record_async("codex_runner_harness_error_outcome", test_codex_runner_harness_error_has_explicit_error_outcome)
+    await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
     )

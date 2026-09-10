@@ -3111,7 +3111,9 @@ confirm_guest_shutdown() {
 stop_on_exit() {
     local ec=$?
     release_boot_config_update_slot
-    if ! confirm_guest_shutdown; then
+    if [ -n "${GUEST_SHUTDOWN_RESULT:-}" ]; then
+        [ "$GUEST_SHUTDOWN_RESULT" = "0" ] || ec=125
+    elif ! confirm_guest_shutdown; then
         ec=125
     fi
     if declare -F cleanup_staged_local_files >/dev/null 2>&1; then
@@ -4648,6 +4650,20 @@ done
 # Preserve the complete remote driver and service logs before the EXIT trap
 # stops/destroys the machine. Console progress intentionally shows only a tail;
 # these artifacts are the authoritative failure evidence.
+# Cancellation produces its run record during shutdown. Spend the existing
+# cleanup window before extracting artifacts, then drain the sealed log once.
+# Keep TIMED_OUT set: a recovered cancellation record is still infrastructure
+# failure. The EXIT trap reuses this result instead of granting another window.
+if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
+    GUEST_SHUTDOWN_RESULT=1
+    if confirm_guest_shutdown; then
+        GUEST_SHUTDOWN_RESULT=0
+        if cloudbench_collect_terminal_log; then
+            FINISHED=1
+            BENCH_EXIT="$CURRENT_TERMINAL_EXIT"
+        fi
+    fi
+fi
 mkdir -p "$OUT_DIR/remote-logs"
 cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then

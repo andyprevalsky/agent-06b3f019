@@ -6439,6 +6439,28 @@ def test_fleet_terminal_projection_uses_two_archives_and_one_terminal_task_list(
     assert "trap cleanup EXIT" in fleet_source
 
 
+@pytest.mark.parametrize("outcome", ["SKIPPED", "ERROR", "CANCELLED", "INFRA_ERROR"])
+def test_fleet_terminal_projection_preserves_benchmark_outcome(tmp_path: Path, outcome: str) -> None:
+    fleet = tmp_path / "outcome-projection"
+    batch = fleet / "_batch"
+    child = fleet / "task"
+    batch.mkdir(parents=True)
+    child.mkdir()
+    (batch / "benches.json").write_text(json.dumps([{"name": "task", "mode": "REAL"}]))
+    task = {"name": "task", "passed": False, "status": "ACTIVE", "benchmark_status": outcome}
+    (child / "cloudbench-run.json").write_text(json.dumps({"tasks": [task]}))
+    result = subprocess.run(
+        [sys.executable, str(AGGREGATE_SCRIPT), str(fleet), str(batch / "run.json")],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    run = json.loads((batch / "run.json").read_text())
+    report = json.loads((batch / "report-card.json").read_text())
+    assert run["tasks"][0]["status"] == "ACTIVE"
+    assert run["tasks"][0]["benchmark_status"] == outcome
+    assert report["per_task"][0]["status"] == ("skipped" if outcome == "SKIPPED" else "error")
+
+
 def test_fleet_terminal_projection_runs_from_signal_exit_finalization(
     tmp_path: Path,
 ) -> None:
@@ -18420,6 +18442,64 @@ def test_autoscaler_worker_clones_take_a_serialized_machine_slot() -> None:
     assert worker.index("reserve_worker_machine_slot") < worker.index("clone_machine_target")
     assert 'capacity_release_reservation "$worker_capacity_token"' in worker
     assert worker.index("clone_machine_target") < worker.index("capacity_release_reservation")
+
+
+def test_watchdog_collects_cancelled_artifact_after_bounded_shutdown(tmp_path: Path) -> None:
+    """Shutdown writes the terminal artifact after the last watchdog poll."""
+    cloud = CLOUD_SCRIPT.read_text()
+    collection = cloud[
+        cloud.index("# Preserve the complete remote driver") : cloud.index(
+            "RUN_IDENTITY_OK=", cloud.index("# Preserve the complete remote driver")
+        )
+    ]
+    collect = _extract_fleet_function(cloud, "cloudbench_collect_terminal_log() {")
+    script = f"""set -eu
+{collect}
+ROOT_DIR="$1"
+OUT_DIR="$1/out"
+mkdir -p "$OUT_DIR"
+SSH_LOG="$1/driver.log"
+printf '%s\\n' 'RUNSTAMP-run-token' > "$SSH_LOG"
+CLOUDBENCH_BOOT_LAUNCH=1
+NEEDS_IMESSAGE_RELAY=0
+RUN_WORKSPACE_NAME=fixture
+REPORT_BEGIN=REPORT-BEGIN
+REPORT_END=REPORT-END
+RESULT_BEGIN=RESULT-BEGIN
+RESULT_END=RESULT-END
+DONE_MARKER='::CLOUDBENCH-DONE:: token=run-token'
+TIMED_OUT=1
+FINISHED=0
+BENCH_EXIT=''
+FLEET_MACHINE_ID=fixture-machine
+confirm_guest_shutdown() {{
+  printf '%s\\n' shutdown > "$ROOT_DIR/order"
+  printf '%s\\n' 'RUNSTAMP-run-token' 'RESULT-BEGIN' \\
+    '{{"tasks":[{{"name":"fixture","passed":false,"status":"ACTIVE","benchmark_status":"CANCELLED"}}]}}' \\
+    'RESULT-END' '::CLOUDBENCH-DONE:: token=run-token exit=1' > "$ROOT_DIR/remote.log"
+}}
+refresh_bench_log_to_eof() {{
+  printf '%s\\n' collect >> "$ROOT_DIR/order"
+  cp "$ROOT_DIR/remote.log" "$SSH_LOG"
+}}
+{collection}
+[ "$TIMED_OUT" = 1 ]
+[ "$FINISHED" = 1 ]
+[ "$BENCH_EXIT" = 1 ]
+[ "$GUEST_SHUTDOWN_RESULT" = 0 ]
+printf '%s\\n' "$RUN_JSON" > "$ROOT_DIR/result.json"
+"""
+    # No process, provider, or network is involved: only the real controller's
+    # post-poll collection block and its token-bound artifact parser execute.
+    result = subprocess.run(
+        ["bash", "-c", script, "watchdog-collection", str(tmp_path)],
+        text=True, capture_output=True, check=False, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "order").read_text().splitlines() == ["shutdown", "collect"]
+    task = json.loads((tmp_path / "result.json").read_text())["tasks"][0]
+    assert task["benchmark_status"] == "CANCELLED"
+    assert task["passed"] is False
 
 
 def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:
