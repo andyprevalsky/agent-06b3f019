@@ -10803,6 +10803,7 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
     resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
     owner = "5" * 32
     app = "bench-app"
+    run_id = "fixture-run"
     warm_id = "feedface000001"
     primary_id = "deadbeef000001"
     worker_id = "deadbeef000002"
@@ -10817,10 +10818,14 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
         "version=2\n"
         f"app={app}\n"
         f"fleet_owner_token={owner}\n"
+        f"run_id={run_id}\n"
         f"audit_dir={audit}\n"
+        "cleanup_policy=retain\n"
     )
+    (registry / "guest-cleanup-unconfirmed").touch()
     (audit / "meta").write_text(
         f"fleet_owner_token={owner}\n"
+        f"run_id={run_id}\n"
         f"app={app}\n"
     )
     records = (
@@ -10834,7 +10839,7 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
         (audit / "fresh" / clone_name).write_text(
             "version=1\n"
             f"fleet_owner_token={owner}\n"
-            "run_id=fixture-run\n"
+            f"run_id={run_id}\n"
             f"app={app}\n"
             f"clone_name={clone_name}\n"
             "source=fresh-clone\n"
@@ -10843,6 +10848,7 @@ def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
             f"volume_id={volume_id}\n"
             "disposition=owned\n"
         )
+        (audit / "by-machine-id" / machine_id).write_text(f"{clone_name}\n")
 
     script = f"""set -uo pipefail
 APP={app}
@@ -10868,6 +10874,154 @@ resolve_exact_recovery_warm_identity "$REGISTRY"
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.strip() == f"{warm_id} vol_warm"
+    assert (registry / "guest-cleanup-unconfirmed").exists()
+
+
+def test_exact_recovery_rejects_unsafe_hierarchical_clone_topologies(
+    tmp_path: Path,
+) -> None:
+    """Only one connected, owner-indexed clone DAG can identify the source guard."""
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
+    owner = "6" * 32
+    app = "bench-app"
+    run_id = "fixture-run"
+    warm_id = "feedface000001"
+    primary_id = "deadbeef000001"
+    worker_id = "deadbeef000002"
+    cycle_a = "deadbeef000003"
+    cycle_b = "deadbeef000004"
+    cases = {
+        "missing-fresh-record": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                ("cloudbench-worker", primary_id, primary_id, worker_id, "vol_worker"),
+            ),
+            "cloudbench-worker",
+            None,
+        ),
+        "source-mismatch": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                ("cloudbench-worker", primary_id, warm_id, worker_id, "vol_worker"),
+            ),
+            None,
+            None,
+        ),
+        "duplicate-target": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                ("cloudbench-worker", primary_id, primary_id, primary_id, "vol_worker"),
+            ),
+            None,
+            None,
+        ),
+        "disconnected-roots": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                (
+                    "cloudbench-worker",
+                    "feedface000002",
+                    "feedface000002",
+                    worker_id,
+                    "vol_worker",
+                ),
+            ),
+            None,
+            None,
+        ),
+        "disconnected-cycle": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                ("cloudbench-cycle-a", cycle_b, cycle_b, cycle_a, "vol_cycle_a"),
+                ("cloudbench-cycle-b", cycle_a, cycle_a, cycle_b, "vol_cycle_b"),
+            ),
+            None,
+            None,
+        ),
+        "machine-index-mismatch": (
+            (
+                ("cloudbench-primary", warm_id, warm_id, primary_id, "vol_primary"),
+                ("cloudbench-worker", primary_id, primary_id, worker_id, "vol_worker"),
+            ),
+            None,
+            worker_id,
+        ),
+    }
+
+    for label, (records, missing_fresh, mismatched_index) in cases.items():
+        case_root = tmp_path / label
+        registry = case_root / "ownership" / owner
+        (registry / "clones").mkdir(parents=True)
+        audit_root = case_root / "audits"
+        audit = audit_root / owner
+        for directory in (
+            audit / "fresh",
+            audit / "expected-fresh",
+            audit / "by-machine-id",
+        ):
+            directory.mkdir(parents=True)
+        (registry / "meta").write_text(
+            "version=2\n"
+            f"app={app}\n"
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"audit_dir={audit}\n"
+        )
+        (audit / "meta").write_text(
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"app={app}\n"
+        )
+        for clone_name, expected_source, fresh_source, machine_id, volume_id in records:
+            (audit / "expected-fresh" / clone_name).write_text(
+                f"clone_name={clone_name}\n"
+                f"source_machine_id={expected_source}\n"
+            )
+            if clone_name == missing_fresh:
+                continue
+            (audit / "fresh" / clone_name).write_text(
+                "version=1\n"
+                f"fleet_owner_token={owner}\n"
+                f"run_id={run_id}\n"
+                f"app={app}\n"
+                f"clone_name={clone_name}\n"
+                "source=fresh-clone\n"
+                f"source_machine_id={fresh_source}\n"
+                f"machine_id={machine_id}\n"
+                f"volume_id={volume_id}\n"
+                "disposition=owned\n"
+            )
+            indexed_name = (
+                "cloudbench-primary"
+                if mismatched_index == machine_id
+                else clone_name
+            )
+            (audit / "by-machine-id" / machine_id).write_text(f"{indexed_name}\n")
+        provider_call = case_root / "unexpected-provider-call"
+        script = f"""set -uo pipefail
+APP={app}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+REGISTRY={shlex.quote(str(registry))}
+UNEXPECTED={shlex.quote(str(provider_call))}
+machine_volume_id() {{
+  touch "$UNEXPECTED"
+  return 99
+}}
+{resolver}
+if resolve_exact_recovery_warm_identity "$REGISTRY"; then
+  exit 90
+fi
+[ ! -e "$UNEXPECTED" ]
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}{result.stdout}"
 
 
 def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(

@@ -6565,29 +6565,36 @@ def fields(path: Path) -> dict[str, str]:
 meta = fields(registry / "meta")
 owner = registry.name
 audit = Path(meta.get("audit_dir", ""))
+audit_meta = fields(audit / "meta")
 if (
     not re.fullmatch(r"[0-9a-f]{32}", owner)
     or meta.get("version") != "2"
     or meta.get("app") != expected_app
     or meta.get("fleet_owner_token") != owner
+    or not re.fullmatch(r"[A-Za-z0-9._-]+", meta.get("run_id", ""))
     or audit != audit_root / owner
     or not plain_directory(audit / "expected-fresh")
-    or fields(audit / "meta").get("fleet_owner_token") != owner
-    or fields(audit / "meta").get("app") != expected_app
+    or not plain_directory(audit / "fresh")
+    or not plain_directory(audit / "by-machine-id")
+    or audit_meta.get("fleet_owner_token") != owner
+    or audit_meta.get("run_id") != meta["run_id"]
+    or audit_meta.get("app") != expected_app
 ):
     raise ValueError("unsafe exact recovery source identity")
 
-sources: set[str] = set()
+expected: dict[str, str] = {}
 for record in (audit / "expected-fresh").iterdir():
     value = fields(record)
     if (
         set(value) != {"clone_name", "source_machine_id"}
         or value["clone_name"] != record.name
+        or record.name in expected
         or re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", record.name) is None
         or re.fullmatch(r"[0-9a-f]+", value["source_machine_id"]) is None
     ):
         raise ValueError("unsafe exact recovery source record")
-    sources.add(value["source_machine_id"])
+    expected[record.name] = value["source_machine_id"]
+sources = set(expected.values())
 # region agent log
 try:
     with open("/opt/cursor/logs/debug.log", "a") as handle:
@@ -6595,9 +6602,79 @@ try:
 except OSError:
     pass
 # endregion
-if len(sources) != 1:
-    raise ValueError("exact owner does not identify one warm source Machine")
-print(next(iter(sources)))
+fresh_required = {
+    "version", "fleet_owner_token", "run_id", "app", "clone_name", "source",
+    "source_machine_id", "machine_id", "volume_id", "disposition",
+}
+fresh_records: dict[str, dict[str, str]] = {}
+parents: dict[str, str] = {}
+for record in (audit / "fresh").iterdir():
+    value = fields(record)
+    clone_name = value.get("clone_name", "")
+    machine_id = value.get("machine_id", "")
+    volume_id = value.get("volume_id", "")
+    if (
+        set(value) != fresh_required
+        or clone_name != record.name
+        or clone_name in fresh_records
+        or value["version"] != "1"
+        or value["fleet_owner_token"] != owner
+        or value["run_id"] != meta["run_id"]
+        or value["app"] != expected_app
+        or value["source"] != "fresh-clone"
+        or expected.get(clone_name) != value["source_machine_id"]
+        or value["disposition"] not in {
+            "ownership-pending", "owned", "transfer-pending-stopped",
+            "destroyed-verified-absent", "not-allocated-verified",
+            "transferred-to-pool-stopped",
+        }
+        or (machine_id and re.fullmatch(r"[0-9a-f]+", machine_id) is None)
+        or (volume_id and re.fullmatch(r"[A-Za-z0-9_-]+", volume_id) is None)
+        or machine_id in parents
+    ):
+        raise ValueError("unsafe exact recovery clone topology")
+    fresh_records[clone_name] = value
+    if machine_id:
+        parents[machine_id] = value["source_machine_id"]
+if set(fresh_records) != set(expected):
+    raise ValueError("incomplete exact recovery clone topology")
+
+index: dict[str, str] = {}
+for record in (audit / "by-machine-id").iterdir():
+    if re.fullmatch(r"[0-9a-f]+", record.name) is None:
+        raise ValueError("unsafe exact recovery Machine index")
+    payload = record.read_bytes() if regular_file(record) else b""
+    try:
+        values = payload.decode().splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError("unsafe exact recovery Machine index") from error
+    if (
+        len(payload) > 65_536
+        or len(values) != 1
+        or values[0] not in expected
+        or record.name in index
+        or fresh_records[values[0]]["machine_id"] != record.name
+    ):
+        raise ValueError("unsafe exact recovery Machine index")
+    index[record.name] = values[0]
+if set(index) != set(parents):
+    raise ValueError("incomplete exact recovery Machine index")
+
+roots = sources - set(parents)
+if len(roots) != 1:
+    raise ValueError("exact owner does not identify one external source root")
+root = next(iter(roots))
+for machine_id in parents:
+    current = machine_id
+    visited: set[str] = set()
+    while current in parents:
+        if current in visited:
+            raise ValueError("exact recovery clone topology contains a cycle")
+        visited.add(current)
+        current = parents[current]
+    if current != root:
+        raise ValueError("exact recovery clone topology is disconnected")
+print(root)
 PY
 )" || return 1
     case "$source_id" in ''|*[!0-9a-f]*) return 1 ;; esac
