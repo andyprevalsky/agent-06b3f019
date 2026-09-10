@@ -10209,6 +10209,107 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
             assert not plan.exists()
 
 
+def test_exact_guest_recovery_maps_autoscaler_workers_without_guest_ack(
+    tmp_path: Path,
+) -> None:
+    """A worker is owned teardown state, not a second top-level guest."""
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
+    end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+    build_plan = fleet[start:end]
+    owner = "5c" * 16
+    app = "bench-app"
+    run_id = "fixture-run"
+    warm_id = "feedface000001"
+    primary_id = "deadbeef000001"
+    worker_id = "deadbeef000002"
+    primary_name = "cloudbench-primary"
+    worker_name = "cloudbench-worker"
+    case_root = tmp_path / "hierarchical-owner"
+    registry = case_root / "ownership" / owner
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    runs_root = case_root / "runs"
+    output = runs_root / run_id / "bench-owned"
+    output.mkdir(parents=True)
+    audit_root = case_root / "audits"
+    audit = audit_root / owner
+    for directory in (
+        audit / "fresh",
+        audit / "expected-fresh",
+        audit / "by-machine-id",
+    ):
+        directory.mkdir(parents=True)
+    (registry / "meta").write_text(
+        "version=2\n"
+        f"app={app}\n"
+        f"fleet_owner_token={owner}\n"
+        f"run_id={run_id}\n"
+        f"runs_root={runs_root}\n"
+        f"audit_dir={audit}\n"
+        "cleanup_policy=retain\n"
+    )
+    (audit / "meta").write_text(
+        f"fleet_owner_token={owner}\n"
+        f"run_id={run_id}\n"
+        f"app={app}\n"
+    )
+    records = (
+        (primary_name, warm_id, primary_id, "vol_primary"),
+        (worker_name, primary_id, worker_id, "vol_worker"),
+    )
+    for clone_name, source_id, machine_id, volume_id in records:
+        (clones / clone_name).write_text(
+            f"name={clone_name}\nid={machine_id}\nvolume_id={volume_id}\n"
+        )
+        (audit / "expected-fresh" / clone_name).write_text(
+            f"clone_name={clone_name}\nsource_machine_id={source_id}\n"
+        )
+        (audit / "fresh" / clone_name).write_text(
+            "version=1\n"
+            f"fleet_owner_token={owner}\n"
+            f"run_id={run_id}\n"
+            f"app={app}\n"
+            f"clone_name={clone_name}\n"
+            "source=fresh-clone\n"
+            f"source_machine_id={source_id}\n"
+            f"machine_id={machine_id}\n"
+            f"volume_id={volume_id}\n"
+            "disposition=owned\n"
+        )
+        (audit / "by-machine-id" / machine_id).write_text(f"{clone_name}\n")
+    (output / ".cid").write_text(f"clone {primary_id}\n")
+    (output / "status-proxy.port").write_text("61001\n")
+    (output / "worker-clones.ids").write_text(f"{worker_id}\n")
+    plan = case_root / "plan"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP={app}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+{build_plan}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+""",
+            "exact-hierarchical-recovery-plan",
+            str(registry),
+            str(plan),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert plan.read_text().splitlines() == [
+        f"guest\tbench-owned\t{primary_name}\t{primary_id}\tvol_primary\t{output}\t61001",
+        f"worker\tbench-owned\t{worker_name}\t{worker_id}\tvol_worker\t{output}\t61001",
+    ]
+
+
 def test_exact_guest_status_and_shutdown_config_fail_closed(
     tmp_path: Path,
 ) -> None:
