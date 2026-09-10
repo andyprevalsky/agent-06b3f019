@@ -10,12 +10,9 @@ first_bad_boundary: scripts/run-bench-fleet clone_machine_target entered machine
 symptoms:
   - "FAIL: source-machine rate-limit rejection crossed into post-mutation clone-name resolution (1 forced inventory refreshes)"
   - "FAIL: volume-only owned audit was rejected before registry reaper; assert 91 == 0"
-  - "exact stale-owner registry identity is unsafe"
   - "exact stale-owner cleanup is quarantined pending guest acknowledgement"
-  - "driver exited without cleanup acknowledgement"
   - "ERROR: services evidence has no exact isolated stopped database identity"
   - "ERROR: durable backend evidence contains no exact provider session identity"
-  - "exact provider cleanup or authoritative zero-allocation proof is incomplete"
 tags:
   - cloudbench
   - fly-io
