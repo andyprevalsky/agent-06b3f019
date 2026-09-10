@@ -6232,6 +6232,14 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 "/cloudbench-interrupt-cleanup-$guest_run_token.status" \
                 "$runner_evidence" 65536 5
         fi
+        # region agent log
+        CLOUDBENCH_DEBUG_RUNNER_EVIDENCE="$runner_evidence" \
+            CLOUDBENCH_DEBUG_RUNNER_STATUS="$runner_status_code" \
+            CLOUDBENCH_DEBUG_RUNNER_TOKEN="$guest_run_token" \
+            CLOUDBENCH_DEBUG_RUNNER_BENCH="$bench" \
+            CLOUDBENCH_DEBUG_RUNNER_MACHINE="$machine_id" \
+            python3 -c 'import json,os,time; p=os.environ["CLOUDBENCH_DEBUG_RUNNER_EVIDENCE"]; f={}; [f.setdefault(k,v) for k,s,v in (line.partition("=") for line in (open(p).read().splitlines() if os.path.isfile(p) else [])) if s]; open("/opt/cursor/logs/debug.log","a").write(json.dumps({"hypothesisId":"J,K,L","location":"scripts/run-bench-fleet:cloudbench_recover_guest_cleanup_receipts","message":"runner cleanup lifecycle subtype","data":{"bench":os.environ["CLOUDBENCH_DEBUG_RUNNER_BENCH"],"machine":os.environ["CLOUDBENCH_DEBUG_RUNNER_MACHINE"],"httpStatus":os.environ["CLOUDBENCH_DEBUG_RUNNER_STATUS"],"fields":sorted(f),"version":f.get("version"),"state":f.get("state"),"tokenMatch":f.get("token")==os.environ["CLOUDBENCH_DEBUG_RUNNER_TOKEN"]},"timestamp":int(time.time()*1000)})+"\n")' 2>/dev/null || true
+        # endregion
         case "$runner_status_code" in
             200)
                 if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
