@@ -593,6 +593,8 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+bash scripts/tests/fleet-infra-canary.test.sh
+bash scripts/tests/fleet-infra-stability-proof.test.sh
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
@@ -603,12 +605,12 @@ if [ -z "$CHANGED_AGENTS" ]; then
 fi
 ```
 
-The six controller commands must pass. The agents `benchmark` blackbox domain
+The eight controller commands must pass. The agents `benchmark` blackbox domain
 must also pass exactly once: Step 4g's agents coverage already runs it whenever
 `$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
 coverage was skipped. Never launch the same controller-owning domain in both
 parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
-is non-empty, wait for Step 4g to finish before starting the six controller
+is non-empty, wait for Step 4g to finish before starting the eight controller
 commands above. This operational
 verification wiring is pre-authorized by Step 0p and must never pause for human
 approval.

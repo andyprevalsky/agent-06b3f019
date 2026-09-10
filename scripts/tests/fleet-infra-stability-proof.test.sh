@@ -176,6 +176,26 @@ if teardown != "missing":
     }))
 PY
 echo "🔏 execution provenance: $run_dir/execution-provenance.json"
+if [ -n "${FLEET_STABILITY_FAKE_NESTED_PROVENANCE:-}" ]; then
+  python3 - "$run_dir" <<'PY'
+import json
+import os
+import sys
+import uuid
+from pathlib import Path
+
+parent = Path(sys.argv[1])
+child = parent.with_name(parent.name + "-canary")
+(child / "_batch").mkdir(parents=True)
+receipt = json.loads((parent / "_batch/lifecycle.json").read_text())
+receipt["run_id"] = child.name
+if os.environ["FLEET_STABILITY_FAKE_NESTED_PROVENANCE"] != "ambiguous":
+    receipt["fleet_owner_token"] = uuid.uuid4().hex
+(child / "_batch/lifecycle.json").write_text(json.dumps(receipt))
+(child / "_batch/run.json").write_text((parent / "_batch/run.json").read_text())
+print(f"🔏 execution provenance: {child}/execution-provenance.json")
+PY
+fi
 if [ -n "${FLEET_STABILITY_FAKE_EXIT:-}" ]; then exit "$FLEET_STABILITY_FAKE_EXIT"; fi
 if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
   || [ "$FLEET_STABILITY_SLICE" = 0 ]; then
@@ -183,6 +203,24 @@ if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
 fi
 SH
 chmod +x "$tmp/fake-fleet"
+
+# A fresh nested canary shares stdout with its parent, so the last provenance
+# line belongs to a different controller. Select the exact parent identity.
+FLEET_STABILITY_FAKE_NESTED_PROVENANCE=canary \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/nested-canary" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/nested-canary.log" 2>&1 \
+  || fail "nested canary provenance masked the verified parent slice"
+if FLEET_STABILITY_FAKE_NESTED_PROVENANCE=ambiguous \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/ambiguous-parent" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/ambiguous-parent.log" 2>&1; then
+  fail "multiple provenance candidates claiming the parent owner must fail closed"
+fi
 
 if FLEET_STABILITY_FAKE_EXIT=143 \
   FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \

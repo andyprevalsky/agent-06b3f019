@@ -142,6 +142,12 @@ cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
 [ "${CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT:-0}" = "1" ] || exit 91
 [ "${CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE:-0}" = "1" ] || exit 92
 [ "${CLOUDBENCH_CONTROLLER_LOCK_NAME:-}" = "cloudbench-controller-infra-canary-preflight.lock" ] || exit 93
+# Each caller already owns its audit directory. A nested fleet must receive a
+# fresh identity, while the serialized follower must still reuse the stamp.
+[[ "${CLOUDBENCH_FLEET_OWNER_TOKEN:-}" =~ ^[a-f0-9]{32}$ ]] || exit 94
+[ "$CLOUDBENCH_FLEET_OWNER_TOKEN" != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ] || exit 95
+[ "$CLOUDBENCH_FLEET_OWNER_TOKEN" != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ] || exit 96
+printf '%s\n' "$CLOUDBENCH_FLEET_OWNER_TOKEN" >> "$CLOUDBENCH_PREFLIGHT_CALLS.owners"
 printf '%s\n' "$$" >> "$CLOUDBENCH_PREFLIGHT_CALLS"
 sleep 0.5
 SH
@@ -149,9 +155,11 @@ chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
 rm -f "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass"
 : > "$PREFLIGHT_REPRO/calls"
 CLOUDBENCH_PREFLIGHT_CALLS="$PREFLIGHT_REPRO/calls" \
+  CLOUDBENCH_FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   bash "$PREFLIGHT_REPRO/run.sh" >"$PREFLIGHT_REPRO/concurrent-a.out" 2>&1 &
 PREFLIGHT_A=$!
 CLOUDBENCH_PREFLIGHT_CALLS="$PREFLIGHT_REPRO/calls" \
+  CLOUDBENCH_FLEET_OWNER_TOKEN=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   bash "$PREFLIGHT_REPRO/run.sh" >"$PREFLIGHT_REPRO/concurrent-b.out" 2>&1 &
 PREFLIGHT_B=$!
 wait "$PREFLIGHT_A" || fail "first concurrent preflight failed"

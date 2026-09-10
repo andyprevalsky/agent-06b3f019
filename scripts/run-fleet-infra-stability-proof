@@ -228,10 +228,23 @@ matches = re.findall(
     text,
     flags=re.MULTILINE,
 )
-if not matches:
+# Nested canaries also print provenance to the parent's stdout. Bind selection
+# to this slice's owner, never to log order, and reject ambiguous ownership.
+candidates = []
+for path in dict.fromkeys(matches):
+    candidate = Path(path) / "_batch" / "run.json"
+    try:
+        identity = json.loads((candidate.parent / "lifecycle.json").read_text())
+    except (OSError, ValueError):
+        continue
+    if (isinstance(identity, dict)
+        and identity.get("fleet_owner_token") == owner_token
+        and identity.get("workspace_root") == workspace):
+        candidates.append(candidate)
+if len(candidates) != 1:
     print("infra\t")
     raise SystemExit
-batch_path = Path(matches[-1]) / "_batch" / "run.json"
+batch_path = candidates[0]
 try:
     payload = json.loads(batch_path.read_text())
 except (OSError, TypeError, ValueError, json.JSONDecodeError):
@@ -282,7 +295,7 @@ try:
 except (OSError, TypeError, ValueError, KeyError, subprocess.SubprocessError):
     print(f"infra\t{batch_path}")
     raise SystemExit
-tasks = payload.get("tasks")
+tasks = payload.get("tasks") if isinstance(payload, dict) else None
 if not isinstance(tasks, list):
     print(f"infra\t{batch_path}")
     raise SystemExit

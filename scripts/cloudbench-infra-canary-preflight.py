@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 
 def _positive_int(value: str) -> int:
@@ -85,6 +86,9 @@ def main() -> int:
                 "CLOUDBENCH_INFRA_CANARY_PREFLIGHT_ACTIVE": "1",
                 "CLOUDBENCH_SKIP_INFRA_CANARY_PREFLIGHT": "1",
                 "CLOUDBENCH_CONTROLLER_LOCK_NAME": args.nested_controller_lock,
+                # The parent already owns its audit directory. This nested
+                # controller must create and retire a separate resource ledger.
+                "CLOUDBENCH_FLEET_OWNER_TOKEN": uuid.uuid4().hex,
             }
         )
         try:

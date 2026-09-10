@@ -19,6 +19,7 @@ tags:
   - nested-controller
   - process-identity
 sources:
+  - PR #1299
   - commit e9ce394585db709669f6bae68e578a85624bb434
   - commit fe99d86f6
   - commit 6e95c1e6e
@@ -156,3 +157,34 @@ instrumentation retention until the exact acceptance proof is confirmed.
 ## Reusable lesson
 
 Derive process-local cleanup ownership from the complete sealed identity at every child entry; never inherit ownership merely because immutable bytes are shared.
+
+## Nested fleet-token recurrence (PR #1299)
+
+Proof `capability-stability-20260910230955-44684` failed before provisioning
+with `refusing pre-existing fleet audit owner path`. Its slice had an explicit
+owner token for final receipt verification. The fresh mandatory canary inherited
+that token through the preflight helper and attempted to create the parent's
+already-owned audit directory.
+
+The helper now allocates a fresh token for each nested canary controller while
+leaving the parent's environment unchanged. Snapshot borrowing and the shared
+check/run/stamp lock remain unchanged. The existing concurrent-preflight test
+now passes two different parent tokens and requires the one serialized child
+to receive a valid identity distinct from both. It failed before the fix and
+the complete canary and stability-proof suites pass afterwards. Evidence:
+`.context/acceptance/nested-canary-owner-{repro,fixed}.log` and
+`.context/acceptance/stability-proof-final.log`. Both suites are permanent
+`/deploy` controller gates. UUID allocation is constant work per nested
+controller and introduces no provider query or shared coordination.
+
+Adversarial review found the matching evidence-selection boundary: the nested
+canary prints its own execution provenance after the parent. Selecting the last
+line would therefore reject a successful parent against the child's receipt.
+The proof now selects exactly one receipt matching the expected parent token
+and workspace before applying all existing lifecycle, audit, and outcome
+checks. Missing or ambiguous ownership remains infrastructure failure. The
+offline fixture reproduces parent provenance followed by a distinct canary,
+and separately rejects two candidates claiming the parent identity. The first
+fixture failed before the fix; the complete proof suite passes afterwards:
+`.context/acceptance/nested-canary-provenance-{repro,fixed}.log`. Selection is
+linear in the controller log's provenance entries and performs no provider IO.

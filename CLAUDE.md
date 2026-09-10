@@ -150,6 +150,15 @@ prefer complete `AGENTS_ENV_B64` / `BACKEND_ENV_B64` secrets (optional SHA256
 checks), configure both ngrok secrets, run `bash scripts/cloud-init.sh`, and
 never install or run `mac-app` there.
 
+A schema change can require a new canonical cloud seed cache key. Cloud guests
+use PostgreSQL 15: migrate the previous reviewed canonical fixture in an
+isolated PG15 database, preserve its row content, and validate with
+`scripts/validate-canonical-seed-dump.sh` before publishing via
+`back-end/scripts/seed-dump-cache.ts`. Use `scripts/save-seed-dump.sh` with that
+PG15 container and verify a restore/read-back. Never publish a coverage database
+or replace the reviewed WhatsApp history with a production cold sync. See
+`docs/rca/cases/2026-08-20-poisoned-canonical-seed-missing-whatsapp-history.md`.
+
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 
 ```bash
