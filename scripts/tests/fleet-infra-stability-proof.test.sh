@@ -110,7 +110,10 @@ for arg in "$@"; do
 done
 python3 - "$run_dir/_batch/run.json" "$FLEET_STABILITY_SLICE" \
   "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" "${tasks[@]}" <<'PY'
+import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -128,8 +131,49 @@ for index, name in enumerate(sys.argv[4:]):
     else:
         status = "PASSED"
         passed = True
-    tasks.append({"name": name, "status": status, "passed": passed})
+    task = {"name": name, "status": status, "passed": passed}
+    if os.environ.get("FLEET_STABILITY_FAKE_AGENT_STATUS") == "1":
+        task["benchmark_status"] = status
+        task["status"] = "ACTIVE" if not passed else "PAUSED"
+    if os.environ.get("FLEET_STABILITY_FAKE_CANCELLED") == "1":
+        task.update(status="ACTIVE", benchmark_status="CANCELLED", passed=False)
+    if os.environ.get("FLEET_STABILITY_FAKE_MALFORMED") == "1":
+        task["benchmark_status"] = []
+    tasks.append(task)
 path.write_text(json.dumps({"tasks": tasks}) + "\n")
+owner = os.environ.get("CLOUDBENCH_FLEET_OWNER_TOKEN", "0" * 32)
+run_dir = path.parent.parent
+audit = run_dir / "teardown-ownership"
+audit.mkdir()
+(audit / "pool").mkdir()
+(audit / "pool-handoffs").mkdir()
+(audit / "pool/fixture").write_text("disposition=returned-stopped-claim-released\n")
+(audit / "pool-handoffs/fixture").write_text("disposition=transferred\n")
+workspace = str(Path.cwd())
+(audit / "meta").write_text(
+    f"version=1\nfleet_owner_token={owner}\nrun_id={run_dir.name}\n"
+    f"workspace_root={workspace}\nstatus=provider-teardown-verified\n"
+)
+digest = hashlib.sha256()
+for item in sorted(audit.rglob("*"), key=lambda item: str(item.relative_to(audit))):
+    if item.is_file():
+        relative = str(item.relative_to(audit)).encode()
+        payload = item.read_bytes()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+common = subprocess.check_output(["git", "rev-parse", "--git-common-dir"], text=True).strip()
+source = (Path(common) / "cloudbench-fleet-audits" / owner).resolve()
+(audit / "source-audit").write_text(f"path={source}\nsha256={digest.hexdigest()}\n")
+teardown = os.environ.get("FLEET_STABILITY_FAKE_TEARDOWN", "verified")
+if teardown != "missing":
+    (path.parent / "lifecycle.json").write_text(json.dumps({
+        "version": 1, "fleet_owner_token": owner, "run_id": run_dir.name,
+        "workspace_root": workspace, "status": teardown,
+        "audit_sha256": digest.hexdigest(),
+        "controller_exit_code": 1 if slice_index == 0 or infra_slice == str(slice_index) else 0,
+    }))
 PY
 echo "🔏 execution provenance: $run_dir/execution-provenance.json"
 if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
@@ -138,6 +182,46 @@ if [ "${FLEET_STABILITY_FAKE_INFRA_SLICE:-}" = "$FLEET_STABILITY_SLICE" ] \
 fi
 SH
 chmod +x "$tmp/fake-fleet"
+
+for teardown in failed missing; do
+  if FLEET_STABILITY_FAKE_TEARDOWN="$teardown" \
+    FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+    FLEET_INFRA_PROOF_STATE_ROOT="$tmp/teardown-$teardown" \
+    FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+      "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+      >"$tmp/teardown-$teardown.log" 2>&1; then
+    fail "ordinary task outcomes must not mask $teardown final teardown"
+  fi
+done
+
+if FLEET_STABILITY_FAKE_MALFORMED=1 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/malformed-outcome" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/malformed-outcome.log" 2>&1; then
+  fail "malformed explicit outcome must not fall back to an accepted legacy status"
+fi
+
+# Real runner rows retain the agent lifecycle state independently of their
+# evaluator outcome. A passed payment-abandonment task is legitimately PAUSED;
+# a failed evaluated timeout can still have an ACTIVE snapshot. Interruption
+# has the same snapshot, so its explicit CANCELLED outcome must remain INFRA.
+FLEET_STABILITY_FAKE_AGENT_STATUS=1 \
+FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+FLEET_INFRA_PROOF_STATE_ROOT="$tmp/agent-status" \
+FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+  "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+  >"$tmp/agent-status.log" 2>&1 \
+  || fail "evaluated agent lifecycle states were classified as infrastructure"
+if FLEET_STABILITY_FAKE_CANCELLED=1 \
+  FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/cancelled-status" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 13 \
+    >"$tmp/cancelled-status.log" 2>&1; then
+  fail "interrupted ACTIVE snapshot must remain infrastructure"
+fi
 
 broken_artifacts="$tmp/broken-artifacts"
 ln -s "$tmp/unavailable/artifacts" "$broken_artifacts"

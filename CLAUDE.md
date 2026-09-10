@@ -82,6 +82,74 @@ PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
 
 Run all services via Conductor (see `conductor.json`).
 
+### Fresh clone setup (Andy’s Mac)
+
+Read this file completely and honor `AGENTS.md` before setup. Secrets are not
+committed. The authoritative local env files live under
+`/Users/andyprevalsky/conductor/repos/navi-whisper-lux-v2/`. Copy or symlink
+`agents/.env`, `back-end/.env`, and `front-end/.env` into the same relative
+paths in the clone; also restore `mac-app/.env` on macOS and `research/.env`
+when doing research. Never print or commit their contents. Verify that
+`BACKEND_API_KEY` is present and agrees between agents and backend without
+printing it. The `.env.example` files are safe references, not complete
+substitutes for the authoritative files. For credential reconciliation, follow
+**Production Env Vars** below, including the Codex-cloud `rose` environment.
+
+Keep the checkout outside iCloud-synced Desktop or Documents; prefer
+`~/Developer/<unique-clone-name>`. Evicted `dataless` files can stall Git and
+Python or make a Git pack appear empty even though `ls` reports its full logical
+size. Finder's **Keep Downloaded** does not repair an already stalled iCloud
+sync; a fresh clone on local storage avoids that dependency.
+
+Start Docker Desktop. Use Python **3.11.9** for `agents/venv` and Node
+**20.10.0** for the Mac app (`source ~/.nvm/nvm.sh`, `nvm install 20.10.0`,
+`nvm use 20.10.0`). Select the installed Python 3.11.9 explicitly when an asdf
+shim points elsewhere. Install backend, frontend, and Mac app dependencies in
+their package directories with `npm install`; create `agents/venv` with
+`python3.11 -m venv venv` from `agents/`, activate it, and run
+`pip install -r requirements.txt`. Run `bash scripts/sync-reference-repos.sh`.
+Fleet controllers require modern Bash (`brew install bash`, then put
+`/opt/homebrew/bin` before `/bin` on Apple Silicon); macOS’s bundled Bash 3.2
+does not provide their `mapfile`/associative-array operations.
+Backend/frontend dependencies may require a newer Node than the Mac app; use
+an installed compatible Node (22.13.0 was verified) for those packages and
+retain 20.10.0 for `mac-app`.
+
+If npm workspace resolution fails, use each package’s committed lockfile with
+`npm ci --workspaces=false` in `back-end/` and `front-end/`, as documented in
+the RCA `2026-07-24-root-npm-install-ignored-workspace-lockfiles`. Do not delete
+lockfiles or change dependency ranges to get a fresh clone installed. If pip’s
+resolver stalls, `uv pip install --python agents/venv/bin/python -r
+agents/requirements.txt` installs the same requirements into the same venv.
+After installing backend dependencies, run `npx prisma generate` from
+`back-end/` before database setup; schema push alone does not generate the
+client used by the seed/index scripts.
+
+In Conductor, use `.conductor/settings.toml`; it supplies workspace variables,
+links env files from `$CONDUCTOR_ROOT_PATH`, and runs `scripts/setup-db.sh`.
+For a standalone clone, choose an unused base port and a unique directory name
+(the workspace name normally matches the directory basename), then run:
+
+```bash
+export CONDUCTOR_PORT=<unused-base-port>
+export CONDUCTOR_WORKSPACE_NAME=<clone-directory-name>
+export CONDUCTOR_ROOT_PATH="$PWD"
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy="$NO_PROXY"
+bash scripts/setup-db.sh
+bash scripts/run.sh
+```
+
+Use the same variables for setup and startup. Setup resets only that workspace’s
+local Postgres database and seeds it from production; the backend env must have
+production DB credentials. Do not reuse another workspace’s name or ports.
+The loopback proxy exclusions keep Python local health/test requests local
+when macOS has a system HTTP proxy; do not disable the user's proxy application.
+For Linux/cloud, use **Cursor Cloud / Linux dev environment** below instead:
+prefer complete `AGENTS_ENV_B64` / `BACKEND_ENV_B64` secrets (optional SHA256
+checks), configure both ngrok secrets, run `bash scripts/cloud-init.sh`, and
+never install or run `mac-app` there.
+
 **Tests:** See `docs/testing.md` for the full guide. Quick:
 
 ```bash

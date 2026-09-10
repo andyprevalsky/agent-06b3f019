@@ -1507,7 +1507,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         PATH="$FAKE_BIN:$PATH" \
         TMPDIR="$SCRIPT_SNAPSHOT_TMP" \
-        FLY_BENCH_API_TOKEN="fake-token" \
+        FLY_BENCH_API_TOKEN="fake-offline-fleet-token" \
         CONDUCTOR_PORT="$port" \
         BENCHMARK_HUB_UPLOAD_URL="http://127.0.0.1:$((port + 5764))" \
         BENCHMARK_HUB_API_KEY="test-key" \

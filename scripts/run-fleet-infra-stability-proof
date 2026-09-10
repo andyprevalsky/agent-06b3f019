@@ -205,16 +205,19 @@ PY
 }
 
 classify_capability_slice() {
-  local log_path="$1"
-  shift
-  python3 - "$log_path" "$@" <<'PY'
+  local log_path="$1" owner_token="$2" controller_exit="$3"
+  shift 3
+  python3 - "$log_path" "$owner_token" "$controller_exit" "$ROOT_DIR" "$@" <<'PY'
+import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 log_path = Path(sys.argv[1])
-expected = sys.argv[2:]
+owner_token, controller_exit, workspace = sys.argv[2:5]
+expected = sys.argv[5:]
 try:
     text = log_path.read_text()
 except OSError:
@@ -234,6 +237,50 @@ try:
 except (OSError, TypeError, ValueError, json.JSONDecodeError):
     print(f"infra\t{batch_path}")
     raise SystemExit
+# A workload result cannot certify resource teardown. Require the exact slice
+# owner's final verdict and the immutable audit it binds, including failures
+# after the provider audit was sealed (for example registry removal).
+try:
+    run_dir = batch_path.parent.parent
+    receipt = json.loads((batch_path.parent / "lifecycle.json").read_text())
+    audit = run_dir / "teardown-ownership"
+    if audit.is_symlink() or not audit.is_dir():
+        raise ValueError("unsafe teardown audit")
+    metadata = dict(line.split("=", 1) for line in (audit / "meta").read_text().splitlines())
+    binding = dict(line.split("=", 1) for line in (audit / "source-audit").read_text().splitlines())
+    common = subprocess.check_output(
+        ["git", "-C", workspace, "rev-parse", "--git-common-dir"], text=True
+    ).strip()
+    common = (Path(workspace) / common).resolve()
+    source = common / "cloudbench-fleet-audits" / owner_token
+    expected_identity = {
+        "fleet_owner_token": owner_token, "run_id": run_dir.name,
+        "workspace_root": workspace,
+    }
+    if any(receipt.get(key) != value or metadata.get(key) != value for key, value in expected_identity.items()):
+        raise ValueError("lifecycle identity mismatch")
+    if (receipt.get("version") != 1 or receipt.get("status") != "verified"
+        or type(receipt.get("controller_exit_code")) is not int
+        or receipt["controller_exit_code"] != int(controller_exit)
+        or metadata.get("version") != "1"
+        or metadata.get("status") != "provider-teardown-verified"
+        or binding.get("path") != str(source)):
+        raise ValueError("fleet lifecycle was not verified")
+    digest = hashlib.sha256()
+    for item in sorted(audit.rglob("*"), key=lambda item: str(item.relative_to(audit))):
+        if item.is_symlink() or not (item.is_dir() or item.is_file()):
+            raise ValueError("unsafe audit entry")
+        if item.is_file() and item.name != "source-audit":
+            relative, data = str(item.relative_to(audit)).encode(), item.read_bytes()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+    if digest.hexdigest() != binding.get("sha256") or digest.hexdigest() != receipt.get("audit_sha256"):
+        raise ValueError("teardown audit changed")
+except (OSError, TypeError, ValueError, KeyError, subprocess.SubprocessError):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
 tasks = payload.get("tasks")
 if not isinstance(tasks, list):
     print(f"infra\t{batch_path}")
@@ -242,11 +289,19 @@ names = [task.get("name") for task in tasks if isinstance(task, dict)]
 if names != expected or len(names) != len(tasks):
     print(f"infra\t{batch_path}")
     raise SystemExit
-statuses = [str(task.get("status") or "").upper() for task in tasks]
+statuses = [task.get("benchmark_status") if task.get("benchmark_status") is not None else task.get("status") for task in tasks]
+if any(not isinstance(status, str) or not status for status in statuses):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+statuses = [status.upper() for status in statuses]
 known = {"PASSED", "FAILED", "SKIPPED", "INFRA_ERROR", "ERROR", "CANCELLED"}
-if any(status not in known for status in statuses):
+if any(type(task.get("passed")) is not bool for task in tasks):
+    print(f"infra\t{batch_path}")
+elif any(status not in known for status in statuses):
     print(f"infra\t{batch_path}")
 elif any(status in {"INFRA_ERROR", "ERROR", "CANCELLED"} for status in statuses):
+    print(f"infra\t{batch_path}")
+elif any(task["passed"] != (status == "PASSED") for task, status in zip(tasks, statuses)):
     print(f"infra\t{batch_path}")
 elif all(bool(task.get("passed")) for task in tasks):
     print(f"pass\t{batch_path}")
@@ -303,7 +358,9 @@ set +e
 
     set +e
     if [ "$MODE" = capability ]; then
+      slice_owner_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
       FLEET_STABILITY_SLICE="$i" \
+      CLOUDBENCH_FLEET_OWNER_TOKEN="$slice_owner_token" \
       CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
         bash "$FLEET_BIN" \
           "${BENCHES[@]}" \
@@ -324,7 +381,7 @@ set +e
     set -e
 
     if [ "$MODE" = capability ]; then
-      classification_line="$(classify_capability_slice "$SLICE_LOG" "${BENCHES[@]}")"
+      classification_line="$(classify_capability_slice "$SLICE_LOG" "$slice_owner_token" "$rc" "${BENCHES[@]}")"
       IFS=$'\t' read -r classification batch_path <<< "$classification_line"
     elif [ "$rc" -eq 0 ]; then
       classification=pass

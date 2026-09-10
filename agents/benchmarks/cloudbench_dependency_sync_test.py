@@ -6491,6 +6491,64 @@ exit 99
     assert report["per_task"][0]["failure_reason"] == "no current run artifact produced"
 
 
+def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Path) -> None:
+    """A sealed provider audit is insufficient if recovery authority remains."""
+    cleanup = _extract_fleet_function(FLEET_SCRIPT.read_text(), "cleanup() {")
+    for removal in ("removed", "failed", "retained"):
+        fleet = tmp_path / removal
+        (fleet / "_batch").mkdir(parents=True)
+        (fleet / "registry").mkdir()
+        (fleet / "teardown-ownership").mkdir()
+        (fleet / "teardown-ownership/source-audit").write_text("sha256=" + "a" * 64 + "\n")
+        script = f"""set -uo pipefail
+FLEET_DIR={shlex.quote(str(fleet))}
+ROOT_DIR={shlex.quote(str(ROOT))}
+FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+RUN_ID={removal}
+FLEET_REGISTRY_DIR="$FLEET_DIR/registry"
+FLEET_REGISTRY_PUBLISHED=1
+FLEET_EXECUTION_COMPLETED=1
+AUTOSCALER_FAILURE=0
+KEEP_CLONES=0
+LOCAL_PROCESS_TEARDOWN_FAILED=0
+CLAIMED_POOL_FILE="$FLEET_DIR/no-claims"
+TAINTED_POOL_FILE="$FLEET_DIR/no-tainted"
+LOCK_DIR="$FLEET_DIR/controller.lock"
+AUTOSCALER_PORT_LEASE_HELPER=/dev/null
+AUTOSCALER_PIDS=()
+PROVISION_PIDS=()
+CHILD_PIDS=()
+for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait \\
+    cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown \\
+    cloudbench_terminate_and_wait record_tainted_claimed_pool_machines \\
+    reconcile_current_pool_transfer_claims reconcile_current_pool_claims \\
+    reap_registry_clones capacity_release_owner_reservations \\
+    finalize_terminal_projection cleanup_owned_script_snapshot \\
+    fleet_audit_finalize_provider_teardown cloudbench_controller_lock_release; do
+    eval "$helper() {{ return 0; }}"
+done
+fleet_registry_remove_if_empty() {{
+    case {removal} in
+        removed) rmdir "$FLEET_REGISTRY_DIR" ;;
+        failed) return 1 ;;
+        retained) return 0 ;;
+    esac
+}}
+{cleanup}
+trap cleanup EXIT
+exit 0
+"""
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
+        assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
+        assert receipt["fleet_owner_token"] == "a" * 32
+        assert receipt["run_id"] == removal
+        if removal == "failed":
+            assert result.returncode != 0, result.stderr
+        else:
+            assert result.returncode == 0, result.stderr
+
+
 def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
     snapshot = tmp_path / "controller-snapshot"
     snapshot.mkdir()
@@ -8424,6 +8482,7 @@ FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
 FLEET_OWNER_HOST=test-host
 GUEST_RECOVERY_CALL={shlex.quote(str(guest_recovery_call))}
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 UNEXPECTED={shlex.quote(str(unexpected))}
 fleet_recovery_reconnect_guest_shutdowns() {{
   touch "$GUEST_RECOVERY_CALL"
@@ -8845,6 +8904,8 @@ FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
 RUN_ID=controller-run
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+ROOT_DIR={shlex.quote(str(ROOT))}
 CLOUDBENCH_BARRIER_TOKEN=controller-token
 CLOUDBENCH_CHILD_TERM_SECONDS=1
 EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(EXACT_SESSION_CLEANUP_SCRIPT))}
@@ -9083,6 +9144,7 @@ FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
 RUN_ID=outer-controller-run
+ROOT_DIR={shlex.quote(str(ROOT))}
 CLOUDBENCH_BARRIER_TOKEN=outer-controller-token
 CLOUDBENCH_CHILD_TERM_SECONDS=1
 EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(helper))}

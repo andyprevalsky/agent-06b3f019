@@ -1605,6 +1605,7 @@ def _codex_harness_credential_skip_result(task: BenchmarkTask) -> TaskResult:
         passed=False,
         agent_id="",
         status="SKIPPED",
+        benchmark_status='SKIPPED',
         progress_score=0,
         duration_seconds=0,
         cost_cents=0,
@@ -1620,6 +1621,7 @@ def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
         passed=False,
         agent_id="",
         status="SKIPPED",
+        benchmark_status='SKIPPED',
         progress_score=0,
         duration_seconds=0,
         cost_cents=0,
@@ -8506,6 +8508,15 @@ async def _run_auth_bundle_biometrics_gate(
     return await run_single_task(base_url, gate_task, keep_failed_agents=keep_failed_agents)
 
 
+def _aggregate_benchmark_status(passed: bool, *results: TaskResult) -> str:
+    """Preserve child harness failures when grading a composite benchmark."""
+    for result in results:
+        outcome = result.benchmark_status if result.benchmark_status is not None else result.status
+        if outcome in ("ERROR", "CANCELLED", "INFRA"):
+            return outcome
+    return "PASSED" if passed else "FAILED"
+
+
 async def run_minted_agent_account_task(
     base_url: str,
     task: BenchmarkTask,
@@ -8518,6 +8529,7 @@ async def run_minted_agent_account_task(
             passed=False,
             agent_id="",
             status="SKIPPED",
+            benchmark_status='SKIPPED',
             progress_score=0,
             duration_seconds=0,
             cost_cents=0,
@@ -8567,11 +8579,14 @@ async def run_minted_agent_account_task(
             keep_failed_agents,
         )
         if not auth_bundle_biometrics_result.passed:
+            benchmark_status = _aggregate_benchmark_status(False, auth_bundle_biometrics_result)
+            passed = benchmark_status == "PASSED"
             return TaskResult(
                 name=task.name,
-                passed=False,
+                passed=passed,
                 agent_id=auth_bundle_biometrics_result.agent_id,
                 status="FAILED",
+                benchmark_status=benchmark_status,
                 progress_score=auth_bundle_biometrics_result.progress_score,
                 duration_seconds=round(time.time() - start, 1),
                 cost_cents=auth_bundle_biometrics_result.cost_cents,
@@ -8665,11 +8680,14 @@ async def run_minted_agent_account_task(
             post_status=post_result.status,
             post_text=post_text,
         )
+        benchmark_status = _aggregate_benchmark_status(passed, post_result)
+        passed = benchmark_status == "PASSED"
         return TaskResult(
             name=task.name,
             passed=passed,
             agent_id=_with_gate_agent_ids(post_result.agent_id),
             status="COMPLETED" if passed else "FAILED",
+            benchmark_status=benchmark_status,
             progress_score=_with_gate_progress(post_result.progress_score),
             duration_seconds=round(time.time() - start, 1),
             cost_cents=_with_gate_cost(post_result.cost_cents),
@@ -8774,11 +8792,14 @@ async def run_minted_agent_account_task(
                     failure_parts.append(
                         f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}"
                     )
+                benchmark_status = _aggregate_benchmark_status(False, signup_result)
+                passed = benchmark_status == "PASSED"
                 return TaskResult(
                     name=task.name,
-                    passed=False,
+                    passed=passed,
                     agent_id=_with_gate_agent_ids(signup_result.agent_id),
                     status="FAILED",
+                    benchmark_status=benchmark_status,
                     progress_score=_with_gate_progress(signup_result.progress_score),
                     duration_seconds=round(time.time() - start, 1),
                     cost_cents=_with_gate_cost(signup_result.cost_cents),
@@ -8855,11 +8876,14 @@ async def run_minted_agent_account_task(
             if post_result.passed and not post_evidence and not x_terminal_phone_blocker:
                 failure_parts.append("no grounded evidence that the hello world post was submitted")
 
+            benchmark_status = _aggregate_benchmark_status(passed, signup_result, post_result)
+            passed = benchmark_status == "PASSED"
             return TaskResult(
                 name=task.name,
                 passed=passed,
                 agent_id=_with_gate_agent_ids(signup_result.agent_id, post_result.agent_id),
                 status="COMPLETED" if passed else "FAILED",
+                benchmark_status=benchmark_status,
                 progress_score=_with_gate_progress(signup_result.progress_score, post_result.progress_score),
                 duration_seconds=round(time.time() - start, 1),
                 cost_cents=_with_gate_cost(signup_result.cost_cents, post_result.cost_cents),
@@ -8921,11 +8945,14 @@ async def run_minted_agent_account_task(
             else:
                 print(f"    ❌ AgentPhone received no new messages during {site_label} auth")
 
+            benchmark_status = _aggregate_benchmark_status(passed, signup_result)
+            passed = benchmark_status == "PASSED"
             return TaskResult(
                 name=task.name,
                 passed=passed,
                 agent_id=_with_gate_agent_ids(signup_result.agent_id),
                 status="COMPLETED" if passed else "FAILED",
+                benchmark_status=benchmark_status,
                 progress_score=_with_gate_progress(signup_result.progress_score),
                 duration_seconds=round(time.time() - start, 1),
                 cost_cents=_with_gate_cost(signup_result.cost_cents),
@@ -9001,11 +9028,14 @@ async def run_minted_agent_account_task(
         if not booking_result.passed:
             failure_parts.append(f"booking failed: {booking_result.failure_reason or booking_result.status}")
 
+        benchmark_status = _aggregate_benchmark_status(passed, signup_result, booking_result)
+        passed = benchmark_status == "PASSED"
         return TaskResult(
             name=task.name,
             passed=passed,
             agent_id=_with_gate_agent_ids(signup_result.agent_id, booking_result.agent_id),
             status="COMPLETED" if passed else "FAILED",
+            benchmark_status=benchmark_status,
             progress_score=_with_gate_progress(signup_result.progress_score, booking_result.progress_score),
             duration_seconds=round(time.time() - start, 1),
             cost_cents=_with_gate_cost(signup_result.cost_cents, booking_result.cost_cents),
@@ -11753,13 +11783,9 @@ async def _run_declared_evaluators(
                 usage = judged.get("usage")
                 passed = score >= float(evaluator.get("pass_threshold", 1.0))
             else:
-                passed = False
-                score = 0.0
-                reasoning = f"Unsupported enforced evaluator method: {method}"
+                raise ValueError(f"Unsupported enforced evaluator method: {method}")
         except Exception as exc:
-            passed = False
-            score = 0.0
-            reasoning = f"Declared evaluator execution failed: {exc}"
+            raise RuntimeError(f"Declared evaluator {evaluator_id} execution failed: {exc}") from exc
         result = {
             "id": evaluator_id,
             "method": method,
@@ -12129,6 +12155,7 @@ async def run_single_task(
                 passed=True,
                 agent_id=agent_id,
                 status=(data.get("agent") or {}).get("status", "PAUSED"),
+                benchmark_status='PASSED',
                 progress_score=(data.get("agent") or {}).get("progress", 0),
                 duration_seconds=round(duration, 1),
                 cost_cents=0,
@@ -12537,6 +12564,7 @@ async def run_single_task(
             passed=passed,
             agent_id=agent_id,
             status=agent.get("status", "UNKNOWN"),
+            benchmark_status="PASSED" if passed else "FAILED",
             progress_score=agent.get("progress", 0),
             duration_seconds=round(duration, 1),
             cost_cents=round(cost_cents, 2),
@@ -12680,6 +12708,7 @@ async def run_single_task(
             passed=False,
             agent_id=agent_id,
             status=status,
+            benchmark_status="CANCELLED",
             progress_score=progress_score,
             duration_seconds=round(duration, 1),
             cost_cents=0,
@@ -12730,6 +12759,7 @@ async def run_single_task(
             passed=False,
             agent_id=agent_id,
             status="ERROR",
+            benchmark_status="ERROR",
             progress_score=0,
             duration_seconds=round(duration, 1),
             cost_cents=0,
@@ -14068,6 +14098,7 @@ async def main_async(args):
                                     passed=False,
                                     agent_id="",
                                     status="ERROR",
+                                    benchmark_status='ERROR',
                                     progress_score=0,
                                     duration_seconds=0,
                                     cost_cents=0,
@@ -14093,6 +14124,7 @@ async def main_async(args):
                                 passed=False,
                                 agent_id="",
                                 status="CANCELLED",
+                                benchmark_status='CANCELLED',
                                 progress_score=0,
                                 duration_seconds=0,
                                 cost_cents=0,

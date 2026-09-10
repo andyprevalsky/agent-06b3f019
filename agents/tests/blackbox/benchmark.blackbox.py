@@ -9131,6 +9131,100 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
     assert loaded.task_results[0].payment_lifecycle["orgTransfer"]["releasedCents"] == 4396
 
 
+def test_declared_judge_errors_are_not_evaluator_rejections():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import benchmarks.run_benchmark as bench
+    import benchmarks.sms_runner as sms
+
+    task = SimpleNamespace(
+        name="judge-execution", enforce_declared_evaluators=True,
+        evaluators=[{"id": "judge", "method": "single_turn_llm_judge"}],
+    )
+    for module, helper, run in (
+        (bench, "_call_declared_llm_judge", lambda: bench._run_declared_evaluators(task, {})),
+        (sms, "run_sms_llm_judge", lambda: sms.evaluate_sms_turns(task, [])),
+    ):
+        with patch.object(module, helper, AsyncMock(side_effect=RuntimeError("judge unavailable"))):
+            try:
+                asyncio.run(run())
+            except RuntimeError as error:
+                assert "judge unavailable" in str(error)
+            else:
+                raise AssertionError(f"{helper}: execution error became a criterion failure")
+
+
+def test_sms_runner_harness_error_has_explicit_error_outcome():
+    from types import SimpleNamespace
+    import benchmarks.sms_runner as sms
+
+    deps = SimpleNamespace(is_local_base_url=lambda _: True, benchmark_user_id=lambda: "test-user")
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(sms, "parse_sms_script", return_value={"turns": []}))
+        stack.enter_context(patch.object(sms, "_user_phone", return_value="+15555550100"))
+        stack.enter_context(patch.object(sms, "_live_agent_ids", side_effect=RuntimeError("database unavailable")))
+        stack.enter_context(patch.object(sms, "_cleanup"))
+        stack.enter_context(patch.object(sms, "_apply_web_search_fixture"))
+        result = asyncio.run(sms.run_sms_task("http://127.0.0.1:32001", SimpleNamespace(name="sms-error"), deps))
+    assert result.passed is False
+    assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
+def test_codex_runner_harness_error_has_explicit_error_outcome():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import benchmarks.codex_runner as codex
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    deps = SimpleNamespace(
+        benchmark_user_id=lambda: "test-user", rose_api_url_for_harness=lambda url: url,
+        api_headers=AsyncMock(return_value={}),
+    )
+    with patch.object(codex, "_create_codex_anchor_agent", AsyncMock(side_effect=RuntimeError("backend unavailable"))):
+        result = asyncio.run(codex.run_codex_task(
+            "http://127.0.0.1:32001", get_task_by_name("claude-code-agent"), deps, "test goal"
+        ))
+    assert result.passed is False
+    assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
+def test_minted_benchmark_preserves_child_harness_outcomes():
+    """A cancelled or broken child cannot become an ordinary aggregate failure."""
+    from unittest.mock import AsyncMock
+    import benchmarks.run_benchmark as bench
+    from benchmarks.results import TaskResult
+
+    for stage in ("biometrics", "post"):
+        for outcome in ("FAILED", "ERROR", "CANCELLED"):
+            child = TaskResult(
+                name="child", passed=False, agent_id="child-agent", status="ACTIVE",
+                benchmark_status=outcome, progress_score=0, duration_seconds=1,
+                cost_cents=0, message_count=1,
+            )
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, {
+                    "BENCHMARK_MINTED_TARGET_URL": "https://x.com",
+                    "BENCHMARK_MINTED_AUTH_REALM": "x.com",
+                    "BENCHMARK_MINTED_CLEAR_EXISTING_AUTH": "false",
+                }))
+                for name, value in (
+                    ("_local_agent_identity_present_for_user", True),
+                    ("_delete_local_minted_accounts_for_user", 0),
+                    ("_seed_local_benchmark_agent_identity_if_missing", None),
+                    ("_disable_local_auth_material_for_realm", 0),
+                    ("_get_local_minted_account", None),
+                    ("_auth_bundle_biometrics_gate_enabled", stage == "biometrics"),
+                ):
+                    stack.enter_context(patch.object(bench, name, return_value=value))
+                stack.enter_context(patch.object(bench, "_run_auth_bundle_biometrics_gate", AsyncMock(return_value=child)))
+                stack.enter_context(patch.object(bench, "run_single_task", AsyncMock(return_value=child)))
+                result = asyncio.run(bench.run_minted_agent_account_task(
+                    "http://127.0.0.1:32001", bench.get_task_by_name("minted-agent-accounts-x")
+                ))
+            assert result.passed is False
+            assert result.benchmark_status == outcome, (stage, outcome, result.benchmark_status)
+
+
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
     """Repeated live minted-account benchmarks should not buy a fresh AgentPhone number."""
     import benchmarks.run_benchmark as bench
@@ -17933,6 +18027,16 @@ async def run_all_tests():
     r.record(
         "benchmark_run_serializes_world_model_fidelity",
         test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_fields,
+    )
+    r.record(
+        "declared_judge_execution_error",
+        test_declared_judge_errors_are_not_evaluator_rejections,
+    )
+    r.record("sms_runner_harness_error_outcome", test_sms_runner_harness_error_has_explicit_error_outcome)
+    r.record("codex_runner_harness_error_outcome", test_codex_runner_harness_error_has_explicit_error_outcome)
+    r.record(
+        "minted_child_harness_outcomes",
+        test_minted_benchmark_preserves_child_harness_outcomes,
     )
     r.record(
         "minted_cleanup_preserves_identity",

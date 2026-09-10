@@ -14,7 +14,7 @@ import {
   resolveLiveViewChromeCrop,
   resolveLiveViewDisplaySize,
   resolveLiveViewWindowSize,
-} from './liveViewFrame';
+} from './liveViewGeometry';
 
 export interface BrowserThumbnailProps {
   browserUrl: string;

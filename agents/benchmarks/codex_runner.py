@@ -178,6 +178,7 @@ async def run_codex_task(
     work_agent_id: Optional[str] = None
     codex_output = ""
     failure_reason: Optional[str] = None
+    execution_error = False
 
     try:
         timeout = aiohttp.ClientTimeout(total=120)
@@ -215,6 +216,7 @@ async def run_codex_task(
 
             await _close_codex_session(session, base_url, headers, codex_task_id, anchor_agent_id, user_id)
     except Exception as exc:  # noqa: BLE001
+        execution_error = True
         failure_reason = f"Codex runner error: {exc}"
 
     if not work_agent_id:
@@ -224,6 +226,7 @@ async def run_codex_task(
             passed=False,
             agent_id=anchor_agent_id,
             status="FAILED",
+            benchmark_status="ERROR" if execution_error else "FAILED",
             progress_score=0.0,
             duration_seconds=duration,
             cost_cents=0.0,
@@ -273,6 +276,7 @@ async def run_codex_task(
         passed=passed,
         agent_id=work_agent_id,
         status=agent.get("status", "FAILED"),
+        benchmark_status="ERROR" if execution_error else "PASSED" if passed else "FAILED",
         progress_score=float(agent.get("progress", 0) or 0),
         duration_seconds=duration,
         cost_cents=cost_cents,

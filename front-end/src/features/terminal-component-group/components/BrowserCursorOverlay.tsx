@@ -39,7 +39,7 @@ import {
 import {
   LIVE_VIEW_CONTENT_VIEWPORT,
   computeLiveViewLetterbox,
-} from './browser-status-bar/liveViewFrame';
+} from './browser-status-bar/liveViewGeometry';
 
 // Custom cursor SVG - navigation arrow pointing right (from navigate-v2.png, flipped)
 // Auto-traced using potrace from the actual PNG. Black fill, 4px white stroke.

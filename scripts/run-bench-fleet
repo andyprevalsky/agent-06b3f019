@@ -8549,6 +8549,7 @@ if [ -z "$PROVISION_POOL" ]; then
     require_in_app_hub_visibility || exit 1
 fi
 LOCAL_PROCESS_TEARDOWN_FAILED=0
+FLEET_EXECUTION_COMPLETED=0
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
@@ -8876,6 +8877,59 @@ cleanup() {
             || { ec=1; teardown_failed=1; }
     fi
     cloudbench_controller_lock_release "$LOCK_DIR"
+    # Task failure and infrastructure failure both use exit 1. Seal their
+    # independent lifecycle verdict only after provider audit publication AND
+    # removal of the exact recovery registry, which can itself still fail.
+    if [ -d "$FLEET_DIR/_batch" ]; then
+        if ! python3 - "$FLEET_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" "$ROOT_DIR" \
+            "$ec" "$teardown_failed" "$KEEP_CLONES" \
+            "$FLEET_EXECUTION_COMPLETED" "${AUTOSCALER_FAILURE:-1}" \
+            "$FLEET_REGISTRY_DIR" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+directory, owner, run_id, workspace, exit_code, teardown, retained, completed, autoscaler, registry = sys.argv[1:]
+root = Path(directory)
+audit_digest = ""
+try:
+    binding = dict(line.split("=", 1) for line in (root / "teardown-ownership/source-audit").read_text().splitlines())
+    audit_digest = binding["sha256"]
+except (OSError, ValueError, KeyError):
+    pass
+verified = (
+    teardown == "0" and retained != "1" and completed == "1"
+    and autoscaler == "0" and len(audit_digest) == 64
+    and bool(registry) and not Path(registry).exists() and not Path(registry).is_symlink()
+)
+target = root / "_batch/lifecycle.json"
+temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
+payload = {
+    "version": 1, "fleet_owner_token": owner, "run_id": run_id,
+    "workspace_root": workspace, "status": "verified" if verified else "failed",
+    "controller_exit_code": int(exit_code), "audit_sha256": audit_digest,
+}
+try:
+    with temporary.open("x") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    descriptor = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+finally:
+    temporary.unlink(missing_ok=True)
+PY
+        then
+            echo "❌ could not seal final fleet lifecycle verdict" >&2
+            ec=1
+        fi
+    fi
     exit "$ec"
 }
 trap cleanup EXIT
@@ -9828,7 +9882,10 @@ run_fleet_child_supervised() {  # <finished-marker> <command> [args...]
     # Start the runner as a dedicated session/process-group leader. Python is
     # already a fleet prerequisite and os.setsid avoids Bash's asynchronous
     # job-control edge cases (which can bypass a subshell's signal traps).
-    python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+    # The runner outlives the controller's session on abrupt termination. It
+    # must not retain the controller's flock descriptor and prevent the exact
+    # recovery entrypoint from acquiring that dead controller's workspace lock.
+    python3 -c 'import os, sys; os.closerange(3, os.sysconf("SC_OPEN_MAX")); os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
     runner_pid=$!
     if [ -n "$forwarded_signal_name" ]; then
         # A signal can arrive after traps are armed but before `$!` is assigned.
@@ -11570,4 +11627,5 @@ done
 echo "  ────────────────────────────────────────────────────"
 echo "  $FLEET_PASS/$FLEET_TOTAL passed"
 echo "════════════════════════════════════════════════════════"
+FLEET_EXECUTION_COMPLETED=1
 [ "$FLEET_PASS" = "$FLEET_TOTAL" ] && [ "$AUTOSCALER_FAILURE" = "0" ]
