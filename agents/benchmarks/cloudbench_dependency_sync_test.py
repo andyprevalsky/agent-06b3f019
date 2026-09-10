@@ -42,6 +42,8 @@ EXECUTION_PROVENANCE_SCRIPT = ROOT / "scripts" / "cloudbench_execution_provenanc
 AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PORT_LEASE_SCRIPT = ROOT / "scripts" / "cloudbench-port-lease.py"
 SCRIPT_SNAPSHOT_OWNER = ROOT / "scripts" / "cloudbench-script-snapshot.py"
+EXACT_SESSION_CLEANUP_SCRIPT = ROOT / "scripts" / "cloudbench-exact-session-cleanup.py"
+GUEST_RECOVERY_SCRIPT = ROOT / "scripts" / "cloudbench-guest-recovery.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 TASKS_JSON = ROOT / "agents" / "benchmarks" / "tasks.json"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
@@ -1768,6 +1770,14 @@ def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
     assert '--file-local "/cloudbench-seed-budget.sh=$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"' in cloud
     assert '"$CLOUDBENCH_GUEST_SEED_BUDGET_LIB" /data/cloudbench-seed-budget.sh' in cloud
     assert "export CLOUDBENCH_SEED_BUDGET_LIB=/data/cloudbench-seed-budget.sh" in cloud
+    for variable, basename in (
+        ("CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT", "cloudbench-exact-session-cleanup.py"),
+        ("CLOUDBENCH_GUEST_RECOVERY_SCRIPT", "cloudbench-guest-recovery.py"),
+    ):
+        assert f'{variable}="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/{basename}"' in cloud
+        assert f'--file-local "/{basename}=${variable}"' in cloud
+        assert f'"${variable}"' in cloud
+        assert f'"${variable}" /data/{basename}' in cloud
 
     # Direct repo runs keep using the same-version scripts/lib directory, while
     # flattened staged bundles select their own directory. Neither falls back
@@ -8426,6 +8436,334 @@ recover_exact_stale_fleet_owner {owner}
     assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
 
 
+def test_pre_fix_guest_runner_receipt_authorizes_exact_reaper(
+    tmp_path: Path,
+) -> None:
+    """A pre-fix driver can omit its top-level ack after the runner sealed clean.
+
+    Recovery may authenticate and validate that exact private receipt, persist a
+    controller receipt, and only then enter the existing exact-ID reaper.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    signatures = (
+        "_agent_stale_owner_debug_log() {",
+        "registry_meta_value() {",
+        "fleet_registry_cleanup_state() {",
+        "registry_owner_alive() {",
+        "cloudbench_fsync_directory() {",
+        "cloudbench_publish_guest_shutdown_confirmation() {",
+        "cloudbench_confirm_guest_shutdowns() {",
+        "cloudbench_recover_guest_cleanup_receipts() {",
+        "fleet_registry_confirm_guest_teardown() {",
+        "cleanup_stale_owner_recovery_proxies() {",
+        "fleet_recovery_reconnect_guest_shutdowns() {",
+        "acquire_registry_recovery_lock() {",
+        "recover_exact_stale_fleet_owner() {",
+    )
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in signatures
+        if signature in fleet
+    )
+    owner = "6a" * 16
+    run_id = "fixture-pre-fix-run"
+    guest_token = "pre-fix-guest-token"
+    machine_id = "deadbeef000009"
+    bench = "pre-fix-bench"
+    registry = tmp_path / "ownership" / owner
+    output = tmp_path / "runs" / run_id / bench
+    output.mkdir(parents=True)
+    (registry / "clones").mkdir(parents=True)
+    (registry / "meta").write_text(
+        "version=2\n"
+        "app=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=test-host\n"
+        "pid=99999999\n"
+        "pid_start=Mon Jan 1 00:00:00 2001\n"
+        f"run_id={run_id}\n"
+        f"runs_root={tmp_path / 'runs'}\n"
+        "cleanup_policy=retain\n"
+    )
+    (registry / "guest-cleanup-unconfirmed").touch()
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(tmp_path / "ownership"))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / "audits"))}
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_TOKEN={owner}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_REGISTRY_PUBLISHED=0
+KEEP_CLONES=0
+RUN_ID=controller-run
+CLOUDBENCH_BARRIER_TOKEN=controller-token
+CLOUDBENCH_CHILD_TERM_SECONDS=1
+EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(EXACT_SESSION_CLEANUP_SCRIPT))}
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
+CALLS={shlex.quote(str(calls))}
+release_cleanup_disk_reserve() {{ return 0; }}
+fleet_registry_build_guest_recovery_plan() {{
+  printf 'guest\\t{bench}\\tcloudbench-pre-fix\\t{machine_id}\\tvol_pre_fix\\t%s\\t61009\\n' \
+    {shlex.quote(str(output))} > "$2"
+}}
+registry_machine_details() {{ printf 'started cloudbench-pre-fix fdaa::109\\n'; }}
+machine_guest_recovery_configuration() {{
+  printf 'barrier-pre-fix\\t{guest_token}\\t8011\\n'
+}}
+claim_recovery_status_proxy_ports() {{ printf '62009\\n' > "$1"; }}
+release_recovery_status_proxy_ports() {{ :; }}
+start_data_plane_proxy() {{
+  sleep 60 &
+  printf -v "$5" '%s' "$!"
+}}
+cloudbench_terminate_and_wait() {{
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+curl() {{
+  local method=GET output_file="" url="" arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"; shift
+    case "$arg" in
+      -X) method="$1"; shift ;;
+      -o) output_file="$1"; shift ;;
+      -H) shift ;;
+      http://*) url="$arg" ;;
+    esac
+  done
+  case "$url" in
+    */shutdown)
+      [ "$method" = POST ] || return 1
+      printf 202
+      ;;
+    */shutdown-health) printf 500 ;;
+    */repo/.context/cloudbench/cloudbench-interrupt-cleanup-{guest_token}.status)
+      printf 'version=1\\ntoken={guest_token}\\nstate=clean\\n' > "$output_file"
+      printf 200
+      ;;
+    *) printf 404 ;;
+  esac
+}}
+recover_registry_audit_only_fresh() {{ printf 'audit-recovery\\n' >> "$CALLS"; }}
+reap_registry_clones() {{
+  [ ! -e "$FLEET_REGISTRY_DIR/guest-cleanup-unconfirmed" ] || return 91
+  [ -s {shlex.quote(str(output / "guest-cleanup.recovery-receipt.json"))} ] || return 92
+  [ "$(cat {shlex.quote(str(output / "guest-shutdown.confirmed"))})" = {run_id} ] || return 93
+  printf 'provider-reap\\n' >> "$CALLS"
+}}
+recover_exact_pool_claims() {{ printf 'pool-recovery\\n' >> "$CALLS"; }}
+capacity_release_stale_owner_reservations() {{ printf 'capacity-release\\n' >> "$CALLS"; }}
+fleet_audit_finalize_recovered_registry() {{ printf 'audit-finalize\\n' >> "$CALLS"; }}
+fleet_registry_remove_if_empty() {{ printf 'registry-finish\\n' >> "$CALLS"; }}
+{functions}
+
+recover_exact_stale_fleet_owner {owner}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    receipt = json.loads((output / "guest-cleanup.recovery-receipt.json").read_text())
+    assert receipt["kind"] == "runner-cleanup"
+    assert receipt["fleet_owner_token"] == owner
+    assert receipt["fleet_run_id"] == run_id
+    assert receipt["bench"] == bench
+    assert receipt["machine_id"] == machine_id
+    assert receipt["guest_run_token"] == guest_token
+    assert receipt["runner_receipt"]["state"] == "clean"
+    assert (output / "guest-shutdown.confirmed").read_text() == f"{run_id}\n"
+    assert calls.read_text().splitlines()[:2] == ["audit-recovery", "provider-reap"]
+
+
+def test_runner_cleanup_receipt_recovery_rejects_incomplete_evidence(
+    tmp_path: Path,
+) -> None:
+    """Missing, malformed, or token-mismatched runner evidence stays closed."""
+    cases = {
+        "missing": None,
+        "malformed": "version=1\ntoken=guest-token\nstate=clean\nextra=unsafe\n",
+        "token-mismatch": "version=1\ntoken=neighbor-token\nstate=clean\n",
+        "not-clean": "version=1\ntoken=guest-token\nstate=failed\n",
+    }
+    for label, payload in cases.items():
+        case_root = tmp_path / label
+        case_root.mkdir()
+        source = case_root / "runner.status"
+        receipt = case_root / "recovery.json"
+        if payload is not None:
+            source.write_text(payload)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(EXACT_SESSION_CLEANUP_SCRIPT),
+                "recover-runner-receipt",
+                "--source",
+                str(source),
+                "--receipt",
+                str(receipt),
+                "--owner",
+                "7a" * 16,
+                "--fleet-run-id",
+                "fixture-run",
+                "--bench",
+                "fixture-bench",
+                "--machine-id",
+                "deadbeef000001",
+                "--output-dir",
+                str(case_root),
+                "--guest-run-token",
+                "guest-token",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0, label
+        assert not receipt.exists(), label
+
+
+def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    """Provider fallback never inventories sessions and receipts exact responses."""
+    owner = "7b" * 16
+    root_agent = "11111111-2222-4333-8444-555555555555"
+    kernel_session = "kernel-session-exact"
+    steel_session = "steel-session-exact"
+    run_json = tmp_path / "run.json"
+    backend_log = tmp_path / "backend.log"
+    quiescence = tmp_path / "quiescence.json"
+    manifest = tmp_path / "manifest.json"
+    receipt = tmp_path / "receipt.json"
+    output = tmp_path / "output"
+    output.mkdir()
+    run_json.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "name": "fixture-bench",
+                        "agent_id": root_agent,
+                    }
+                ]
+            }
+        )
+    )
+    backend_log.write_text(
+        f"[HTTP] GET /api/agents/{root_agent} -> 200\n"
+        f"[Kernel] Created Kernel browser session sessionId={kernel_session} contextId=context-a\n"
+        f"[Steel] ✓ Created Steel session: {steel_session}\n"
+    )
+    quiescence.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "state": "quiesced",
+                "guest_run_token": "guest-token",
+                "machine_id": "deadbeef000001",
+            }
+        )
+    )
+    calls: list[tuple[str, str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_DELETE(self) -> None:
+            calls.append(("DELETE", self.path, self.headers.get("Authorization", "")))
+            self.send_response(204)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            calls.append(("POST", self.path, self.headers.get("steel-api-key", "")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"success":true,"message":"released"}')
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    env = {
+        **os.environ,
+        "KERNEL_API_KEY": "kernel-key",
+        "STEEL_API_KEY": "steel-key",
+        "KERNEL_API_BASE_URL": f"http://127.0.0.1:{port}",
+        "STEEL_BASE_URL": f"http://127.0.0.1:{port}",
+    }
+    command = [
+        sys.executable,
+        str(EXACT_SESSION_CLEANUP_SCRIPT),
+        "cleanup-provider-sessions",
+        "--run-json",
+        str(run_json),
+        "--backend-log",
+        str(backend_log),
+        "--quiescence-receipt",
+        str(quiescence),
+        "--manifest",
+        str(manifest),
+        "--receipt",
+        str(receipt),
+        "--owner",
+        owner,
+        "--fleet-run-id",
+        "fixture-run",
+        "--bench",
+        "fixture-bench",
+        "--machine-id",
+        "deadbeef000001",
+        "--output-dir",
+        str(output),
+        "--guest-run-token",
+        "guest-token",
+        "--agents-env",
+        str(tmp_path / "missing-agents.env"),
+        "--backend-env",
+        str(tmp_path / "missing-backend.env"),
+    ]
+    try:
+        first = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+        second = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert calls == [
+        ("DELETE", f"/browsers/{kernel_session}", "Bearer kernel-key"),
+        ("POST", f"/v1/sessions/{steel_session}/release", "steel-key"),
+    ]
+    manifest_value = json.loads(manifest.read_text())
+    assert manifest_value["sessions"] == {
+        "kernel": [kernel_session],
+        "steel": [steel_session],
+    }
+    receipt_value = json.loads(receipt.read_text())
+    assert receipt_value["kind"] == "provider-exact-cleanup"
+    assert [(entry["provider"], entry["session_id"], entry["http_status"]) for entry in receipt_value["results"]] == [
+        ("kernel", kernel_session, 204),
+        ("steel", steel_session, 200),
+    ]
+
+
 def test_exact_guest_recovery_mapping_is_complete_and_volume_only_safe(
     tmp_path: Path,
 ) -> None:
@@ -11486,6 +11824,8 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-prepare-patch.sh",
         "cloudbench-status-server.py",
         "cloudbench-benchmark-target.py",
+        "cloudbench-exact-session-cleanup.py",
+        "cloudbench-guest-recovery.py",
         "cloudbench_catalog.py",
         "run-fleet-infra-canary",
         "cloudbench-infra-canary-preflight.py",
@@ -11763,6 +12103,8 @@ def test_script_snapshot_initialization_signal_and_publish_failure_clean_up(
             "cloudbench-prepare-patch.sh": ROOT / "scripts/cloudbench-prepare-patch.sh",
             "cloudbench-status-server.py": ROOT / "scripts/cloudbench-status-server.py",
             "cloudbench-benchmark-target.py": ROOT / "scripts/cloudbench-benchmark-target.py",
+            "cloudbench-exact-session-cleanup.py": EXACT_SESSION_CLEANUP_SCRIPT,
+            "cloudbench-guest-recovery.py": GUEST_RECOVERY_SCRIPT,
             "cloudbench_catalog.py": ROOT / "scripts/cloudbench_catalog.py",
             "cloudbench-env.sh": ROOT / "scripts/lib/cloudbench-env.sh",
             "cloudbench-seed-budget.sh": ROOT / "scripts/lib/cloudbench-seed-budget.sh",
