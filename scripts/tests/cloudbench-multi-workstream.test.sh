@@ -1083,6 +1083,7 @@ elif args[:2] == ["machine", "status"]:
     with locked_state() as state:
         found = find_machine(state, args[2])
     if found is None:
+        print(f"failed to get VM {args[2]}: machine not found", file=sys.stderr)
         sys.exit(1)
     if "-d" in args:
         print(json.dumps(found.get("config") or {}))
