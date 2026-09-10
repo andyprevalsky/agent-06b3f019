@@ -2039,6 +2039,7 @@ for index, name in enumerate(names):
 
 root = os.getcwd()
 context_dir = os.environ.get("RUN_CONTEXT_DIR") or ".context"
+use_system_postgres = os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
 data = {
     "schema_version": 1,
     "status": os.environ.get("SERVICE_STATUS", "unknown"),
@@ -2070,14 +2071,18 @@ data = {
     "temporal_task_queue": os.environ.get("TEMPORAL_TASK_QUEUE", ""),
     "wmh_model_name": os.environ.get("WMH_MANIFEST_MODEL_NAME", ""),
         "database": {
-            "container": os.environ.get("DB_CONTAINER", ""),
-            "volume": os.environ.get("DB_VOLUME", ""),
+            "container": ""
+            if use_system_postgres
+            else os.environ.get("DB_CONTAINER", ""),
+            "volume": ""
+            if use_system_postgres
+            else os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
-            "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "use_system_postgres": use_system_postgres,
             "name": os.environ.get("LOCAL_DB_NAME", "victoria"),
             "port": env_int("LOCAL_DB_ACTUAL_PORT"),
             "runtime_port": 5432
-            if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
+            if use_system_postgres
             else env_int("LOCAL_DB_PORT"),
         },
     "env": {

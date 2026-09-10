@@ -782,6 +782,35 @@ def validate_zero_backend(path: Path, root_agent_id: str) -> tuple[str, str]:
     return text, hashlib.sha256(payload).hexdigest()
 
 
+def exact_system_postgres_labels(database: dict[str, Any]) -> bool:
+    container = database.get("container")
+    volume = database.get("volume")
+    database_name = database.get("name")
+    if not all(isinstance(value, str) for value in (container, volume, database_name)):
+        return False
+    if container == "" and volume == "":
+        return True
+
+    container_prefix = "victoria-db-"
+    volume_prefix = "victoria-pgdata-"
+    if not container.startswith(container_prefix) or not volume.startswith(volume_prefix):
+        return False
+    container_suffix = container.removeprefix(container_prefix)
+    volume_suffix = volume.removeprefix(volume_prefix)
+    if (
+        container_suffix != volume_suffix
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}", container_suffix)
+        is None
+    ):
+        return False
+    legacy_database_name = "victoria_bench_" + re.sub(
+        r"[^A-Za-z0-9]",
+        "_",
+        container_suffix,
+    )
+    return database_name == legacy_database_name
+
+
 def parse_zero_services(path: Path) -> tuple[str, int, str]:
     value, payload = read_json_object(path, maximum=1024 * 1024)
     database = value.get("database")
@@ -797,8 +826,7 @@ def parse_zero_services(path: Path) -> tuple[str, int, str]:
         or not isinstance(database, dict)
         or database.get("owned_by_run_sh") is not True
         or database.get("use_system_postgres") is not True
-        or database.get("container") != ""
-        or database.get("volume") != ""
+        or not exact_system_postgres_labels(database)
     ):
         raise GuestRecoveryError(
             "services evidence has no exact isolated stopped database identity"
