@@ -1787,6 +1787,7 @@ print(state.strip().lower())
 reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone's forked volume
     local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
+    local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0
     [ -n "$vol" ] || return 0
     if [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; then
         echo "  ❌ refusing to destroy warm source volume $vol" >&2
@@ -1795,8 +1796,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     # The mutation exit status proves only request acceptance. Default volume
     # inventory also hides destroyed states and can transiently omit a restore,
     # so no count of app-wide list absences is a deletion receipt. Poll this
-    # exact ID instead and retire ownership only from an explicit terminal
-    # lifecycle state or an exact-ID not-found response.
+    # exact ID instead and retire ownership only from an exact-ID not-found
+    # response. Provider-visible pending_destroy/destroyed states still have an
+    # exact object and therefore retain teardown ownership.
     destroy_capture="$(mktemp "${TMPDIR:-/tmp}/cloudbench-volume-destroy.XXXXXX")" || {
         echo "  ❌ could not allocate bounded response capture for volume $vol; retaining exact ownership" >&2
         return 1
@@ -1809,8 +1811,10 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         }
         if FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
             destroy_rc=0
+            destroy_accepted=1
         else
             destroy_rc=$?
+            destroy_ambiguous=1
         fi
         destroy_bytes="$(wc -c < "$destroy_capture" | tr -d ' ')"
         destroy_excerpt="$(head -c 200 "$destroy_capture" | tr '\r\n' '  ')"
@@ -1841,15 +1845,37 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
         fi
         if [ "$lifecycle_rc" -eq 0 ]; then
             case "$state" in
-                pending_destroy|destroyed)
-                    rm -f "$destroy_capture"
-                    return 0
-                    ;;
+                created|restoring|scheduling_destroy|recovering|pending_destroy|destroyed) ;;
+                *) lifecycle_ambiguous=1 ;;
             esac
+        else
+            lifecycle_ambiguous=1
         fi
         sleep 3
     done
     rm -f "$destroy_capture"
+    # Return a distinct non-success state when every mutation was accepted and
+    # every exact lifecycle read remained valid, but provider disappearance has
+    # not converged. Callers performing teardown still fail closed and retain
+    # ownership. Clone provisioning alone may spend its next bounded attempt
+    # because this exact volume remains durably keyed to the current owner.
+    # Neither this state nor a provider-visible terminal lifecycle retires the
+    # owner; only the exact not-found receipt above does.
+    if [ "$destroy_accepted" -eq 1 ] && [ "$destroy_ambiguous" -eq 0 ] \
+        && [ "$lifecycle_ambiguous" -eq 0 ]; then
+        # region agent log
+        printf '{"hypothesisId":"A,B","location":"scripts/run-bench-fleet:reap_volume","message":"destroy accepted while exact absence remains pending","data":{"volume":"%s","destroyAccepted":%s,"destroyAmbiguous":%s,"lifecycleAmbiguous":%s},"timestamp":%s}\n' \
+            "$vol" "$destroy_accepted" "$destroy_ambiguous" "$lifecycle_ambiguous" \
+            "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+        # endregion
+        echo "  ⚠️ destroy accepted for volume $vol but exact absence has not converged — retaining exact ownership" >&2
+        return 75
+    fi
+    # region agent log
+    printf '{"hypothesisId":"D","location":"scripts/run-bench-fleet:reap_volume","message":"destroy or exact lifecycle remained ambiguous","data":{"volume":"%s","destroyAccepted":%s,"destroyAmbiguous":%s,"lifecycleAmbiguous":%s},"timestamp":%s}\n' \
+        "$vol" "$destroy_accepted" "$destroy_ambiguous" "$lifecycle_ambiguous" \
+        "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+    # endregion
     echo "  ⚠️ could not destroy volume $vol — exact-owner recovery retained: flyctl volumes destroy $vol -a $APP" >&2
     return 1
 }
@@ -6770,7 +6796,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
-    local storage_deadline preallocation_failure
+    local storage_deadline preallocation_failure reap_status
     local attempt max_attempts retry_delay clone_timeout
     # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
@@ -6828,15 +6854,30 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                     echo "❌ could not persist exact owned volume $target_volume for failed clone '$target_name'" >&2
                     return 1
                 fi
-                if ! reap_volume "$target_volume" "$diagnostic_log"; then
-                    echo "❌ failed clone volume $target_volume could not be reaped; retaining exact ownership" >&2
-                    return 1
-                fi
-                fleet_audit_update_fresh_clone "$target_name" "" "$target_volume" \
-                    destroyed-verified-absent || return 1
-                fleet_registry_release_name "$target_name" || return 1
-                grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
-                mv "$names_ledger.tmp" "$names_ledger"
+                reap_status=0
+                reap_volume "$target_volume" "$diagnostic_log" || reap_status=$?
+                # region agent log
+                printf '{"hypothesisId":"A,B,C","location":"scripts/run-bench-fleet:clone_machine_target","message":"owned failed-clone volume cleanup classified","data":{"volume":"%s","cloneName":"%s","attempt":%s,"reapStatus":%s},"timestamp":%s}\n' \
+                    "$target_volume" "$target_name" "$attempt" "$reap_status" \
+                    "$(($(date +%s) * 1000))" >> /opt/cursor/logs/debug.log 2>/dev/null || true
+                # endregion
+                case "$reap_status" in
+                    0)
+                        fleet_audit_update_fresh_clone "$target_name" "" "$target_volume" \
+                            destroyed-verified-absent || return 1
+                        fleet_registry_release_name "$target_name" || return 1
+                        grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+                        mv "$names_ledger.tmp" "$names_ledger"
+                        ;;
+                    75)
+                        printf 'clone volume=%s destroy accepted; exact absence pending under durable owner name=%s\n' \
+                            "$target_volume" "$target_name" >> "$diagnostic_log"
+                        ;;
+                    *)
+                        echo "❌ failed clone volume $target_volume destroy was rejected or ambiguous; retaining exact ownership" >&2
+                        return 1
+                        ;;
+                esac
             elif clone_failure_definitively_unallocated \
                 "$clone_status" "$source_id" "$clone_out"; then
                 preallocation_failure=1
@@ -6877,7 +6918,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         # legally move to not-allocated-verified; re-auditing here used to abort
         # the retry loop after attempt 1 and surface as "unresolved clone name"
         # / "provisioning failed (no machine)" under capacity pressure.
-        if [ -z "$target_id" ]; then
+        if [ -z "$target_id" ] && [ -z "$target_volume" ]; then
             local reconciled_id reconcile_status already_cleaned=0
             if ! grep -Fxq "$target_name" "$names_ledger" 2>/dev/null; then
                 already_cleaned=1

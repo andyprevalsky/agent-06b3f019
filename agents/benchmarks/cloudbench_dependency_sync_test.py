@@ -5844,8 +5844,9 @@ FLY() {{
       return 1 ;;
     "volumes show")
       printf '%s\n' "$*" >> "$CALLS"
-      printf '%s\n' '{{"id":"vol_vz8m80el8w7dwqxv","state":"pending_destroy"}}'
-      return 0 ;;
+      printf '%s\n' \
+        'Error: failed retrieving volume: failed to get volume vol_vz8m80el8w7dwqxv: volume not found (Request ID: fixture)' >&2
+      return 1 ;;
   esac
   return 99
 }}
@@ -7691,7 +7692,9 @@ FLY() {{
     "machine destroy") : > "$DESTROYED"; return 0 ;;
     "volumes destroy") return 0 ;;
     "volumes show")
-      printf '%s\n' '{{"id":"vol_clone","state":"pending_destroy"}}' ;;
+      printf '%s\n' \
+        'Error: failed retrieving volume: failed to get volume vol_clone: volume not found (Request ID: fixture)' >&2
+      return 1 ;;
   esac
   return 0
 }}
@@ -7721,10 +7724,10 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
     assert "volumes destroy vol_warm" not in log
 
 
-def test_reap_volume_requires_an_exact_terminal_lifecycle_receipt(
+def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
     tmp_path: Path,
 ) -> None:
-    """Only an exact terminal state or exact-ID absence can retire ownership."""
+    """Only exact absence retires ownership; accepted pending stays distinct."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -7734,13 +7737,13 @@ def test_reap_volume_requires_an_exact_terminal_lifecycle_receipt(
         )
     )
     cases = {
-        "pending_destroy": (0, 1),
-        "destroyed": (0, 1),
+        "pending_destroy": (75, 6),
+        "destroyed": (75, 6),
         "exact-absent": (0, 1),
-        "created": (1, 6),
-        "restoring": (1, 6),
-        "scheduling_destroy": (1, 6),
-        "recovering": (1, 6),
+        "created": (75, 6),
+        "restoring": (75, 6),
+        "scheduling_destroy": (75, 6),
+        "recovering": (75, 6),
         "provider-failure": (1, 6),
         "invalid-json": (1, 6),
         "wrong-id": (1, 6),
@@ -7966,7 +7969,11 @@ FLY() {{
         1) printf '%s\n' '{{"id":"vol_exact","state":"created"}}' ;;
         2) printf '%s\n' '{{not-json' ;;
         3) printf '%s\n' '{{"id":"vol_exact","state":"scheduling_destroy"}}' ;;
-        *) printf '%s\n' '{{"id":"vol_exact","state":"pending_destroy"}}' ;;
+        4) printf '%s\n' '{{"id":"vol_exact","state":"pending_destroy"}}' ;;
+        *)
+          printf '%s\n' \
+            'Error: failed retrieving volume: failed to get volume vol_exact: volume not found (Request ID: fixture)' >&2
+          return 1 ;;
       esac
       return 0 ;;
   esac
@@ -7986,6 +7993,8 @@ reap_volume vol_exact
     assert postcondition_result.returncode == 0, postcondition_result.stderr + postcondition_result.stdout
     postcondition_log = postcondition_calls.read_text().splitlines()
     assert postcondition_log == [
+        "volumes destroy vol_exact -a bench-app --yes",
+        "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
         "volumes show vol_exact -a bench-app --json",
         "volumes destroy vol_exact -a bench-app --yes",
@@ -10743,8 +10752,9 @@ STATUS
       ;;
     "volumes show")
       case "$3" in {machine_volume}|{volume_only}) ;; *) return 94 ;; esac
-      printf '{{"id":"%s","state":"pending_destroy"}}\\n' "$3"
-      ;;
+      printf 'Error: failed retrieving volume: failed to get volume %s: volume not found (Request ID: fixture)\\n' \
+        "$3" >&2
+      return 1 ;;
     *) return 93 ;;
   esac
 }}
