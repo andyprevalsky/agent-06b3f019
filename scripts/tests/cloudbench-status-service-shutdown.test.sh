@@ -34,6 +34,7 @@ trap '
   printf "replay-finalized\n" > "$root/replay.finalized"
   printf "%s\n" "$run_token" > "$root/cloudbench-driver-clean-$run_token.ack.tmp"
   mv "$root/cloudbench-driver-clean-$run_token.ack.tmp" "$root/cloudbench-driver-clean-$run_token.ack"
+  while [ ! -e "$root/driver-exit.release" ]; do sleep 0.01; done
   exit 0
 ' TERM
 while :; do sleep 1; done
@@ -139,6 +140,26 @@ requested="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
     "http://127.0.0.1:$port/shutdown")"
 [ "$requested" = 202 ] || fail "authenticated shutdown returned HTTP $requested"
 
+for _ in $(seq 1 100); do
+    [ -s "$tmp/cloudbench-driver-clean-$run_token.ack" ] && break
+    sleep 0.05
+done
+[ -s "$tmp/cloudbench-driver-clean-$run_token.ack" ] \
+    || fail "driver did not publish its cleanup acknowledgement"
+pre_exit_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown-health")"
+[ "$pre_exit_code" = 202 ] \
+    || fail "cleanup acknowledgement terminalized a running driver (HTTP $pre_exit_code)"
+[ -s "$tmp/replay.finalized" ] || fail "cleanup acknowledged before replay finalization"
+
+touch "$tmp/driver-exit.release"
+wait "$driver_pid"
+driver_pid=""
+rm -f "$tmp/cloudbench-driver.pid"
+printf 'exited\n' > "$tmp/cloudbench-driver.state.tmp"
+mv "$tmp/cloudbench-driver.state.tmp" "$tmp/cloudbench-driver.state"
+
 ack_code=""
 for _ in $(seq 1 100); do
     ack_code="$(curl -sS -o /dev/null -w '%{http_code}' \
@@ -148,9 +169,6 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 [ "$ack_code" = 204 ] || fail "guest cleanup was never acknowledged (HTTP $ack_code)"
-[ -s "$tmp/replay.finalized" ] || fail "cleanup acknowledged before replay finalization"
-wait "$driver_pid"
-driver_pid=""
 
 # A stale/reused pid must never let one run signal another process.
 rm -f "$tmp/cloudbench-shutdown-$run_token.request" \
