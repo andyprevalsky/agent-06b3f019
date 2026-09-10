@@ -5289,9 +5289,11 @@ exact_owner_pool_claim_ids() {  # <v2-owner-meta>; emits only nonterminal exact-
     python3 - "$1" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
 import os
 from pathlib import Path
+import json
 import re
 import stat
 import sys
+import time
 
 meta_path = Path(sys.argv[1])
 audit_root = Path(sys.argv[2])
@@ -5617,6 +5619,20 @@ for candidate in run_dir.iterdir():
     if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
         raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
+# region agent log
+worker_ledger_ids: dict[str, list[str]] = {}
+for candidate in run_dir.iterdir():
+    worker_ledger = candidate / "worker-clones.ids"
+    if plain_directory(candidate) and regular_file(worker_ledger):
+        worker_ledger_ids[candidate.name] = worker_ledger.read_text(
+            encoding="utf-8"
+        ).splitlines()
+try:
+    with open("/opt/cursor/logs/debug.log", "a") as handle:
+        handle.write(json.dumps({"hypothesisId": "G,H,I", "location": "scripts/run-bench-fleet:fleet_registry_build_guest_recovery_plan", "message": "exact recovery output and worker mapping", "data": {"registryMachineIds": sorted(machine_records), "outputMachineIds": sorted(output_by_machine), "workerLedgers": worker_ledger_ids}, "timestamp": int(time.time() * 1000)}) + "\n")
+except OSError:
+    pass
+# endregion
 if set(output_by_machine) != set(machine_records):
     raise ValueError("incomplete stale-owner output mapping")
 
