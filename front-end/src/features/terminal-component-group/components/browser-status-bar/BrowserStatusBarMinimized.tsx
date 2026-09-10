@@ -69,9 +69,6 @@ export function BrowserStatusBarMinimized({
           browserUrl={browserUrl}
           width={128}
           height={80}
-          iframeWidth={1280}
-          iframeHeight={800}
-          scale={0.1}
           wrapperClassName={thumbnailWrapperClass}
           onClick={onThumbnailClick}
           disabled={forceMinimized}

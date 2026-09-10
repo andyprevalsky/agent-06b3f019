@@ -18,6 +18,12 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+if [[ "${1:-}" == "stability-proof" ]]; then
+    shift
+    exec bash "$ROOT_DIR/scripts/run-fleet-infra-stability-proof" \
+        --capability "$@"
+fi
+
 cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
@@ -50,6 +56,14 @@ fi
 # on THIS machine). Without it, a benchmark run defaults to CLOUD.
 if [[ "${1:-}" == "--local" ]]; then
     shift
+    for arg in "$@"; do
+        case "$arg" in
+            -k|--runs|--runs=*|-k=*|--concurrency|--concurrency=*)
+                echo "❌ -k/--runs and --concurrency currently require the default cloud fleet." >&2
+                exit 2
+                ;;
+        esac
+    done
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
@@ -69,6 +83,154 @@ if [[ "${1:-}" == "--single-box" ]]; then
     exit 2
 fi
 
+usage() {
+    cat <<'EOF'
+Usage: scripts/run-bench <slice-or-task...> [options]
+
+Selections:
+  daily | pre-deploy | rose-bench | polar-bench | incomplete
+  or one or more exact benchmark task names
+  stability-proof    Run random ready-catalog slices sequentially; ordinary
+                     benchmark failures advance and any INFRA outcome aborts
+
+Campaign options:
+  -k K, -k=K, --runs K, --runs=K
+                      Run every resolved task K times in separate fleet controllers
+  --concurrency N, --concurrency=N
+                      Keep at most N campaign copies active (default 1 with -k)
+
+The ordinary no-flag path runs the resolved slice as one fully parallel,
+per-bench-isolated cloud fleet. Use --local first to opt into local execution.
+EOF
+}
+
+RUNS=1
+CONCURRENCY=1
+CAMPAIGN_REQUESTED=0
+INTERNAL_OPERATION=0
+SELECTORS=()
+FLEET_ARGS=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -k|--runs)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a positive integer" >&2; exit 2; }
+            RUNS="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        -k=*|--runs=*)
+            RUNS="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --concurrency)
+            [ "$#" -ge 2 ] || { echo "❌ --concurrency requires a positive integer" >&2; exit 2; }
+            CONCURRENCY="$2"; CAMPAIGN_REQUESTED=1; shift 2
+            ;;
+        --concurrency=*)
+            CONCURRENCY="${1#*=}"; CAMPAIGN_REQUESTED=1; shift
+            ;;
+        --single-box)
+            echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
+            echo "   Use scripts/run-bench <task...> for the isolated fleet." >&2
+            exit 2
+            ;;
+        --sim-on|--ref|--dash-base|--timeout|--autoscale-max)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            FLEET_ARGS+=("$1" "$2"); shift 2
+            ;;
+        --recover-stale-owner|--provision-pool)
+            [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
+            INTERNAL_OPERATION=1
+            FLEET_ARGS+=("$1" "$2"); shift 2
+            ;;
+        --keep-clones|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier)
+            FLEET_ARGS+=("$1"); shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            while [ "$#" -gt 0 ]; do
+                SELECTORS+=("$1")
+                shift
+            done
+            ;;
+        --*)
+            echo "❌ Unknown flag: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            # Match run-bench-fleet's compatibility for one space-joined task
+            # list while keeping each resolved catalog name shell-safe.
+            read -r -a split_selectors <<< "$1"
+            SELECTORS+=("${split_selectors[@]}")
+            shift
+            ;;
+    esac
+done
+
+case "$RUNS" in
+    ''|*[!0-9]*|0)
+        echo "❌ -k/--runs and --concurrency must be positive integers" >&2
+        exit 2
+        ;;
+esac
+case "$CONCURRENCY" in
+    ''|*[!0-9]*|0)
+        echo "❌ -k/--runs and --concurrency must be positive integers" >&2
+        exit 2
+        ;;
+esac
+if [ "$INTERNAL_OPERATION" -eq 1 ]; then
+    [ "$CAMPAIGN_REQUESTED" -eq 0 ] || {
+        echo "❌ campaign flags cannot be combined with fleet maintenance operations" >&2
+        exit 2
+    }
+    if [ -n "${RUN_BENCH_FLEET_BIN_UNDER_TEST:-}" ]; then
+        exec bash "$RUN_BENCH_FLEET_BIN_UNDER_TEST" "${FLEET_ARGS[@]}"
+    fi
+    FLEET_MAINTENANCE_BIN="$ROOT_DIR/scripts/run-bench-fleet"
+    exec bash "$FLEET_MAINTENANCE_BIN" "${FLEET_ARGS[@]}"
+fi
+[ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+
+CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
+RESOLVED_OUTPUT="$("$PY" -u "$ROOT_DIR/scripts/cloudbench_catalog.py" \
+    resolve "$CATALOG_PATH" "${SELECTORS[@]}")" || {
+    echo "❌ benchmark selection failed" >&2
+    exit 2
+}
+RESOLVED_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] && RESOLVED_TASKS+=("$task")
+done <<< "$RESOLVED_OUTPUT"
+[ "${#RESOLVED_TASKS[@]}" -gt 0 ] || {
+    echo "❌ benchmark selection resolved no tasks" >&2
+    exit 2
+}
+echo "🎯 resolved ${#RESOLVED_TASKS[@]} benchmark task(s): ${RESOLVED_TASKS[*]}"
+
+if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
+    CAMPAIGN_ARGS=(
+        "--root=$ROOT_DIR"
+        "--runs=$RUNS"
+        "--concurrency=$CONCURRENCY"
+    )
+    for task in "${RESOLVED_TASKS[@]}"; do
+        CAMPAIGN_ARGS+=("--task=$task")
+    done
+    for arg in "${FLEET_ARGS[@]}"; do
+        case "$arg" in
+            --foreground|--wait|--detach)
+                echo "❌ campaign lifecycle is foreground-owned; omit $arg" >&2
+                exit 2
+                ;;
+        esac
+        CAMPAIGN_ARGS+=("--forward-arg=$arg")
+    done
+    exec "$PY" -u "$ROOT_DIR/scripts/run-bench-campaign.py" "${CAMPAIGN_ARGS[@]}"
+fi
+
 # Production-only tasks hit live Temporal/API (roselabs / Render). They must not
 # provision Fly guests or contend for the shared warm donor — that path is both
 # unnecessary and races every concurrent workspace. Route them through the same
@@ -77,11 +239,11 @@ fi
 # Helper exit codes (do not collapse):
 #   0 — all-production_only batch (newline-delimited names on stdout)
 #   1 — valid catalog, but not an all-production_only batch → fall through to fleet
-#   2 — catalog unreadable / invalid names → fail closed (never look like "empty")
+#   2 — unknown task, catalog unreadable, or invalid names → fail closed
 PROD_ONLY_STATUS=0
-PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "$@")" || PROD_ONLY_STATUS=$?
+PROD_ONLY_TASKS="$("$PY" -u "$ROOT_DIR/scripts/cloudbench-production-only-tasks.py" "${RESOLVED_TASKS[@]}")" || PROD_ONLY_STATUS=$?
 if [ "$PROD_ONLY_STATUS" -eq 2 ]; then
-    echo "❌ production-only classifier failed (catalog unreadable or invalid task names)" >&2
+    echo "❌ production-only classifier failed (unknown task, unreadable catalog, or invalid task name)" >&2
     exit 2
 fi
 if [ "$PROD_ONLY_STATUS" -eq 0 ] && [ -n "$PROD_ONLY_TASKS" ]; then
@@ -103,4 +265,7 @@ fi
 # autoscaling with prod's params scoped to that bench's queue. The whole run is
 # shown in ONE aggregated batch dashboard (auto-opened) covering ALL benches.
 # Sim is per-bench and OFF by default — pass --sim-on <a,b> to enable it.
-exec bash "$ROOT_DIR/scripts/run-bench-fleet" "$@"
+if [ -n "${RUN_BENCH_FLEET_BIN_UNDER_TEST:-}" ]; then
+    exec bash "$RUN_BENCH_FLEET_BIN_UNDER_TEST" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"
+fi
+exec bash "$ROOT_DIR/scripts/run-bench-fleet" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"

@@ -25,7 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - Third-party libraries (httpx, instructor) may have import-time issues
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
-    from domains.spawn_agent.config import is_oai_demo_mass_agent_task
+    from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
         spawn_agent,
@@ -1476,9 +1476,12 @@ class AgentWorkflow:
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         # Arg is the Fast Mode button (LLM provider speed). Cache replay is
-        # DEMO-prompt only and ignores the button.
+        # DEMO-prompt only and ignores the button. Catalog DEMO / fast_cache:on
+        # goals (incl. small fleet-concurrency probes) share the same gate via
+        # is_demo_cache_task; mass-agent-only spawn rules stay on
+        # is_oai_demo_mass_agent_task.
         self.provider_fast_mode = bool(fast_mode_cache_enabled)
-        self.fast_mode_cache_enabled = is_oai_demo_mass_agent_task(self)
+        self.fast_mode_cache_enabled = is_demo_cache_task(self)
         self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
@@ -1487,6 +1490,17 @@ class AgentWorkflow:
             _fast_cache_compute_affinity_key(user_id, goal) if self.fast_mode_cache_enabled else None
         )
         self._restore_deployment_state(resume_state)
+        # continue_as_new / deployment resume may restore fast_cache_goal from
+        # runtime_state. Recompute the DEMO cache gate from the restored goals
+        # so a non-demo input goal cannot leave cache replay disabled when the
+        # durable goal is demo (the persisted-goal resolver below no-ops when
+        # the restored goal already matches).
+        self.fast_mode_cache_enabled = is_demo_cache_task(self)
+        self.compute_token_fast_cache_affinity_key = (
+            _fast_cache_compute_affinity_key(user_id, self.fast_cache_goal or goal)
+            if self.fast_mode_cache_enabled
+            else None
+        )
         if isinstance(context, list):
             self.context = list(context)
         if self.start_time is None:
@@ -1656,7 +1670,7 @@ class AgentWorkflow:
                     )
                     self.fast_cache_goal = persisted_goal
                     # Recompute DEMO cache gate after the durable goal is known.
-                    self.fast_mode_cache_enabled = is_oai_demo_mass_agent_task(self)
+                    self.fast_mode_cache_enabled = is_demo_cache_task(self)
                     # Compute-token cache affinity pins by goal too — keep it on
                     # the same stable namespace.
                     self.compute_token_fast_cache_affinity_key = (

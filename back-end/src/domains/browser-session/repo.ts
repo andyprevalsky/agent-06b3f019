@@ -149,7 +149,13 @@ export async function transitionBrowserControlState(
   controlLeaseExpiresAt: Date | null
 ): Promise<boolean> {
   const result = await prisma.browserSession.updateMany({
-    where: { id: taskId, controlState: { in: expectedStates } },
+    where: {
+      id: taskId,
+      controlState: { in: expectedStates },
+      // User grants must stay on the live session. A close between the
+      // service-layer ACTIVE check and this CAS must not flip ownership.
+      ...(controlState === 'USER' ? { status: 'ACTIVE' as const } : {}),
+    },
     data: { controlState, controlLeaseExpiresAt },
   });
   return result.count === 1;

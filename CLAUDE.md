@@ -119,7 +119,42 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 - **Agents** requires 80% line+branch (see `agents/pyproject.toml` → `[tool.coverage.report]`). Current: 81%.
 - Thresholds ratchet — only increase, never decrease. Bump after adding tests.
 
-**Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `scripts/run-bench list`. For local iteration, prefer `scripts/run-bench <task...>` or `scripts/run-bench --rerun-failed latest`; the local wrapper starts an isolated `scripts/run.sh --benchmark` stack with per-run ports, DB container/volume name, frontend/public URL, Temporal task queue, and manifest under `.context/benchmarks/<run-id>/`, runs selected tasks with max concurrency 5, keeps failed agents long enough to run `agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services down. To checkpoint any single benchmark, use `scripts/run-bench <task> --checkpoint <turn_n>`; the runner creates the source by running that benchmark to the root message index, pauses/exports it, and resumes a cloned checkpoint. Add `--checkpoint-no-start` to create a paused FE-visible checkpoint, then resume it with the printed `--checkpoint-start-agent-id` command. Use `scripts/run-bench --full` only when you intentionally want the whole local suite. Use `scripts/run-bench eval` for the full eval suite through the same isolation layer. Direct `run_benchmark.py --port N` remains the lower-level path for already-running services or special cases. Simulator run: `cd agents && python benchmarks/run_benchmark.py --task <task> --simulate --world-model-url http://localhost:<wmh-port> --world-model-name <model>`; add `--wmh-eval` when you want post-run prediction-accuracy scoring recorded in the benchmark JSON. R2 trace-corpus hygiene: `cd back-end && TRACE_ARCHIVE_BACKEND=r2 npx tsx scripts/curate-trace-archive.ts --all --dry-run`; use `--delete` only to remove non-gold legacy/partial bundles after reviewing the dry-run report. The `/benchmark` command delegates to `scripts/run-bench` so Claude and shell users share the same isolation/concurrency behavior.
+**Benchmarks:** `scripts/run-bench` is the one supported entrypoint for humans,
+`/benchmark`, and `/descend`; see `agents/benchmarks/README.md` for the full CLI.
+Use `scripts/run-bench list` to inspect tasks, then run a named slice or explicit
+tasks with `scripts/run-bench <slice-or-task...>`. It defaults to the cloud
+fleet, one isolated machine/world/queue per task. Use
+`scripts/run-bench <task> -k K --concurrency N` (equivalently `--runs K`) for K
+independent copies with at most N active; never repeat a task by passing duplicate
+names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
+`polar-bench`, and `incomplete`.
+
+For a consecutive full-catalog no-INFRA gate, run
+`scripts/run-bench stability-proof -k K --concurrency N --seed S`. It executes K
+sequential random slices of N isolated ready tasks from the unified first-party
+and Polar catalog. `PASSED`, `FAILED`, and `SKIPPED` terminal batch results
+advance the streak; missing/malformed results and `INFRA_ERROR`, `ERROR`, or
+`CANCELLED` fail closed. Its offline fake-provider regression runs inside the
+existing deploy test path, adding no live benchmark stage, cost, or deploy wait.
+
+Local execution is explicit:
+`scripts/run-bench --local <task...>` or
+`scripts/run-bench --local --rerun-failed latest`. The local wrapper starts an
+isolated `scripts/run.sh --benchmark` stack with per-run ports, DB
+container/volume name, frontend/public URL, Temporal task queue, and manifest
+under `.context/benchmarks/<run-id>/`; it keeps failed agents long enough for
+`agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services
+down. Checkpoints are local-only:
+`scripts/run-bench --local <task> --checkpoint <turn_n>`; add
+`--checkpoint-no-start` for a paused FE-visible checkpoint.
+
+Use `scripts/run-bench eval` for the full eval suite. Direct
+`run_benchmark.py --port N` remains the lower-level path for already-running
+services or special cases. The command's selection, `-k`/`--runs`,
+`--concurrency`, isolation identities, random ready-catalog slicing, terminal
+batch classification, and failure propagation are exercised with fake provider
+children inside existing deploy tests; keep that proof offline and `$0`, with
+no separate live benchmark stage or cloud wait added to `/deploy`.
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment
@@ -303,7 +338,11 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 0a. **Be a TANK: don't ask, iterate until prod actually works.** When a task is "make X work in prod" (get a gate green, ship a fix, prove a flow end-to-end), OWN it end-to-end without pausing to ask permission for each step — the user has standing authorization to keep going until the real-world outcome is achieved (gate green, agent verified live, purchase completed). **RCA every issue you hit along the way and FIX it, even when the issue is not directly your task** — a stale CI secret, a flaky harness, a broken teardown, a mis-scoped token, someone else's never-green gate. Scope increase is expected, not a reason to stop (see rules 1b and 24). Before assuming an issue is yours to fix from scratch, **check whether another branch already has the fix in flight** (`git log --all`, open PRs) — if so, wait for it or cherry-pick rather than duplicating. Keep a tight iterate loop: reproduce → diagnose from evidence (logs, not guesses) → fix root cause → re-run the real gate → repeat until it is genuinely green. "It probably works now" is not done; a green prod gate (or a verified live run) is done. Only stop to ask when an action is genuinely irreversible/destructive or spends real money beyond what was authorized.
 
-1. **Functionality is only guaranteed if a test measures it and that test is cemented in a consistently-run path** (blackbox, pre-deploy, daily, or any suite run via `/deploy` or an equivalent recurring gate). Due to the nature of agentic coding, regressions are EXTREMELY likely — the app is only as good as its test suite. Therefore prioritize test-driven development. Any behavior that lacks a cemented test is assumed broken until proven otherwise, and any bug we fix per RCA MUST land its reproduction test in the deploy process so the regression can never silently return.
+1. **Functionality is not complete until a test cements it in the `/deploy` path.** A feature, fix, or behavior change is unfinished if the only proof is a local demo, a one-off script, or a reviewer's eyeballs. Anything not explicitly tested is prone to regressions — and under agentic coding those regressions are EXTREMELY likely. The app is only as good as the suite that `/deploy` (or an equivalent recurring gate: blackbox, pre-deploy, daily) actually runs.
+
+   Designing the test and its validation criteria is the main bulk of the work, not an afterthought after the implementation. Write the assertion first: what observable behavior must stay true, which suite owns it, and how `/deploy` will catch a silent break. Implementation is the smaller remainder.
+
+   Functionality is only guaranteed if a test measures it and that test is cemented in a consistently-run path. Any behavior that lacks a cemented test is assumed broken until proven otherwise, and any bug we fix per RCA MUST land its reproduction test in the deploy process so the regression can never silently return.
 
 2. **TDD loop** - Don't return until tests pass:
 
@@ -355,7 +394,7 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
   "UPDATE workspaces SET pr_title = 'My Custom Name', pr_title_locked = 1 WHERE directory_name = '$(basename \"$PWD\")'"
 ```
 
-15. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
+15. **Plans must have automated verification** - Every plan's verification section must describe automated tests, not manual steps. Designing those tests and their validation criteria is the main bulk of the plan, not a short appendix. If no existing test route covers the change, create one. If you need API keys, configs, or other resources to test, ask for them in the plan. The goal: once a plan is approved, bring the feature all the way through to PR merged into main using `/deploy`.
 
 16. **ALL test failures must be fixed — no exceptions** - Never rationalize test failures as "pre-existing", "not related to my changes", or "infrastructure issues." This applies to EVERY test tier: Prettier, ESLint, TypeScript, structural tests, coverage, blackbox tests, AND smoke benchmarks. If a test fails, you MUST fix it before proceeding. Do NOT skip, do NOT rationalize, do NOT merge with known failures. If smoke benchmarks fail due to expired tokens, fix the tokens. If they fail due to Temporal issues, fix Temporal. If they fail due to slow LLM responses, investigate and fix timeouts. "Infrastructure issue" is a diagnosis, not an excuse to skip. The local DB (Docker Postgres) must be running for blackbox tests — `run-blackbox-tests.sh` auto-detects the container via `CONDUCTOR_PORT`/`CONDUCTOR_WORKSPACE_NAME`. If the container isn't running, start it: `docker start victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}`.
 

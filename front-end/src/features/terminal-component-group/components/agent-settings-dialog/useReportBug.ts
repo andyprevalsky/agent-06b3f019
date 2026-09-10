@@ -9,10 +9,8 @@
  *      |                                        +-- err --> [COMPOSING]
  *      +-- (agent change / dialog close) --> reset to IDLE
  *
- * After launch we keep the deep link on-screen. API-created Cursor agents
- * often do not appear in the native mobile "rose" inbox (source:api vs
- * source:mobile), and window.open after await is blocked on iOS — so Open /
- * Copy must stay as explicit user-gesture buttons.
+ * After launch we keep the deep link on-screen. Submit must not auto-open
+ * Cursor; Open / Copy stay as explicit user-gesture buttons.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -138,13 +136,9 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
         title: 'Bug report launched',
         description:
           launchSource === 'scm'
-            ? 'Check your Cursor mobile inbox (or Open below).'
-            : 'Open the link below (API launch — enable Filter → Source → API if missing).',
+            ? 'Check your Cursor mobile inbox, or tap Open below.'
+            : 'Tap Open below (API launch — enable Filter → Source → API if missing).',
       });
-      // Best-effort: may be blocked after await on mobile Safari.
-      if (typeof window !== 'undefined') {
-        window.open(result.url, '_blank', 'noopener,noreferrer');
-      }
     } catch (error) {
       if (submitGenerationRef.current !== generation) return;
       toast({

@@ -6,12 +6,13 @@ surface: agents
 component: spawn-browser-agent-v3 / visible_result_completion
 classification: our-bug
 problem_class: model-intelligence-limitation
-first_bad_boundary: "agents/domains/spawn_browser_agent_v3/handler.py live action loop — executes post-submit wait after reasoning already stated risk score + verdict"
+first_bad_boundary: "agents/domains/spawn_browser_agent_v3/visible_result_completion.py should_force_visible_result_completion — ignored post-submit evaluate/tool-result text that already contained the visible score + form verdict"
 symptoms:
-  - browser-biometrics-webdecoy smoke timeout / PAUSED at 426s / cap 420s
+  - Timeout after 420s (dynamic cap=420s) | Agent status: PAUSED (expected COMPLETED)
+  - last assistant: "The challenge is fetched with difficulty 4 and minAgeMs 1500"
+  - evaluate "0.15" / "Risk Score" / "Bot detected - form blocked" / pow_not_satisfied
+  - wait 5–10s after visible FCaptcha score instead of attempt_completion
   - last assistant: "Let me try submitting the form one more time."
-  - wait 5–10s repeated after "risk score of 0.07" + "Bot detected - form blocked"
-  - drag TypeError and unknown-action-drag fixes held
 tags:
   - browser
   - smoke
@@ -21,7 +22,9 @@ tags:
 sources:
   - agent c3762be3-59be-4aa4-af6c-83d8eed9aeb9
   - PR #1209
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_post_submit_wait
+  - agent 15a85ea0-46e4-429b-ae37-d75514b0cd97
+  - agent 9dc6b7e4-eee9-4ed9-8502-ed43531471cf
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score
 status: fixed
 ---
 
@@ -63,8 +66,67 @@ cases (no submit yet, non-wait action, no score).
 
 None recorded.
 
+## Recurrence 2026-09-08 (agent 15a85ea0)
+
+Same smoke task, serial exclusive fixture (not the 2026-09-07 contention
+case). No take-control / USER_REQUESTED. LLM path was claudeAuth
+`claude-fable-5-claude`, not waterfall/credits.
+
+Evaluate at 16:56:05 already returned visible `0.15` / `Risk Score` /
+`Bot detected - form blocked` / `pow_not_satisfied`. Reasoning then said
+"wait longer for PoW" (verdict words, no "risk score") and burned the rest
+of the 420s cap on wait/resubmit/`read_network_requests`. The 2026-09-02
+guardrail missed it because it only scanned LLM reasoning, not post-submit
+action-entry tool results, and did not treat network/log inspection as idle.
+
+Owning-boundary repro:
+`test_visible_result_completion_rewrites_wait_when_evaluate_already_has_score`
+failed on `wait` before the tool-result scan and passed after.
+
+## Recurrence 2026-09-08 (agent 9dc6b7e4)
+
+Same smoke task on HEAD `50dd6f349` after CodeRabbit tightened score matching
+to require the words `risk score` / `fcaptcha` / JSON `"score"`. After Submit
+the model said `a score "0.07" appeared` and then scrolled. Observation dumps
+correctly stayed strict; the reasoning path no longer rewrote scroll because
+it omitted the word `risk`. The earlier guardrail failed to hold because the
+review-cycle tightening over-constrained the LLM-visible phrasing.
+
+Owning-boundary repro:
+`test_visible_result_completion_rewrites_post_submit_score_without_verdict`
+now uses that exact `a score "0.07" appeared` sentence. Observation still
+rejects the same phrasing without a labeled/JSON score. The relaxed
+reasoning path also accepts bound scores `0` / `1` / `1.0` next to `score`
+and still rejects `score v1.0`.
+
+## Recurrence 2026-09-08 (CodeRabbit 3961783563)
+
+`_normalize_history_blob` turns `\\n` into real newlines, but
+`_FCAPTCHA_SCORE_RE` used `.*` without `re.DOTALL`. An evaluate dump
+`Bot detected\\nFCaptcha\\nScore: 0.15` therefore failed the labeled
+observation check. Reasoning still matched via the relaxed `score` +
+unit-interval path; observation did not. Enable `re.DOTALL` so the
+existing FCaptcha/Score label pair works across adjacent lines. Cemented
+in `test_visible_result_completion_ignores_post_submit_version_decimal_without_score`.
+
+## Recurrence 2026-09-08 (CodeRabbit 3962052511)
+
+Independent label + `0.xx` matching treated static `Risk Score` chrome plus
+`threshold 0.15` as a visible result. Observation now requires the
+unit-interval next to `Risk Score` or `FCaptcha`+`Score`, or a JSON
+`score` field. Reasoning stays relaxed.
+
+Threshold stripping also covers `threshold: 0.15` and `threshold of 0.15`
+so `_LABELED_BOUND_SCORE_RE` cannot treat those as the visible score
+(CodeRabbit 3962184379).
+
+Submit/navigation indexes now read structured `action` /
+`element_description` fields only, so a later evaluate dump that mentions
+"click Submit" cannot hide the FCaptcha observation (CodeRabbit 3962336479).
+
 ## Reusable lesson
 
-Once the agent has already written the user-requested visible result, an idle
-`wait` is budget burn, not progress. Force completion at that boundary instead
+Once the visible score and form verdict are already on the page — in
+reasoning or a post-submit tool result — an idle wait or network inspect
+is budget burn, not progress. Force completion at that boundary instead
 of hoping the model stops retrying a third-party proof-of-work.

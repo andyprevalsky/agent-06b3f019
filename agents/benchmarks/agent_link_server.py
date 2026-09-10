@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -55,6 +57,68 @@ _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 class PortAllocationError(RuntimeError):
     """No local user port is available for a benchmark archive viewer."""
+
+
+def _pid_start_time(pid: int) -> str:
+    """Return the process birth identity used by the shell-side owner verifier."""
+    return " ".join(
+        subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).split()
+    )
+
+
+def _publish_hub_owner(args: argparse.Namespace, status: str) -> None:
+    """Publish secret-free ownership; only the post-bind record is immutable."""
+    owner_file = args.owner_file
+    if owner_file is None:
+        return
+    pid = os.getpid()
+    pid_start = _pid_start_time(pid)
+    command = str(Path(__file__).resolve())
+    argv_sha256 = hashlib.sha256(
+        b"\0".join(os.fsencode(argument) for argument in sys.argv)
+    ).hexdigest()
+    fields = {
+        "version": "1",
+        "pid": str(pid),
+        "pid_start": pid_start,
+        "pgid": str(os.getpgrp()),
+        "owner_token": args.owner_token,
+        "command": command,
+        "argv_sha256": argv_sha256,
+        "root": str(args.root.resolve()),
+        "runs_root": str(args.hub_runs_dir.resolve()),
+        "repo_root": str(args.repo_root.resolve()),
+        "context_dir": str(args.context_dir.resolve()),
+        "host": args.host,
+        "port": str(args.port),
+        "status": status,
+    }
+    if any("\n" in value for value in fields.values()):
+        raise ValueError("hub ownership fields must be single-line")
+    owner_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = owner_file.with_name(f"{owner_file.name}.tmp.{pid}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            for key, value in fields.items():
+                handle.write(f"{key}={value}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o444 if status == "live-transfer-required" else 0o644)
+        os.replace(temporary, owner_file)
+        directory_fd = os.open(owner_file.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 @contextmanager
@@ -843,8 +907,18 @@ def _make_handler(args: argparse.Namespace):
                 if path == "/hub-meta.json":
                     payload = json.dumps(
                         {
+                            "root": str(args.root.resolve()),
                             "hub_runs_dir": str(hub.resolve()),
                             "repo_root": str(args.repo_root.resolve()),
+                            "context_dir": str(args.context_dir.resolve()),
+                            "command": str(Path(__file__).resolve()),
+                            "pid": os.getpid(),
+                            "pid_start": _pid_start_time(os.getpid()),
+                            "owner_token": args.owner_token,
+                            "port": args.port,
+                            "argv_sha256": hashlib.sha256(
+                                b"\0".join(os.fsencode(argument) for argument in sys.argv)
+                            ).hexdigest(),
                         }
                     ).encode("utf-8")
                     self._send_bytes(payload, "application/json")
@@ -954,9 +1028,22 @@ def main() -> int:
     # run's fleet dir). Serves a run-index at /, each run's dashboard at /run/<id>/,
     # and resolves open-agent across EVERY run. This is the single dashboard.
     parser.add_argument("--hub-runs-dir", type=Path, default=None)
+    parser.add_argument("--owner-file", type=Path, default=None)
+    parser.add_argument("--owner-token", default="")
     args = parser.parse_args()
+    if (args.owner_file is None) != (not args.owner_token):
+        parser.error("--owner-file and --owner-token must be provided together")
+    if args.owner_file is not None:
+        if args.hub_runs_dir is None:
+            parser.error("--owner-file is supported only for central-hub mode")
+        if len(args.owner_token) != 32 or any(
+            character not in "0123456789abcdef" for character in args.owner_token
+        ):
+            parser.error("--owner-token must be 32 lowercase hexadecimal characters")
     args.root.mkdir(parents=True, exist_ok=True)
+    _publish_hub_owner(args, "starting")
     server = ThreadingHTTPServer((args.host, args.port), _make_handler(args))
+    _publish_hub_owner(args, "live-transfer-required")
     server.serve_forever()
     return 0
 

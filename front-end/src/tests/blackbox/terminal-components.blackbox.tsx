@@ -1629,21 +1629,15 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.queryByTestId('thinking-animation')).toBeNull();
     expect(screen.queryByTestId('browser-border-glow')).toBeNull();
     expect(screen.queryByTestId('browser-cursor-overlay')).toBeNull();
-    await waitFor(() => {
-      expect(resizedViewports).toEqual([{ taskId: 'task-auth', width: 1180, height: 720 }]);
-    });
+    expect(resizedViewports).toEqual([]);
+    const livePane = document.querySelector('[data-testid="live-view-pane"]');
+    expect(livePane).toHaveClass('overflow-hidden');
     await act(async () => {
       emitResize?.(1280, 760);
       await new Promise((resolve) => window.setTimeout(resolve, 200));
     });
-    expect(resizedViewports).toHaveLength(1);
     releaseFirstResize?.();
-    await waitFor(() => {
-      expect(resizedViewports).toEqual([
-        { taskId: 'task-auth', width: 1180, height: 720 },
-        { taskId: 'task-auth', width: 1280, height: 760 },
-      ]);
-    });
+    expect(resizedViewports).toEqual([]);
 
     await user.click(screen.getByRole('button', { name: 'Start Agent' }));
     await waitFor(() => expect(completedRequestId).toBe('auth-req-1'));
@@ -1768,7 +1762,7 @@ describe('BrowserStatusBar (blackbox)', () => {
         controlModes.push(body.mode ?? '');
         controlRequested = body.mode === 'user';
         return HttpResponse.json({
-          state: controlRequested ? 'requested' : 'agent',
+          state: controlRequested ? 'user' : 'agent',
           agentPaused: false,
         });
       }),
@@ -1813,7 +1807,7 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(resumeCalled).toBe(false);
     expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
     expect(controlModes).toEqual(['user']);
-    expect(controlStateReads).toBeGreaterThan(0);
+    expect(controlStateReads).toBeLessThanOrEqual(1);
     expect(screen.getByTitle('Browser')).toHaveAttribute(
       'src',
       expect.stringContaining('interactive=true'),
@@ -1975,6 +1969,90 @@ describe('BrowserStatusBar (blackbox)', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('interactive=true'),
+    );
+  });
+
+  it('takes control of the second carousel browser on the same live URL without resume', async () => {
+    const firstUrl = 'https://connect.steel.dev/v1/sessions/first/player?interactive=false';
+    const secondUrl = 'https://connect.steel.dev/v1/sessions/second/player?interactive=false';
+    const controlPosts: string[] = [];
+    let resumeCalled = false;
+    server.use(
+      http.post(`${API_BASE}/browser-session/resume`, () => {
+        resumeCalled = true;
+        return HttpResponse.json({ success: true, debug_url: 'https://unexpected.example' });
+      }),
+      http.post(`${API_BASE}/browser-session/task/:taskId/control`, async ({ params, request }) => {
+        const body = (await request.json()) as { mode?: string };
+        controlPosts.push(`${params.taskId}:${body.mode ?? ''}`);
+        return HttpResponse.json({
+          state: body.mode === 'user' ? 'user' : 'agent',
+          agentPaused: false,
+          debugUrl: params.taskId === 'task-second' ? secondUrl : firstUrl,
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        [
+          {
+            message_id: 'm-first',
+            timestamp: '2026-01-01T00:00:00Z',
+            text: '',
+            role: 'TOOL',
+            metadata: {
+              task_id: 'task-first',
+              toolName: 'spawn_browser_agent',
+              action_type: 'session_started',
+              title: 'First browser',
+              browser_url: firstUrl,
+            },
+          },
+          {
+            message_id: 'm-second',
+            timestamp: '2026-01-01T00:00:05Z',
+            text: '',
+            role: 'TOOL',
+            metadata: {
+              task_id: 'task-second',
+              toolName: 'spawn_browser_agent',
+              action_type: 'session_started',
+              title: 'Second browser',
+              browser_url: secondUrl,
+            },
+          },
+        ],
+        <BrowserStatusBarCarousel
+          browsers={[
+            { taskId: 'task-first', browserUrl: firstUrl },
+            { taskId: 'task-second', browserUrl: secondUrl },
+          ]}
+        />,
+      ),
+    );
+
+    await user.click(screen.getByLabelText('Next browser'));
+    await user.click(screen.getByText('Second browser'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const hdrButtons = within(header).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+
+    await user.click(await screen.findByRole('button', { name: 'Take control', exact: true }));
+    expect(
+      await screen.findByRole('button', { name: 'Hand back control', exact: true }),
+    ).toBeInTheDocument();
+    expect(resumeCalled).toBe(false);
+    expect(controlPosts).toEqual(['task-second:user']);
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('sessions/second'),
+    );
     expect(screen.getByTitle('Browser')).toHaveAttribute(
       'src',
       expect.stringContaining('interactive=true'),

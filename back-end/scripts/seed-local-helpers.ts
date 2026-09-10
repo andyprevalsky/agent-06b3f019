@@ -112,6 +112,19 @@ export async function syncUserRecord(
   return syncUserRecordsByIdentity(localUser, [user]);
 }
 
+/** Prisma unique `where` for a P2002 `meta.target` list. */
+export function uniqueConflictWhere(
+  fields: string[],
+  record: Record<string, unknown>
+): Record<string, unknown> {
+  if (fields.length === 1) {
+    const field = fields[0];
+    return { [field]: record[field] };
+  }
+  const compoundKey = fields.join('_');
+  return { [compoundKey]: Object.fromEntries(fields.map((field) => [field, record[field]])) };
+}
+
 export async function runSyncStep(name: string, fn: () => Promise<number>): Promise<void> {
   try {
     const count = await fn();

@@ -63,9 +63,6 @@ function ExpandedHeader({
         browserUrl={browserUrl}
         width={144}
         height={90}
-        iframeWidth={1440}
-        iframeHeight={900}
-        scale={0.1}
         wrapperClassName="absolute left-3 bottom-[3px] group rounded-lg border border-border bg-white overflow-hidden cursor-pointer shadow-lg hover:shadow-xl hover:ring-2 hover:ring-primary/50 transition-all z-40 hidden sm:block"
         onClick={onThumbnailClick}
       />

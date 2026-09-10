@@ -78,28 +78,34 @@ export async function setBrowserControlState(
     return getBrowserControlState(taskId, userId);
   }
 
-  if (session.controlState === USER_REQUESTED || session.controlState === USER) {
-    await repo.transitionBrowserControlState(
-      taskId,
-      [session.controlState],
-      session.controlState,
-      leaseExpiry()
-    );
-    return getBrowserControlState(taskId, userId);
-  }
   if (session.status !== ACTIVE) throw new BrowserControlUnavailableError(session.status);
+  if (session.controlState === USER || session.controlState === USER_REQUESTED) {
+    // Leftover USER_REQUESTED from the old handshake must also become USER
+    // immediately so a mid-action lease cannot expire back to AGENT.
+    return grantUserControl(taskId, [session.controlState], userId);
+  }
 
-  // If the workflow is already paused, no browser activity can race the user,
-  // so ownership is immediate. Otherwise the activity must acknowledge the
-  // request at an action boundary before the frontend enables interaction.
-  const agent = await repo.findAgentStatus(session.agentId);
-  const nextState = agent?.status === 'PAUSED' ? USER : USER_REQUESTED;
+  // Same-session handover is immediate. The activity still yields when it
+  // next observes USER; do not block the live view on an action-boundary ack.
+  return grantUserControl(taskId, [AGENT], userId);
+}
+
+async function grantUserControl(
+  taskId: string,
+  expectedStates: PrismaControlState[],
+  userId?: string
+) {
   const transitioned = await repo.transitionBrowserControlState(
     taskId,
-    [AGENT],
-    nextState,
+    expectedStates,
+    USER,
     leaseExpiry()
   );
-  if (!transitioned) return getBrowserControlState(taskId, userId);
+  if (transitioned) return getBrowserControlState(taskId, userId);
+
+  const current = await requireControlRecord(taskId, userId);
+  if (current.status !== ACTIVE) {
+    throw new BrowserControlUnavailableError(current.status);
+  }
   return getBrowserControlState(taskId, userId);
 }

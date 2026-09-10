@@ -318,6 +318,7 @@ run_suite "LLM Trajectory Injection Guard Unit Tests" bash scripts/tests/check-l
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
+run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh
 run_suite "RCA Archive New Command" bash scripts/tests/rca-archive-new.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Auto RCA Workflow Contract" bash scripts/tests/auto-rca-workflow.test.sh
@@ -335,10 +336,12 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|r
   run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
   run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
+  run_suite "Fleet Infra Canary" bash scripts/tests/fleet-infra-canary.test.sh
   run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
   run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
   run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
   run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+  run_suite "Cloud Benchmark Status-Service Shutdown" bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 fi
 if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
   run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh

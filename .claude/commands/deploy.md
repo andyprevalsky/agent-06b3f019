@@ -8,6 +8,8 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
+**(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the Claude fallback, or the usage-exhaustion skip) is the only review gate.
+
 ## Canonical human-approval format
 
 Every human approval request in this command—including prompt or
@@ -816,7 +818,7 @@ Do not wait for one lane before starting another. All applicable lanes must be
 green before merge. If any lane requires a code change, wait for the open review
 to finish, batch all fixes, restart the Test Loop from Step 0, and relaunch the
 applicable test lanes. Do not request another review until those lanes stabilize.
-The later manual review covers every commit accumulated since the prior review.
+The later automated review cycle (CodeRabbit or Claude fallback) covers every commit accumulated since the prior review — not a human PR reviewer.
 
 By Phase 2, the push and PR already exist. Treat Steps 7 and 8 as “verify
 already done” unless a failed test-loop iteration forced a restart.

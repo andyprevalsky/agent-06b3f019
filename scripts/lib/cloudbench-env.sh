@@ -95,8 +95,219 @@ cloudbench_central_hub_matches() {  # <port> <expected-runs-root>
   [ -n "$actual_root" ] && [ "$actual_root" = "$expected_root" ]
 }
 
+cloudbench_central_hub_owner_matches() {  # <port> <runs-root> <repo-root> <owner-file>
+  local port="$1" runs_root="$2" repo_root="$3" owner_file="$4"
+  local metadata pid pid_start pgid actual_pgid
+  [ -f "$owner_file" ] || return 1
+  metadata="$(curl --noproxy '*' -fsS --max-time 2 \
+    "http://127.0.0.1:$port/hub-meta.json" 2>/dev/null)" || return 1
+  HUB_METADATA_JSON="$metadata" python3 - "$owner_file" "$port" \
+    "$runs_root" "$repo_root" <<'PY' || return 1
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+owner_path = Path(sys.argv[1])
+port = int(sys.argv[2])
+runs_root = Path(sys.argv[3]).resolve()
+repo_root = Path(sys.argv[4]).resolve()
+context_dir = (runs_root / "_hub").resolve()
+command = (repo_root / "agents/benchmarks/agent_link_server.py").resolve()
+
+fields = {}
+for raw in owner_path.read_text(encoding="utf-8").splitlines():
+    key, separator, value = raw.partition("=")
+    if not separator or key in fields:
+        raise SystemExit(1)
+    fields[key] = value
+required = {
+    "version", "pid", "pid_start", "pgid", "owner_token", "command",
+    "argv_sha256", "root", "runs_root", "repo_root", "context_dir",
+    "host", "port", "status",
+}
+if set(fields) != required or fields["version"] != "1":
+    raise SystemExit(1)
+try:
+    pid = int(fields["pid"])
+    pgid = int(fields["pgid"])
+    owner_port = int(fields["port"])
+except ValueError:
+    raise SystemExit(1)
+token = fields["owner_token"]
+digest = fields["argv_sha256"]
+if (
+    pid <= 1
+    or pgid != pid
+    or owner_port != port
+    or len(token) != 32
+    or any(character not in "0123456789abcdef" for character in token)
+    or len(digest) != 64
+    or any(character not in "0123456789abcdef" for character in digest)
+    or not fields["pid_start"]
+    or fields["host"] != "127.0.0.1"
+    or fields["status"] != "live-transfer-required"
+    or Path(fields["root"]).resolve() != runs_root
+    or Path(fields["runs_root"]).resolve() != runs_root
+    or Path(fields["repo_root"]).resolve() != repo_root
+    or Path(fields["context_dir"]).resolve() != context_dir
+    or Path(fields["command"]).resolve() != command
+    or owner_path.resolve().parent != context_dir
+    or owner_path.name != f"agent-link-server.{port}.{token}.owner"
+    or stat.S_IMODE(owner_path.stat().st_mode) & 0o222
+):
+    raise SystemExit(1)
+
+try:
+    metadata = json.loads(os.environ["HUB_METADATA_JSON"])
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(metadata, dict):
+    raise SystemExit(1)
+try:
+    metadata_pid = int(metadata.get("pid", 0))
+    metadata_port = int(metadata.get("port", 0))
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if (
+    metadata_pid != pid
+    or metadata_port != port
+    or metadata.get("pid_start") != fields["pid_start"]
+    or metadata.get("owner_token") != token
+    or metadata.get("argv_sha256") != digest
+    or Path(str(metadata.get("root", ""))).resolve() != runs_root
+    or Path(str(metadata.get("hub_runs_dir", ""))).resolve() != runs_root
+    or Path(str(metadata.get("repo_root", ""))).resolve() != repo_root
+    or Path(str(metadata.get("context_dir", ""))).resolve() != context_dir
+    or Path(str(metadata.get("command", ""))).resolve() != command
+):
+    raise SystemExit(1)
+PY
+  pid="$(cloudbench_tracked_owner_value "$owner_file" pid)"
+  pid_start="$(cloudbench_tracked_owner_value "$owner_file" pid_start)"
+  pgid="$(cloudbench_tracked_owner_value "$owner_file" pgid)"
+  cloudbench_pid_matches_start "$pid" "$pid_start" || return 1
+  actual_pgid="$(ps -p "$pid" -o pgid= 2>/dev/null | awk '{$1=$1; print}')"
+  [ "$pgid" = "$pid" ] && [ "$actual_pgid" = "$pgid" ]
+}
+
+cloudbench_central_hub_owner_for() {  # <port> <runs-root> <repo-root>
+  local port="$1" runs_root="$2" repo_root="$3" owner_file
+  for owner_file in "$runs_root/_hub"/agent-link-server."$port".*.owner; do
+    [ -f "$owner_file" ] || continue
+    if cloudbench_central_hub_owner_matches "$port" "$runs_root" \
+      "$repo_root" "$owner_file"; then
+      printf '%s\n' "$owner_file"
+      return 0
+    fi
+  done
+  return 1
+}
+
+cloudbench_terminate_central_hub_owner() {  # <port> <runs-root> <repo-root> <owner-file> [seconds]
+  local port="$1" runs_root="$2" repo_root="$3" owner_file="$4"
+  local timeout_seconds="${5:-5}" pid pid_start pgid deadline group_state
+  case "$timeout_seconds" in ''|*[!0-9]*|0) return 1 ;; esac
+  cloudbench_central_hub_owner_matches "$port" "$runs_root" "$repo_root" \
+    "$owner_file" || return 1
+  pid="$(cloudbench_tracked_owner_value "$owner_file" pid)"
+  pid_start="$(cloudbench_tracked_owner_value "$owner_file" pid_start)"
+  pgid="$(cloudbench_tracked_owner_value "$owner_file" pgid)"
+  cloudbench_signal_tracked_group "$pid" "$pid_start" TERM || return 1
+  deadline=$((SECONDS + timeout_seconds))
+  while cloudbench_pid_matches_start "$pid" "$pid_start" \
+    && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.1
+  done
+  if cloudbench_pid_matches_start "$pid" "$pid_start"; then
+    cloudbench_signal_tracked_group "$pid" "$pid_start" KILL || return 1
+  fi
+  deadline=$((SECONDS + 10))
+  group_state="$(cloudbench_process_group_state "$pgid")"
+  while [ "$group_state" = "live" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.1
+    group_state="$(cloudbench_process_group_state "$pgid")"
+  done
+  [ "$group_state" = "absent" ] || return 1
+  python3 - "$owner_file" <<'PY'
+import hashlib
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+owner_bytes = path.read_bytes()
+fields = {}
+for raw in owner_bytes.decode("utf-8").splitlines():
+    key, separator, value = raw.partition("=")
+    if not separator or key in fields:
+        raise SystemExit(1)
+    fields[key] = value
+terminal = path.with_name(f"{path.name}.terminal")
+terminal_fields = {
+    "version": "1",
+    "owner_file": str(path.resolve()),
+    "owner_sha256": hashlib.sha256(owner_bytes).hexdigest(),
+    "pid": fields.get("pid", ""),
+    "pid_start": fields.get("pid_start", ""),
+    "pgid": fields.get("pgid", ""),
+    "owner_token": fields.get("owner_token", ""),
+    "disposition": "terminated-verified",
+    "terminated_at": datetime.now(timezone.utc).isoformat(),
+}
+temporary = terminal.with_name(f"{terminal.name}.tmp.{os.getpid()}")
+try:
+    with temporary.open("x", encoding="utf-8") as handle:
+        for key, value in terminal_fields.items():
+            handle.write(f"{key}={value}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.chmod(0o444)
+    os.replace(temporary, terminal)
+finally:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+cloudbench_tcp_listener_present() {  # <port>
+  # lsof is present on macOS developer hosts but absent from the Amazon Linux
+  # cloud controller image.  Treating command-not-found as "no listener" made
+  # the fleet select an occupied foreign hub port.  A TCP connect probe answers
+  # the question we actually need here and is portable to every controller
+  # because Python is already a hard cloudbench dependency.
+  #
+  # Exit codes:
+  #   0 — listener present
+  #   1 — no listener (port free)
+  #   2 — bad argument
+  #   3 — probe failed (timeout / python / unexpected); callers must fail closed
+  python3 - "$1" <<'PY'
+import socket
+import sys
+
+try:
+    port = int(sys.argv[1])
+except (IndexError, ValueError):
+    raise SystemExit(2)
+
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.2)
+        raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(3)
+PY
+}
+
 cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
-  local preferred="$1" expected_root="$2" candidate
+  local preferred="$1" expected_root="$2" candidate probe_rc
 
   # A Conductor port can be reused while another workspace's persistent hub is
   # still alive. Reuse a listener only when it identifies the same runs root;
@@ -104,14 +315,25 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   # port. The identity endpoint also makes a previously rebased hub reusable by
   # later runs from this workspace.
   for candidate in $(seq "$preferred" $((preferred + 500))); do
-    if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+    # Capture probe_rc BEFORE interpreting it. `if cmd; then …; fi` resets $?
+    # to 0 when cmd is false and there is no else — so reading $? after the if
+    # always looked like "probe failed with rc=0" on free ports and refused
+    # fail-open even when the port was actually free (broke hub bring-up).
+    cloudbench_tcp_listener_present "$candidate"
+    probe_rc=$?
+    if [ "$probe_rc" -eq 0 ]; then
+      if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      continue
+    fi
+    if [ "$probe_rc" -eq 1 ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
-    if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+    echo "FATAL: central hub TCP probe failed on port ${candidate} (rc=${probe_rc}); refusing fail-open port selection" >&2
+    return 1
   done
 
   echo "FATAL: no free central benchmark hub port in ${preferred}..$((preferred + 500))" >&2
@@ -216,23 +438,55 @@ cloudbench_detach_reexec_tracked() {  # <owner-file> <log-file> <argv...>
   shift 2
   python3 - "$owner_file" "$log" "$@" <<'PY'
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import time
 
 owner_file, log, *argv = sys.argv[1:]
+group_token = secrets.token_hex(16)
+pending_signal = []
+
+def defer_signal(signum, _frame):
+    if not pending_signal:
+        pending_signal.append(signum)
+
+for signal_name in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signal_name, defer_signal)
+
 child_pid = os.fork()
 if child_pid:
+    def cancel_child():
+        try:
+            if os.getpgid(child_pid) == child_pid:
+                os.killpg(child_pid, signal.SIGKILL)
+            else:
+                os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child_pid, 0)
+        except ChildProcessError:
+            pass
+
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
+        if pending_signal:
+            cancel_child()
+            raise SystemExit(128 + pending_signal[0])
         try:
             fields = {}
             with open(owner_file) as handle:
                 for raw in handle:
                     key, _, value = raw.rstrip("\n").partition("=")
                     fields[key] = value
-            if int(fields.get("pid", "0")) == child_pid and fields.get("pid_start"):
+            if (
+                int(fields.get("pid", "0")) == child_pid
+                and fields.get("pid_start")
+                and fields.get("pgid") == str(child_pid)
+                and fields.get("group_token") == group_token
+            ):
                 raise SystemExit(0)
         except (OSError, ValueError):
             pass
@@ -240,15 +494,28 @@ if child_pid:
         if exited:
             raise SystemExit(os.waitstatus_to_exitcode(status))
         time.sleep(0.05)
-    try:
-        os.kill(child_pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    cancel_child()
     print("FATAL: detached process did not publish its ownership handshake", file=sys.stderr)
     raise SystemExit(1)
 
+if pending_signal:
+    raise SystemExit(128 + pending_signal[0])
 os.setsid()
 pid = os.getpid()
+# Keep an immutable, birth-identified session leader alive until every process
+# in the detached group is gone.  Waiters can then escalate the exact group
+# without ever treating a reused numeric PGID as proof of ownership.
+for signal_name in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signal_name, lambda _signum, _frame: None)
+if pending_signal:
+    raise SystemExit(128 + pending_signal[0])
+before_owner_ready = os.environ.get("CLOUDBENCH_TEST_TRACKED_DETACH_BEFORE_OWNER_READY")
+before_owner_release = os.environ.get("CLOUDBENCH_TEST_TRACKED_DETACH_BEFORE_OWNER_RELEASE")
+if before_owner_ready:
+    with open(before_owner_ready, "w") as handle:
+        handle.write(f"{pid}\n")
+    while before_owner_release and not os.path.exists(before_owner_release):
+        time.sleep(0.01)
 pid_start = " ".join(
     subprocess.check_output(
         ["ps", "-p", str(pid), "-o", "lstart="],
@@ -256,22 +523,78 @@ pid_start = " ".join(
         stderr=subprocess.DEVNULL,
     ).split()
 )
-owner_tmp = f"{owner_file}.tmp.{pid}"
-with open(owner_tmp, "w") as handle:
-    handle.write("version=1\n")
-    handle.write(f"pid={pid}\n")
-    handle.write(f"pid_start={pid_start}\n")
-    handle.write(f"pgid={os.getpgrp()}\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-os.replace(owner_tmp, owner_file)
-
 fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 os.dup2(fd, 1)
 os.dup2(fd, 2)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
-os.execvp(argv[0], argv)
+os.environ["CLOUDBENCH_TRACKED_GROUP_TOKEN"] = group_token
+
+release_read, release_write = os.pipe()
+command_pid = os.fork()
+if command_pid == 0:
+    os.close(release_write)
+    for signal_name in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(signal_name, signal.SIG_DFL)
+    released = os.read(release_read, 1)
+    os.close(release_read)
+    if released != b"1":
+        raise SystemExit(1)
+    os.execvp(argv[0], argv)
+
+os.close(release_read)
+owner_tmp = f"{owner_file}.tmp.{pid}"
+try:
+    with open(owner_tmp, "w") as handle:
+        handle.write("version=1\n")
+        handle.write(f"pid={pid}\n")
+        handle.write(f"pid_start={pid_start}\n")
+        handle.write(f"pgid={os.getpgrp()}\n")
+        handle.write(f"group_token={group_token}\n")
+        handle.write(f"command_pid={command_pid}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(owner_tmp, owner_file)
+except BaseException:
+    os.close(release_write)
+    try:
+        os.waitpid(command_pid, 0)
+    except ChildProcessError:
+        pass
+    raise
+os.write(release_write, b"1")
+os.close(release_write)
+
+command_status = None
+while True:
+    if command_status is None:
+        exited, status = os.waitpid(command_pid, os.WNOHANG)
+        if exited:
+            command_status = os.waitstatus_to_exitcode(status)
+    if command_status is not None:
+        try:
+            observed = subprocess.run(
+                ["ps", "-axo", "pid=,pgid="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1,
+                start_new_session=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            time.sleep(0.05)
+            continue
+        if observed.returncode != 0:
+            time.sleep(0.05)
+            continue
+        members = []
+        for raw in observed.stdout.splitlines():
+            fields = raw.split()
+            if len(fields) == 2 and fields[1] == str(pid) and fields[0] != str(pid):
+                members.append(fields[0])
+        if not members:
+            raise SystemExit(command_status)
+    time.sleep(0.05)
 PY
 }
 
@@ -280,10 +603,27 @@ cloudbench_tracked_owner_value() {  # <owner-file> <key>
   sed -n "s/^${key}=//p" "$owner_file" 2>/dev/null | head -1
 }
 
+cloudbench_process_group_state() {  # <pgid> -> live|absent|unknown
+  local pgid="$1" observed observed_pgid
+  if ! observed="$(ps -axo pgid= 2>/dev/null)"; then
+    echo unknown
+    return 0
+  fi
+  while read -r observed_pgid; do
+    if [ "$observed_pgid" = "$pgid" ]; then
+      echo live
+      return 0
+    fi
+  done <<< "$observed"
+  echo absent
+}
+
 cloudbench_process_group_exists() {  # <pgid>
-  local pgid="$1"
-  ps -axo pgid= 2>/dev/null |
-    awk -v wanted="$pgid" '$1 == wanted { found = 1 } END { exit !found }'
+  [ "$(cloudbench_process_group_state "$1")" = "live" ]
+}
+
+cloudbench_pid_exists() {  # <pid>
+  kill -0 "$1" 2>/dev/null
 }
 
 cloudbench_signal_tracked_group() {  # <pid> <pid-start> <signal>
@@ -296,13 +636,17 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   local owner_file="$1" status_file="$2"
   shift 2
   local recovery_command=("$@")
-  local pid pid_start pgid status pending_signal="" forwarded_signal=""
+  local pid pid_start pgid group_token group_state status pending_signal="" forwarded_signal=""
   local recovery_seconds="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}"
   local recovery_deadline=0 drain_deadline recovery_required=0
+  local terminal_grace_seconds="${CLOUDBENCH_DETACHED_TERMINAL_GRACE_SECONDS:-2}"
+  local terminal_term_seconds="${CLOUDBENCH_DETACHED_TERMINAL_TERM_SECONDS:-5}"
+  local terminal_deadline=0 terminal_term_sent=0 terminal_teardown_failed=0
 
   pid="$(cloudbench_tracked_owner_value "$owner_file" pid)"
   pid_start="$(cloudbench_tracked_owner_value "$owner_file" pid_start)"
   pgid="$(cloudbench_tracked_owner_value "$owner_file" pgid)"
+  group_token="$(cloudbench_tracked_owner_value "$owner_file" group_token)"
   case "$pid:$pgid" in
     ''|*[!0-9:]*|:*|*:)
       echo "FATAL: detached ownership handshake is malformed" >&2
@@ -313,9 +657,25 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     echo "FATAL: detached ownership handshake does not identify its session group" >&2
     return 1
   }
+  [ "${#group_token}" -eq 32 ] || {
+    echo "FATAL: detached ownership handshake has an invalid group token" >&2
+    return 1
+  }
+  case "$group_token" in
+    *[!0-9a-f]*)
+      echo "FATAL: detached ownership handshake has an invalid group token" >&2
+      return 1
+      ;;
+  esac
   case "$recovery_seconds" in
     ''|*[!0-9]*|0)
       echo "FATAL: detached recovery seconds must be a positive integer" >&2
+      return 1
+      ;;
+  esac
+  case "$terminal_grace_seconds:$terminal_term_seconds" in
+    *[!0-9:]*|:*|*:0)
+      echo "FATAL: detached terminal drain bounds must be non-negative grace and positive TERM seconds" >&2
       return 1
       ;;
   esac
@@ -343,21 +703,40 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     # own provider resources. Bound the full process-group drain, then escalate
     # the still-live owned group. Only consume status after the group is gone.
     if [ -n "$forwarded_signal" ]; then
-      if cloudbench_process_group_exists "$pgid"; then
+      group_state="$(cloudbench_process_group_state "$pgid")"
+      if [ "$group_state" = "unknown" ]; then
+        trap - HUP INT TERM
+        echo "FATAL: could not prove detached fleet process-group state during cancellation" >&2
+        return 1
+      fi
+      if [ "$group_state" = "absent" ] && cloudbench_pid_exists "$pid"; then
+        trap - HUP INT TERM
+        echo "FATAL: detached group probe contradicted its still-live identity anchor" >&2
+        return 1
+      fi
+      if [ "$group_state" = "live" ]; then
         if [ "$SECONDS" -ge "$recovery_deadline" ]; then
           echo "⚠️  detached fleet group survived bounded $forwarded_signal recovery; escalating" >&2
-          if cloudbench_pid_matches_start "$pid" "$pid_start" \
-              || cloudbench_process_group_exists "$pgid"; then
+          if ! cloudbench_pid_matches_start "$pid" "$pid_start"; then
+            group_state="$(cloudbench_process_group_state "$pgid")"
+            if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
+              trap - HUP INT TERM
+              echo "FATAL: detached fleet identity anchor vanished before KILL escalation" >&2
+              return 1
+            fi
+          else
             kill -s KILL -- "-$pgid" 2>/dev/null || true
           fi
           drain_deadline=$((SECONDS + 10))
-          while cloudbench_process_group_exists "$pgid" \
+          group_state="$(cloudbench_process_group_state "$pgid")"
+          while [ "$group_state" = "live" ] \
               && [ "$SECONDS" -lt "$drain_deadline" ]; do
             sleep 0.1 || true
+            group_state="$(cloudbench_process_group_state "$pgid")"
           done
-          if cloudbench_process_group_exists "$pgid"; then
+          if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
             trap - HUP INT TERM
-            echo "FATAL: detached fleet process group did not drain after KILL" >&2
+            echo "FATAL: detached fleet process group was not proven drained after KILL" >&2
             return 1
           fi
           recovery_required=1
@@ -401,7 +780,80 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
       break
     fi
 
-    [ -s "$status_file" ] && break
+    if [ -s "$status_file" ]; then
+      group_state="$(cloudbench_process_group_state "$pgid")"
+      if [ "$group_state" = "unknown" ]; then
+        trap - HUP INT TERM
+        echo "FATAL: detached terminal status arrived while process-group state was unknown" >&2
+        return 1
+      fi
+      if [ "$group_state" = "absent" ]; then
+        if cloudbench_pid_exists "$pid"; then
+          trap - HUP INT TERM
+          echo "FATAL: detached terminal group probe contradicted its still-live identity anchor" >&2
+          return 1
+        fi
+        if [ "$terminal_term_sent" = "1" ]; then
+          recovery_required=1
+          terminal_teardown_failed=1
+        fi
+        break
+      fi
+      if ! cloudbench_pid_matches_start "$pid" "$pid_start"; then
+        # The persistent anchor can exit between the group and PID probes once
+        # the final command has drained. Re-probe; only the jointly absent
+        # state is terminal, never the earlier numeric-PGID observation alone.
+        group_state="$(cloudbench_process_group_state "$pgid")"
+        if [ "$group_state" = "absent" ] && ! cloudbench_pid_exists "$pid"; then
+          if [ "$terminal_term_sent" = "1" ]; then
+            recovery_required=1
+            terminal_teardown_failed=1
+          fi
+          break
+        fi
+        trap - HUP INT TERM
+        echo "FATAL: detached terminal status arrived after its identity anchor vanished with an unproven group" >&2
+        return 1
+      fi
+      if [ "$terminal_deadline" = "0" ]; then
+        terminal_deadline=$((SECONDS + terminal_grace_seconds))
+      elif [ "$terminal_term_sent" = "0" ] \
+          && [ "$SECONDS" -ge "$terminal_deadline" ]; then
+        echo "⚠️  detached terminal status arrived before its owned group drained; requesting teardown" >&2
+        kill -s TERM -- "-$pgid" 2>/dev/null || true
+        terminal_term_sent=1
+        terminal_deadline=$((SECONDS + terminal_term_seconds))
+      elif [ "$terminal_term_sent" = "1" ] \
+          && [ "$SECONDS" -ge "$terminal_deadline" ]; then
+        if ! cloudbench_pid_matches_start "$pid" "$pid_start"; then
+          group_state="$(cloudbench_process_group_state "$pgid")"
+          if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
+            trap - HUP INT TERM
+            echo "FATAL: detached identity anchor vanished before terminal KILL escalation" >&2
+            return 1
+          fi
+        else
+          kill -s KILL -- "-$pgid" 2>/dev/null || true
+        fi
+        drain_deadline=$((SECONDS + 10))
+        group_state="$(cloudbench_process_group_state "$pgid")"
+        while [ "$group_state" = "live" ] \
+            && [ "$SECONDS" -lt "$drain_deadline" ]; do
+          sleep 0.1 || true
+          group_state="$(cloudbench_process_group_state "$pgid")"
+        done
+        if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
+          trap - HUP INT TERM
+          echo "FATAL: detached terminal process group was not proven drained after KILL" >&2
+          return 1
+        fi
+        recovery_required=1
+        terminal_teardown_failed=1
+        break
+      fi
+      sleep 0.1 || true
+      continue
+    fi
 
     # A wrapper can be SIGKILLed or fail before atomically publishing status.
     # Never poll forever. If its original process group still has members,
@@ -415,27 +867,24 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
         sleep 0.1 || true
       done
       [ -s "$status_file" ] && continue
-      if cloudbench_process_group_exists "$pgid"; then
-        kill -s TERM -- "-$pgid" 2>/dev/null || true
-        recovery_deadline=$((SECONDS + recovery_seconds))
-        while cloudbench_process_group_exists "$pgid" \
-            && [ "$SECONDS" -lt "$recovery_deadline" ]; do
-          sleep 1 || true
-        done
-        if cloudbench_process_group_exists "$pgid"; then
-          echo "⚠️  detached fleet group survived bounded TERM recovery; escalating" >&2
-          kill -s KILL -- "-$pgid" 2>/dev/null || true
-        fi
-        drain_deadline=$((SECONDS + 10))
-        while cloudbench_process_group_exists "$pgid" \
-            && [ "$SECONDS" -lt "$drain_deadline" ]; do
-          sleep 0.1 || true
-        done
-        if cloudbench_process_group_exists "$pgid"; then
-          trap - HUP INT TERM
-          echo "FATAL: detached fleet process group did not drain during wrapper recovery" >&2
-          return 1
-        fi
+      group_state="$(cloudbench_process_group_state "$pgid")"
+      if [ "$group_state" = "unknown" ]; then
+        trap - HUP INT TERM
+        echo "FATAL: detached fleet identity anchor vanished while process-group state was unknown" >&2
+        return 1
+      fi
+      if [ "$group_state" = "live" ]; then
+        # A hard-dead/mismatched leader removes the only immutable authority to
+        # address this process group. Numeric PGID reuse is not ownership proof.
+        # Retain the rendezvous and require operator/audited recovery.
+        trap - HUP INT TERM
+        echo "FATAL: detached fleet identity anchor vanished while its numeric process group remained live" >&2
+        return 1
+      fi
+      if cloudbench_pid_exists "$pid"; then
+        trap - HUP INT TERM
+        echo "FATAL: detached wrapper probe contradicted its still-live identity anchor" >&2
+        return 1
       fi
       if [ "${#recovery_command[@]}" -eq 0 ]; then
         trap - HUP INT TERM
@@ -457,6 +906,16 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   done
 
   trap - HUP INT TERM
+  if [ "$terminal_teardown_failed" = "1" ]; then
+    if [ "${#recovery_command[@]}" -eq 0 ]; then
+      echo "FATAL: forced detached terminal teardown has no durable ownership recovery command" >&2
+      return 1
+    fi
+    if ! "${recovery_command[@]}"; then
+      echo "FATAL: forced detached terminal teardown could not reconcile durable ownership" >&2
+      return 1
+    fi
+  fi
   status="$(head -1 "$status_file" 2>/dev/null || true)"
   rm -f "$owner_file" "$status_file" "$owner_file".tmp.* "$status_file".tmp.* \
     2>/dev/null || true
@@ -468,6 +927,10 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   esac
   if [ "$status" -gt 255 ]; then
     echo "FATAL: detached fleet wrote an out-of-range exit status: $status" >&2
+    return 1
+  fi
+  if [ "$terminal_teardown_failed" = "1" ]; then
+    echo "FATAL: detached command published terminal status before its owned process group drained" >&2
     return 1
   fi
   return "$status"
@@ -559,6 +1022,7 @@ cloudbench_git_insteadof_github_token() {
 
 cloudbench_resolve_controller_github_token() {
   local token="" dotenv
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
   if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
     token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
     [ -n "$token" ] && { printf '%s' "$token"; return 0; }
@@ -574,8 +1038,7 @@ cloudbench_resolve_controller_github_token() {
   fi
   token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
   if [ -z "$token" ]; then
-    for dotenv in "${CLOUDBENCH_FLEET_ROOT:-.}/back-end/.env" "${CLOUDBENCH_FLEET_ROOT:-.}/agents/.env" \
-      "back-end/.env" "agents/.env"; do
+    for dotenv in "$workspace_root/back-end/.env" "$workspace_root/agents/.env"; do
       [ -f "$dotenv" ] || continue
       token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN 2>/dev/null || true)"
       [ -z "$token" ] || break
@@ -712,19 +1175,47 @@ cloudbench_pid_start_time() {
     awk '{$1=$1; print}'
 }
 
+cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
+  local pid="$1" expected_start="$2" actual_start ps_status
+  case "$pid" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+  [ "$pid" -gt 1 ] && [ -n "$expected_start" ] \
+    || { echo unknown; return 0; }
+  if actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null)"; then
+    actual_start="$(printf '%s\n' "$actual_start" | awk '{$1=$1; print}')"
+    [ -n "$actual_start" ] || { echo unknown; return 0; }
+    if [ "$actual_start" = "$expected_start" ]; then
+      echo live
+    else
+      # The numeric PID exists, but the recorded process birth does not.
+      echo absent
+    fi
+    return 0
+  else
+    ps_status=$?
+  fi
+  # procps/BSD ps use status 1 for a well-formed PID that does not exist.
+  # If the PID concurrently appeared, kill -0 catches it and preserves the
+  # fail-closed unknown state rather than claiming an absence.
+  if [ "$ps_status" -eq 1 ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo absent
+  else
+    echo unknown
+  fi
+}
+
 cloudbench_pid_matches_start() {
-  local pid="$1" expected_start="$2" actual_start
-  [ -n "$expected_start" ] || return 1
-  actual_start="$(cloudbench_pid_start_time "$pid")"
-  [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+  [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ]
 }
 
 cloudbench_terminate_tree_and_wait() {
   local timeout_seconds="$1"
   shift
 
-  local pid job_pid start deadline live i
+  local pid job_pid start deadline live i actual_start state unresolved
+  local observation process_stat expected_start process_table target_snapshot
+  local captured_root still_job
   local roots=() active_roots=() active_jobs=() targets=() target_starts=()
+  local target_states=() remaining_roots=()
   for pid in "$@"; do
     [ -n "$pid" ] && roots+=("$pid")
   done
@@ -752,29 +1243,33 @@ cloudbench_terminate_tree_and_wait() {
   # shell reparents those descendants to init, allowing them to mutate durable
   # ownership after controller cleanup has completed. Snapshot the complete,
   # currently-live descendant forest with process birth identity before sending
-  # any signal. A root that vanished between jobs(1) and ps(1) is intentionally
-  # absent.
-  while IFS=$'\t' read -r pid start; do
-    if [ -n "$pid" ] && [ -n "$start" ]; then
-      targets+=("$pid")
-      target_starts+=("$start")
-    fi
-  done < <(
-    ps -axo pid=,ppid=,lstart= 2>/dev/null | python3 -c '
+  # any signal. Capture ps(1) and parser status synchronously: process
+  # substitution discards both exit codes and can turn an unavailable process
+  # table into an empty, falsely successful teardown.
+  if ! process_table="$(ps -axo pid=,ppid=,lstart= 2>/dev/null)"; then
+    echo "Could not capture the process table for owned tree teardown" >&2
+    return 1
+  fi
+  if ! target_snapshot="$(python3 -c '
 import sys
 
 roots = [int(value) for value in sys.argv[1:]]
 children = {}
 processes = {}
 for raw in sys.stdin:
+    if not raw.strip():
+        continue
     fields = raw.split(None, 2)
     if len(fields) != 3:
-        continue
+        raise SystemExit(1)
     try:
         pid, ppid = map(int, fields[:2])
     except ValueError:
-        continue
-    processes[pid] = (ppid, " ".join(fields[2].split()))
+        raise SystemExit(1)
+    start = " ".join(fields[2].split())
+    if pid <= 0 or ppid < 0 or not start or pid in processes:
+        raise SystemExit(1)
+    processes[pid] = (ppid, start)
     children.setdefault(ppid, []).append(pid)
 
 seen = set()
@@ -792,9 +1287,69 @@ for root in roots:
     visit(root)
 for pid, start in ordered:
     print(f"{pid}\t{start}")
-' "${active_roots[@]}"
-  )
-  [ "${#targets[@]}" -gt 0 ] || return 0
+' "${active_roots[@]}" <<< "$process_table")"; then
+    echo "Could not parse the process table for owned tree teardown" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r pid start; do
+    if [ -n "$pid" ] && [ -n "$start" ]; then
+      targets+=("$pid")
+      target_starts+=("$start")
+    fi
+  done <<< "$target_snapshot"
+
+  # Every root that the shell still owns must have an exact birth in the one
+  # successful snapshot before any signal is sent. A root can also exit cleanly
+  # between the jobs(1) sample and the process-table snapshot (common once
+  # mandatory autoscalers publish autoscaler.completed-after-child during guest
+  # shutdown). Reap those already-terminal roots instead of failing closed on a
+  # TOCTOU. Fail closed only when the shell still claims a live job that the
+  # kernel/snapshot cannot account for — descendants may already be reparented.
+  remaining_roots=()
+  for job_pid in "${active_roots[@]}"; do
+    captured_root=0
+    for pid in "${targets[@]:-}"; do
+      if [ "$pid" = "$job_pid" ]; then
+        captured_root=1
+        break
+      fi
+    done
+    if [ "$captured_root" = "1" ]; then
+      remaining_roots+=("$job_pid")
+      continue
+    fi
+
+    # Force bash to process any pending SIGCHLD for this exact child before we
+    # decide whether the job table and kernel still disagree.
+    wait "$job_pid" 2>/dev/null || true
+
+    actual_start="$(cloudbench_pid_start_time "$job_pid")"
+    if [ -n "$actual_start" ]; then
+      echo "Owned process root $job_pid was absent from the teardown snapshot" >&2
+      return 1
+    fi
+
+    active_jobs=()
+    while read -r pid; do
+      [ -n "$pid" ] && active_jobs+=("$pid")
+    done < <(jobs -pr)
+    still_job=0
+    for pid in "${active_jobs[@]:-}"; do
+      if [ "$pid" = "$job_pid" ]; then
+        still_job=1
+        break
+      fi
+    done
+    if [ "$still_job" = "1" ]; then
+      echo "Owned process root $job_pid was absent from the teardown snapshot" >&2
+      return 1
+    fi
+  done
+  active_roots=()
+  if [ "${#remaining_roots[@]}" -gt 0 ]; then
+    active_roots=("${remaining_roots[@]}")
+  fi
+  [ "${#active_roots[@]}" -gt 0 ] || return 0
 
   # Revalidate birth identity immediately before every signal. This prevents a
   # TERM-responsive target that exits during another descendant's grace period
@@ -826,11 +1381,105 @@ for pid, start in ordered:
       kill -KILL "${targets[$i]}" 2>/dev/null || true
     fi
   done
+
+  # A waitable root can remain visible as a zombie after honoring KILL. Reap
+  # only an exact captured root birth that ps(1) marks Z; waiting on any other
+  # state could block beyond this function's bound. Reparented descendant
+  # zombies are not waitable here, but are terminal/non-mutating below.
+  for pid in "${active_roots[@]}"; do
+    expected_start=""
+    for ((i = 0; i < ${#targets[@]}; i++)); do
+      if [ "${targets[$i]}" = "$pid" ]; then
+        expected_start="${target_starts[$i]}"
+        break
+      fi
+    done
+    [ -n "$expected_start" ] || continue
+    observation="$(
+      ps -p "$pid" -o lstart= -o stat= 2>/dev/null |
+        awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
+    )" || observation=""
+    case "$observation" in
+      *$'\t'*)
+        actual_start="${observation%$'\t'*}"
+        process_stat="${observation##*$'\t'}"
+        if [ "$actual_start" = "$expected_start" ]; then
+          case "$process_stat" in
+            Z*) wait "$pid" 2>/dev/null || true ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+
+  # SIGKILL delivery is not proof of process death (for example, a task can
+  # remain uninterruptible), and a failed ps(1) lookup is not proof that the
+  # captured birth disappeared. Recheck every captured birth for a fresh,
+  # bounded grace period. A different non-empty birth means PID reuse and is
+  # deliberately terminal for the original process; an empty/malformed birth
+  # while kill -0 still sees the PID is unknown and therefore fails closed.
+  deadline=$((SECONDS + timeout_seconds))
+  while :; do
+    unresolved=0
+    target_states=()
+    for ((i = 0; i < ${#targets[@]}; i++)); do
+      observation="$(
+        ps -p "${targets[$i]}" -o lstart= -o stat= 2>/dev/null |
+          awk 'NF >= 6 {state=$NF; NF--; $1=$1; print $0 "\t" state}'
+      )" || observation=""
+      case "$observation" in
+        *$'\t'*)
+          actual_start="${observation%$'\t'*}"
+          process_stat="${observation##*$'\t'}"
+          ;;
+        *)
+          actual_start=""
+          process_stat=""
+          ;;
+      esac
+      if [ -n "$actual_start" ]; then
+        if [ "$actual_start" = "${target_starts[$i]}" ]; then
+          case "$process_stat" in
+            Z*) state=zombie ;;
+            *)
+              state=survivor
+              unresolved=1
+              ;;
+          esac
+        else
+          state=replaced
+        fi
+      elif kill -0 "${targets[$i]}" 2>/dev/null; then
+        state=unknown
+        unresolved=1
+      else
+        state=absent
+      fi
+      target_states+=("$state")
+    done
+    [ "$unresolved" -eq 0 ] && break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      for ((i = 0; i < ${#targets[@]}; i++)); do
+        case "${target_states[$i]}" in
+          survivor)
+            echo "Process ${targets[$i]} (${target_starts[$i]}) survived SIGKILL verification" >&2
+            ;;
+          unknown)
+            echo "Process ${targets[$i]} still exists but its birth identity is unknown after SIGKILL" >&2
+            ;;
+        esac
+      done
+      return 1
+    fi
+    sleep 1
+  done
+
   # Only direct children are waitable by this shell. Waiting roots is enough
-  # to reap the tracked jobs; descendant liveness was handled above.
+  # to reap the tracked jobs after every captured birth was verified terminal.
   for pid in "${active_roots[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
+  return 0
 }
 
 cloudbench_wait_machine_startable() {

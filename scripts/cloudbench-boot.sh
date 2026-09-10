@@ -25,17 +25,44 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# Preserve the controller's sealed-script no-bytecode contract through the
+# boot transport before any staged Python helper starts.
+export PYTHONDONTWRITEBYTECODE=1
+
 LOG=/data/bench.log
 REPO=/data/repo
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 DRIVER_PID_FILE=/data/cloudbench-driver.pid
 DRIVER_STATE_FILE=/data/cloudbench-driver.state
+SHUTDOWN_REQUEST_FILE="/data/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
+CLEANUP_ACK_FILE="/data/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot}.ack"
 
 publish_driver_state() {
     local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
     printf '%s\n' "$state" > "$temporary" && mv -f "$temporary" "$DRIVER_STATE_FILE"
 }
+publish_cleanup_ack() {
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$"
+    printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
+        && mv -f "$temporary" "$CLEANUP_ACK_FILE"
+}
+seal_missing_injected_helper() {
+    local label="$1" path="$2"
+    printf '[boot %s] FATAL: controller-injected %s missing or empty (%s); refusing checked-out fallback\n' \
+        "$(date -u +%H:%M:%S)" "$label" "$path" >> "$LOG"
+    # No benchmark or browser process was launched, so cleanup is already
+    # complete. Publish that token-bound fact before the explicit lifecycle
+    # seal; if either durable write fails, leave the guest fail-closed.
+    if ! publish_cleanup_ack; then
+        printf '[boot %s] FATAL: could not publish no-launch cleanup acknowledgement\n' \
+            "$(date -u +%H:%M:%S)" >> "$LOG"
+        return 1
+    fi
+    publish_driver_state exited
+}
 DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-/cloudbench-fetch-ref.sh}"
+STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-/cloudbench-status-server.py}"
 
 # Not a benchmark boot (the warm clone-source machine, or a bare manual start) →
 # idle exactly like the image's original `sleep infinity` CMD.
@@ -56,11 +83,12 @@ done
 # ambiguous during checkout: it means "not launched yet", not "driver died".
 # Relays and fleet collectors only treat the terminal `exited` state as proof
 # that waiting cannot succeed.
-rm -f "$DRIVER_PID_FILE"
+rm -f "$DRIVER_PID_FILE" "$SHUTDOWN_REQUEST_FILE" "$CLEANUP_ACK_FILE"
 publish_driver_state booting || exit 1
 
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
 # actually booted into the driver (replaces the old ssh-written RUNSTAMP).
+rm -f /data/bench.log.generation
 printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
 
 # Data-plane status server: serve /data (which holds bench.log) over HTTP so the
@@ -69,19 +97,38 @@ printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
 # to the box's private IPv6 6PN address, reachable only through the authenticated
 # proxy. The custom service also implements authenticated barrier release and the
 # /driver-health contract consumed by the controller.
+if [ ! -s "$STATUS_SERVER_SCRIPT" ]; then
+    seal_missing_injected_helper status-server "$STATUS_SERVER_SCRIPT" || exit 1
+    exec sleep infinity
+fi
 pkill -f "cloudbench-status-server.py.*--port $STATUS_PORT" 2>/dev/null || true
-setsid python3 /cloudbench-status-server.py \
+setsid python3 "$STATUS_SERVER_SCRIPT" \
     --port "$STATUS_PORT" \
     --directory /data \
     --barrier "${CLOUDBENCH_START_BARRIER:-}" \
+    --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
     >/dev/null 2>&1 </dev/null &
 
-# Bootstrap-checkout the ref so the REF's driver + helper scripts run (not the
-# snapshot's stale copy). Reuse the battle-tested fetch-ref script, which builds a
+# Nothing from the requested checkout may run until the complete bootstrap
+# control pair is present. Missing staged control code means no benchmark or
+# browser resource exists, so seal+ack the no-launch outcome for exact teardown.
+if [ ! -s "$DRIVER" ]; then
+    seal_missing_injected_helper driver "$DRIVER" || exit 1
+    exec sleep infinity
+fi
+if [ ! -s "$FETCH_REF_SCRIPT" ]; then
+    seal_missing_injected_helper fetch-ref-helper "$FETCH_REF_SCRIPT" || exit 1
+    exec sleep infinity
+fi
+
+# Bootstrap-checkout the ref so its repository content is ready before the
+# immutable controller-injected driver performs the full sync/patch flow. Reuse
+# the battle-tested fetch-ref script, which builds a
 # request-scoped http.extraheader from CLOUDBENCH_GITHUB_TOKEN_B64 (passed as a
 # machine --env by the controller) — no token in the URL or the log. Its logic is
-# stable across refs, so the snapshot's copy safely checks out the ref, after
-# which the driver = the REF's cloudbench-run.sh. The driver re-runs git_sync too.
+# stable across refs, so the snapshot's copy safely checks out the ref. The
+# injected driver re-runs git_sync and never delegates its control flow to the
+# requested ref.
 export CLOUDBENCH_APP_USER="${CLOUDBENCH_APP_USER:-rose}"
 # Clear stale git locks the snapshot may carry. The ssh-launch path did this in its
 # "clear-stale" step; boot-launch has no ssh, so do it here — a leftover
@@ -91,14 +138,15 @@ export CLOUDBENCH_APP_USER="${CLOUDBENCH_APP_USER:-rose}"
 pkill -TERM -f 'cloudbench-run.sh|run_benchmark.py|scripts/run.sh --benchmark' 2>/dev/null || true
 rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock \
       "$REPO/.git/cloudbench-fetch.lock" 2>/dev/null || true
-{
+bootstrap_checkout_ref() {
     echo "[boot $(date -u +%H:%M:%S)] bootstrap-checkout ${REF:-<none>}"
     git config --global --add safe.directory "$REPO" 2>/dev/null || true
-    if [ -n "${REF:-}" ] && [ -f "$REPO/scripts/cloudbench-fetch-ref.sh" ]; then
-        bash "$REPO/scripts/cloudbench-fetch-ref.sh" "$REPO" "$REF" \
+    if [ -n "${REF:-}" ]; then
+        bash "$FETCH_REF_SCRIPT" "$REPO" "$REF" \
             || echo "[boot] bootstrap fetch-ref failed (driver git_sync will retry)"
     fi
-} >> "$LOG" 2>&1
+}
+bootstrap_checkout_ref >> "$LOG" 2>&1
 
 # Run the controller-injected driver, not the copy in the checkout. This matters
 # for dirty-worktree validation: cloudbench-run.sh is the process that applies
@@ -112,9 +160,12 @@ rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock
 # NORESULT. The controller persists the run-scoped marker payloads first and
 # then explicitly stops/returns this Machine to the pool. If the driver crashes
 # before DONE, /driver-health still reports it dead while this supervisor lives.
-if [ ! -s "$DRIVER" ]; then
-    printf '[boot %s] injected driver missing; falling back to checked-out ref\n' "$(date -u +%H:%M:%S)" >> "$LOG"
-    DRIVER="$REPO/scripts/cloudbench-run.sh"
+if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+    publish_cleanup_ack || exit 1
+    printf '[boot %s] shutdown requested before driver launch; cleanup acknowledged\n' \
+        "$(date -u +%H:%M:%S)" >> "$LOG"
+    publish_driver_state exited || exit 1
+    exec sleep infinity
 fi
 bash "$DRIVER" >> "$LOG" 2>&1 &
 driver_pid=$!
@@ -125,7 +176,10 @@ publish_driver_state running || exit 1
 wait "$driver_pid"
 driver_rc=$?
 rm -f "$DRIVER_PID_FILE"
-publish_driver_state exited || exit 1
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
+# `exited` is the terminal evidence seal consumed by the controller. Publish it
+# only after the supervisor's final log byte is durable, so a 410 health response
+# can never race ahead of authoritative artifact collection.
+publish_driver_state exited || exit 1
 exec sleep infinity

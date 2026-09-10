@@ -1,21 +1,26 @@
 /**
  * BrowserThumbnail — scaled-down iframe preview used by the minimized/expanded
  * BrowserStatusBar variants. Pure presentational component.
+ *
+ * Frames the content viewport (1280x800). Steel streams are the 1288x891
+ * computer window, so the iframe is translated to hide toolbar/borders.
  */
 
 import type { MouseEvent } from 'react';
 import { Maximize2 } from 'lucide-react';
+import {
+  computeCroppedLiveViewIframe,
+  computeLiveViewLetterbox,
+  resolveLiveViewChromeCrop,
+  resolveLiveViewDisplaySize,
+  resolveLiveViewWindowSize,
+} from './liveViewFrame';
 
 export interface BrowserThumbnailProps {
   browserUrl: string;
   /** Outer wrapper dimensions in px. */
   width: number;
   height: number;
-  /** Inner iframe dimensions (source viewport being scaled down). */
-  iframeWidth: number;
-  iframeHeight: number;
-  /** CSS scale applied to the iframe. Typically 0.1. */
-  scale: number;
   /** Wrapper positioning — BrowserStatusBar overlaps the parent container. */
   wrapperClassName: string;
   onClick?: (e: MouseEvent) => void;
@@ -26,13 +31,23 @@ export function BrowserThumbnail({
   browserUrl,
   width,
   height,
-  iframeWidth,
-  iframeHeight,
-  scale,
   wrapperClassName,
   onClick,
   disabled = false,
 }: BrowserThumbnailProps) {
+  const display = resolveLiveViewDisplaySize(browserUrl);
+  const windowSize = resolveLiveViewWindowSize(browserUrl);
+  const crop = resolveLiveViewChromeCrop(browserUrl);
+  const clip = computeLiveViewLetterbox(width, height, display.width, display.height);
+  const iframe = crop
+    ? computeCroppedLiveViewIframe(clip, crop)
+    : {
+        width: windowSize.width,
+        height: windowSize.height,
+        x: clip.offsetX,
+        y: clip.offsetY,
+        scale: clip.scale,
+      };
   return (
     <div
       onClick={disabled ? undefined : onClick}
@@ -43,9 +58,9 @@ export function BrowserThumbnail({
         src={browserUrl}
         className="border-0 pointer-events-none"
         style={{
-          width: `${iframeWidth}px`,
-          height: `${iframeHeight}px`,
-          transform: `scale(${scale})`,
+          width: `${iframe.width}px`,
+          height: `${iframe.height}px`,
+          transform: `translate(${iframe.x}px, ${iframe.y}px) scale(${iframe.scale})`,
           transformOrigin: 'top left',
         }}
         title="Preview"

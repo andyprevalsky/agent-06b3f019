@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# run-fleet-infra-stability-proof — sequential multi-slice cloud fleet
+# durability proof. Default mode is a $0 INFRA probe; --capability runs the
+# sampled benchmark tasks and advances past ordinary evaluator failures.
+#
+# Runs RUNS sequential fleets. Each fleet is WIDTH catalog-sampled tasks in
+# parallel under --infra-probe --strict-barrier (no LLM / run_benchmark).
+# Fail closed on the first INFRA result — every slice must report ZERO INFRA
+# exclusions / child INFRA_ERROR. In capability mode a non-zero controller exit
+# is classified from terminal `_batch/run.json`, not conflated with INFRA.
+#
+# Pool: unified catalog (tasks.json + polar_tasks.json). Probe never executes
+# the task body, so polar/browser names are fine for INFRA proof. LIVE DEMO
+# concurrency ($0 cache agents) stays on scripts/run-fleet-concurrency-modes
+# with demo-fleet-alpha|beta|gamma only.
+#
+# Usage:
+#   bash scripts/run-fleet-infra-stability-proof
+#   bash scripts/run-fleet-infra-stability-proof --dry-sample
+#   bash scripts/run-fleet-infra-stability-proof --runs 10 --width 20 --seed 20260908
+#   scripts/run-bench stability-proof -k 10 --concurrency 10 --seed 20260908
+#
+# Env overrides: FLEET_INFRA_PROOF_{RUNS,WIDTH,SEED,TIMEOUT}
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+RUNS="${FLEET_INFRA_PROOF_RUNS:-10}"
+WIDTH="${FLEET_INFRA_PROOF_WIDTH:-20}"
+SEED="${FLEET_INFRA_PROOF_SEED:-20260908}"
+TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-1800}"
+DRY_SAMPLE=0
+MODE=infra
+ARTIFACT_DIR="${FLEET_INFRA_PROOF_ARTIFACT_DIR:-/opt/cursor/artifacts}"
+FLEET_BIN="${FLEET_INFRA_PROOF_FLEET_BIN:-$ROOT_DIR/scripts/run-bench-fleet}"
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/run-fleet-infra-stability-proof [options]
+
+Options:
+  --dry-sample       Print all slices as JSON; no Fly / no fleet launch.
+  --capability       Run real tasks; ordinary benchmark failures still advance.
+  --runs <n>         Number of sequential fleets (default 10)
+  -k <n>             Alias for --runs
+  --width <n>        Parallel tasks per fleet (default 20)
+  --concurrency <n>  Alias for --width
+  --seed <n>         Deterministic sampling seed (default 20260908)
+  --timeout <s>      Per-fleet controller timeout (default 1800)
+  -h, --help         Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-sample) DRY_SAMPLE=1; shift ;;
+    --capability) MODE=capability; shift ;;
+    --runs|-k)
+      RUNS="${2:-}"; shift 2
+      case "$RUNS" in ''|*[!0-9]*|0) echo "❌ --runs must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --runs=*|-k=*)
+      RUNS="${1#*=}"; shift
+      case "$RUNS" in ''|*[!0-9]*|0) echo "❌ --runs must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --width|--concurrency)
+      WIDTH="${2:-}"; shift 2
+      case "$WIDTH" in ''|*[!0-9]*|0) echo "❌ --width must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --width=*|--concurrency=*)
+      WIDTH="${1#*=}"; shift
+      case "$WIDTH" in ''|*[!0-9]*|0) echo "❌ --width must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    --seed)
+      SEED="${2:-}"; shift 2
+      if ! [[ "$SEED" =~ ^-?[0-9]+$ ]]; then
+        echo "❌ --seed must be an integer" >&2; exit 2
+      fi
+      ;;
+    --timeout)
+      TIMEOUT="${2:-}"; shift 2
+      case "$TIMEOUT" in ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer" >&2; exit 2 ;; esac
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "❌ unknown arg: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+# Env overrides (FLEET_INFRA_PROOF_*) bypass CLI validation above — re-check
+# after parse so RUNS=0 cannot emit PASSED without testing a slice.
+case "$RUNS" in ''|*[!0-9]*|0)
+  echo "❌ RUNS must be a positive integer (got: $RUNS)" >&2; exit 2 ;;
+esac
+case "$WIDTH" in ''|*[!0-9]*|0)
+  echo "❌ WIDTH must be a positive integer (got: $WIDTH)" >&2; exit 2 ;;
+esac
+case "$TIMEOUT" in ''|*[!0-9]*|0)
+  echo "❌ TIMEOUT must be a positive integer (got: $TIMEOUT)" >&2; exit 2 ;;
+esac
+if ! [[ "$SEED" =~ ^-?[0-9]+$ ]]; then
+  echo "❌ SEED must be an integer (got: $SEED)" >&2; exit 2
+fi
+
+if [ "$WIDTH" -gt 32 ]; then
+  echo "❌ refusing width>32 (hard cap 32; same as infra canary; ratchet deliberately)" >&2
+  exit 2
+fi
+
+if [ "$DRY_SAMPLE" = "1" ]; then
+  exec python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" dry-proof \
+    --repo "$ROOT_DIR" \
+    --runs "$RUNS" \
+    --width "$WIDTH" \
+    --seed "$SEED"
+fi
+
+if [ "$MODE" = capability ]; then
+  STATE_ROOT="${FLEET_INFRA_PROOF_STATE_ROOT:-.context/fleet/capability-stability-proof}"
+  PROOF_ID="capability-stability-$(date -u +%Y%m%d%H%M%S)-$$"
+else
+  STATE_ROOT="${FLEET_INFRA_PROOF_STATE_ROOT:-.context/fleet/infra-stability-proof}"
+  PROOF_ID="infra-stability-$(date -u +%Y%m%d%H%M%S)-$$"
+fi
+mkdir -p "$ARTIFACT_DIR" "$STATE_ROOT"
+PROOF_DIR="$STATE_ROOT/$PROOF_ID"
+mkdir -p "$PROOF_DIR"
+SUMMARY_JSON="$PROOF_DIR/summary.json"
+SUMMARY_ARTIFACT="$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}.log"
+
+echo "🛡  fleet $MODE stability proof"
+echo "   runs=$RUNS width=$WIDTH seed=$SEED timeout=${TIMEOUT}s"
+echo "   proof_id=$PROOF_ID"
+if [ "$MODE" = capability ]; then
+  echo "   mode: real benchmark execution; FAILED advances, INFRA aborts"
+else
+  echo "   mode: --infra-probe (strict barrier, \$0, no LLM)"
+fi
+echo "   fail closed: any INFRA outcome aborts remaining slices"
+
+python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" "$MODE" <<'PY'
+import json, sys, time
+path, proof_id, runs, width, seed, timeout, mode = sys.argv[1:]
+json.dump(
+    {
+        "proof_id": proof_id,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "runs": int(runs),
+        "width": int(width),
+        "seed": int(seed),
+        "timeout_seconds": int(timeout),
+        "mode": mode,
+        "slices": [],
+        "status": "running",
+    },
+    open(path, "w"),
+    indent=2,
+)
+print(file=open(path, "a"))  # ensure trailing newline for readers
+PY
+
+PASSED=0
+FAILED_SLICE=""
+FAILED_RC=0
+
+record_slice() {
+  local idx="$1" rc="$2" classification="$3" log_path="$4" batch_path="$5"
+  shift 5
+  local -a names=("$@")
+  python3 - "$SUMMARY_JSON" "$idx" "$rc" "$classification" "$log_path" "$batch_path" "${names[@]}" <<'PY'
+import json, sys, time
+path = sys.argv[1]
+idx = int(sys.argv[2])
+rc = int(sys.argv[3])
+classification = sys.argv[4]
+log_path = sys.argv[5]
+batch_path = sys.argv[6] or None
+names = sys.argv[7:]
+data = json.loads(open(path).read() or "{}")
+data.setdefault("slices", []).append(
+    {
+        "slice": idx,
+        "rc": rc,
+        "classification": classification,
+        "passed": classification != "infra",
+        "names": names,
+        "log": log_path,
+        "batch_run": batch_path,
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+)
+if classification == "infra":
+    data["status"] = "failed"
+    data["failed_slice"] = idx
+open(path, "w").write(json.dumps(data, indent=2) + "\n")
+PY
+}
+
+classify_capability_slice() {
+  local log_path="$1"
+  shift
+  python3 - "$log_path" "$@" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+log_path = Path(sys.argv[1])
+expected = sys.argv[2:]
+try:
+    text = log_path.read_text()
+except OSError:
+    print("infra\t")
+    raise SystemExit
+matches = re.findall(
+    r"^🔏 execution provenance: (.+)/execution-provenance[.]json$",
+    text,
+    flags=re.MULTILINE,
+)
+if not matches:
+    print("infra\t")
+    raise SystemExit
+batch_path = Path(matches[-1]) / "_batch" / "run.json"
+try:
+    payload = json.loads(batch_path.read_text())
+except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+tasks = payload.get("tasks")
+if not isinstance(tasks, list):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+names = [task.get("name") for task in tasks if isinstance(task, dict)]
+if names != expected or len(names) != len(tasks):
+    print(f"infra\t{batch_path}")
+    raise SystemExit
+statuses = [str(task.get("status") or "").upper() for task in tasks]
+known = {"PASSED", "FAILED", "SKIPPED", "INFRA_ERROR", "ERROR", "CANCELLED"}
+if any(status not in known for status in statuses):
+    print(f"infra\t{batch_path}")
+elif any(status in {"INFRA_ERROR", "ERROR", "CANCELLED"} for status in statuses):
+    print(f"infra\t{batch_path}")
+elif all(bool(task.get("passed")) for task in tasks):
+    print(f"pass\t{batch_path}")
+else:
+    print(f"harness\t{batch_path}")
+PY
+}
+
+finalize() {
+  local status="$1"
+  python3 - "$SUMMARY_JSON" "$status" "$PASSED" <<'PY'
+import json, sys, time
+path, status, passed = sys.argv[1], sys.argv[2], int(sys.argv[3])
+data = json.loads(open(path).read() or "{}")
+data["status"] = status
+data["passed_slices"] = passed
+data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+open(path, "w").write(json.dumps(data, indent=2) + "\n")
+PY
+  cp -f "$SUMMARY_JSON" "$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}_summary.json" 2>/dev/null || true
+}
+
+{
+  echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED"
+  for ((i = 0; i < RUNS; i++)); do
+    mapfile -t BENCHES < <(
+      python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" sample \
+        --repo "$ROOT_DIR" \
+        --width "$WIDTH" \
+        --seed "$SEED" \
+        --slice "$i"
+    )
+    if [ "${#BENCHES[@]}" -ne "$WIDTH" ]; then
+      echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2
+      FAILED_SLICE="$i"
+      FAILED_RC=2
+      record_slice "$i" 2 infra "$PROOF_DIR/slice-${i}.log" "" "${BENCHES[@]:-}"
+      finalize failed
+      # stdout only — the outer `tee "$SUMMARY_ARTIFACT"` captures these lines;
+      # a second `tee -a` races the outer writer and can clobber failure lines.
+      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)"
+      exit 2
+    fi
+
+    SLICE_LOG="$PROOF_DIR/slice-${i}.log"
+    echo ""
+    echo "════════════════════════════════════════════════════════════"
+    echo "▶ slice $((i + 1))/$RUNS  (index=$i, width=$WIDTH)"
+    echo "  tasks: ${BENCHES[*]}"
+    echo "  log: $SLICE_LOG"
+    echo "════════════════════════════════════════════════════════════"
+
+    set +e
+    if [ "$MODE" = capability ]; then
+      FLEET_STABILITY_SLICE="$i" \
+      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
+        bash "$FLEET_BIN" \
+          "${BENCHES[@]}" \
+          --timeout "$TIMEOUT" \
+          --foreground \
+          > >(tee "$SLICE_LOG") 2>&1
+    else
+      FLEET_STABILITY_SLICE="$i" \
+      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
+        bash "$FLEET_BIN" \
+          "${BENCHES[@]}" \
+          --infra-probe \
+          --timeout "$TIMEOUT" \
+          --foreground \
+          > >(tee "$SLICE_LOG") 2>&1
+    fi
+    rc=$?
+    set -e
+
+    if [ "$MODE" = capability ]; then
+      classification_line="$(classify_capability_slice "$SLICE_LOG" "${BENCHES[@]}")"
+      IFS=$'\t' read -r classification batch_path <<< "$classification_line"
+    elif [ "$rc" -eq 0 ]; then
+      classification=pass
+      batch_path=""
+    else
+      classification=infra
+      batch_path=""
+    fi
+    record_slice "$i" "$rc" "$classification" "$SLICE_LOG" "$batch_path" "${BENCHES[@]}"
+
+    if [ "$classification" = infra ]; then
+      FAILED_SLICE="$i"
+      FAILED_RC="$rc"
+      [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
+      finalize failed
+      echo "❌ ${MODE^^} STABILITY PROOF FAILED at slice $i (fleet exit=$rc)"
+      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining"
+      exit "$FAILED_RC"
+    fi
+
+    PASSED=$((PASSED + 1))
+    echo "✅ slice $i NO-INFRA classification=$classification ($PASSED/$RUNS)"
+  done
+
+  finalize passed
+  echo ""
+  echo "✅ ${MODE^^} STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)"
+  echo "   summary: $SUMMARY_JSON"
+} 2>&1 | tee "$SUMMARY_ARTIFACT"
+exit "${PIPESTATUS[0]}"

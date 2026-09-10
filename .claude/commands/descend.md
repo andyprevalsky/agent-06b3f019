@@ -172,6 +172,56 @@ slice one task at a time, rerunning a failed subset, or running a diagnostic
 subset does not change the original slice name, task list, or denominator.
 Record and report every executed subset separately from overall slice progress.
 
+## One benchmark command
+
+Use `scripts/run-bench` for every suite, slice, task, bounded-concurrency
+campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
+`run-bench-cloud`, or an ad hoc repetition loop directly.
+
+~~~text
+/descend or operator
+  → scripts/run-bench <slice-or-task...> [--concurrency N] [-k K|--runs K]
+      → canonical catalog selection
+      → one fleet for the ordinary fully-parallel slice
+      └─ bounded campaign for task × repetition instances
+           → one shared serialized infra-canary stamp transaction
+           → at most N one-task fleet controllers
+           → distinct controller lock + run ID + machine/volume/queue per instance
+  → scripts/run-bench stability-proof -k K --concurrency N --seed S
+      → K sequential random ready-catalog slices, N isolated tasks per slice
+      → terminal _batch/run.json classification
+           ├─ PASSED / FAILED / SKIPPED → record and advance
+           └─ INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
+~~~
+
+Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
+`incomplete`; explicit task names may be combined. Selection order is preserved,
+group members stay in catalog order, and duplicates are removed. The command
+prints the resolved list and count before any provider action.
+
+With no campaign flags, one isolated fleet runs the resolved tasks concurrently
+and preserves the single batch artifact. `-k K` and `--runs K` are equivalent
+and create K independent runs of every resolved task; `--concurrency N` bounds
+how many of those one-task fleet controllers may be active. Repetitions default
+to sequential when no concurrency is supplied. Every copy remains isolated;
+never implement `-k` by passing duplicate task names to one fleet.
+
+For a consecutive no-INFRA acceptance gate, use
+`scripts/run-bench stability-proof -k K --concurrency N --seed S`. The sampler
+draws every slice from the unified ready catalog (`tasks.json` plus
+`polar_tasks.json`), and every slice runs to a terminal batch projection before
+the next starts. An ordinary benchmark/evaluator failure counts as a completed
+slice; missing, malformed, `INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
+abort the command so the streak can restart only after RCA and a fix.
+
+The command contract is exercised end to end with fake provider children inside
+the existing always-run `Descend Command` deploy gate: selection, both `-k`
+spellings, concurrency bounds, per-copy identities, child-failure propagation,
+ready-catalog random slicing, terminal batch classification, and fail-closed
+INFRA reset. This must remain an offline `$0` extension of the existing
+always-run `Descend Command` deploy gate; never add a separate live benchmark
+stage or cloud wait to `/deploy`.
+
 ## Persistent state
 
 Create .context/descend/<run-id>/state.json and update it after every state
@@ -368,12 +418,13 @@ cost, or a single-task subset.
 Run only through the isolated entrypoint (cloud fleet by default):
 
 ~~~bash
-scripts/run-bench <resolved task names...>
+scripts/run-bench <resolved slice-or-task names...>
 ~~~
 
-`scripts/run-bench` already defaults to `run-bench-fleet`. Never prepend
-`--local` unless Andy asked for local. Never use `--single-box` (disabled;
-not parallel-safe).
+`scripts/run-bench` already defaults to `run-bench-fleet` and fail-closes on a
+stale/missing infra-canary stamp. It owns `--concurrency N` plus `-k K`/`--runs K`
+when independent repeated trials are required. Never prepend `--local` unless
+Andy asked for local. Never use `--single-box` (disabled; not parallel-safe).
 
 Capture the controller PID, dashboard, artifact path, actual start/finish
 timestamps, and every agent FE link. Actively monitor until every requested

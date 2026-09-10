@@ -19,13 +19,14 @@
  * [USER_CONTROL] -> interactive iframe + Hand back control on both form factors
  *
  * VIEWPORT STATE:
- * [DESKTOP] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
- * [MOBILE] -> preserve the provider's desktop viewport and scale it into the
- * aspect-matched full-width pane
+ * [DESKTOP|MOBILE] -> letterbox the 1280x800 content viewport into the leftover
+ * pane (Steel chrome is clipped in LiveViewFrame). Never resize the remote
+ * viewport: that breaks antibot fingerprint (spoofed outer/screen vs a
+ * pane-sized inner).
  */
 
 import { createPortal } from 'react-dom';
-import { useRef, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -42,7 +43,7 @@ import {
 } from './BrowserFullscreenOverlays';
 import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
-import { useBrowserViewportSync } from './useBrowserViewportSync';
+import { LiveViewFrame } from './LiveViewFrame';
 import type {
   BrowserSessionMetadata,
   OutputSchemaRef,
@@ -151,14 +152,12 @@ type PaneProps = Pick<
   | 'isUserControlling'
   | 'onResume'
 > & {
-  paneRef: RefObject<HTMLDivElement>;
   isMobile: boolean;
   controlState: BrowserControlState;
 };
 
 /** Live-iframe pane + agent overlays. No header or redundant helper footer. */
 function BrowserPaneBody({
-  paneRef,
   agentId,
   taskId,
   browserUrl,
@@ -172,50 +171,36 @@ function BrowserPaneBody({
 }: PaneProps) {
   const glowTone = resolveBrowserBorderGlowTone(messages, taskId);
   return (
-    <div
-      className={cn(
-        'flex min-h-0 flex-col',
-        isMobile ? 'w-full flex-none overflow-hidden' : 'flex-1',
-      )}
-      // Kernel streams at 1280x800 (8:5). An explicit aspect ratio keeps the
-      // cross-origin player edge-to-edge without depending on generated CSS.
+    <LiveViewFrame
+      url={browserUrl}
+      title="Browser"
+      iframeKey={`${taskId}:${browserUrl}`}
+      className={cn('flex min-h-0 flex-col bg-white', isMobile ? 'w-full flex-none' : 'flex-1')}
       style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
     >
-      <div ref={paneRef} className="relative flex-1 bg-white">
-        <iframe
-          key={`${taskId}:${browserUrl}`}
-          src={browserUrl}
-          className="h-full w-full border-0"
-          allow="clipboard-read; clipboard-write"
-          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
-          title="Browser"
+      {controlState === 'active' && !isUserControlling && <BrowserBorderGlow tone={glowTone} />}
+      {controlState === 'active' && !isUserControlling && (
+        <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
+      )}
+      {!isMobile && controlState === 'active' && (
+        <TakeControlChip
+          onResume={onResume}
+          isResuming={isResuming}
+          isUserControlling={isUserControlling}
         />
-        {controlState === 'active' && !isUserControlling && (
-          <BrowserBorderGlow tone={glowTone} />
-        )}
-        {controlState === 'active' && !isUserControlling && (
-          <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
-        )}
-        {!isMobile && controlState === 'active' && (
-          <TakeControlChip
-            onResume={onResume}
-            isResuming={isResuming}
-            isUserControlling={isUserControlling}
-          />
-        )}
-        {!isMobile && controlState === 'waiting' && (
-          <WaitingForAssistanceChip
-            onResume={onResume}
-            isResuming={isResuming}
-            request={authAssistanceRequest ?? 'Complete the sign-in so I can continue'}
-            isMobile={isMobile}
-          />
-        )}
-        {!isMobile && controlState === 'disconnected' && (
-          <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
-        )}
-      </div>
-    </div>
+      )}
+      {!isMobile && controlState === 'waiting' && (
+        <WaitingForAssistanceChip
+          onResume={onResume}
+          isResuming={isResuming}
+          request={authAssistanceRequest ?? 'Complete the sign-in so I can continue'}
+          isMobile={isMobile}
+        />
+      )}
+      {!isMobile && controlState === 'disconnected' && (
+        <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
+      )}
+    </LiveViewFrame>
   );
 }
 
@@ -282,16 +267,13 @@ function DesktopFullscreen({
 }
 
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
-  const browserPaneRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
   // Confirmed user ownership outranks stale disconnect/auth-assistance signals.
   // Those signals can remain in the message stream while the user is driving.
   const controlState = props.isUserControlling ? 'active' : resolveBrowserControlState(props);
-  useBrowserViewportSync(props.taskId, browserPaneRef, !isMobile);
 
   const pane = (
     <BrowserPaneBody
-      paneRef={browserPaneRef}
       agentId={props.agentId}
       taskId={props.taskId}
       browserUrl={props.browserUrl}

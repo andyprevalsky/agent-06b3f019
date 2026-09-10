@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${CLOUDBENCH_ROOT_UNDER_TEST:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+tmp="$(mktemp -d)"
+server_pid=""
+driver_pid=""
+unowned_pid=""
+cleanup() {
+    [ -z "$server_pid" ] || kill "$server_pid" 2>/dev/null || true
+    [ -z "$driver_pid" ] || kill -KILL "$driver_pid" 2>/dev/null || true
+    [ -z "$unowned_pid" ] || kill "$unowned_pid" 2>/dev/null || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+run_token="test-run-$$"
+auth_token="test-auth-$$"
+ready_file="$tmp/status.ready"
+driver_script="$tmp/fake-driver.sh"
+
+cat > "$driver_script" <<'SH'
+#!/usr/bin/env bash
+set -u
+root="$1"
+run_token="$2"
+trap '
+  printf "replay-finalized\n" > "$root/replay.finalized"
+  printf "%s\n" "$run_token" > "$root/cloudbench-driver-clean-$run_token.ack.tmp"
+  mv "$root/cloudbench-driver-clean-$run_token.ack.tmp" "$root/cloudbench-driver-clean-$run_token.ack"
+  exit 0
+' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$driver_script"
+
+CLOUDBENCH_RUN_TOKEN="$run_token" "$driver_script" "$tmp" "$run_token" &
+driver_pid=$!
+printf '%s\n' "$driver_pid" > "$tmp/cloudbench-driver.pid"
+printf 'running\n' > "$tmp/cloudbench-driver.state"
+
+# This is the production-shaped status-service boundary: the caller supplies a
+# run token, binds a data-plane listener, and waits for an atomic ready marker.
+CLOUDBENCH_BARRIER_TOKEN="$auth_token" \
+    python3 "$ROOT/scripts/cloudbench-status-server.py" \
+        --bind 127.0.0.1 --port 0 --directory "$tmp" \
+        --run-token "$run_token" --ready-file "$ready_file" \
+        >"$tmp/status.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 100); do
+    [ -s "$ready_file" ] && break
+    kill -0 "$server_pid" 2>/dev/null || {
+        wait "$server_pid" || status=$?
+        cat "$tmp/status.log" >&2
+        fail "production-shaped status service exited before ready (status ${status:-0})"
+    }
+    sleep 0.05
+done
+[ -s "$ready_file" ] || fail "status service did not become ready"
+port="$(cat "$ready_file")"
+
+unauthorized="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:$port/shutdown")"
+[ "$unauthorized" = 403 ] || fail "unauthenticated shutdown returned HTTP $unauthorized"
+kill -0 "$driver_pid" 2>/dev/null || fail "unauthenticated request signalled the guest driver"
+
+before_request="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown-health")"
+[ "$before_request" = 409 ] || fail "shutdown health before request returned HTTP $before_request"
+
+requested="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown")"
+[ "$requested" = 202 ] || fail "authenticated shutdown returned HTTP $requested"
+
+ack_code=""
+for _ in $(seq 1 100); do
+    ack_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $auth_token" \
+        "http://127.0.0.1:$port/shutdown-health")"
+    [ "$ack_code" = 204 ] && break
+    sleep 0.05
+done
+[ "$ack_code" = 204 ] || fail "guest cleanup was never acknowledged (HTTP $ack_code)"
+[ -s "$tmp/replay.finalized" ] || fail "cleanup acknowledged before replay finalization"
+wait "$driver_pid"
+driver_pid=""
+
+# A stale/reused pid must never let one run signal another process.
+rm -f "$tmp/cloudbench-shutdown-$run_token.request" \
+    "$tmp/cloudbench-driver-clean-$run_token.ack"
+sleep 60 &
+unowned_pid=$!
+printf '%s\n' "$unowned_pid" > "$tmp/cloudbench-driver.pid"
+printf 'running\n' > "$tmp/cloudbench-driver.state"
+wrong_owner="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown")"
+[ "$wrong_owner" = 409 ] || fail "unowned driver pid returned HTTP $wrong_owner"
+kill -0 "$unowned_pid" 2>/dev/null || fail "status service signalled a process owned by another run"
+kill "$unowned_pid"
+wait "$unowned_pid" 2>/dev/null || true
+unowned_pid=""
+
+# A shutdown racing driver startup remains durable for the boot entrypoint.
+rm -f "$tmp/cloudbench-driver.pid" "$tmp/cloudbench-driver.state" \
+    "$tmp/cloudbench-shutdown-$run_token.request"
+booting="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $auth_token" \
+    "http://127.0.0.1:$port/shutdown")"
+[ "$booting" = 202 ] || fail "pre-driver shutdown returned HTTP $booting"
+[ -e "$tmp/cloudbench-shutdown-$run_token.request" ] \
+    || fail "pre-driver shutdown request was not durable"
+
+if CLOUDBENCH_BARRIER_TOKEN="$auth_token" \
+    python3 "$ROOT/scripts/cloudbench-status-server.py" \
+        --bind 127.0.0.1 --port 0 --directory "$tmp" \
+        --run-token 'invalid/token' >"$tmp/invalid-token.log" 2>&1; then
+    fail "status service accepted an unsafe run token"
+fi
+rg -q 'invalid run token' "$tmp/invalid-token.log" \
+    || fail "unsafe run token did not fail at the owned validation boundary"
+
+echo "PASS: status service enforces authenticated run-scoped shutdown and cleanup acknowledgement"
