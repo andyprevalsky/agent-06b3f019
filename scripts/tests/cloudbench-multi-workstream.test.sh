@@ -1084,7 +1084,23 @@ elif args[:2] == ["machine", "status"]:
         found = find_machine(state, args[2])
     if found is None:
         sys.exit(1)
-    print(f"  State: {found['state']}")
+    if "-d" in args:
+        print(json.dumps(found.get("config") or {}))
+    else:
+        mounts = (found.get("config") or {}).get("mounts") or []
+        volume = mounts[0].get("volume", "") if mounts else ""
+        print(
+            f"""Machine ID: {found['id']}
+State: {found['state']}
+
+VM
+ ID            │ {found['id']}
+ State         │ {found['state']}
+ Name          │ {found['name']}
+ Private IP    │ {found.get('private_ip', '')}
+ Region        │ {found.get('region', '')}
+ Volume        │ {volume}"""
+        )
 elif args[:2] == ["machine", "update"]:
     machine_id = args[2]
     if os.path.exists(os.path.join(FAKE_DIR, "delay-machine-update")):
