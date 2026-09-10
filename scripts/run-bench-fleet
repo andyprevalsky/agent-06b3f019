@@ -3982,7 +3982,8 @@ import re
 import sys
 
 machine_id = os.environ["MACHINE_ID"]
-lines = sys.stdin.read().splitlines()
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+lines = [ansi.sub("", line) for line in sys.stdin.read().splitlines()]
 top_ids = [
     line.split(":", 1)[1].strip()
     for line in lines
@@ -3993,21 +3994,38 @@ top_states = [
     for line in lines
     if line.startswith("State:")
 ]
+vm_headers = [index for index, line in enumerate(lines) if line.strip() == "VM"]
+if len(vm_headers) != 1:
+    raise SystemExit(2)
+vm_start = vm_headers[0] + 1
+vm_end = next(
+    (
+        index
+        for index in range(vm_start, len(lines))
+        if lines[index].strip() == "Event Logs"
+    ),
+    len(lines),
+)
 pairs = {}
-for line in lines:
-    match = re.fullmatch(r"\s*([^=]+?)\s*=\s*(.*?)\s*", line)
-    if not match:
+separators = set()
+for line in lines[vm_start:vm_end]:
+    if not line.strip():
         continue
-    key, value = match.groups()
+    match = re.fullmatch(r"\s*([^=│]+?)\s*(=|│)\s*(.*?)\s*", line)
+    if not match:
+        raise SystemExit(2)
+    key, separator, value = match.groups()
     if key in pairs:
         raise SystemExit(2)
     pairs[key] = value
+    separators.add(separator)
 state = pairs.get("State", "")
 name = pairs.get("Name", "")
 private_ip = pairs.get("Private IP", "")
 if (
     top_ids != [machine_id]
     or len(top_states) != 1
+    or len(separators) != 1
     or pairs.get("ID") != machine_id
     or state != top_states[0]
     or not re.fullmatch(r"[a-z][a-z0-9_-]*", state)
