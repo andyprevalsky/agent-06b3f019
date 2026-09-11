@@ -18,7 +18,10 @@ const requestedConcurrency = Number.parseInt(process.env.BACKEND_UNIT_CONCURRENC
 const coverageDir = process.env.BACKEND_UNIT_COVERAGE_DIR;
 // Recheck is CPU-heavy. Under coverage it shares the host with the backend and
 // 160 blackbox domains, so a 1s analyzer budget times out even on safe range
-// queries. Run those files first, alone, then start the parallel pool.
+// queries. Run those files first, alone, and omit NODE_V8_COVERAGE on that
+// child — inherited V8 coverage collection is enough load to miss the budget
+// even with no sibling unit workers. Coverage of regexSafety.ts still lands
+// via the instrumented backend / data-grep path.
 const SERIAL_FIRST_FILES = new Set(['regex-safety.test.ts']);
 
 if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
@@ -212,16 +215,21 @@ async function main(): Promise<void> {
     const startedAt = performance.now();
     const chunks: Buffer[] = [];
     // Preserve one isolated process per file without npm/tsx wrapper processes.
+    const childEnv = {
+      ...process.env,
+      ...localDatabaseEnv,
+    };
+    if (SERIAL_FIRST_FILES.has(basename(file))) {
+      delete childEnv.NODE_V8_COVERAGE;
+    } else if (coverageDir !== undefined) {
+      childEnv.NODE_V8_COVERAGE = coverageDir;
+    }
     const child = spawn(
       process.execPath,
       ['--experimental-test-module-mocks', '--import', 'tsx', file],
       {
         cwd: backendDir,
-        env: {
-          ...process.env,
-          ...localDatabaseEnv,
-          ...(coverageDir === undefined ? {} : { NODE_V8_COVERAGE: coverageDir }),
-        },
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       }
     );

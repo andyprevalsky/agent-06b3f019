@@ -309,8 +309,13 @@ assert.match(
 );
 assert.match(
   unitRunner,
-  /NODE_V8_COVERAGE: coverageDir/,
-  'every isolated unit child must retain V8 coverage instrumentation'
+  /SERIAL_FIRST_FILES\.has\(basename\(file\)\)[\s\S]*delete childEnv\.NODE_V8_COVERAGE/,
+  'serial-first analyzer files must omit inherited NODE_V8_COVERAGE so recheck stays inside the 1s budget'
+);
+assert.match(
+  unitRunner,
+  /else if \(coverageDir !== undefined\) \{\s*childEnv\.NODE_V8_COVERAGE = coverageDir/,
+  'parallel unit children must retain V8 coverage instrumentation'
 );
 assert.ok(
   blackboxRunner.indexOf('runWithConcurrency(parallelDomains') <
