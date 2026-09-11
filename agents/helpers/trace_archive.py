@@ -925,7 +925,9 @@ def _submit_archive_job(
                 compress=compress,
             )
             if result is not None and drain_backend_outbox_after_success:
-                _drain_backend_outbox()
+                # The current backend may belong to an isolated run. Retrying a
+                # retired root here adopts its finalization locks and backlog.
+                _drain_backend_outbox(root_agent_id=safe_root)
         except Exception as exc:
             logger.warning(
                 "trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200]

@@ -1200,6 +1200,78 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
             restore()
 
 
+async def test_successful_archive_write_drains_only_its_root():
+    """A current run must not deliver a retired run's backlog to its own backend."""
+    import helpers.trace_archive as archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        old_env = {key: os.environ.get(key) for key in (
+            "TRACE_ARCHIVE_ASYNC_WRITES", "BACKEND_API_URL", "BACKEND_API_KEY",
+        )}
+        old_client, old_executor = archive.httpx.Client, archive._ARCHIVE_EXECUTOR
+        executor = ThreadPoolExecutor(max_workers=1)
+        posts = []
+        accepting = False
+
+        class Client:
+            is_closed = False
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def post(self, url, headers, json, **kwargs):
+                posts.append((json["rootAgentId"], json["path"]))
+                class Response:
+                    status_code = 200 if accepting else 503
+                    text = "fixture unavailable" if not accepting else ""
+                    def json(self):
+                        return {"ref": "fixture://stored"}
+                return Response()
+
+        try:
+            os.environ.update(TRACE_ARCHIVE_BACKEND="r2", TRACE_ARCHIVE_ASYNC_WRITES="0",
+                              BACKEND_API_URL="https://archive.example.test", BACKEND_API_KEY="fixture-key")
+            archive.httpx.Client = Client
+            archive._BACKEND_CLIENTS.client = None
+            archive._BACKEND_CLIENTS.client_factory = None
+            archive._ARCHIVE_EXECUTOR = executor
+            for agent in ("a-retired-root", "z-current-root"):
+                assert archive.archive_json(root_agent_id=agent, path="llm/pending.json.gz.enc",
+                                            payload={"owner": agent}) is None
+            retired = archive._outbox_root() / "a-retired-root" / "llm/pending.json.gz.enc"
+            current = archive._outbox_root() / "z-current-root" / "llm/pending.json.gz.enc"
+            retained = retired.read_bytes()
+            retained_meta = Path(str(retired) + ".meta.json").read_bytes()
+            posts.clear()
+            accepting = True
+            os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+            assert archive.archive_json(root_agent_id="z-current-root", path="llm/current.json.gz.enc",
+                                        payload={"current": True}) is not None
+            await asyncio.to_thread(executor.shutdown, True)
+            assert posts == [("z-current-root", "llm/current.json.gz.enc"),
+                             ("z-current-root", "llm/pending.json.gz.enc")], posts
+            assert not current.exists(), "the current root's own backlog must still drain"
+            assert retired.read_bytes() == retained, "another run's encrypted payload must remain untouched"
+            assert Path(str(retired) + ".meta.json").read_bytes() == retained_meta
+            posts.clear()
+            assert archive._drain_backend_outbox(root_agent_id="a-retired-root") == 1
+            assert posts == [("a-retired-root", "llm/pending.json.gz.enc")]
+            assert not retired.exists(), "explicit recovery of the retired root must still work"
+        finally:
+            executor.shutdown(wait=True)
+            archive._ARCHIVE_EXECUTOR = old_executor
+            archive.httpx.Client = old_client
+            archive._BACKEND_CLIENTS.client = None
+            archive._BACKEND_CLIENTS.client_factory = None
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            restore()
+
+
 async def test_async_local_submission_does_not_adopt_later_r2_config():
     import helpers.trace_archive as trace_archive
     from helpers.trace_archive import archive_json
@@ -1508,6 +1580,10 @@ async def run_all_tests():
     await r.record_async(
         "backend_failure_spools_encrypted_outbox_and_async_drain",
         test_backend_failure_spools_encrypted_outbox_and_async_drain,
+    )
+    await r.record_async(
+        "successful_archive_write_drains_only_its_root",
+        test_successful_archive_write_drains_only_its_root,
     )
     await r.record_async(
         "async_local_submission_does_not_adopt_later_r2_config",

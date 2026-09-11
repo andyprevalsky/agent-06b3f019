@@ -76,10 +76,19 @@ for (const [name, harness] of [
   ['blackbox', blackboxScript],
 ] as const) {
   assert.ok(
-    harness.indexOf('npx prisma generate') < harness.indexOf('npx prisma db push'),
-    `${name} launcher must regenerate Prisma before syncing or starting test children`
+    harness.indexOf('node "$SCRIPT_DIR/assert-prisma-client-current.mjs"') > 0 &&
+      harness.indexOf('node "$SCRIPT_DIR/assert-prisma-client-current.mjs"') <
+        harness.indexOf('npx prisma db push'),
+    `${name} launcher must verify Prisma freshness before syncing or starting test children`
   );
+  assert.doesNotMatch(harness, /prisma generate/, `${name} must not rewrite shared dependencies`);
 }
+
+execFileSync('python3', ['../scripts/tests/prisma-test-launcher-readonly.test.py'], {
+  cwd: process.cwd(),
+  stdio: 'inherit',
+  timeout: 90000,
+});
 
 assert.match(
   coverageScript,

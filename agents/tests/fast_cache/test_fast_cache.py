@@ -133,6 +133,163 @@ async def _drain(agen) -> List[Any]:
     return [c async for c in agen]
 
 
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+@pytest.mark.parametrize("capture", [True, False])
+def test_cache_replay_captures_actual_completion(mem, monkeypatch, tmp_path, entrypoint, capture):
+    """The real replay and disk writer must retain current input and synthetic output."""
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+    agent_id = "replay-evidence-contract"
+    messages = [{"role": "user", "content": "Current replay request"}]
+    tools = [{"type": "function", "function": {"name": "set_plan", "parameters": {"type": "object"}}}]
+    kwargs = dict(
+        pool="rose-1-ultra",
+        messages=messages,
+        tools=tools,
+        agent_id=agent_id,
+        provider_fast_mode=True,
+        dump_context=capture,
+    )
+    stored = rose_cache.empty_response()
+    for chunk in _full_stream():
+        rose_cache.accumulate_chunk(stored, chunk)
+
+    async def body():
+        context = FastCacheContext(enabled=True, goal="evidence contract", write_enabled=False)
+        set_context(context)
+        key = context.llm_key("execute_loop", rose_cache.request_key_material(kwargs))
+        mem.data[key] = stored
+        client = RoseClient(openrouter_key="must-not-call-live")
+
+        async def forbid_live(**_kwargs):
+            raise AssertionError("a replay must never call a live provider")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(client, "_complete_impl", forbid_live)
+        expected = await _drain(rose_cache.replay(stored))
+        stream = (
+            client.complete(call_site="execute_loop", **kwargs)
+            if entrypoint == "central"
+            else rose_cache.cached_complete(client, call_site="execute_loop", **kwargs)
+        )
+        chunks = await _drain(stream)
+        assert chunks == expected
+        assert mem.set_calls == 0
+        return key
+
+    key = asyncio.run(body())
+    dumps = list(tmp_path.rglob("*.json"))
+    assert len(dumps) == int(capture)
+    if capture:
+        dump = json.loads(dumps[0].read_text())
+        assert dump["agent_id"] == agent_id
+        assert dump["messages"] == messages
+        assert dump["tools"] == tools
+        assert dump["extra"]["completion_source"] == "fast_cache"
+        assert dump["extra"]["cache_key"] == key
+        assert dump["output"]["actual_model"] == "fast-cache"
+        assert dump["output"]["content"] == "Hello world"
+        assert dump["output"]["tool_calls"] == stored["tool_calls"]
+        assert dump["output"]["usage"]["completion_tokens"] == 0
+        assert dump["output"]["replay_complete"] is True
+
+
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+def test_cache_passthrough_dump_is_labeled(mem, monkeypatch, tmp_path, entrypoint):
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+
+    async def body():
+        set_context(FastCacheContext(enabled=True, goal=_soft_complete_bench_goal()))
+        client = RoseClient(openrouter_key="must-not-call-live")
+        kwargs = dict(
+            pool="rose-1-ultra",
+            agent_id="passthrough-contract",
+            messages=[{"role": "user", "content": "Current completion context"}],
+        )
+        stream = (
+            client.complete(call_site="completion_summary", **kwargs)
+            if entrypoint == "central"
+            else rose_cache.cached_complete(client, call_site="completion_summary", **kwargs)
+        )
+        chunks = await _drain(stream)
+        assert chunks[-1].kind == "done"
+
+    asyncio.run(body())
+    dumps = list(tmp_path.rglob("*.json"))
+    assert len(dumps) == 1
+    dump = json.loads(dumps[0].read_text())
+    assert dump["extra"]["completion_source"] == "fast_cache"
+    assert dump["extra"]["replay_reason"] == "fm_terminal_passthrough"
+    assert dump["extra"]["cache_hit_key"] == "terminal_passthrough"
+    assert dump["output"]["actual_model"] == "fast-cache"
+    assert dump["output"]["replay_complete"] is True
+
+
+@pytest.mark.parametrize("entrypoint", ["central", "compatibility"])
+def test_cache_dump_marks_consumer_abandonment(mem, monkeypatch, tmp_path, entrypoint):
+    from helpers import observability
+    from providers.rose.client import RoseClient
+
+    monkeypatch.setattr(observability, "_DUMP_ROOT", tmp_path)
+    monkeypatch.setattr(observability, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(observability, "archive_json", lambda **kwargs: None)
+
+    async def body():
+        ctx = FastCacheContext(enabled=True, goal="abandonment contract", write_enabled=False)
+        set_context(ctx)
+        kwargs = dict(pool="rose-1-ultra", agent_id="abandoned-contract", messages=[])
+        key = ctx.llm_key("execute_loop", rose_cache.request_key_material({**kwargs, "provider_fast_mode": True}))
+        mem.data[key] = {"content": "not consumed"}
+        client = RoseClient(openrouter_key="must-not-call-live")
+        stream = (client.complete(call_site="execute_loop", **kwargs)
+                  if entrypoint == "central" else
+                  rose_cache.cached_complete(client, call_site="execute_loop", **kwargs))
+        assert (await anext(stream)).kind == "metadata"
+        await stream.aclose()
+        # Check before event-loop shutdown/GC can finalize a leaked inner iterator.
+        dump = json.loads(next(tmp_path.rglob("*.json")).read_text())
+        assert dump["output"]["replay_complete"] is False
+        assert dump["output"]["content"] == ""
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("failure", ["start", "finish"])
+def test_cache_dump_failure_preserves_stream(monkeypatch, failure):
+    from helpers import observability
+
+    def fail(**kwargs):
+        raise OSError("capture unavailable")
+
+    monkeypatch.setattr(observability, "dump_llm_context", fail if failure == "start" else lambda **kwargs: "dump")
+    monkeypatch.setattr(observability, "update_llm_dump", lambda *args, **kwargs: fail())
+
+    async def body():
+        stored = {"content": "unchanged response"}
+        expected = await _drain(rose_cache.replay(stored))
+        actual = await _drain(
+            rose_cache.replay_with_context(
+                stored,
+                call_site="execute_loop",
+                cache_key="key",
+                hit_key="key",
+                complete_kwargs={"agent_id": "failure-contract", "messages": []},
+            )
+        )
+        assert actual == expected
+
+    asyncio.run(body())
+
+
 # ---------------------------------------------------------------------------
 # Normalization / keys  (anti-bust, exact-match, PII)
 # ---------------------------------------------------------------------------

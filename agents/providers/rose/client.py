@@ -26,6 +26,7 @@ import contextlib
 import os
 import time
 import uuid
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Dict, List, Optional, Type, cast
 
 import httpx
@@ -564,7 +565,7 @@ class RoseClient:
             empty_response as _fc_empty,
         )
         from providers.fast_cache.rose_cache import (
-            replay as _fc_replay,
+            replay_with_context as _fc_replay,
         )
         from providers.fast_cache.rose_cache import (
             request_key_material as _fc_request_key_material,
@@ -654,8 +655,16 @@ class RoseClient:
                     hit_key=hit_key or key,
                     alias_hit=bool(hit_key and hit_key != key),
                 )
-                async for chunk in _fc_replay(stored):
-                    yield chunk
+                async with aclosing(_fc_replay(
+                    stored,
+                    call_site=call_site,
+                    complete_kwargs=kwargs,
+                    cache_key=key,
+                    hit_key=hit_key or key,
+                    reason="cache_hit",
+                )) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
             # Mirror cached_complete: cache-read failures must not look like a
             # clean miss and must not emit synthetic passthrough completions.
@@ -674,8 +683,16 @@ class RoseClient:
                             hit_key="scrape_passthrough",
                             reason="swf_scrape_passthrough",
                         )
-                        async for chunk in _fc_replay(derived):
-                            yield chunk
+                        async with aclosing(_fc_replay(
+                            derived,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="scrape_passthrough",
+                            reason="swf_scrape_passthrough",
+                        )) as replay_stream:
+                            async for chunk in replay_stream:
+                                yield chunk
                         return
                     # Non-demo FM: fall through to live summarize.
                 if site in {"completion_summary", "context_compression"}:
@@ -688,8 +705,16 @@ class RoseClient:
                             hit_key="terminal_passthrough",
                             reason="fm_terminal_passthrough",
                         )
-                        async for chunk in _fc_replay(terminal):
-                            yield chunk
+                        async with aclosing(_fc_replay(
+                            terminal,
+                            call_site=call_site,
+                            complete_kwargs=kwargs,
+                            cache_key=key,
+                            hit_key="terminal_passthrough",
+                            reason="fm_terminal_passthrough",
+                        )) as replay_stream:
+                            async for chunk in replay_stream:
+                                yield chunk
                         return
                 soft = _fc_soft_complete(call_site)
                 # Warm end-of-trajectory: emit as replay passthrough (not soft_complete)
@@ -706,8 +731,16 @@ class RoseClient:
                         hit_key="trajectory_end_passthrough",
                         reason="fm_trajectory_end_passthrough",
                     )
-                    async for chunk in _fc_replay(soft):
-                        yield chunk
+                    async with aclosing(_fc_replay(
+                        soft,
+                        call_site=call_site,
+                        complete_kwargs=kwargs,
+                        cache_key=key,
+                        hit_key="trajectory_end_passthrough",
+                        reason="fm_trajectory_end_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
                 # Cold allowlisted sites must not burn live LLM under Fast Mode read.
                 # Known July GP execute namespaces start at p:1 — do not stub them
@@ -727,8 +760,16 @@ class RoseClient:
                         hit_key="cold_namespace_passthrough",
                         reason="fm_cold_namespace_passthrough",
                     )
-                    async for chunk in _fc_replay(soft):
-                        yield chunk
+                    async with aclosing(_fc_replay(
+                        soft,
+                        call_site=call_site,
+                        complete_kwargs=kwargs,
+                        cache_key=key,
+                        hit_key="cold_namespace_passthrough",
+                        reason="fm_cold_namespace_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
             logger.info("llm.cache.miss", call_site=call_site, key=key, lookup_failed=lookup_failed)
         else:

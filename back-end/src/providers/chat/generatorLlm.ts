@@ -9,7 +9,6 @@ import {
   createStreamingCompletion,
   markCacheable,
   type CompletionChunk,
-  type CompletionMessage,
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
@@ -22,6 +21,7 @@ import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
 import type { ChatLlmUsage } from './routerLlm';
 import type { ChatProviderRoute } from './phaseModels';
+import type { ChatCompletionParams } from './completionOptions';
 import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
 import {
   createGeneratorAttentionLifecycle,
@@ -310,13 +310,7 @@ function extractStreamableReasoning(
 // ============================================
 // Generator LLM Call with Streaming
 // ============================================
-export function buildGeneratorCompletionOptions(params: {
-  model: string;
-  messages: CompletionMessage[];
-  providerRoute: ChatProviderRoute;
-  providerFastMode: boolean;
-  abortSignal?: AbortSignal;
-}): CompletionOptions {
+export function buildGeneratorCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
     messages: params.messages,
@@ -334,6 +328,7 @@ export function buildGeneratorCompletionOptions(params: {
         schema: GENERATOR_JSON_SCHEMA,
       },
     },
+    dump_context: { agent_id: params.agentId, call_site: 'chat_generator' },
     provider_fast_mode: params.providerFastMode,
     provider_route: params.providerRoute,
     abort_signal: params.abortSignal,
@@ -507,6 +502,7 @@ async function callGeneratorLlmCore(
   const createLiveStream = (hedgeSignal?: AbortSignal) =>
     createStreamingCompletion(
       buildGeneratorCompletionOptions({
+        agentId: params.agentId,
         model: params.model,
         messages: openaiMessages,
         providerRoute: params.providerRoute,

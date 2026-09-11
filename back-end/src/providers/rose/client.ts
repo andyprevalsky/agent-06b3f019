@@ -310,8 +310,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     return null;
   };
 
-  const finalizeDump = (error?: unknown) => {
-    if (!dumpPath) return;
+  let dumpFinalized = false;
+  const finalizeDump = (error?: unknown, consumerClosed = false) => {
+    if (!dumpPath || dumpFinalized) return;
+    dumpFinalized = true;
     const actualModelRaw = metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
     updateLlmDump(dumpPath, {
@@ -323,6 +325,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         finish_reason: finishReason,
       },
       extra: {
+        consumer_closed: consumerClosed,
         output: outputParts.join(''),
         reasoning: reasoningParts.join(''),
         tool_calls: toolCalls,
@@ -336,82 +339,315 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   };
 
-  // Chat prefers low-latency Gemma-4-31B on Cerebras. If that route produces no
-  // caller-visible content before its deadline, we race the same-model
-  // OpenRouter spill against the REAL multi-provider waterfall. Neither branch
-  // is pinned to the stalled Cerebras host, so a slow/empty provider can never
-  // silence the whole chat turn.
-  let cerebrasRoute;
   try {
-    cerebrasRoute = selectExclusiveCerebrasChatRoute({
-      options: opts.options,
-      requestId: opts.requestId,
-      callSite: opts.callSite,
-    });
-  } catch (error) {
-    finalizeDump(error);
-    throw error;
-  }
-  if (cerebrasRoute !== null) {
-    // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
-    // (402/429) it keeps the chat on Gemma-4-31B via OpenRouter (unpinned); on a
-    // stall it races that spill against the generic multi-provider waterfall.
+    // Chat prefers low-latency Gemma-4-31B on Cerebras. If that route produces no
+    // caller-visible content before its deadline, we race the same-model
+    // OpenRouter spill against the REAL multi-provider waterfall. Neither branch
+    // is pinned to the stalled Cerebras host, so a slow/empty provider can never
+    // silence the whole chat turn.
+    let cerebrasRoute;
     try {
-      yield* runCerebrasChatWithWaterfallFallback({
-        cerebrasRoute,
+      cerebrasRoute = selectExclusiveCerebrasChatRoute({
+        options: opts.options,
+        requestId: opts.requestId,
+        callSite: opts.callSite,
+      });
+    } catch (error) {
+      finalizeDump(error);
+      throw error;
+    }
+    if (cerebrasRoute !== null) {
+      // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
+      // (402/429) it keeps the chat on Gemma-4-31B via OpenRouter (unpinned); on a
+      // stall it races that spill against the generic multi-provider waterfall.
+      try {
+        yield* runCerebrasChatWithWaterfallFallback({
+          cerebrasRoute,
+          poolSpec,
+          options: opts.options,
+          requestId: opts.requestId,
+          pool: opts.pool,
+          callSite: opts.callSite,
+          startedAt,
+          emit: emitChunk,
+        });
+      } catch (error) {
+        const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+        finalizeDump(cause);
+        throw cause;
+      }
+      finalizeDump();
+      return;
+    }
+
+    // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves
+    // the pool's ordered pre-content fallback and bypasses every OAuth/shared-key
+    // provider. Missing configuration fails closed before any provider call.
+    if (opts.options.provider_route === 'openrouter-waterfall') {
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            exclusiveOpenRouterWaterfall({
+              poolSpec,
+              options: opts.options,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+            }),
+          emit: emitChunk,
+        });
+      } catch (error) {
+        const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+        finalizeDump(cause);
+        throw cause;
+      }
+
+      log.info('openrouter_waterfall.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      finalizeDump();
+      return;
+    }
+
+    // Exclusive low-latency route used by the synchronous Chat Router. This
+    // branch precedes every user OAuth, shared Anthropic, and OpenRouter path.
+    if (opts.options.provider_route === 'shared-openai-priority') {
+      const sharedOpenAiKey = openAiApiKey();
+      if (!sharedOpenAiKey) {
+        const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
+        finalizeDump(error);
+        throw error;
+      }
+
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            openAiApiKeyComplete({
+              poolSpec,
+              model: poolSpec.gptAuthModel,
+              messages: opts.options.messages,
+              responseFormat: opts.options.response_format,
+              tools: opts.options.tools,
+              toolChoice: opts.options.tool_choice,
+              temperature: opts.options.temperature,
+              effort: opts.options.effort,
+              openAiKey: sharedOpenAiKey,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              providerFastMode: true,
+              abortSignal: opts.options.abort_signal,
+            }),
+          emit: emitChunk,
+        });
+      } catch (error) {
+        const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+        finalizeDump(cause);
+        throw cause;
+      }
+
+      log.info('shared_openai_priority.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      finalizeDump();
+      return;
+    }
+
+    // 1. claudeAuth attempt (with fall-through buffering)
+    let claudeAuthFailed: RoseError | null = null;
+    let gptAuthFailed: RoseError | null = null;
+    let openAiApiKeyFailed: RoseError | null = null;
+    if (opts.options.claude_token) {
+      const failure = yield* attemptClaudeAuthWithRecovery({
         poolSpec,
         options: opts.options,
         requestId: opts.requestId,
-        pool: opts.pool,
         callSite: opts.callSite,
-        startedAt,
         emit: emitChunk,
+        log,
       });
-    } catch (error) {
-      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-      finalizeDump(cause);
-      throw cause;
-    }
-    finalizeDump();
-    return;
-  }
-
-  // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves
-  // the pool's ordered pre-content fallback and bypasses every OAuth/shared-key
-  // provider. Missing configuration fails closed before any provider call.
-  if (opts.options.provider_route === 'openrouter-waterfall') {
-    try {
-      yield* runWithFallThrough({
-        produce: () =>
-          exclusiveOpenRouterWaterfall({
-            poolSpec,
-            options: opts.options,
-            requestId: opts.requestId,
-            callSite: opts.callSite,
-          }),
-        emit: emitChunk,
+      if (failure === null) {
+        log.info('claude_auth.done', {
+          request_id: opts.requestId,
+          pool: opts.pool,
+          elapsed_ms: Date.now() - startedAt,
+        });
+        finalizeDump();
+        return;
+      }
+      claudeAuthFailed = failure;
+      log.info('fall_through_from_claude_auth', {
+        request_id: opts.requestId,
+        reason: failure.name,
       });
-    } catch (error) {
-      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-      finalizeDump(cause);
-      throw cause;
     }
 
-    log.info('openrouter_waterfall.done', {
-      request_id: opts.requestId,
-      pool: opts.pool,
-      elapsed_ms: Date.now() - startedAt,
-    });
-    finalizeDump();
-    return;
-  }
+    // 2. gptAuth attempt (with fall-through buffering)
+    if (opts.options.gpt_token) {
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            gptAuthComplete({
+              poolSpec,
+              messages: opts.options.messages,
+              responseFormat: opts.options.response_format,
+              tools: opts.options.tools,
+              toolChoice: opts.options.tool_choice,
+              temperature: opts.options.temperature,
+              effort: opts.options.effort,
+              gptToken: opts.options.gpt_token!,
+              accountId: opts.options.gpt_account_id,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              providerFastMode: opts.options.provider_fast_mode,
+            }),
+          emit: emitChunk,
+        });
+        log.info('gpt_auth.done', {
+          request_id: opts.requestId,
+          pool: opts.pool,
+          elapsed_ms: Date.now() - startedAt,
+          claude_auth_failed: claudeAuthFailed?.name ?? null,
+        });
+        finalizeDump();
+        return;
+      } catch (err) {
+        if (err instanceof PreContentFallThroughError) {
+          gptAuthFailed = err.cause;
+          log.info('fall_through_from_gpt_auth', {
+            request_id: opts.requestId,
+            reason: err.cause.name,
+          });
+        } else {
+          finalizeDump(err);
+          throw err;
+        }
+      }
+    }
 
-  // Exclusive low-latency route used by the synchronous Chat Router. This
-  // branch precedes every user OAuth, shared Anthropic, and OpenRouter path.
-  if (opts.options.provider_route === 'shared-openai-priority') {
+    // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
+    // when no compute token served (or it fell through), before Anthropic and
+    // OpenRouter. Force provider fast mode for this funded route.
     const sharedOpenAiKey = openAiApiKey();
-    if (!sharedOpenAiKey) {
-      const error = new Error('Rose shared-openai-priority route requires GPT_API_KEY');
+    if (sharedOpenAiKey) {
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            openAiApiKeyComplete({
+              poolSpec,
+              model: poolSpec.gptAuthModel,
+              messages: opts.options.messages,
+              responseFormat: opts.options.response_format,
+              tools: opts.options.tools,
+              toolChoice: opts.options.tool_choice,
+              temperature: opts.options.temperature,
+              effort: opts.options.effort,
+              openAiKey: sharedOpenAiKey,
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              providerFastMode: true,
+            }),
+          emit: emitChunk,
+        });
+        log.info('openai_apikey.done', {
+          request_id: opts.requestId,
+          pool: opts.pool,
+          elapsed_ms: Date.now() - startedAt,
+          claude_auth_failed: claudeAuthFailed?.name ?? null,
+          gpt_auth_failed: gptAuthFailed?.name ?? null,
+        });
+        finalizeDump();
+        return;
+      } catch (err) {
+        if (err instanceof PreContentFallThroughError) {
+          openAiApiKeyFailed = err.cause;
+          log.info('fall_through_from_openai_apikey', {
+            request_id: opts.requestId,
+            reason: err.cause.name,
+          });
+        } else {
+          finalizeDump(err);
+          throw err;
+        }
+      }
+    }
+
+    // 2.6 Anthropic API-key fallback — a funded default for any user. Engages
+    // when no compute token or shared GPT key served (or it fell through) and an
+    // ANTHROPIC_API_KEY is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
+    // x-api-key (billed), reusing the claudeAuth request body.
+    let anthropicApiKeyFailed: RoseError | null = null;
+    const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
+    // Shared DB-backed cooldown: skip the key entirely while it's backed off so
+    // no worker/workflow hammers an exhausted key. Only query when a key exists.
+    const apiKeyOnCooldown = anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
+    if (anthropicApiKey && apiKeyOnCooldown) {
+      log.info('anthropic_apikey.skipped_cooldown', {
+        request_id: opts.requestId,
+      });
+    }
+    if (anthropicApiKey && !apiKeyOnCooldown) {
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            claudeAuthComplete({
+              poolSpec,
+              messages: opts.options.messages,
+              responseFormat: opts.options.response_format,
+              tools: opts.options.tools,
+              toolChoice: opts.options.tool_choice,
+              maxTokens: opts.options.max_tokens,
+              temperature: opts.options.temperature,
+              effort: opts.options.effort,
+              auth: { mode: 'apiKey', key: anthropicApiKey },
+              requestId: opts.requestId,
+              callSite: opts.callSite,
+              providerFastMode: opts.options.provider_fast_mode,
+            }),
+          emit: emitChunk,
+        });
+        log.info('anthropic_apikey.done', {
+          request_id: opts.requestId,
+          pool: opts.pool,
+          elapsed_ms: Date.now() - startedAt,
+          claude_auth_failed: claudeAuthFailed?.name ?? null,
+          gpt_auth_failed: gptAuthFailed?.name ?? null,
+        });
+        finalizeDump();
+        return;
+      } catch (err) {
+        if (err instanceof PreContentFallThroughError) {
+          anthropicApiKeyFailed = err.cause;
+          // Out-of-credits (402) or bad-key (401/403) means the shared key is
+          // unusable right now — back it off in the DB so no other request, on any
+          // worker or workflow, retries it for the cooldown window. Transient
+          // errors (5xx/stall/429) do NOT trip it: those can recover next call.
+          if (err.cause instanceof RosePaymentRequiredError || err.cause instanceof RoseAuthError) {
+            await markAnthropicApiKeyOnCooldown(err.cause.name);
+          }
+          log.info('fall_through_from_anthropic_apikey', {
+            request_id: opts.requestId,
+            reason: err.cause.name,
+          });
+        } else {
+          finalizeDump(err);
+          throw err;
+        }
+      }
+    }
+
+    // 3. Waterfall — this is the terminal pipeline; unwrap the internal
+    // fall-through sentinel so callers continue to see typed RoseError
+    // subclasses (their `instanceof RoseError` checks depend on it).
+    if (opts.options.disable_waterfall) {
+      const error =
+        anthropicApiKeyFailed ??
+        openAiApiKeyFailed ??
+        gptAuthFailed ??
+        claudeAuthFailed ??
+        new Error('Rose waterfall disabled');
       finalizeDump(error);
       throw error;
     }
@@ -419,268 +655,44 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     try {
       yield* runWithFallThrough({
         produce: () =>
-          openAiApiKeyComplete({
+          waterfallComplete({
             poolSpec,
-            model: poolSpec.gptAuthModel,
             messages: opts.options.messages,
             responseFormat: opts.options.response_format,
-            tools: opts.options.tools,
-            toolChoice: opts.options.tool_choice,
             temperature: opts.options.temperature,
-            effort: opts.options.effort,
-            openAiKey: sharedOpenAiKey,
+            maxTokens: opts.options.max_tokens,
+            reasoningEffort: opts.options.effort,
+            openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
             requestId: opts.requestId,
             callSite: opts.callSite,
-            providerFastMode: true,
-            abortSignal: opts.options.abort_signal,
+            providerFastMode: opts.options.provider_fast_mode,
           }),
         emit: emitChunk,
       });
-    } catch (error) {
-      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-      finalizeDump(cause);
-      throw cause;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        finalizeDump(err.cause);
+        throw err.cause;
+      }
+      finalizeDump(err);
+      throw err;
     }
-
-    log.info('shared_openai_priority.done', {
+    log.info('waterfall.done', {
       request_id: opts.requestId,
       pool: opts.pool,
       elapsed_ms: Date.now() - startedAt,
+      claude_auth_failed: claudeAuthFailed?.name ?? null,
+      gpt_auth_failed: gptAuthFailed?.name ?? null,
+      openai_apikey_failed: openAiApiKeyFailed?.name ?? null,
+      anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
     });
     finalizeDump();
-    return;
-  }
-
-  // 1. claudeAuth attempt (with fall-through buffering)
-  let claudeAuthFailed: RoseError | null = null;
-  let gptAuthFailed: RoseError | null = null;
-  let openAiApiKeyFailed: RoseError | null = null;
-  if (opts.options.claude_token) {
-    const failure = yield* attemptClaudeAuthWithRecovery({
-      poolSpec,
-      options: opts.options,
-      requestId: opts.requestId,
-      callSite: opts.callSite,
-      emit: emitChunk,
-      log,
-    });
-    if (failure === null) {
-      log.info('claude_auth.done', {
-        request_id: opts.requestId,
-        pool: opts.pool,
-        elapsed_ms: Date.now() - startedAt,
-      });
-      finalizeDump();
-      return;
-    }
-    claudeAuthFailed = failure;
-    log.info('fall_through_from_claude_auth', {
-      request_id: opts.requestId,
-      reason: failure.name,
-    });
-  }
-
-  // 2. gptAuth attempt (with fall-through buffering)
-  if (opts.options.gpt_token) {
-    try {
-      yield* runWithFallThrough({
-        produce: () =>
-          gptAuthComplete({
-            poolSpec,
-            messages: opts.options.messages,
-            responseFormat: opts.options.response_format,
-            tools: opts.options.tools,
-            toolChoice: opts.options.tool_choice,
-            temperature: opts.options.temperature,
-            effort: opts.options.effort,
-            gptToken: opts.options.gpt_token!,
-            accountId: opts.options.gpt_account_id,
-            requestId: opts.requestId,
-            callSite: opts.callSite,
-            providerFastMode: opts.options.provider_fast_mode,
-          }),
-        emit: emitChunk,
-      });
-      log.info('gpt_auth.done', {
-        request_id: opts.requestId,
-        pool: opts.pool,
-        elapsed_ms: Date.now() - startedAt,
-        claude_auth_failed: claudeAuthFailed?.name ?? null,
-      });
-      finalizeDump();
-      return;
-    } catch (err) {
-      if (err instanceof PreContentFallThroughError) {
-        gptAuthFailed = err.cause;
-        log.info('fall_through_from_gpt_auth', {
-          request_id: opts.requestId,
-          reason: err.cause.name,
-        });
-      } else {
-        finalizeDump(err);
-        throw err;
-      }
-    }
-  }
-
-  // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
-  // when no compute token served (or it fell through), before Anthropic and
-  // OpenRouter. Force provider fast mode for this funded route.
-  const sharedOpenAiKey = openAiApiKey();
-  if (sharedOpenAiKey) {
-    try {
-      yield* runWithFallThrough({
-        produce: () =>
-          openAiApiKeyComplete({
-            poolSpec,
-            model: poolSpec.gptAuthModel,
-            messages: opts.options.messages,
-            responseFormat: opts.options.response_format,
-            tools: opts.options.tools,
-            toolChoice: opts.options.tool_choice,
-            temperature: opts.options.temperature,
-            effort: opts.options.effort,
-            openAiKey: sharedOpenAiKey,
-            requestId: opts.requestId,
-            callSite: opts.callSite,
-            providerFastMode: true,
-          }),
-        emit: emitChunk,
-      });
-      log.info('openai_apikey.done', {
-        request_id: opts.requestId,
-        pool: opts.pool,
-        elapsed_ms: Date.now() - startedAt,
-        claude_auth_failed: claudeAuthFailed?.name ?? null,
-        gpt_auth_failed: gptAuthFailed?.name ?? null,
-      });
-      finalizeDump();
-      return;
-    } catch (err) {
-      if (err instanceof PreContentFallThroughError) {
-        openAiApiKeyFailed = err.cause;
-        log.info('fall_through_from_openai_apikey', {
-          request_id: opts.requestId,
-          reason: err.cause.name,
-        });
-      } else {
-        finalizeDump(err);
-        throw err;
-      }
-    }
-  }
-
-  // 2.6 Anthropic API-key fallback — a funded default for any user. Engages
-  // when no compute token or shared GPT key served (or it fell through) and an
-  // ANTHROPIC_API_KEY is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
-  // x-api-key (billed), reusing the claudeAuth request body.
-  let anthropicApiKeyFailed: RoseError | null = null;
-  const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
-  // Shared DB-backed cooldown: skip the key entirely while it's backed off so
-  // no worker/workflow hammers an exhausted key. Only query when a key exists.
-  const apiKeyOnCooldown = anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
-  if (anthropicApiKey && apiKeyOnCooldown) {
-    log.info('anthropic_apikey.skipped_cooldown', {
-      request_id: opts.requestId,
-    });
-  }
-  if (anthropicApiKey && !apiKeyOnCooldown) {
-    try {
-      yield* runWithFallThrough({
-        produce: () =>
-          claudeAuthComplete({
-            poolSpec,
-            messages: opts.options.messages,
-            responseFormat: opts.options.response_format,
-            tools: opts.options.tools,
-            toolChoice: opts.options.tool_choice,
-            maxTokens: opts.options.max_tokens,
-            temperature: opts.options.temperature,
-            effort: opts.options.effort,
-            auth: { mode: 'apiKey', key: anthropicApiKey },
-            requestId: opts.requestId,
-            callSite: opts.callSite,
-            providerFastMode: opts.options.provider_fast_mode,
-          }),
-        emit: emitChunk,
-      });
-      log.info('anthropic_apikey.done', {
-        request_id: opts.requestId,
-        pool: opts.pool,
-        elapsed_ms: Date.now() - startedAt,
-        claude_auth_failed: claudeAuthFailed?.name ?? null,
-        gpt_auth_failed: gptAuthFailed?.name ?? null,
-      });
-      finalizeDump();
-      return;
-    } catch (err) {
-      if (err instanceof PreContentFallThroughError) {
-        anthropicApiKeyFailed = err.cause;
-        // Out-of-credits (402) or bad-key (401/403) means the shared key is
-        // unusable right now — back it off in the DB so no other request, on any
-        // worker or workflow, retries it for the cooldown window. Transient
-        // errors (5xx/stall/429) do NOT trip it: those can recover next call.
-        if (err.cause instanceof RosePaymentRequiredError || err.cause instanceof RoseAuthError) {
-          await markAnthropicApiKeyOnCooldown(err.cause.name);
-        }
-        log.info('fall_through_from_anthropic_apikey', {
-          request_id: opts.requestId,
-          reason: err.cause.name,
-        });
-      } else {
-        finalizeDump(err);
-        throw err;
-      }
-    }
-  }
-
-  // 3. Waterfall — this is the terminal pipeline; unwrap the internal
-  // fall-through sentinel so callers continue to see typed RoseError
-  // subclasses (their `instanceof RoseError` checks depend on it).
-  if (opts.options.disable_waterfall) {
-    const error =
-      anthropicApiKeyFailed ??
-      openAiApiKeyFailed ??
-      gptAuthFailed ??
-      claudeAuthFailed ??
-      new Error('Rose waterfall disabled');
+  } catch (error) {
     finalizeDump(error);
     throw error;
+  } finally {
+    // Async-generator return skips ordinary trailing code. Preserve the partial
+    // response before the caller can seal/archive the terminated chat stream.
+    finalizeDump(undefined, true);
   }
-
-  try {
-    yield* runWithFallThrough({
-      produce: () =>
-        waterfallComplete({
-          poolSpec,
-          messages: opts.options.messages,
-          responseFormat: opts.options.response_format,
-          temperature: opts.options.temperature,
-          maxTokens: opts.options.max_tokens,
-          reasoningEffort: opts.options.effort,
-          openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
-          requestId: opts.requestId,
-          callSite: opts.callSite,
-          providerFastMode: opts.options.provider_fast_mode,
-        }),
-      emit: emitChunk,
-    });
-  } catch (err) {
-    if (err instanceof PreContentFallThroughError) {
-      finalizeDump(err.cause);
-      throw err.cause;
-    }
-    finalizeDump(err);
-    throw err;
-  }
-  log.info('waterfall.done', {
-    request_id: opts.requestId,
-    pool: opts.pool,
-    elapsed_ms: Date.now() - startedAt,
-    claude_auth_failed: claudeAuthFailed?.name ?? null,
-    gpt_auth_failed: gptAuthFailed?.name ?? null,
-    openai_apikey_failed: openAiApiKeyFailed?.name ?? null,
-    anthropic_apikey_failed: anthropicApiKeyFailed?.name ?? null,
-  });
-  finalizeDump();
 }

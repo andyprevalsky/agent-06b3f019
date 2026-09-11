@@ -421,6 +421,7 @@ if $DB_FOUND; then
   LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30&connect_timeout=15"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
+  node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
   if command -v psql >/dev/null 2>&1; then
     psql "$LOCAL_PSQL_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -438,7 +439,6 @@ END $$;
 SQL
   fi
   echo "Syncing Prisma schema to local test database..."
-  npx prisma generate >/dev/null
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
   DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null

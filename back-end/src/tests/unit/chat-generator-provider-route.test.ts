@@ -54,6 +54,7 @@ async function collect(stream: AsyncIterable<CompletionChunk>): Promise<Completi
 function phaseGeneratorOptions() {
   const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
   return buildGeneratorCompletionOptions({
+    agentId: 'chat-options-contract',
     model: phases.generator,
     messages: [
       { role: 'system', content: GENERATOR_SYSTEM_PROMPT },
@@ -66,6 +67,7 @@ function phaseGeneratorOptions() {
 
 function directGeneratorOptions() {
   return buildGeneratorCompletionOptions({
+    agentId: 'chat-options-contract',
     model: 'rose-labs/rose-1-lite',
     messages: [
       { role: 'system', content: GENERATOR_SYSTEM_PROMPT },

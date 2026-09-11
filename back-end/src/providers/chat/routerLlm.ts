@@ -8,7 +8,6 @@ import {
   createStreamingCompletion,
   markCacheable,
   type CompletionChunk,
-  type CompletionMessage,
   type CompletionOptions,
 } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
@@ -33,6 +32,7 @@ import {
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 import { isOaiDemoGoal } from '../fastCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
+import type { ChatCompletionParams } from './completionOptions';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 import {
@@ -248,13 +248,7 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
-export function buildRouterCompletionOptions(params: {
-  model: string;
-  messages: CompletionMessage[];
-  providerRoute: ChatProviderRoute;
-  providerFastMode: boolean;
-  abortSignal?: AbortSignal;
-}): CompletionOptions {
+export function buildRouterCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
     messages: params.messages,
@@ -272,6 +266,7 @@ export function buildRouterCompletionOptions(params: {
         schema: ROUTER_JSON_SCHEMA,
       },
     },
+    dump_context: { agent_id: params.agentId, call_site: 'chat_router' },
     provider_fast_mode: params.providerFastMode,
     provider_route: params.providerRoute,
     abort_signal: params.abortSignal,
@@ -388,6 +383,7 @@ export async function callRouterLlm(params: {
   const createLiveStream = (abortSignal?: AbortSignal) =>
     createStreamingCompletion(
       buildRouterCompletionOptions({
+        agentId: params.agentId,
         model: params.model,
         messages: openaiMessages,
         providerRoute: params.providerRoute,

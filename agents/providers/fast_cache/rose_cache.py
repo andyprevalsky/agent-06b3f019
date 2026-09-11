@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import aclosing
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict
 
@@ -252,6 +253,88 @@ async def _replay(stored: Dict[str, Any]) -> AsyncIterator["StreamChunk"]:
     usage = _cache_replay_usage(stored.get("usage") or {})
     yield SimpleNamespace(kind="usage", data=usage)
     yield SimpleNamespace(kind="done", data={"timing": {"round_trip_s": 0.0}, "from_fast_cache": True})
+
+
+async def replay_with_context(
+    stored: Dict[str, Any],
+    *,
+    call_site: str,
+    complete_kwargs: Dict[str, Any],
+    cache_key: str,
+    hit_key: str,
+    reason: str = "cache_hit",
+) -> AsyncIterator["StreamChunk"]:
+    """Capture the current request and actual replay, never a claimed live call.
+
+    Both cache entry points use this path, including synthetic passthroughs.
+    Observability is best-effort and cannot change the stream or cache writes.
+    """
+    dump_path = None
+    output = _empty_response()
+    completed = False
+    if complete_kwargs.get("dump_context", True) and complete_kwargs.get("messages") is not None:
+        try:
+            from helpers.observability import dump_llm_context
+            from providers.rose.client import _messages_without_internal_system_boundaries
+
+            response_model = complete_kwargs.get("response_model")
+            dump_path = dump_llm_context(
+                call_site=call_site,
+                agent_id=complete_kwargs.get("agent_id"),
+                messages=_messages_without_internal_system_boundaries(complete_kwargs["messages"]),
+                model="fast-cache",
+                tools=complete_kwargs.get("tools"),
+                config={
+                    "pool": complete_kwargs.get("pool"),
+                    "requested_params": {
+                        name: complete_kwargs[name]
+                        for name in (
+                            "temperature",
+                            "max_tokens",
+                            "seed",
+                            "tool_choice",
+                            "thinking",
+                            "effort",
+                            "provider_fast_mode",
+                            "deadline_s",
+                            "ttft_timeout_s",
+                            "idle_timeout_s",
+                        )
+                        if name in complete_kwargs
+                    },
+                    "response_model": response_model.__name__ if response_model else None,
+                    "response_schema": response_model.model_json_schema() if response_model else None,
+                },
+                extra={
+                    **(complete_kwargs.get("dump_extra") or {}),
+                    "completion_source": "fast_cache",
+                    "cache_key": cache_key,
+                    "cache_hit_key": hit_key,
+                    "replay_reason": reason,
+                    "recorded_model": stored.get("actual_model"),
+                },
+            )
+        except Exception:
+            logger.debug("llm.cache.dump_start_failed", call_site=call_site, exc_info=True)
+    try:
+        async for chunk in _replay(stored):
+            if dump_path:
+                try:
+                    _accumulate(output, chunk)
+                    if chunk.kind == "done":
+                        completed = True
+                        output["timing"] = chunk.data.get("timing", {})
+                except Exception:
+                    logger.debug("llm.cache.dump_chunk_failed", call_site=call_site, exc_info=True)
+            yield chunk
+    finally:
+        if dump_path:
+            try:
+                from helpers.observability import update_llm_dump
+
+                update_llm_dump(dump_path, output={**output, "replay_complete": completed})
+            except Exception:
+                logger.debug("llm.cache.dump_finish_failed", call_site=call_site, exc_info=True)
 
 
 def _accumulate(acc: Dict[str, Any], chunk: "StreamChunk") -> None:
@@ -922,8 +1005,16 @@ async def cached_complete(
                 except Exception as exc:
                     logger.warning("fast_cache.set_error", key=key, error=str(exc))
             logger.info("llm.cache.replay", call_site=call_site, key=key, hit_key=hit_key or key)
-            async for chunk in _replay(stored):
-                yield chunk
+            async with aclosing(replay_with_context(
+                stored,
+                call_site=call_site,
+                complete_kwargs=complete_kwargs,
+                cache_key=key,
+                hit_key=hit_key or key,
+                reason="cache_hit",
+            )) as replay_stream:
+                async for chunk in replay_stream:
+                    yield chunk
             return
         # Soft-complete only on a clean miss at true end-of-trajectory (a prior
         # durable slot exists). Cold namespaces must not fake hits. SWF misses
@@ -944,8 +1035,16 @@ async def cached_complete(
                         hit_key="scrape_passthrough",
                         reason="swf_scrape_passthrough",
                     )
-                    async for chunk in _replay(derived):
-                        yield chunk
+                    async with aclosing(replay_with_context(
+                        derived,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="scrape_passthrough",
+                        reason="swf_scrape_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
             if site in {"completion_summary", "context_compression"}:
                 terminal = soft_complete_on_miss(site)
@@ -957,8 +1056,16 @@ async def cached_complete(
                         hit_key="terminal_passthrough",
                         reason="fm_terminal_passthrough",
                     )
-                    async for chunk in _replay(terminal):
-                        yield chunk
+                    async with aclosing(replay_with_context(
+                        terminal,
+                        call_site=call_site,
+                        complete_kwargs=complete_kwargs,
+                        cache_key=key,
+                        hit_key="terminal_passthrough",
+                        reason="fm_terminal_passthrough",
+                    )) as replay_stream:
+                        async for chunk in replay_stream:
+                            yield chunk
                     return
             soft = soft_complete_on_miss(call_site)
             if (
@@ -978,8 +1085,16 @@ async def cached_complete(
                     hit_key="trajectory_end_passthrough",
                     reason="fm_trajectory_end_passthrough",
                 )
-                async for chunk in _replay(soft):
-                    yield chunk
+                async with aclosing(replay_with_context(
+                    soft,
+                    call_site=call_site,
+                    complete_kwargs=complete_kwargs,
+                    cache_key=key,
+                    hit_key="trajectory_end_passthrough",
+                    reason="fm_trajectory_end_passthrough",
+                )) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
             # Cold allowlisted sites: never fall through to live LLM under Fast
             # Mode read (verify22 burned cents on cold execute/verifier/explore).
@@ -1000,8 +1115,16 @@ async def cached_complete(
                     hit_key="cold_namespace_passthrough",
                     reason="fm_cold_namespace_passthrough",
                 )
-                async for chunk in _replay(soft):
-                    yield chunk
+                async with aclosing(replay_with_context(
+                    soft,
+                    call_site=call_site,
+                    complete_kwargs=complete_kwargs,
+                    cache_key=key,
+                    hit_key="cold_namespace_passthrough",
+                    reason="fm_cold_namespace_passthrough",
+                )) as replay_stream:
+                    async for chunk in replay_stream:
+                        yield chunk
                 return
         logger.info("llm.cache.miss", call_site=call_site, key=key)
     else:

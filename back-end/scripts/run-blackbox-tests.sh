@@ -251,6 +251,7 @@ if $DB_FOUND; then
     fi
     echo "Skipping local DB schema sync; existing backend caller prepared the test database."
   else
+    node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
     if command -v psql >/dev/null 2>&1; then
       psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
@@ -268,7 +269,6 @@ END $$;
 SQL
     fi
     echo "Syncing Prisma schema to local test database..."
-    npx prisma generate >/dev/null
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
     # Credential seeding and smoke execution are separate controls. A caller may
