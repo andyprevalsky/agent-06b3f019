@@ -287,6 +287,7 @@ cloudbench_tcp_listener_present() {  # <port>
   #   2 — bad argument
   #   3 — probe failed (timeout / python / unexpected); callers must fail closed
   python3 - "$1" <<'PY'
+import errno
 import socket
 import sys
 
@@ -294,11 +295,18 @@ try:
     port = int(sys.argv[1])
 except (IndexError, ValueError):
     raise SystemExit(2)
+if not 1 <= port <= 65535:
+    raise SystemExit(2)
 
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
-        raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+        result = probe.connect_ex(("127.0.0.1", port))
+        if result == 0:
+            raise SystemExit(0)
+        if result == errno.ECONNREFUSED:
+            raise SystemExit(1)
+        raise SystemExit(3)
 except SystemExit:
     raise
 except Exception:

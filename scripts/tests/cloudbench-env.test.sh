@@ -1716,6 +1716,64 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'Never stop the warm machine ourselves' \
   "fleet must wait for warm stop without stopping a sibling-owned warm source"
 
+# connect_ex returns errno values for failures, including timeouts; only a
+# refused connection proves a port free. Execute the actual embedded program.
+python3 - "$HELPER_SRC" <<'PY'
+import errno
+from pathlib import Path
+import socket
+import sys
+from unittest.mock import patch
+
+source = Path(sys.argv[1]).read_text()
+function = source.split("cloudbench_tcp_listener_present()", 1)[1]
+program = function.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+compiled = compile(program, f"{sys.argv[1]}:cloudbench_tcp_listener_present", "exec")
+for result, expected in [
+    (0, 0),
+    (errno.ECONNREFUSED, 1),
+    (errno.EAGAIN, 3),
+    (errno.ETIMEDOUT, 3),
+    (errno.EHOSTUNREACH, 3),
+    (errno.ENETUNREACH, 3),
+    (errno.EACCES, 3),
+    (socket.timeout("fixture timeout"), 3),
+    (OSError(errno.EMFILE, "fixture socket error"), 3),
+]:
+    with patch.object(sys, "argv", ["-", "19731"]), patch.object(socket, "socket") as make_socket:
+        probe = make_socket.return_value.__enter__.return_value
+        if isinstance(result, Exception):
+            probe.connect_ex.side_effect = result
+        else:
+            probe.connect_ex.return_value = result
+        try:
+            exec(compiled, {"__name__": "__main__"})
+        except SystemExit as exc:
+            assert exc.code == expected, (result, expected, exc.code)
+        else:
+            raise AssertionError("TCP probe must report an explicit exit status")
+        make_socket.assert_called_once_with(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout.assert_called_once_with(0.2)
+        probe.connect_ex.assert_called_once_with(("127.0.0.1", 19731))
+for invalid in ["not-a-port", "", "-1", "0", "65536"]:
+    with patch.object(sys, "argv", ["-", invalid]), patch.object(socket, "socket") as make_socket:
+        try:
+            exec(compiled, {"__name__": "__main__"})
+        except SystemExit as exc:
+            assert exc.code == 2, (invalid, 2, exc.code)
+        else:
+            raise AssertionError("Invalid TCP probe port must fail")
+        make_socket.assert_not_called()
+print("TCP probe errno classification contract ok")
+PY
+(
+  cloudbench_tcp_listener_present() { return 3; }
+  if selected="$(cloudbench_select_central_hub_port 19731 /tmp/no-such-hub-root)"; then
+    fail "TCP probe error must prevent hub port selection"
+  fi
+  [ -z "$selected" ] || fail "TCP probe error must not return a port"
+)
+
 # Hub port selection must fail closed when the TCP probe errors (not "free").
 require_text "$HELPER_SRC" \
   'refusing fail-open port selection' \
@@ -1737,12 +1795,24 @@ require_text "$HELPER_SRC" \
   [ "$rc" -eq 2 ] || fail "bad port arg must exit 2 (got $rc)"
   # Occupy free_port briefly and assert exit 0.
   python3 - "$free_port" <<'PY' &
-import socket, sys, time
+import socket, sys, threading, time
 port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", port))
 s.listen(1)
+
+# Each probe opens a connection. Consume it so readiness does not fill the
+# accept queue and make the following assertion time out on macOS.
+def accept_connections():
+    while True:
+        try:
+            connection, _ = s.accept()
+        except OSError:
+            return
+        connection.close()
+
+threading.Thread(target=accept_connections, daemon=True).start()
 time.sleep(2)
 s.close()
 PY

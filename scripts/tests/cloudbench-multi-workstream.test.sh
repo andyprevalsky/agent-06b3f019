@@ -111,6 +111,147 @@ fail() {
     exit 1
 }
 
+test_tcp_listener_absent() {
+    local probe_status=0
+    cloudbench_tcp_listener_present "$1" || probe_status=$?
+    [ "$probe_status" -eq 1 ] && return 0
+    if [ "$probe_status" -ne 0 ]; then
+        echo "❌ test listener probe inconclusive on :$1 (rc=$probe_status)" >&2
+    fi
+    return 1
+}
+
+# Exercise the actual allocation and cleanup consumers without controllers,
+# sockets or signals. A probe error must neither claim a port nor erase evidence.
+listener_probe_status_contract() (
+    local function_name function_source allocation_source injected_probe_status status
+    local ws record failures=0 expected_busy expected_status expected_record expected_untracks
+    local untrack_calls="$TMP_ROOT/listener-status-untrack.calls"
+    for function_name in test_tcp_listener_absent terminate_test_pending_hubs terminate_test_owned_hubs; do
+        function_source="$(awk -v name="$function_name" '
+            $0 ~ "^" name "\\(\\)" { capture = 1 }
+            capture { print }
+            capture && /^}$/ { exit }
+        ' "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh")"
+        [ -n "$function_source" ] && eval "$function_source"
+    done
+    allocation_source="$(awk '
+        /^    for candidate_port in / { capture = 1 }
+        capture { print }
+        capture && /^    done$/ { exit }
+    ' "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh")"
+    [ -n "$allocation_source" ] || return 1
+    cloudbench_tcp_listener_present() { return "$injected_probe_status"; }
+    cloudbench_tracked_owner_value() {
+        case "$2" in
+            pid|pgid) printf '999999\n' ;;
+            pid_start) printf 'fixture-birth\n' ;;
+            port)
+                case "$1" in *.second.owner) printf '42001\n' ;; *) printf '42000\n' ;; esac
+                ;;
+        esac
+    }
+    validate_test_hub_pending_record() { return 0; }
+    validate_test_hub_owner_record() { return 0; }
+    cloudbench_pid_matches_start() { return 1; }
+    cloudbench_process_group_state() { printf 'absent\n'; }
+    cloudbench_central_hub_owner_for() { return 1; }
+    untrack_test_hub_pid() { printf '%s\n' "$1" >> "$untrack_calls"; }
+    ps() { return 1; }
+    wait() { return 127; }
+    # Any unexpected entry into a signalling path is a fixture failure.
+    cloudbench_signal_tracked_group() { return 1; }
+    cloudbench_terminate_central_hub_owner() { return 1; }
+
+    for injected_probe_status in 3 1 0 2 127; do
+        local port_base=42000 candidate_port port_window_busy=0
+        expected_busy=1
+        expected_status=1
+        expected_record=present
+        expected_untracks=0
+        if [ "$injected_probe_status" -eq 1 ]; then
+            expected_busy=0
+            expected_status=0
+            expected_record=absent
+            expected_untracks=1
+        fi
+        eval "$allocation_source"
+        if [ "$port_window_busy" -ne "$expected_busy" ]; then
+            echo "FAIL: allocation accepted inconclusive probe rc=$injected_probe_status" >&2
+            failures=$((failures + 1))
+        fi
+        for function_name in terminate_test_pending_hubs terminate_test_owned_hubs; do
+            ws="$TMP_ROOT/listener-status-$injected_probe_status-$function_name"
+            mkdir -p "$ws/.context/fleet/runs/_hub" || return 1
+            record="$ws/.context/fleet/runs/_hub/agent-link-server.42000.fixture"
+            case "$function_name" in
+                terminate_test_pending_hubs) record="$record.pending" ;;
+                *) record="$record.owner" ;;
+            esac
+            printf 'fixture record\n' > "$record"
+            : > "$untrack_calls"
+            status=0
+            "$function_name" "$ws" >/dev/null 2>&1 || status=$?
+            if [ "$status" -ne "$expected_status" ]; then
+                echo "FAIL: $function_name accepted probe rc=$injected_probe_status (cleanup rc=$status)" >&2
+                failures=$((failures + 1))
+            fi
+            if [ "$(wc -l < "$untrack_calls" | tr -d ' ')" -ne "$expected_untracks" ]; then
+                echo "FAIL: $function_name changed PID tracking before conclusive probe rc=$injected_probe_status" >&2
+                failures=$((failures + 1))
+            fi
+            if { [ "$expected_record" = present ] && [ ! -f "$record" ]; } \
+                || { [ "$expected_record" = absent ] && [ -e "$record" ]; }; then
+                echo "FAIL: $function_name did not keep record $expected_record for probe rc=$injected_probe_status" >&2
+                failures=$((failures + 1))
+            fi
+        done
+    done
+    # A present listener with a verified different owner is deliberately left
+    # to that owner's pass; tightening errors must preserve that distinction.
+    injected_probe_status=0
+    cloudbench_central_hub_owner_for() { printf '/fixture/distinct.owner\n'; }
+    ws="$TMP_ROOT/listener-status-distinct-owner"
+    mkdir -p "$ws/.context/fleet/runs/_hub" || return 1
+    record="$ws/.context/fleet/runs/_hub/agent-link-server.42000.fixture.pending"
+    printf 'fixture record\n' > "$record"
+    : > "$untrack_calls"
+    if ! terminate_test_pending_hubs "$ws" || [ -e "$record" ] \
+        || [ "$(wc -l < "$untrack_calls" | tr -d ' ')" -ne 1 ]; then
+        echo 'FAIL: verified distinct listener owner blocked pending-record finalization' >&2
+        failures=$((failures + 1))
+    fi
+    # No owner's evidence may be cleared when a later port remains uncertain.
+    ws="$TMP_ROOT/listener-status-mixed-owners"
+    mkdir -p "$ws/.context/fleet/runs/_hub" || return 1
+    record="$ws/.context/fleet/runs/_hub/agent-link-server.42000"
+    printf 'fixture record\n' > "$record.first.owner"
+    printf 'fixture record\n' > "$record.second.owner"
+    local probe_calls="$TMP_ROOT/listener-status-mixed.calls"
+    : > "$probe_calls"
+    : > "$untrack_calls"
+    cloudbench_tcp_listener_present() {
+        printf 'probe\n' >> "$probe_calls"
+        [ "$(wc -l < "$probe_calls" | tr -d ' ')" -eq 1 ] && return 1
+        return 3
+    }
+    if terminate_test_owned_hubs "$ws" >/dev/null 2>&1 \
+        || [ ! -f "$record.first.owner" ] || [ ! -f "$record.second.owner" ] \
+        || [ -s "$untrack_calls" ]; then
+        echo 'FAIL: mixed conclusive/inconclusive ports partially finalized owned Hub evidence' >&2
+        failures=$((failures + 1))
+    fi
+    [ "$failures" -eq 0 ]
+)
+
+if [ "${CLOUDBENCH_TEST_LISTENER_STATUS_SELF_TEST:-0}" = "1" ]; then
+    listener_probe_status_contract || fail "listener probe consumers must require conclusive state"
+    echo "PASS: only rc=1 proves absence; inconclusive probes retain cleanup records"
+    exit 0
+fi
+listener_probe_status_contract || fail "listener probe consumers must require conclusive state"
+echo "PASS: only rc=1 proves absence; inconclusive probes retain cleanup records"
+
 FLEET_BENCH_APP="$(fleet_bench_app)" \
     || fail "could not resolve APP from scripts/run-bench-fleet"
 
@@ -1684,7 +1825,7 @@ for port_attempt in $(seq 0 199); do
     port_window_busy=0
     for candidate_port in "$port_base" "$((port_base + 1))" \
         "$((port_base + 20))" "$((port_base + 21))"; do
-        if cloudbench_tcp_listener_present "$candidate_port"; then
+        if ! test_tcp_listener_absent "$candidate_port"; then
             port_window_busy=1
             break
         fi
@@ -2097,7 +2238,7 @@ PY
 terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
     local ws="$1" runs_root="$1/.context/fleet/runs"
     local hub_context="$runs_root/_hub" pending_file pid pid_start pgid port
-    local process_state actual_pgid deadline group_state listener_owner
+    local process_state actual_pgid deadline group_state listener_owner probe_status
     [ -d "$hub_context" ] || return 0
     for pending_file in "$hub_context"/agent-link-server.*.*.pending; do
         [ -f "$pending_file" ] || continue
@@ -2152,7 +2293,9 @@ terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
             echo "❌ exact pending test Hub process group remains $group_state: $pgid" >&2
             return 1
         }
-        if cloudbench_tcp_listener_present "$port"; then
+        probe_status=0
+        cloudbench_tcp_listener_present "$port" || probe_status=$?
+        if [ "$probe_status" -eq 0 ]; then
             listener_owner="$(cloudbench_central_hub_owner_for \
                 "$port" "$runs_root" "$ws" || true)"
             # A shared port is not process identity. Defer a verified distinct
@@ -2163,6 +2306,9 @@ terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
                 echo "❌ pending test Hub listener survived exact teardown on :$port" >&2
                 return 1
             fi
+        elif [ "$probe_status" -ne 1 ]; then
+            echo "❌ pending test Hub listener probe inconclusive on :$port (rc=$probe_status)" >&2
+            return 1
         fi
         untrack_test_hub_pid "$pid"
         chmod u+w "$pending_file" 2>/dev/null || true
@@ -2173,7 +2319,7 @@ terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
 terminate_test_owned_hubs() {  # terminate_test_owned_hubs <workspace>
     local ws="$1" runs_root="$1/.context/fleet/runs"
     local hub_context="$runs_root/_hub" owner_file pid pid_start pgid port group_state process_state
-    local owner_ports=()
+    local owner_ports=() completed_owners=() completed_pids=() index
     [ -d "$hub_context" ] || return 0
     terminate_test_pending_hubs "$ws" || return 1
     for owner_file in "$hub_context"/agent-link-server.*.*.owner; do
@@ -2223,15 +2369,22 @@ terminate_test_owned_hubs() {  # terminate_test_owned_hubs <workspace>
             echo "❌ exact test Hub process group remains $group_state: $pgid" >&2
             return 1
         }
-        untrack_test_hub_pid "$pid"
-        chmod u+w "$owner_file" 2>/dev/null || true
-        rm -f "$owner_file" "$owner_file.terminal" || return 1
+        completed_owners+=("$owner_file")
+        completed_pids+=("$pid")
     done
     for port in "${owner_ports[@]}"; do
-        if cloudbench_tcp_listener_present "$port"; then
-            echo "❌ test Hub listener survived exact teardown on :$port" >&2
+        if ! test_tcp_listener_absent "$port"; then
+            echo "❌ test Hub listener absence not verified after exact teardown on :$port" >&2
             return 1
         fi
+    done
+    # Keep ownership evidence until every stopped Hub's port is conclusively
+    # absent. A failed probe must leave the exact records available for retry.
+    for index in "${!completed_owners[@]}"; do
+        owner_file="${completed_owners[$index]}"
+        untrack_test_hub_pid "${completed_pids[$index]}"
+        chmod u+w "$owner_file" 2>/dev/null || true
+        rm -f "$owner_file" "$owner_file.terminal" || return 1
     done
 }
 
@@ -2553,7 +2706,7 @@ PY
     if [ "$rc" -eq 143 ] \
         && ! cloudbench_pid_matches_start "$pid" "$pid_start" \
         && [ "$(cloudbench_process_group_state "$pgid")" = absent ] \
-        && ! cloudbench_tcp_listener_present "$port" \
+        && test_tcp_listener_absent "$port" \
         && [ ! -e "$pending_file" ] \
         && [ ! -e "$contract_root" ]; then
         return 0
@@ -2584,7 +2737,7 @@ PY
     rm -rf "$contract_root"
     ! cloudbench_pid_matches_start "$pid" "$pid_start" \
         && [ "$(cloudbench_process_group_state "$pgid")" = absent ] \
-        && ! cloudbench_tcp_listener_present "$port" \
+        && test_tcp_listener_absent "$port" \
         || return 1
     return 1
 }
@@ -2642,7 +2795,7 @@ PY
     if [ "$rc" -eq 143 ] \
         && ! cloudbench_pid_matches_start "$pid" "$pid_start" \
         && [ "$(cloudbench_process_group_state "$pgid")" = absent ] \
-        && ! cloudbench_tcp_listener_present "$port" \
+        && test_tcp_listener_absent "$port" \
         && [ ! -e "$contract_root" ]; then
         return 0
     fi
@@ -2661,7 +2814,7 @@ PY
     rm -rf "$contract_root"
     ! cloudbench_pid_matches_start "$pid" "$pid_start" \
         && [ "$(cloudbench_process_group_state "$pgid")" = absent ] \
-        && ! cloudbench_tcp_listener_present "$port" \
+        && test_tcp_listener_absent "$port" \
         || return 1
     return 1
 }
