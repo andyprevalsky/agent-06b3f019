@@ -8838,13 +8838,6 @@ cleanup() {
         ec=1
         teardown_failed=1
     fi
-    # Autoscaler EXIT cleanup calls the snapshotted port-lease helper. Remove
-    # an invocation-owned immutable bundle only after every child/autoscaler is
-    # reaped; borrowed snapshots belong to their creating/waiting process.
-    if ! cleanup_owned_script_snapshot; then
-        ec=1
-        teardown_failed=1
-    fi
     # A benchmark FAIL and a teardown FAIL are independent facts. Preserve the
     # workload exit code, but still publish verified teardown when every exact
     # resource reached its required terminal disposition.
@@ -8861,6 +8854,13 @@ cleanup() {
         && [ "$KEEP_CLONES" != "1" ]; then
         fleet_registry_remove_if_empty "$FLEET_REGISTRY_DIR" \
             || { ec=1; teardown_failed=1; }
+    fi
+    # Teardown audit publication and registry retirement also consume the
+    # snapshotted migration helper. Keep the bundle until those final consumers
+    # finish; deleting it after child reaping alone strands migrated ownership.
+    if ! cleanup_owned_script_snapshot; then
+        ec=1
+        teardown_failed=1
     fi
     cloudbench_controller_lock_release "$LOCK_DIR"
     # Task failure and infrastructure failure both use exit 1. Seal their

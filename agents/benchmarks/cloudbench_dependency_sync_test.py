@@ -1454,9 +1454,10 @@ exec "$@"
         repo / "scripts/run.sh",
         """#!/usr/bin/env bash
 set -u
+source """ + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh")) + """
 mkdir -p "$BENCHMARK_CONTEXT_DIR"
 printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
-trap 'exit 0' TERM INT
+trap 'run_publish_stack_cleanup_status clean; exit 0' TERM INT
 while :; do sleep 1; done
 """,
     )
@@ -1486,7 +1487,7 @@ async def fake_main_async(_args):
         return "fixture"
 
     async def get_tree(*_args, **_kwargs):
-        return []
+        return [{{"agent_id": "root-agent"}}]
 
     async def poll_forever(*_args, **_kwargs):
         await asyncio.Event().wait()
@@ -1498,7 +1499,19 @@ async def fake_main_async(_args):
         return {{"messages": []}}
 
     async def finalize(*_args, **_kwargs):
-        return None, None
+        return "fixture-manifest", None
+
+    async def pause(*_args, **_kwargs):
+        return True
+
+    def exact_sessions(_url, aid):
+        assert aid == "root-agent"
+        return {{"tree_agent_ids": [aid], "browser_sessions": []}}
+
+    def close_sessions(_url, aid, _before):
+        assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"
+        return {{"root_agent_id": aid, "root_deleted": True}}
+
 
     async def headers():
         return {{"X-API-Key": "fixture"}}
@@ -1535,11 +1548,17 @@ async def fake_main_async(_args):
     runner._restore_live_fixture_scenarios_async = return_none
     runner._api_headers = headers
     runner.httpx.AsyncClient = Client
-    await runner.run_single_task(
+    runner.pause_agent = pause
+    runner.cloud_batch_cleanup.exact_root_sessions = exact_sessions
+    runner.cloud_batch_cleanup.close_exact_root_sessions = close_sessions
+    runner._begin_interrupt_cleanup()
+    result = await runner.run_single_task(
         "http://127.0.0.1:39999",
         task,
         keep_failed_agents=True,
     )
+    await runner._finalize_owned_cloud_batch("http://127.0.0.1:39999", [result], {{}})
+    runner._complete_interrupt_cleanup()
 
 
 runner.main_async = fake_main_async
@@ -1690,8 +1709,8 @@ cloudbench_env_value() { return 0; }
         assert "state=clean" in cleanup_status
         assert (data_dir / f"cloudbench-driver-clean-{run_token}.ack").read_text() == f"{run_token}\n"
         assert (data_dir / "cloudbench-driver.state").read_text() == "exited\n"
-        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index("Deleted cancelled agent")
-        assert log_text.index("Deleted cancelled agent") < log_text.index(
+        assert log_text.index("benchmark cancellation signal dispatched") < log_text.index("Verified cloud root provider cleanup")
+        assert log_text.index("Verified cloud root provider cleanup") < log_text.index(
             "benchmark root cleanup evidence: state=clean"
         )
         assert log_text.index("benchmark root cleanup evidence: state=clean") < log_text.index(
@@ -2268,6 +2287,41 @@ publish_cleanup_ack
     assert (data / "interrupt.status").read_bytes() == receipt.read_bytes()
     assert (result.returncode == 0) == (state == "clean")
     assert (data / "cleanup.ack").exists() == (state == "clean")
+
+
+@pytest.mark.parametrize("state,token,pid,birth,expected", [
+    ("clean", "fixture", "42", "this-start", True),
+    ("pending", "fixture", "42", "this-start", False),
+    ("failed", "fixture", "42", "this-start", False),
+    ("clean", "foreign", "42", "this-start", False),
+    ("clean", "fixture", "41", "this-start", False),
+    ("clean", "fixture", "42", "old-start", False),
+    ("missing", "fixture", "42", "this-start", False),
+])
+def test_driver_cleanup_requires_current_stack_receipt_on_normal_completion(tmp_path, state, token, pid, birth, expected):
+    publish = _extract_fleet_function(DRIVER_SCRIPT.read_text(), "publish_cleanup_ack() {")
+    stack = tmp_path / "stack.status"
+    if state != "missing":
+        stack.write_text(f"version=1\nstate={state}\ntoken={token}\nstack_pid={pid}\nstack_birth={birth}\n")
+    root = tmp_path / "root.status"
+    root.write_text("version=1\nstate=clean\ntoken=fixture\n")
+    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+log() {{ :; }}
+{publish}
+CLOUDBENCH_RUN_TOKEN=fixture
+ACTIVE_COMMAND_SIGNALLED=0
+STACK_PID=42
+STACK_BIRTH=this-start
+STACK_CLEANUP_STATUS_FILE={shlex.quote(str(stack))}
+RUNNER_INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(root))}
+INTERRUPT_CLEANUP_STATUS_FILE={shlex.quote(str(tmp_path / 'data/root.status'))}
+CLEANUP_ACK_FILE={shlex.quote(str(tmp_path / 'data/cleanup.ack'))}
+publish_cleanup_ack
+'''], text=True, capture_output=True, check=False)
+    assert (tmp_path / "data/root.status").exists(), result.stderr
+    assert (tmp_path / "data/root.status").read_bytes() == root.read_bytes()
+    assert (result.returncode == 0) == expected, result.stderr
+    assert (tmp_path / "data/cleanup.ack").exists() == expected
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -13972,6 +14026,8 @@ APP_USER=rose
 BASE_PORT=3000
 CONTEXT_DIR=/data/repo/.context/cloudbench
 WORKSPACE_NAME={shlex.quote(workspace_name)}
+CLOUDBENCH_RUN_TOKEN=fixture
+STACK_CLEANUP_STATUS_FILE=/data/repo/.context/cloudbench/stack.status
 STACK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump
 WMH_MODEL_NAME=fixture
 WMH_DIR=/data/world-model
@@ -20016,7 +20072,8 @@ machine_guest_recovery_configuration {machine} vol_old {shlex.quote(str(registry
     assert "volume_id=vol_new\n" in (registry / "clones" / clone).read_text()
 
 
-def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cleanup_exit", [None, 0, 143])
+def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path: Path, cleanup_exit: int | None) -> None:
     registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
@@ -20024,7 +20081,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path
         "fleet_registry_reconcile_mounted_volume() {", "reap_registry_clones() {",
         "fleet_audit_update_registry_clone() {", "fleet_registry_remove_if_empty() {",
         "fleet_audit_finalize_provider_teardown() {", "reap_machine() {",
-        "reap_volume() {", "volume_inventory_contains_id() {",
+        "reap_volume() {", "volume_inventory_contains_id() {", "cleanup() {",
     ))
     workspace = tmp_path / "workspace"
     runs = workspace / ".context/fleet/runs"
@@ -20075,8 +20132,43 @@ fleet_registry_resume_volume_migrations "$REGISTRY" || exit 87
 fleet_registry_remove_if_empty "$REGISTRY" || exit 85
 [ ! -e "$REGISTRY" ] || exit 86
 '''
+    if cleanup_exit is not None:
+        snapshot = tmp_path / "owned-snapshot"
+        snapshot.mkdir()
+        shutil.copy2(ROOT / "scripts/cloudbench-volume-migration.py", snapshot)
+        script = script[:script.index('reap_registry_clones "$REGISTRY" forced || exit 81')]
+        script += f"""
+VOLUME_MIGRATION_HELPER={shlex.quote(str(snapshot / 'cloudbench-volume-migration.py'))}
+FLEET_REGISTRY_DIR="$REGISTRY"
+FLEET_REGISTRY_PUBLISHED=1
+FLEET_EXECUTION_COMPLETED=1
+AUTOSCALER_FAILURE=0
+KEEP_CLONES=0
+LOCAL_PROCESS_TEARDOWN_FAILED=0
+CLAIMED_POOL_FILE="$FLEET_DIR/no-claims"
+TAINTED_POOL_FILE="$FLEET_DIR/no-tainted"
+LOCK_DIR="$FLEET_DIR/controller.lock"
+AUTOSCALER_PORT_LEASE_HELPER=/dev/null
+AUTOSCALER_PIDS=()
+PROVISION_PIDS=()
+CHILD_PIDS=()
+mkdir -p "$FLEET_DIR/_batch"
+for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait  cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown  cloudbench_terminate_and_wait record_tainted_claimed_pool_machines  reconcile_current_pool_transfer_claims reconcile_current_pool_claims  capacity_release_owner_reservations finalize_terminal_projection  cloudbench_controller_lock_release; do
+    eval "$helper() {{{{ return 0; }}}}"
+done
+cleanup_owned_script_snapshot() {{{{ rm -r {shlex.quote(str(snapshot))}; }}}}
+trap cleanup EXIT
+trap 'exit 143' TERM
+""".replace("{{", "{").replace("}}", "}")
+        script += 'kill -TERM "$$"\n' if cleanup_exit == 143 else 'exit 0\n'
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=20)
-    assert result.returncode == 0, result.stderr + result.stdout
+    assert result.returncode == (cleanup_exit or 0), result.stderr + result.stdout
+    if cleanup_exit is not None:
+        assert not snapshot.exists(), "owned snapshot was retained after its final consumer"
+        assert not registry.exists(), "verified migration left recovery authority behind"
+        lifecycle = json.loads((runs / "fixture-run/_batch/lifecycle.json").read_text())
+        assert lifecycle["controller_exit_code"] == cleanup_exit
+        assert lifecycle["status"] == ("failed" if cleanup_exit == 143 else "verified")
     assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
     assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
     journal = audit / "volume-migrations" / machine / "vol_old.json"

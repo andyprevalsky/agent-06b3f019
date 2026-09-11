@@ -18006,6 +18006,15 @@ def _with_tmp_path(test_fn):
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    from benchmarks import cloud_batch_cleanup_test
+    for name in sorted(dir(cloud_batch_cleanup_test)):
+        if not name.startswith("test_"):
+            continue
+        case = getattr(cloud_batch_cleanup_test, name)
+        if hasattr(case, "async_case"):
+            await r.record_async("cloud_cleanup_" + name[5:], case.async_case)
+        else:
+            r.record("cloud_cleanup_" + name[5:], case)
     r.record(
         "every_benchmark_run_registers_in_app_hub",
         test_every_benchmark_run_registers_in_app_hub_before_execution,

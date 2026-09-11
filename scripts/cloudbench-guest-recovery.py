@@ -983,7 +983,7 @@ def run_exact_psql(
     return result.stdout.strip()
 
 
-def root_tree_query_sql(root_agent_id: str) -> str:
+def root_tree_query_sql(root_agent_id: str, *, include_sealing_state: bool = False) -> str:
     statement = f"""
 WITH RECURSIVE tree AS (
   SELECT id, "parentAgentId", "deletedAt"
@@ -1018,6 +1018,12 @@ SELECT json_build_object(
   ), '[]'::json)
 )::text;
 """.strip()
+    if include_sealing_state:
+        statement = statement.replace(
+            "'root_exists', EXISTS(",
+            "'unsealed_tree_agent_ids', COALESCE((SELECT json_agg(id ORDER BY id) FROM tree WHERE \"deletedAt\" IS NULL), '[]'::json), 'root_exists', EXISTS(",
+            1,
+        )
     return " ".join(statement.split())
 
 

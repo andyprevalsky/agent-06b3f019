@@ -53,6 +53,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from benchmarks import cloud_batch_cleanup
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -83,6 +84,7 @@ from benchmarks.logs import (
     canonicalize_agent_tree,
     collect_logs,
     collect_tree_messages,
+    extract_message_transcript,
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
@@ -2533,12 +2535,15 @@ async def finalize_archive_and_score_world_model(
     task_name: str,
     *,
     force: bool = False,
+    owned_batch_final: bool = False,
     benchmark_passed: Optional[bool] = None,
     benchmark_status: Optional[str] = None,
     failure_reason: Optional[str] = None,
 ) -> tuple[Optional[str], dict]:
     """Finalize durable trace storage and score WMH prediction fidelity for the run."""
 
+    if cloud_batch_cleanup.contract() is not None and not owned_batch_final:
+        return None, {"status": "deferred", "reason": "owned cloud batch cleanup precedes archive"}
     archive_manifest_ref = await archive_agent_finalize(
         base_url,
         agent_id,
@@ -5288,6 +5293,8 @@ def slice_csv(filepath: str, row_start: int, row_end: int) -> str:
 
 def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bool:
     """Return whether benchmark cleanup should delete the created agent."""
+    if cloud_batch_cleanup.contract() is not None:
+        return False
     if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
         return False
     return passed or not keep_failed_agents
@@ -5295,6 +5302,8 @@ def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bo
 
 def _should_delete_cancelled_agent(keep_failed_agents: bool) -> bool:
     """Owner interruption overrides diagnostic retention, never explicit audit retention."""
+    if cloud_batch_cleanup.contract() is not None:
+        return False
     if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
         return False
     return not keep_failed_agents or os.environ.get("BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT") == "true"
@@ -5398,41 +5407,29 @@ def _agent_messages_ready_for_browser_hub_archive(
     return _agent_messages_have_browser_terminal(messages) and _agent_messages_have_browser_recording_ready(messages)
 
 
-def _agent_messages_ready_for_durable_browser_evidence(
-    messages: Optional[List[dict]],
-) -> bool:
-    """True when every recorded browser has the publisher's explicit terminal.
-
-    The FE can close a live panel from a workflow-scoped ``session_paused`` row,
-    but ``publish_evidence_links`` deliberately requires task-scoped
-    ``task_complete`` evidence for every recorded browser. Payment-abandonment
-    archives are approval evidence, so use that stricter contract.
-    """
-    browser_task_ids: set[str] = set()
-    completed_task_ids: set[str] = set()
-    for message in messages or []:
-        metadata = message.get("metadata") or {}
-        if not isinstance(metadata, dict):
+def _agent_messages_ready_for_durable_browser_evidence(messages: Optional[List[dict]]) -> bool:
+    """Require terminal and attached recording for every browser, including no-row failures."""
+    states: dict[str, dict[str, bool]] = {}
+    lifecycle = {"browser", "session_init", "session_started", "task_started", "recording", "network_recording", "task_complete"}
+    for row in extract_message_transcript({"messages": messages or []}):
+        meta = row.get("metadata")
+        if not isinstance(meta, dict) or not isinstance(meta.get("task_id"), str) or not meta["task_id"]:
             continue
-        if metadata.get("toolName") != "spawn_browser_agent":
+        action = meta.get("action_type")
+        browser = meta.get("toolName") == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {"browser", "recording", "network_recording"}
+        code = meta.get("toolName") == "spawn_claude_code_agent" or meta.get("agentType") == "code"
+        if not browser and not code and action not in lifecycle:
             continue
-        task_id = metadata.get("task_id")
-        if not isinstance(task_id, str) or not task_id:
-            continue
-        action_type = metadata.get("action_type")
-        if action_type in {
-            "browser",
-            "session_init",
-            "session_started",
-            "task_started",
-            "recording",
-            "network_recording",
-            "task_complete",
-        }:
-            browser_task_ids.add(task_id)
-        if action_type == "task_complete":
-            completed_task_ids.add(task_id)
-    return browser_task_ids.issubset(completed_task_ids) and (_agent_messages_have_browser_recording_ready(messages))
+        state = states.setdefault(meta["task_id"], {"browser": False, "code": False, "complete": False, "recording": False})
+        state["browser"] |= browser
+        state["code"] |= code
+        state["complete"] |= action == "task_complete"
+        # The durable publisher accepts this singular URL or an attached file.
+        state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
+    return all(
+        (state["code"] and not state["browser"]) or (state["complete"] and state["recording"])
+        for state in states.values()
+    )
 
 
 async def _refresh_agent_after_pause_for_browser_terminal(
@@ -5468,6 +5465,100 @@ async def _refresh_agent_after_pause_for_browser_terminal(
             return latest
     print("    ⚠ Timed out waiting for browser terminal messages after pause; archiving latest snapshot anyway")
     return latest
+
+
+async def _refresh_browser_archive_snapshot(
+    base_url: str, agent_id: str, data: dict, logs: dict,
+    *, expected_agent_ids: set[str] | None = None, timeout_seconds: float = 60.0,
+) -> dict:
+    """Refresh the entire tree at the final archive boundary; incomplete evidence fails closed."""
+    async with asyncio.timeout(timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            tree_agents = await get_agent_tree(base_url, agent_id)
+            ids = {str(info.get("agent_id")) for info in tree_agents}
+            expected = expected_agent_ids or {agent_id}
+            if not expected.issubset(ids):
+                raise RuntimeError("archive tree omitted an owned agent")
+            snapshots = dict(zip(sorted(ids), await asyncio.gather(*(get_agent(base_url, aid) for aid in sorted(ids)))))
+            latest = snapshots[agent_id]
+            if time.monotonic() >= deadline:
+                raise TimeoutError("browser archive refresh exceeded its readiness bound")
+            if all(_agent_messages_ready_for_durable_browser_evidence(value.get("messages")) for value in snapshots.values()):
+                async def cached_get(aid):
+                    return snapshots[aid]
+                tree = canonicalize_agent_tree(await collect_tree_messages(agent_id, tree_agents, cached_get))
+                if set(tree) != ids:
+                    raise RuntimeError("archive tree transcript capture was incomplete")
+                latest["_benchmark"] = {**latest.get("_benchmark", {}), **data.get("_benchmark", {})}
+                logs["messages"] = extract_message_transcript(latest)
+                logs["tree"] = tree
+                return latest
+            if time.monotonic() >= deadline:
+                raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
+            await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
+
+async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
+    """Finalize each owned root after all tasks, while workers can still persist cleanup."""
+    by_id = {result.agent_id: result for result in results if result.agent_id}
+    owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
+    # A missing create response cannot prove that no root was allocated.
+    failures = []
+    if any(not r.agent_id and r.status != "SKIPPED" for r in results):
+        failures.append("owned cloud execution has an unknown root creation outcome")
+    if not owned:
+        raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
+    for aid in sorted(owned):
+        try:
+            if not await pause_agent(base_url, aid):
+                raise RuntimeError("pause was not acknowledged")
+        except Exception as error:
+            failures.append(f"{aid}: {error}")
+    for aid in sorted(owned):
+        result = by_id.get(aid)
+        before = None
+        logs = result.logs if result is not None and isinstance(result.logs, dict) else {}
+        try:
+            before = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, aid)
+            data = await _refresh_browser_archive_snapshot(
+                base_url, aid, {}, logs, expected_agent_ids=set(before["tree_agent_ids"]),
+            )
+            if result is None:
+                raise RuntimeError("owned cloud root did not produce a task result")
+            result.logs = logs
+            result.message_count = len(data.get("messages") or [])
+            result.archive_manifest_ref, result.world_model_fidelity = await finalize_archive_and_score_world_model(
+                base_url, aid, result.name, force=True, owned_batch_final=True, benchmark_passed=result.passed,
+                benchmark_status=result.benchmark_status, failure_reason=result.failure_reason,
+            )
+            if not result.archive_manifest_ref:
+                raise RuntimeError("owned cloud root final archive was not confirmed")
+        except Exception as error:
+            failures.append(f"{aid}: {error}")
+            if result is not None:
+                result.passed = False
+                result.benchmark_status = "ERROR"
+                result.failure_reason = f"Cloud evidence finalization failed: {error}"
+        finally:
+            # Even failed evidence must release its exact resources. A DELETE
+            # response alone is insufficient because backend cleanup is best effort.
+            try:
+                if before is None:
+                    raise RuntimeError("exact provider ownership was not established")
+                await delete_agent(base_url, aid)
+                receipt = await asyncio.to_thread(cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before)
+                logs["cloud_provider_cleanup"] = receipt
+                print(f"    Verified cloud root provider cleanup: {aid}")
+            except Exception as error:
+                failures.append(f"{aid}: {error}")
+                if result is not None:
+                    result.passed = False
+                    result.benchmark_status = "ERROR"
+                    result.failure_reason = f"Cloud provider cleanup failed: {error}"
+            if result is not None:
+                result.logs = logs
+    if failures:
+        raise RuntimeError("owned cloud evidence finalization failed: " + "; ".join(failures))
 
 
 async def _seal_payment_abandonment_browser_for_archive(
@@ -12773,7 +12864,7 @@ async def run_single_task(
 
     except asyncio.CancelledError:
         duration = time.time() - start
-        interrupt_cleanup_started = _begin_interrupt_cleanup()
+        interrupt_cleanup_started = _begin_interrupt_cleanup() if cloud_batch_cleanup.contract() is None else False
         cancelled_agent_deleted = False
         print(f"\n    ⚠ {task.name}: CANCELLED — collecting logs before shutdown")
         if realtime_monitor:
@@ -12882,7 +12973,7 @@ async def run_single_task(
             )
             await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
-                if not keep_failed_agents:
+                if not keep_failed_agents and cloud_batch_cleanup.contract() is None:
                     await delete_agent(base_url, agent_id)
                     print(f"    🗑  Deleted orphaned agent {agent_id[:12]}")
                 else:
@@ -14140,6 +14231,9 @@ async def main_async(args):
         except asyncio.CancelledError:
             pass
 
+    owned_batch_cleanup = cloud_batch_cleanup.contract() is not None
+    if owned_batch_cleanup:
+        _begin_interrupt_cleanup()
     _report_ticker_task = asyncio.create_task(_report_ticker())
     _emit_report({}, force=True)
     try:
@@ -14315,6 +14409,16 @@ async def main_async(args):
             else:
                 print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
+        # All selected execution has finished. Keep workers and backend available
+        # while recordings finalize, then freeze terminal evidence once.
+        batch_cleanup_error = None
+        if owned_batch_cleanup:
+            try:
+                await _finalize_owned_cloud_batch(base_url, run.task_results, _live_task_agent_ids)
+                _complete_interrupt_cleanup()
+            except Exception as error:
+                batch_cleanup_error = error
+
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
             run.world_model_retrieval_audit = _fetch_wmh_retrieval_audit()
@@ -14326,6 +14430,9 @@ async def main_async(args):
                 (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
             except Exception as exc:
                 print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+
+        if batch_cleanup_error is not None:
+            raise batch_cleanup_error
 
     # Print summary
     s = run.summary

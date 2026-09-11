@@ -147,6 +147,7 @@ CLEANUP_ACK_FILE="$DATA_DIR/cloudbench-driver-clean-${CLOUDBENCH_RUN_TOKEN:-boot
 SHUTDOWN_REQUEST_FILE="$DATA_DIR/cloudbench-shutdown-${CLOUDBENCH_RUN_TOKEN:-boot}.request"
 INTERRUPT_CLEANUP_STATUS_FILE="$DATA_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 RUNNER_INTERRUPT_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-interrupt-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
+STACK_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-stack-cleanup-${CLOUDBENCH_RUN_TOKEN:-boot}.status"
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_SIGNALLED=0
 ACTIVE_COMMAND_STARTING=0
@@ -155,12 +156,12 @@ STACK_PID=""
 TAIL_PID=""
 
 publish_cleanup_ack() {
-    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary token_matches=0
+    local temporary="${CLEANUP_ACK_FILE}.tmp.$$" cleanup_state cleanup_token cleanup_status_temporary cleanup_stack_pid cleanup_stack_birth token_matches=0
     # Library/contract probes intentionally invoke the driver without a guest
     # run token and without /data. They do not own a status service to ack.
     [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 0
     mkdir -p "${CLEANUP_ACK_FILE%/*}" "${INTERRUPT_CLEANUP_STATUS_FILE%/*}" || return 1
-    if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ]; then
+    if [ "$ACTIVE_COMMAND_SIGNALLED" = "1" ] || [ -f "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" ]; then
         cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' \
             "$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
         cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' \
@@ -180,6 +181,16 @@ publish_cleanup_ack() {
         esac
         if [ "$cleanup_state" != "clean" ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ]; then
             log "FATAL: benchmark root cleanup was not confirmed; refusing guest cleanup acknowledgement"
+            return 1
+        fi
+    fi
+    if [ -n "${STACK_PID:-}" ]; then
+        cleanup_state="$(awk -F= '$1 == "state" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_token="$(awk -F= '$1 == "token" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_pid="$(awk -F= '$1 == "stack_pid" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        cleanup_stack_birth="$(awk -F= '$1 == "stack_birth" { print $2; exit }' "$STACK_CLEANUP_STATUS_FILE" 2>/dev/null || true)"
+        if [ -z "${STACK_BIRTH:-}" ] || [ "$cleanup_stack_birth" != "$STACK_BIRTH" ] || [ "$cleanup_state" != clean ] || [ "$cleanup_token" != "$CLOUDBENCH_RUN_TOKEN" ] || [ "$cleanup_stack_pid" != "$STACK_PID" ]; then
+            log "FATAL: stack worker cleanup was not confirmed; refusing guest cleanup acknowledgement"
             return 1
         fi
     fi
@@ -816,6 +827,8 @@ STACK_ENV=(
     # state. Allocate a run-local provider profile; server shutdown deletes it.
     "BENCHMARK_ISOLATED_BROWSER_PROFILES=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "RUN_STACK_CLEANUP_STATUS_FILE=$STACK_CLEANUP_STATUS_FILE"
+    "RUN_STACK_CLEANUP_TOKEN=$CLOUDBENCH_RUN_TOKEN"
     "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
@@ -949,8 +962,10 @@ fi
 mkdir -p "$DATA_DIR/cloudbench-cache" && chown "$APP_USER:$APP_USER" "$DATA_DIR/cloudbench-cache" 2>/dev/null || true
 
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
+rm -f "$STACK_CLEANUP_STATUS_FILE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
 STACK_PID=$!
+STACK_BIRTH="$(ps -p "$STACK_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
 log "stack pid=$STACK_PID (logs → $STACK_LOG)"
 
 tail -n +1 -F "$STACK_LOG" &
@@ -1205,6 +1220,7 @@ export BENCHMARK_ISOLATED_BROWSER_PROFILES=true
 export BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT=true
 export BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE='$RUNNER_INTERRUPT_CLEANUP_STATUS_FILE'
 export BENCHMARK_INTERRUPT_CLEANUP_TOKEN='$CLOUDBENCH_RUN_TOKEN'
+if [ '$BENCH_TARGET_MODE' = local ]; then export BENCHMARK_CLOUD_BATCH_CLEANUP=true; fi
 export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'

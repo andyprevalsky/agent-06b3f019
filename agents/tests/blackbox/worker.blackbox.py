@@ -216,6 +216,124 @@ def test_activity_admission_closes_on_cpu_pressure():
         pass
 
 
+
+def test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup():
+    """Repeated wrapper signals must not force-exit a worker during replay cleanup."""
+    launcher = WORKER_PATH.parent / "scripts" / "run_local_worker.sh"
+    for count in (1, 3):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").touch()
+            (root / "worker.py").write_text(
+                "import os, signal, time\n"
+                "from pathlib import Path\n"
+                "index = os.environ['WORKER_INDEX']\n"
+                "signals = 0\n"
+                "def stop(*args):\n"
+                " global signals\n"
+                " signals += 1\n"
+                " if signals > 1: raise SystemExit(9)\n"
+                " time.sleep(.3)\n"
+                " Path('clean-' + index).write_text(str(signals))\n"
+                " raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "Path('ready-' + index).touch()\n"
+                "while True: time.sleep(.01)\n"
+            )
+            process = subprocess.Popen(
+                ["bash", str(launcher)], cwd=root,
+                env={**os.environ, "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
+                     "WORKER_PROCESSES": str(count), "NAVI_WORKER_LOG_STREAM": "false",
+                     "NAVI_WORKER_LOG_FILE": str(root / "worker.log")},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not all((root / f"ready-{index}").exists() for index in range(count)):
+                    assert process.poll() is None, "worker supervisor exited before readiness"
+                    assert time.monotonic() < deadline, "worker fixture did not become ready"
+                    time.sleep(.02)
+                process.send_signal(signal.SIGTERM)
+                time.sleep(.05)
+                process.send_signal(signal.SIGTERM)
+                assert process.wait(timeout=5) == 0, "repeat cancellation killed a cleanup in progress"
+                assert all((root / f"clean-{index}").read_text() == "1" for index in range(count))
+            finally:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGTERM)
+                    process.wait(timeout=10)
+
+
+def _check_stack_worker_cleanup(worker_exit):
+    """Real Bash-owned children must finish a delayed HTTP cleanup before backend exit."""
+    import shlex
+    repository = WORKER_PATH.parent.parent
+    source = (repository / "scripts/run.sh").read_text()
+    def function(name):
+        start = source.index(name + "() {")
+        return source[start:source.index("\n}", start) + 2]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "expected-exit").write_text(str(worker_exit))
+        (root / "backend.py").write_text(
+            "from http.server import HTTPServer,BaseHTTPRequestHandler\nfrom pathlib import Path\n"
+            "class Handler(BaseHTTPRequestHandler):\n"
+            " def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b'cleanup-ok')\n"
+            " def log_message(self,*args): pass\n"
+            "server=HTTPServer(('127.0.0.1',0),Handler)\n"
+            "Path('backend.port').write_text(str(server.server_port))\nserver.serve_forever()\n"
+        )
+        (root / "worker.py").write_text(
+            "import signal,time,urllib.request\nfrom pathlib import Path\n"
+            "def stop(*args):\n time.sleep(2)\n"
+            " with urllib.request.urlopen('http://127.0.0.1:'+Path('backend.port').read_text(),timeout=1) as response:\n"
+            "  assert response.read()==b'cleanup-ok'\n"
+            " Path('provider-cleanup-complete').touch()\n raise SystemExit(int(Path('expected-exit').read_text()))\n"
+            "signal.signal(signal.SIGTERM,stop)\nPath('worker.ready').touch()\n"
+            "while True: time.sleep(.05)\n"
+        )
+        script = "\n".join([
+            "set -eo pipefail", f"SCRIPT_DIR={shlex.quote(str(repository / 'scripts'))}",
+            'source "$SCRIPT_DIR/lib/run-process-cleanup.sh"',
+            function("kill_tree"), function("kill_tree_hard"), function("cleanup"),
+            f"{shlex.quote(sys.executable)} backend.py &", "backend_fixture_pid=$!", 'printf "%s" "$backend_fixture_pid" > backend.pid',
+            f"{shlex.quote(sys.executable)} worker.py &", "AGENTS_PID=$!",
+            "trap 'kill \"$AGENTS_PID\" \"$backend_fixture_pid\" 2>/dev/null || true' EXIT",
+            "AGENTS_BIRTH=\"$(ps -p \"$AGENTS_PID\" -o lstart= | sed 's/^ *//;s/ *$//')\"",
+            'PIDS=("$backend_fixture_pid" "$AGENTS_PID")', "NAMES=(back-end agents)",
+            "SHUTTING_DOWN=false", "BENCHMARK_ISOLATED_RUN=true", "DB_OWNED_BY_US=false",
+            "USE_SYSTEM_PG=false", "SYSTEM_DB_OWNED_BY_US=false", "NGROK_CONFIG_FILE=", "FAIL_DIR=",
+            "RUN_STACK_CLEANUP_TOKEN=fixture", f"RUN_STACK_CLEANUP_STATUS_FILE={shlex.quote(str(root / 'stack.status'))}",
+            "BACKEND_PID=", "write_services_manifest() { :; }",
+            'for attempt in {1..100}; do [ ! -f worker.ready ] || [ ! -f backend.port ] || break; sleep .02; done',
+            "cleanup_code=0; cleanup || cleanup_code=$?",
+            'if kill -0 "$backend_fixture_pid" 2>/dev/null; then echo "owned backend survived before fixture safety trap" >&2; exit 99; fi',
+            'exit "$cleanup_code"',
+        ])
+        process = subprocess.Popen(["bash", "-c", script], cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            stdout, stderr = process.communicate(timeout=12)
+            assert process.returncode == (0 if worker_exit == 0 else 1), (stdout, stderr)
+            receipt = dict(line.split("=", 1) for line in (root / "stack.status").read_text().splitlines())
+            assert receipt["state"] == ("clean" if worker_exit == 0 else "failed")
+            backend_pid = (root / "backend.pid").read_text()
+            alive = subprocess.run(["ps", "-p", backend_pid, "-o", "stat="], capture_output=True, text=True)
+            assert not alive.stdout.strip(), "owned backend survived worker cleanup failure"
+            assert (root / "provider-cleanup-complete").exists(), "backend stopped before worker HTTP cleanup"
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes():
+    _check_stack_worker_cleanup(0)
+
+
+def test_stack_reaps_other_services_and_preserves_failed_worker_receipt():
+    _check_stack_worker_cleanup(7)
+
+
 def test_local_workers_do_not_alias_an_occupied_secondary_port():
     """A sibling's health listener cannot remove this run's worker capacity."""
     launcher = WORKER_PATH.parent / "scripts" / "run_local_worker.sh"
@@ -480,6 +598,9 @@ async def run_all_tests():
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     r.record("local_workers_do_not_alias_occupied_ports", test_local_workers_do_not_alias_an_occupied_secondary_port)
+    r.record("local_worker_single_cancellation_drains_cleanup", test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup)
+    r.record("stack_keeps_backend_alive_for_worker_cleanup", test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes)
+    r.record("stack_reaps_services_after_failed_worker", test_stack_reaps_other_services_and_preserves_failed_worker_receipt)
     r.record("dynamic_worker_metrics_discoverable", test_dynamic_worker_metrics_are_discoverable_and_scrapable)
     r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)

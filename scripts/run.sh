@@ -2294,9 +2294,26 @@ kill_tree_hard() {
 cleanup() {
     if $SHUTTING_DOWN; then return; fi
     SHUTTING_DOWN=true
+    local cleanup_failed=false
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
+    run_publish_stack_cleanup_status pending || return 1
+    # Workers finalize recordings and close providers through this backend.
+    # Drain their single signal owner while the backend/database remain alive.
+    if ! run_drain_owned_agents; then
+        cleanup_failed=true
+        run_publish_stack_cleanup_status failed
+        # A nonzero exit is a failed cleanup receipt, but a reaped worker must
+        # not orphan the rest of the owned stack. Keep services for recovery
+        # only when the supervisor's terminal state remains unproven.
+        if [ "${AGENTS_DRAINED:-false}" != true ]; then
+            SERVICE_STATUS=failed
+            write_services_manifest || true
+            return 1
+        fi
+    fi
     # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
+        [ "$pid" != "${AGENTS_PID:-}" ] || continue
         if [ -n "${BACKEND_PID:-}" ] && [ "$pid" = "$BACKEND_PID" ] \
             && [ -n "${BACKEND_PGID:-}" ]; then
             terminate_backend_group || true
@@ -2323,6 +2340,11 @@ cleanup() {
     [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
+    if $cleanup_failed; then
+        run_publish_stack_cleanup_status failed
+        return 1
+    fi
+    run_publish_stack_cleanup_status clean
 }
 trap 'release_seed_lock_if_held; cleanup' EXIT
 
@@ -2594,12 +2616,12 @@ if ! $BENCHMARK_MODE && $IS_MAC; then
     PIDS+=($!); NAMES+=("mac-app")
 fi
 
-if $BENCHMARK_MODE; then
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && ENABLE_BENCHMARK_MEMORY_BASELINE=1 HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-else
-    run_service "agents" bash -c 'set -eo pipefail; cd agents && source venv/bin/activate && HEALTH_CHECK_PORT=$HEALTH_PORT SDK_METRICS_PORT=$SDK_METRICS_PORT ./scripts/run_local_worker.sh' &
-fi
-PIDS+=($!); NAMES+=("agents")
+if $BENCHMARK_MODE; then export ENABLE_BENCHMARK_MEMORY_BASELINE=1; fi
+python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c \
+    'set -eo pipefail; cd agents; source venv/bin/activate; export HEALTH_CHECK_PORT=$HEALTH_PORT; exec ./scripts/run_local_worker.sh' &
+AGENTS_PID=$!
+AGENTS_BIRTH="$(ps -p "$AGENTS_PID" -o lstart= | sed 's/^ *//;s/ *$//')"
+PIDS+=("$AGENTS_PID"); NAMES+=("agents")
 
 # Benchmark Hub poller: claims runs dispatched from the in-app Benchmarks tab
 # and executes them on this machine. Without it a dispatched run sits queued
@@ -2676,6 +2698,7 @@ while true; do
     # Check if any process has died
     for i in "${!PIDS[@]}"; do
         pid="${PIDS[$i]}"
+        if [ "$pid" = "${AGENTS_PID:-}" ] && [ "${AGENTS_DRAINED:-false}" = true ]; then continue; fi
         if ! kill -0 "$pid" 2>/dev/null; then
             # Process is gone — get its exit code
             # `run.sh` uses `set -e`; a bare non-zero `wait` would trigger the

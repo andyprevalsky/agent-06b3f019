@@ -140,6 +140,21 @@ retroactively produce an accepted slice or alter any task outcome. The requested
 ten sequential ten-task proof must start again with the separately requested
 five-minute execution override.
 
+### Recurrence during the September 11 interrupted proof
+
+Owner `6299f8b56df1475c96f3c2e1d2281f5d` recovered its ten Machines but failed
+its final audit because cleanup removed the immutable script snapshot before
+`fleet_audit_finalize_provider_teardown` invoked the migration helper. The
+snapshot must outlive its last consumer, including cancellation cleanup. The
+actual cleanup integration was extended for normal exit and TERM 143: both
+failed with the helper missing before the fix, then all three variants passed
+when snapshot deletion moved after audit finalization and registry retirement.
+
+Canonical recovery then completed. Independent exact provider reads verified
+ten Machines terminal and eleven volumes terminal/unattached or exactly absent,
+and confirmed that the registry was gone. The interrupted proof remains failed;
+resource recovery does not turn it into validation evidence.
+
 ## Human feedback
 
 The user directed the agent to finish without permission prompts, required ten
