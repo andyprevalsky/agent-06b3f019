@@ -110,3 +110,104 @@ selection and a proposal for one global twenty-benchmark deploy budget.
 ## Reusable lesson
 
 Keep recording writers and their backend alive until terminal evidence is captured, and require exact provider cleanup before acknowledging teardown.
+
+## Recurrence: attempt nine, slice two
+
+Slice one of `capability-stability-20260911055658-53991` produced ten task
+outcomes, zero infrastructure errors, ten validated durable evidence bundles and
+verified teardown. Slice two failed and does not count. Five of Polar's six
+browser activities persisted recordings; the sixth continued work after the
+root pause and did not finish recording before the existing 60-second archive
+barrier. Investigation of that cancellation boundary remains open.
+
+A second failure in exact Steel verification overwrote the first failure reason.
+The TimeoutError also formatted as an empty string. Shutdown dropped the local
+database, and neither pre-delete nor terminal ownership query was retained in
+the failed task. Full backend and all eight worker logs were recovered from the
+retained exact VM before destruction. The separate REST client identity issue
+is recorded in `2026-09-11-exact-provider-client-identity-filtered`.
+
+The batch now retains its exact before/after/final ownership snapshots and every
+successful provider receipt in diagnostic evidence, including failed cleanup.
+It records archive and provider errors separately and gives otherwise-empty
+exceptions their type name. Only successful verification produces the existing
+`cloud_provider_cleanup` success receipt. Diagnostics are not cleanup authority
+and do not turn a failed run into a verified one.
+
+The permanent blackbox reproduction
+`test_failed_batch_retains_ownership_and_each_failure_cause` failed on the old
+code because the ownership evidence was absent and the archive failure was
+overwritten. It passes after the repair. A separate added helper contract test
+asserts terminal snapshots and earlier provider successes survive a later
+release failure; its initial run encountered the newly required keyword before
+implementation, so that initial TypeError is not claimed as causal evidence.
+All thirteen focused cleanup tests pass, and the full benchmark blackbox group
+passes in 60.0 seconds. Those results do not establish the live recording fix;
+no ten-slice acceptance claim is made from them.
+
+The preserved Temporal history subsequently confirmed cancellation requests for
+all six browser activities at 06:32:01.823Z. Activity 35, browser task
+`563dfc20-1b9a-50c3-9ea3-75e056fb81fa`, continued work across the final evidence
+window and never completed before root termination. The retained logs do not
+identify the exact await where its cancellation delivery was consumed.
+
+Pinned Python 3.11.9 and Temporal's real ActivityEnvironment provide a
+deterministic owning-boundary reproduction: complete the inner page-state future
+and request cancellation in the same event-loop turn while the activity awaits
+`asyncio.wait_for`. The await returns with Temporal's cancellation flag still
+true. A plain heartbeat succeeds, allowing another paid work step. A heartbeat
+is a liveness signal, not a cancellation checkpoint.
+
+The first refactor moved the existing explicit work heartbeats into one helper
+without changing behavior. The permanent test then failed with
+`['paid-step', 'recording-saved']` instead of cancellation followed by cleanup.
+The shared work checkpoint now checks Temporal's persistent cancellation state
+and raises CancelledError into the existing cancellation/finally path. The same
+test passes, proves normal work still runs without cancellation, and proves an
+awaited cleanup and cleanup heartbeat remain possible. The process heartbeat
+pump and recording cleanup do not perform this work check; repeatedly cancelling
+them would recreate the earlier lost-recording bug. No timeout was increased.
+
+The permanent browser blackbox also replays an unacknowledged recording-message
+save. Before the repair, both finalizer paths could report success despite the
+backend returning false (the live missing browser received HTTP 404). Kernel
+and frame finalizers now require acknowledgement; frame artifacts are retained
+when persistence fails. The valid before run failed because no error was raised;
+the same assertion passes after the repair. An earlier fixture invocation with
+a missing tempfile import is retained as an invalid test setup, not causal proof.
+
+Local reproduction commands:
+
+- `agents/venv/bin/python .context/setup/run-browser-cancel-repro.py`
+- `agents/venv/bin/python .context/setup/run-recording-ack-repro.py`
+
+Both call permanent tests in `spawn_browser_agent_v3.blackbox.py`, registered in
+that domain's standard blackbox runner. Existing fixtures that directly call
+activity-bound code now run inside ActivityEnvironment, rather than bypassing
+production cancellation checks. The initial full Mac run also exposed missing
+Playwright Chromium binaries; those were installed before the valid full rerun.
+
+Canonical recovery reconciled all ten retained slice-two machines. Independent
+provider reads verified all ten machines terminal, all ten volumes terminal and
+unattached or exactly absent, and the ownership registry absent. A separate
+exact Steel GET verified its released state; the older recovery log parser had
+only recovered the six Kernel identities. Recovery is not retroactive slice
+acceptance. The ten-by-ten proof must restart after live verification of this fix.
+
+Recovery now unions log-derived sessions with the exact before/after/final
+ownership snapshots in the sealed run JSON. It checks the run digest again
+before reading those snapshots, validates every root/tree/provider/session
+binding, supports a snapshot-only provider identity, and rejects malformed
+present evidence. Older runs with no snapshot field retain their existing
+log-based path. Positive snapshots also forbid the zero-allocation alternate
+receipt. The permanent recovery regression failed before the change with an
+empty Steel set and passes afterward, including snapshot-only and malformed
+identity cases. Four canonical recovery integration cases pass. Independent
+review identified and verified the digest, present-null and zero-allocation
+consistency checks.
+
+The second full browser blackbox run passed all checks except one token-rotation
+fixture still missing ActivityEnvironment. That failed subset passes after its
+context correction. The fourteen cleanup regressions and the previously run
+eighteen execution-backstop regressions pass. Live task verification remains
+required, and this incident remains open.

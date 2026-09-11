@@ -22,9 +22,9 @@ from typing import Callable, Optional
 
 from temporalio import activity
 
-logger = logging.getLogger(__name__)
-
 from .config import HEARTBEAT_KEEPALIVE_SECONDS
+
+logger = logging.getLogger(__name__)
 
 KEEPALIVE_MESSAGE = "browser keepalive (renderer/CDP may be blocked by a bot-challenge)"
 
@@ -132,3 +132,10 @@ def start_browser_activity_heartbeat() -> int:
 def stop_browser_activity_heartbeat(token: int) -> None:
     """Drop a previously registered activity context."""
     _DEFAULT.unregister(token)
+
+
+def browser_activity_checkpoint(*details: object) -> None:
+    """Stop cancelled work without interrupting the awaited recording cleanup."""
+    if activity.is_cancelled():
+        raise asyncio.CancelledError
+    activity.heartbeat(*details)

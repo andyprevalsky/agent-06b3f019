@@ -173,7 +173,7 @@ async def test_batch_continues_exact_cleanup_after_recording_or_delete_failure()
             if failure == "delete" and aid == ROOT:
                 raise RuntimeError("delete failed")
 
-        def close(_url, aid, _before):
+        def close(_url, aid, _before, **_kwargs):
             events.append(("release", aid))
             return {"root_agent_id": aid}
 
@@ -306,3 +306,135 @@ def test_provider_rejection_does_not_skip_other_sessions_in_same_root():
             cleanup.close_exact_root_sessions("http://localhost:1", ROOT, sealed)
     assert calls == [("kernel", "owned0001"), ("kernel", "owned0002")]
     assert verify.call_count == 2
+
+
+def test_exact_provider_cleanup_identifies_client_without_accepting_forbidden():
+    """Replay Steel's captured Cloudflare 1010 response at the real HTTP seam."""
+    import hashlib
+    import http.server
+    import runpy
+    import threading
+
+    helper = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-exact-session-cleanup.py"))
+    requests = []
+    forbidden = b"error code: 1010"
+    released = b'{"success":true}'
+
+    class Provider(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append((self.path, self.headers.get("User-Agent"), self.headers.get("Accept")))
+            identified = bool(self.headers.get("User-Agent")) and not self.headers["User-Agent"].startswith("Python-urllib/")
+            accepted = identified and self.headers.get("Accept") == "application/json" and "denied-session" not in self.path
+            payload = released if accepted else forbidden
+            self.send_response(200 if accepted else 403)
+            self.send_header("Content-Type", "application/json" if accepted else "text/plain")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with patch.dict("os.environ", {"STEEL_API_KEY": "fixture-key", "STEEL_BASE_URL": f"http://127.0.0.1:{server.server_port}"}):
+            status, digest = helper["provider_request"]("steel", "owned-session", ())
+            assert status == 200 and digest == hashlib.sha256(released).hexdigest()
+            with pytest.raises(helper["CleanupEvidenceError"], match="HTTP 403"):
+                helper["provider_request"]("steel", "denied-session", ())
+        assert len(requests) == 2
+        assert requests[0][0] == "/v1/sessions/owned-session/release"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+@async_case
+async def test_failed_batch_retains_ownership_and_each_failure_cause():
+    before = {"tree_agent_ids": [ROOT], "browser_sessions": [{"agent_id": ROOT, "provider": "steel", "session_id": "owned-session"}]}
+    row = result(ROOT)
+    with (
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(side_effect=TimeoutError())),
+        patch.object(bench, "delete_agent", AsyncMock()),
+        patch.object(cleanup, "close_exact_root_sessions", side_effect=RuntimeError("HTTP 403")),
+    ):
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+    evidence = row.logs["cloud_cleanup_evidence"]
+    assert evidence["before"] == before
+    assert evidence["errors"] == ["archive: TimeoutError", "provider: HTTP 403"]
+    assert "TimeoutError" in row.failure_reason and "HTTP 403" in row.failure_reason
+    assert "cloud_provider_cleanup" not in row.logs
+
+
+def test_failed_release_retains_terminal_database_and_successful_provider_receipts():
+    before = {"tree_agent_ids": [ROOT], "browser_sessions": [
+        {"agent_id": ROOT, "provider": "kernel", "session_id": "owned-kernel"},
+        {"agent_id": ROOT, "provider": "steel", "session_id": "owned-steel"},
+    ]}
+    after = {**before, "root_deleted": True, "unsealed_tree_agent_ids": []}
+    evidence = {}
+
+    def release(provider, _sid, _paths):
+        if provider == "steel":
+            raise RuntimeError("HTTP 403")
+        return 404, "digest"
+
+    with (
+        patch.object(cleanup, "exact_root_sessions", return_value=after),
+        patch.object(cleanup.runpy, "run_path", return_value={"provider_request": release}),
+    ):
+        with pytest.raises(RuntimeError, match="HTTP 403"):
+            cleanup.close_exact_root_sessions("http://localhost:1", ROOT, before, evidence=evidence)
+    assert evidence["before"] == before
+    assert evidence["after"] == evidence["final"] == after
+    assert evidence["provider_receipts"] == [{"provider": "kernel", "session_id": "owned-kernel", "status": 404, "response_sha256": "digest"}]
+
+
+def test_recovery_manifest_keeps_promoted_sessions_from_exact_database_evidence():
+    import runpy
+
+    helper = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-exact-session-cleanup.py"))
+    snapshot = {
+        "root_exists": True, "tree_agent_ids": [ROOT, CHILD],
+        "browser_sessions": [{"agent_id": CHILD, "provider": "steel", "session_id": "promoted-steel"}],
+    }
+    evidence = {"root_agent_id": ROOT, "before": snapshot}
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory).resolve()
+        run = output / "run.json"
+        backend = output / "backend.log"
+        backend.write_text(f"root={ROOT}\nCreated Kernel browser session sessionId=original-kernel\n")
+        args = SimpleNamespace(
+            output_dir=str(output), owner="a" * 32, fleet_run_id="run-one", bench="task-one",
+            machine_id="a123", guest_run_token="guest-one", run_json=str(run),
+            backend_log=str(backend), quiescence_receipt=str(output / "quiescence.json"),
+        )
+
+        def publish(value):
+            run.write_text(json.dumps({"tasks": [{"name": args.bench, "agent_id": ROOT, "logs": {"cloud_cleanup_evidence": value}}]}))
+
+        with patch.dict(helper["provider_manifest"].__globals__, {"validate_quiescence": lambda *_args: "quiescence-digest"}):
+            publish(evidence)
+            manifest = helper["provider_manifest"](args)
+            assert manifest["sessions"] == {"kernel": ["original-kernel"], "steel": ["promoted-steel"]}
+            backend.write_text(f"root={ROOT}\n")
+            assert helper["provider_manifest"](args)["sessions"] == {"kernel": [], "steel": ["promoted-steel"]}
+            with pytest.raises(helper["CleanupEvidenceError"], match="recorded provider sessions"):
+                helper["zero_provider_manifest"](args)
+            backend.write_text(f"root={ROOT}\nCreated Kernel browser session sessionId=original-kernel\n")
+            for bad in (
+                None,
+                {**evidence, "root_agent_id": CHILD},
+                {**evidence, "before": {**snapshot, "tree_agent_ids": [ROOT]}},
+                {**evidence, "before": {**snapshot, "browser_sessions": [{"agent_id": CHILD, "provider": "unknown", "session_id": "promoted-steel"}]}},
+            ):
+                publish(bad)
+                with pytest.raises(helper["CleanupEvidenceError"]):
+                    helper["provider_manifest"](args)

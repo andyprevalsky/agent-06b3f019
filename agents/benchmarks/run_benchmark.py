@@ -5518,8 +5518,11 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         result = by_id.get(aid)
         before = None
         logs = result.logs if result is not None and isinstance(result.logs, dict) else {}
+        evidence = {"root_agent_id": aid, "errors": []}
+        logs["cloud_cleanup_evidence"] = evidence
         try:
             before = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, aid)
+            evidence["before"] = before
             data = await _refresh_browser_archive_snapshot(
                 base_url, aid, {}, logs, expected_agent_ids=set(before["tree_agent_ids"]),
             )
@@ -5534,11 +5537,13 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             if not result.archive_manifest_ref:
                 raise RuntimeError("owned cloud root final archive was not confirmed")
         except Exception as error:
-            failures.append(f"{aid}: {error}")
+            detail = str(error) or type(error).__name__
+            evidence["errors"].append(f"archive: {detail}")
+            failures.append(f"{aid}: {detail}")
             if result is not None:
                 result.passed = False
                 result.benchmark_status = "ERROR"
-                result.failure_reason = f"Cloud evidence finalization failed: {error}"
+                result.failure_reason = f"Cloud evidence finalization failed: {detail}"
         finally:
             # Even failed evidence must release its exact resources. A DELETE
             # response alone is insufficient because backend cleanup is best effort.
@@ -5546,15 +5551,19 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 if before is None:
                     raise RuntimeError("exact provider ownership was not established")
                 await delete_agent(base_url, aid)
-                receipt = await asyncio.to_thread(cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before)
+                receipt = await asyncio.to_thread(
+                    cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before, evidence=evidence,
+                )
                 logs["cloud_provider_cleanup"] = receipt
                 print(f"    Verified cloud root provider cleanup: {aid}")
             except Exception as error:
-                failures.append(f"{aid}: {error}")
+                detail = str(error) or type(error).__name__
+                evidence["errors"].append(f"provider: {detail}")
+                failures.append(f"{aid}: {detail}")
                 if result is not None:
                     result.passed = False
                     result.benchmark_status = "ERROR"
-                    result.failure_reason = f"Cloud provider cleanup failed: {error}"
+                    result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
             if result is not None:
                 result.logs = logs
     if failures:

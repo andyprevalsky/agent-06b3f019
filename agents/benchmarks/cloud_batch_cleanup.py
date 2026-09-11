@@ -83,13 +83,17 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
     return value
 
 
-def close_exact_root_sessions(base_url: str, root_id: str, before: dict) -> dict:
+def close_exact_root_sessions(base_url: str, root_id: str, before: dict, *, evidence: dict | None = None) -> dict:
     """Canonical DELETE must seal the root before any fallback release is allowed."""
+    evidence = evidence if evidence is not None else {}
+    evidence["before"] = before
     after = exact_root_sessions(base_url, root_id, require_deleted=True)
+    evidence["after"] = after
     cleanup = runpy.run_path(str(REPO_ROOT / "scripts/cloudbench-exact-session-cleanup.py"))
     sessions = {(r["provider"], r["session_id"]) for r in before["browser_sessions"] + after["browser_sessions"]}
     receipts = []
     failures = []
+    evidence["provider_receipts"] = receipts
     for provider, session_id in sorted(sessions):
         try:
             status, digest = cleanup["provider_request"](
@@ -100,6 +104,7 @@ def close_exact_root_sessions(base_url: str, root_id: str, before: dict) -> dict
             failures.append(f"{provider}/{session_id}: {error}")
     try:
         final = exact_root_sessions(base_url, root_id, require_deleted=True)
+        evidence["final"] = final
         if final != after:
             failures.append("owned tree or provider sessions changed during terminal verification")
     except Exception as error:

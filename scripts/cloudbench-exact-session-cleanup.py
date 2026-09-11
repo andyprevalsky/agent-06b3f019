@@ -358,16 +358,6 @@ def collect_session_evidence(
     return parsed, allocation_event_count, mutation_count
 
 
-def parse_session_evidence(path: Path, root_agent_id: str) -> tuple[dict[str, list[str]], str]:
-    text, payload_sha = read_backend_evidence(path, root_agent_id)
-    parsed, _, _ = collect_session_evidence(text)
-    if not parsed["kernel"] and not parsed["steel"]:
-        raise CleanupEvidenceError(
-            "durable backend evidence contains no exact provider session identity"
-        )
-    return parsed, payload_sha
-
-
 def parse_active_root_agent(text: str) -> str:
     lines = text.splitlines()
     create_indices = [
@@ -454,10 +444,59 @@ def validate_quiescence(
     return sha256_bytes(payload)
 
 
+def root_snapshot_sessions(path: Path, root_agent_id: str, run_sha: str) -> dict[str, set[str]]:
+    """Recover provider switches from the sealed run's exact database reads."""
+    payload = read_bytes(path)
+    if sha256_bytes(payload) != run_sha:
+        raise CleanupEvidenceError("run evidence changed while reading provider ownership")
+    task = json.loads(payload)["tasks"][0]
+    logs = task.get("logs") or {}
+    if not isinstance(logs, dict):
+        raise CleanupEvidenceError("malformed run logs for provider ownership")
+    evidence = logs.get("cloud_cleanup_evidence")
+    sessions: dict[str, set[str]] = {"kernel": set(), "steel": set()}
+    if "cloud_cleanup_evidence" not in logs:
+        return sessions
+    if not isinstance(evidence, dict) or evidence.get("root_agent_id") != root_agent_id:
+        raise CleanupEvidenceError("database snapshots are not bound to the exact root")
+    for phase in ("before", "after", "final"):
+        if phase not in evidence:
+            continue
+        snapshot = evidence[phase]
+        if not isinstance(snapshot, dict):
+            raise CleanupEvidenceError("malformed exact root database snapshot")
+        tree = snapshot.get("tree_agent_ids")
+        rows = snapshot.get("browser_sessions")
+        if (
+            snapshot.get("root_exists") is not True
+            or not isinstance(tree, list)
+            or root_agent_id not in tree
+            or any(not isinstance(aid, str) or SAFE_AGENT.fullmatch(aid) is None for aid in tree)
+            or len(tree) != len(set(tree))
+            or not isinstance(rows, list)
+        ):
+            raise CleanupEvidenceError("incomplete exact root database snapshot")
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or row.get("agent_id") not in tree
+                or row.get("provider") not in sessions
+                or not isinstance(row.get("session_id"), str)
+            ):
+                raise CleanupEvidenceError("provider session is not bound to the exact root tree")
+            add_session(sessions, row["provider"], row["session_id"])
+    return sessions
+
+
 def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
     root_agent_id, run_sha = parse_run_identity(Path(args.run_json), args.bench)
-    sessions, backend_sha = parse_session_evidence(Path(args.backend_log), root_agent_id)
+    text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
+    logged_sessions, _, _ = collect_session_evidence(text)
+    snapshots = root_snapshot_sessions(Path(args.run_json), root_agent_id, run_sha)
+    sessions = {provider: sorted(set(logged_sessions[provider]) | snapshots[provider]) for provider in snapshots}
+    if not any(sessions.values()):
+        raise CleanupEvidenceError("durable evidence contains no exact provider session identity")
     quiescence_sha = validate_quiescence(
         Path(args.quiescence_receipt),
         args.machine_id,
@@ -732,6 +771,8 @@ def validate_zero_query_proof(
 def zero_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
     root_agent_id, run_sha = parse_run_identity(Path(args.run_json), args.bench)
+    if any(root_snapshot_sessions(Path(args.run_json), root_agent_id, run_sha).values()):
+        raise CleanupEvidenceError("zero-allocation evidence contains recorded provider sessions")
     text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
     validate_complete_backend_lifecycle(text)
     sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
@@ -821,6 +862,9 @@ def provider_request(provider: str, session_id: str, env_paths: tuple[Path, ...]
     if not api_key:
         raise CleanupEvidenceError(f"{provider} cleanup credential is missing")
 
+    # Identify this client explicitly, as the provider SDK does. Steel's edge
+    # rejects urllib's default identity with Cloudflare 1010 before API auth.
+    headers.update({"User-Agent": "rose-cloudbench/1.0", "Accept": "application/json"})
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=20) as response:

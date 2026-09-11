@@ -37,6 +37,18 @@ AGENTS_ROOT = Path(__file__).resolve().parents[2]
 # Helpers: build a real encrypted envelope
 # ========================================
 
+def _in_browser_activity_context(function):
+    """Give activity-bound fixtures the SDK cancellation and heartbeat context."""
+    import functools
+    from temporalio.testing import ActivityEnvironment
+
+    @functools.wraps(function)
+    async def run(*args, **kwargs):
+        return await ActivityEnvironment().run(function, *args, **kwargs)
+
+    return run
+
+
 def _make_rsa_keypair():
     """Generate an RSA keypair and return (private_pem_b64, public_key)."""
     from cryptography.hazmat.backends import default_backend
@@ -2482,6 +2494,32 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
         metadata = save_mock.await_args.kwargs["extra_metadata"]
         assert metadata["recording_file_pointer"] == {"id": "file-pointer-1"}
         assert metadata["browser_session_metadata"] == {"provider": "steel"}
+
+async def test_browser_recording_finalizer_requires_backend_acknowledgement():
+    import tempfile
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+
+    with tempfile.TemporaryDirectory() as directory:
+        recording_path = Path(directory) / "index.html"
+        recording_path.write_text("<html>recording</html>")
+        for kernel in (False, True):
+            recorder = SimpleNamespace(
+                uses_kernel_replay=kernel,
+                stop_kernel_replay=AsyncMock(return_value="https://recording.example/view"),
+                replay_view_urls=[],
+                close=AsyncMock(return_value=recording_path),
+                export_inline_html_bytes=lambda: b"<html>recording</html>",
+            )
+            with (
+                patch("domains.spawn_browser_agent_v3.handler.upload_to_storage", AsyncMock(return_value={"id": "recording-file"})),
+                patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock(return_value=False)),
+            ):
+                with pytest.raises(RuntimeError, match="recording message was not acknowledged"):
+                    await _finalize_browser_recording_for_fe(
+                        browser_recorder=recorder, agent_id="agent-1", task_id="task-1", user_id="user-1",
+                        browser_url="https://debug.example", browser_session_metadata={"provider": "kernel" if kernel else "steel"},
+                    )
+
 
 async def test_browser_recording_finalizer_persists_before_trace_archive():
     """FE persistence is the critical path; the trace copy is background work.
@@ -8352,6 +8390,7 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     ]
     assert forwarded_tools == ["call-1"]
 
+@_in_browser_activity_context
 async def test_call_browser_use_with_rotation_rotates_claude_token():
     import domains.spawn_browser_agent_v3.handler as handler
     from domains.spawn_browser_agent_v3.handler import _call_browser_use_with_rotation
@@ -16833,6 +16872,7 @@ async def test_spawn_browser_activity_requires_output_schema():
         else:
             raise AssertionError("expected missing output_schema to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -16876,6 +16916,7 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
         else:
             raise AssertionError("expected missing cdp_url to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -16925,6 +16966,7 @@ async def test_spawn_browser_activity_raises_when_resumed_session_has_no_cdp_url
         else:
             raise AssertionError("expected missing resumed cdp_url to raise")
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -16980,6 +17022,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     resume_mock.assert_not_awaited()
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
     """A handoff refresh may replace the provider session while keeping the browser task stable."""
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -17058,6 +17101,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
     assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
     assert session_info["resume_mode"] == "backend_refreshed_session"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -17123,6 +17167,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live_session_expired():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -17189,6 +17234,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_write_approval_resume_falls_back_when_liveness_missing():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
@@ -17392,6 +17438,7 @@ async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     assert "Opt out of all" in message
     assert "Only accepting scheduled orders" in message
 
+@_in_browser_activity_context
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     from contextlib import ExitStack
 
@@ -19158,6 +19205,43 @@ async def test_asyncio_browser_heartbeat_starves_when_event_loop_blocked():
     )
 
 
+async def test_browser_work_checkpoint_preserves_cancel_after_completed_await():
+    """A completed wait_for child must not erase Temporal's cancellation latch."""
+    from temporalio import activity
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.activity_heartbeat import browser_activity_checkpoint
+
+    for cancelled in (False, True):
+        environment = ActivityEnvironment()
+        ready = asyncio.Event()
+        page = asyncio.get_running_loop().create_future()
+        events = []
+
+        async def browser_work():
+            try:
+                ready.set()
+                await asyncio.wait_for(page, timeout=60)
+                browser_activity_checkpoint("calling browser model")
+                events.append("paid-step")
+            except asyncio.CancelledError:
+                events.append("cancelled")
+            finally:
+                # A work checkpoint must not keep injecting cancellation into
+                # recording finalization after it has entered the cleanup path.
+                await asyncio.sleep(0)
+                activity.heartbeat("recording cleanup")
+                events.append("recording-saved")
+
+        running = asyncio.create_task(environment.run(browser_work))
+        await ready.wait()
+        page.set_result({"url": "https://example.test"})
+        if cancelled:
+            environment.cancel()
+        await running
+        expected = ["cancelled" if cancelled else "paid-step", "recording-saved"]
+        assert events == expected, f"browser continued work after cancellation: {events}"
+
+
 async def test_browser_activity_heartbeat_survives_event_loop_block():
     """Thread pump must keep heartbeating while the browser event loop is blocked."""
     from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
@@ -19214,6 +19298,7 @@ def test_browser_activity_uses_thread_heartbeat_pump():
     assert "asyncio.create_task(_background_heartbeat())" not in source
 
 
+@_in_browser_activity_context
 async def test_browser_agent_yields_until_user_hands_control_back():
     """The activity must acknowledge ownership and stop acting until release."""
     from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
@@ -19237,6 +19322,7 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     assert heartbeat.call_count == 2
 
 
+@_in_browser_activity_context
 async def test_browser_agent_yields_when_ownership_is_already_user():
     """Immediate same-session USER ownership still parks the activity until release."""
     from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
@@ -20171,6 +20257,10 @@ async def run_all_tests():
         test_asyncio_browser_heartbeat_starves_when_event_loop_blocked,
     )
     await r.record_async(
+        "browser_work_checkpoint_preserves_cancellation",
+        test_browser_work_checkpoint_preserves_cancel_after_completed_await,
+    )
+    await r.record_async(
         "browser_activity_heartbeat_survives_event_loop_block",
         test_browser_activity_heartbeat_survives_event_loop_block,
     )
@@ -21023,6 +21113,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_cancel_resilient",
         test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_requires_acknowledgement",
+        test_browser_recording_finalizer_requires_backend_acknowledgement,
     )
     await r.record_async(
         "browser_recording_finalizer_persists_before_trace_archive",
