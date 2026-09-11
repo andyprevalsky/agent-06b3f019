@@ -265,15 +265,20 @@ async function findAgentByMarker(
   return null;
 }
 
-async function getAgent(agentId: string, requestDeadlineAt: number): Promise<AgentPhoneAgent> {
+async function getAgent(
+  agentId: string,
+  requestDeadlineAt: number
+): Promise<AgentPhoneAgent | null> {
   const response = await fetch(`${baseUrl()}/agents/${encodeURIComponent(agentId)}`, {
     headers: authHeaders(),
     signal: requestSignal(requestDeadlineAt),
   });
   const data = await parseJson(response);
+  if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(
-      `AgentPhone agent reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    throw new AgentPhoneHttpError(
+      `AgentPhone agent reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`,
+      response.status
     );
   }
   const agent = agentFromPayload(data);
@@ -341,16 +346,17 @@ async function resolveAgentForProvisioning(params: {
 }): Promise<ResolvedProvisioningAgent> {
   if (params.existingAgentId) {
     try {
-      return {
-        agent: await getAgent(params.existingAgentId, params.requestDeadlineAt),
-        createdThisAttempt: false,
-      };
+      const stored = await getAgent(params.existingAgentId, params.requestDeadlineAt);
+      if (stored !== null) {
+        return { agent: stored, createdThisAttempt: false };
+      }
     } catch (error) {
-      log.warn('Stored AgentPhone agent id was not recoverable; continuing keyed lookup', {
-        userId: params.userId,
-        existingAgentId: params.existingAgentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      throw new AgentPhoneProvisioningError(
+        `Stored AgentPhone agent lookup is uncertain: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        false
+      );
     }
   }
 
@@ -455,7 +461,7 @@ async function provisionAgentPhoneNumber(
   } catch (createError) {
     try {
       const reconciledAgent = await getAgent(agent.id, requestDeadlineAt);
-      const reconciledNumber = numberFromAgent(reconciledAgent);
+      const reconciledNumber = reconciledAgent === null ? null : numberFromAgent(reconciledAgent);
       if (reconciledNumber) {
         return {
           agentId: agent.id,
@@ -463,7 +469,7 @@ async function provisionAgentPhoneNumber(
           phoneNumber: reconciledNumber.phoneNumber,
         };
       }
-      if (createdThisAttempt) {
+      if (createdThisAttempt && reconciledAgent !== null) {
         await deleteAgent(agent.id, requestDeadlineAt);
       }
     } catch (reconcileError) {

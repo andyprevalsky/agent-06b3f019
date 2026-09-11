@@ -89,13 +89,15 @@ bound remains a fail-closed absence proof, never a success gate for a known id.
 Number-create cleanup deletes only an agent created in the same attempt.
 Recovered agents (stored id or unique marker) stay intact if `POST /numbers`
 fails; email fallback is still allowed. Inbound conversation listing requires
-`numberId` or `phoneNumber` before paging.
+`numberId` or `phoneNumber` before paging. A stored-agent GET that is not a
+confirmed 404 fail-closes as uncertain and never `POST /agents`.
 
 Cemented by `back-end/src/tests/blackbox/agentphone-recovery-scan-bound.blackbox.ts`
 (stored IDs skip the list; later-page unique marker returns without completeness;
 incomplete scan without a handle still fail-closes; recovered agent is not
-deleted when number create fails). Related AgentPhone blackboxes stay green. Do
-not fail-open create after an incomplete scan.
+deleted when number create fails; stored-agent 500 does not create a successor).
+Related AgentPhone blackboxes stay green. Do not fail-open create after an
+incomplete scan.
 
 ## Human feedback
 
