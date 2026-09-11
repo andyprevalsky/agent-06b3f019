@@ -11,6 +11,8 @@ symptoms:
   - "guest shutdown request failed (HTTP 000)"
   - "retaining fleet ownership"
   - "failed proof left ten Machines started after its controller exited"
+  - "non-regular exact recovery identity"
+  - "exact stale fleet ownership recovery failed"
 tags:
   - cloud-fleet
   - ownership
@@ -201,6 +203,51 @@ still rejecting the frame (`read-bound-before.log`, `read-bound-after.log`).
 Deleting the pipe would
 restore the earlier unwritable-status-file hang; unifying partial reads into
 one bounded logical frame repairs both success and multi-digit failures.
+
+### September 11 pre-allocation visibility recurrence
+
+Proof 13 (`capability-stability-20260911201448-35774`, HEAD `cf288dd2`)
+stopped with zero accepted slices after the Hub uploader imported the wrong
+Python environment. Its audit had already been published, but both visibility
+calls preceded the full cleanup trap and `fleet_registry_init`. Thus the failing
+import left an incomplete audit without any registry. The supervisor did drain
+its exact child group and invoke recovery, but recovery correctly rejected
+missing controller authority. The registry had never existed; this was not the
+concurrent-retirement race documented in the September 9 case.
+
+Searches used `non-regular exact recovery identity` and
+`fleet registry disappeared after startup failure`. The earlier supervisor fix
+did not cover errors before its child published recoverable controller authority.
+This recurrence identifies a lifecycle ordering gap, distinct from guest cleanup.
+The path was project interpreter selection -> Hub import -> early shell exit ->
+snapshot-only cleanup -> incomplete audit -> rejected exact recovery.
+
+The permanent `cloudbench-multi-workstream.test.sh` startup contract uses the
+real controller and uploader with a deterministic missing-module error in the
+scratch `logs.py`. It asserts a nonzero workload exit, no machine or volume
+mutation, unchanged unrelated ownership, retired registry (including no dangling
+link), terminal audit plus immutable run-local mirror, failed lifecycle, and the
+intentionally retained exact Hub identity. The unchanged final test fails before
+and passes after the fix in
+`.context/acceptance/fleet-startup-rca/permanent-final-red-green.json`.
+Its quick selector is `CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY=1`; the contract also
+runs unconditionally in the existing full deploy controller gate.
+
+Both visibility gates now run after cleanup installation, registry publication,
+and cleanup reserve allocation, still before pool reconciliation or provider
+allocation. Reordering existing lifecycle steps removes the observed gap without
+adding recovery shortcuts, changing timeout policy, or broadening provider
+mutation authority. Work remains once per controller, with no per-agent hot-path
+or shared coordination added at 10,000 agents.
+
+The historical proof remains failed. Its original incomplete audit is preserved,
+and `.context/acceptance/proof13-preallocation-containment.json` separately binds
+the drained supervisor receipt, absence of its exact processes, empty allocation
+records, and the Hub's immutable exact-owner terminal receipt. The Hub was retired
+through `cloudbench_terminate_central_hub_owner`. No registry or terminal provider
+audit was synthesized from absence: the old audit lacks original controller
+host/birth authority. These records contain the failed attempt; they provide no
+acceptance credit and do not establish a passing live after-proof.
 
 ## Verification limits
 

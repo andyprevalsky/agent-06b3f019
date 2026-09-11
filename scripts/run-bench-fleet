@@ -527,6 +527,12 @@ else
     ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 fi
 cd "$ROOT_DIR" || exit 1
+# Dependency-bearing helpers (including Hub uploads) must use the same
+# interpreter as agent benchmarks, including direct and snapshotted launches.
+# Scripts-only controller fixtures have no venv and keep their supplied PATH.
+if [ -x "$ROOT_DIR/agents/venv/bin/python3" ]; then
+    export PATH="$ROOT_DIR/agents/venv/bin:$PATH"
+fi
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
 # Injected $GITHUB_TOKEN is often an invalid github_pat_. Overwrite process env
@@ -8532,10 +8538,6 @@ printf '%s\n' "$FLEET_TEARDOWN_OWNERSHIP_DIR" \
         echo "❌ could not publish the fleet teardown manifest pointer" >&2
         exit 1
     }
-if [ -z "$PROVISION_POOL" ]; then
-    require_central_hub_visibility || exit 1
-    require_in_app_hub_visibility || exit 1
-fi
 LOCAL_PROCESS_TEARDOWN_FAILED=0
 FLEET_EXECUTION_COMPLETED=0
 AUTOSCALER_PIDS=()
@@ -8954,6 +8956,13 @@ reserve_cleanup_disk_space || {
     echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1
 }
+# Visibility can fail on imports, credentials, or HTTP. Publish controller
+# authority and arm its finalizer before those calls so startup failures get
+# the same durable teardown as failures after allocation.
+if [ -z "$PROVISION_POOL" ]; then
+    require_central_hub_visibility || exit 1
+    require_in_app_hub_visibility || exit 1
+fi
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 normalize_current_pool_shape || exit 1
 # READ-ONLY env preflight: the run path never stages/mutates the shared

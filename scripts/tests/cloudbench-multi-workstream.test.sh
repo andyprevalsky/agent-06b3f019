@@ -1847,7 +1847,8 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
-if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ]; then
+if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
+    && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ]; then
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -2906,6 +2907,82 @@ if [ "${CLOUDBENCH_TEST_RESET_HUB_SELF_TEST:-0}" = "1" ]; then
         != "$old_hub_token" ] \
         || fail "workspace reset reused the retired Hub owner token"
     echo "PASS: workspace reset exact-cleans the old Hub and tracks a POST-capable replacement"
+    exit 0
+fi
+
+# The uploader imports dependency-bearing helpers before its first HTTP call.
+# Its failure must still run the controller's exact-owner finalizer, and the
+# uploader must use the project's interpreter even when PATH selects another.
+startup_visibility_failure_contract() {
+    local token log status=0 audit run_id failed=0 real_python marker sentinel hub_owner
+    token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    log="$TMP_ROOT/controller-startup-visibility.log"
+    marker="$TMP_ROOT/project-python-hub-upload"
+    sentinel="$SANDBOX/.git/cloudbench-fleet-ownership/startup-unrelated-owner"
+    mkdir -p "$sentinel"
+    printf 'unrelated-owner-must-survive\n' > "$sentinel/sentinel"
+    real_python="$(command -v python3)"
+    mkdir -p "$WS_A/agents/venv/bin"
+    cat > "$WS_A/agents/venv/bin/python3" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in */hub_upload.py) : > "$marker" ;; esac
+exec "$real_python" "\$@"
+SH
+    chmod +x "$WS_A/agents/venv/bin/python3"
+    ln -s python3 "$WS_A/agents/venv/bin/python"
+    cp "$WS_A/agents/benchmarks/logs.py" "$TMP_ROOT/startup-logs.py.saved"
+    printf 'import missing_startup_visibility_dependency\n' > "$WS_A/agents/benchmarks/logs.py"
+    : > "$FAKE_DIR/journal.log"
+    CLOUDBENCH_TEST_FLEET_OWNER_TOKEN="$token" \
+        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$log" \
+        bench-alpha --timeout 240 || status=$?
+    mv "$TMP_ROOT/startup-logs.py.saved" "$WS_A/agents/benchmarks/logs.py"
+    rm -rf "$WS_A/agents/venv"
+    [ "$status" -ne 0 ] || fail "startup visibility failure was reported successful"
+    grep -Fq "No module named 'missing_startup_visibility_dependency'" "$log" \
+        || fail "startup visibility repro did not reach the captured import boundary"
+    if [ ! -f "$marker" ]; then
+        echo "FAIL: Hub upload bypassed the project Python interpreter" >&2
+        failed=1
+    fi
+    if grep -qE '^(machine (clone|start|stop|destroy|update)|volumes? (create|fork|destroy))' \
+        "$FAKE_DIR/journal.log"; then
+        fail "startup visibility failure allowed provider mutation"
+    fi
+    [ "$(cat "$sentinel/sentinel")" = unrelated-owner-must-survive ] \
+        || fail "startup failure disturbed an unrelated ownership record"
+    rm -rf "$sentinel"
+    audit="$SANDBOX/.git/cloudbench-fleet-audits/$token"
+    run_id="$(cloudbench_tracked_owner_value "$audit/meta" run_id)"
+    if [ "$(cloudbench_tracked_owner_value "$audit/meta" status)" != provider-teardown-verified ] \
+        || [ ! -s "$WS_A/.context/fleet/runs/$run_id/teardown-ownership/source-audit" ] \
+        || [ -e "$SANDBOX/.git/cloudbench-fleet-ownership/$token" ] \
+        || [ -L "$SANDBOX/.git/cloudbench-fleet-ownership/$token" ]; then
+        echo "FAIL: startup visibility failure stranded incomplete ownership" >&2
+        failed=1
+    fi
+    [ "$failed" -eq 0 ] || fail "startup visibility failure contract failed"
+    [ "$(cloudbench_tracked_owner_value "$audit/meta" hub_disposition)" \
+        = retained-exact-owner-transfer-required ] \
+        || fail "startup cleanup lost the intentional retained Hub disposition"
+    hub_owner="$(cloudbench_tracked_owner_value "$audit/meta" hub_owner_file)"
+    cloudbench_central_hub_owner_matches "$HUB_PORT_A" \
+        "$WS_A/.context/fleet/runs" "$WS_A" "$hub_owner" \
+        || fail "startup cleanup did not preserve the exact live Hub owner"
+    python3 - "$WS_A/.context/fleet/runs/$run_id/_batch/lifecycle.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text())
+assert payload["status"] == "failed", payload
+assert payload["controller_exit_code"] != 0, payload
+PY
+    [ "$?" -eq 0 ] || fail "startup failure lifecycle was not preserved"
+    assert_no_controller_script_snapshots "startup visibility failure"
+    echo "PASS: project Python and exact teardown survive pre-allocation Hub import failure"
+}
+startup_visibility_failure_contract
+if [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
