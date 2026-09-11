@@ -68,7 +68,7 @@ def setup_mock(routes: dict[str, dict[str, Any]]) -> None:
                 "status": 200,
                 "json": {"document_id": "doc-123"}
             },
-            "api.parallel.ai/v1beta/search": {
+            "api.parallel.ai/v1/search": {
                 "status": 200,
                 "json": {"results": []}
             }

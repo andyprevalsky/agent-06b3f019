@@ -9,7 +9,7 @@ from tools.web_search.config import (
     DEFAULT_MAX_RESULTS,
     HTTP_TIMEOUT,
     PARALLEL_API_URL,
-    PARALLEL_BETA_HEADER,
+    PARALLEL_SEARCH_MODE,
 )
 
 
@@ -34,15 +34,19 @@ async def fetch_search_results(
     """
     headers = {
         "x-api-key": api_key,
-        "parallel-beta": PARALLEL_BETA_HEADER,
         "Content-Type": "application/json",
     }
 
+    # Match chat's Parallel V1 Turbo request contract
+    # (back-end/src/providers/chat/chatTools.ts).
     payload = {
+        "mode": PARALLEL_SEARCH_MODE,
         "objective": query,
         "search_queries": [query],
-        "max_results": DEFAULT_MAX_RESULTS,
-        "excerpts": {"max_chars_per_result": max_chars_per_result},
+        "advanced_settings": {
+            "max_results": DEFAULT_MAX_RESULTS,
+            "excerpt_settings": {"max_chars_per_result": max_chars_per_result},
+        },
     }
 
     response = await get_http_client().post(PARALLEL_API_URL, headers=headers, json=payload, timeout=HTTP_TIMEOUT)
