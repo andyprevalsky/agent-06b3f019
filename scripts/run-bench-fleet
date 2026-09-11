@@ -653,6 +653,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-prisma-client.sh" \
+       "$ROOT_DIR/scripts/cloudbench-install-ngrok.sh" \
        "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" \
        "$ROOT_DIR/scripts/cloudbench-prepare-patch.sh" \
        "$ROOT_DIR/scripts/cloudbench-status-server.py" \

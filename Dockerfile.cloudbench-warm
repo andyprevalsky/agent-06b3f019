@@ -70,6 +70,10 @@ RUN curl -fsSL \
     && apt-get install -y --no-install-recommends /tmp/cloudflared.deb \
     && rm -f /tmp/cloudflared.deb
 
+# The documented fallback must also exist when a Quick Tunnel cannot route.
+COPY scripts/cloudbench-install-ngrok.sh /tmp/rose-cloudbench-install-ngrok.sh
+RUN bash /tmp/rose-cloudbench-install-ngrok.sh && rm -f /tmp/rose-cloudbench-install-ngrok.sh
+
 # ── Non-root user that owns the repo + can drive the Postgres cluster ──────
 # run.sh's system-Postgres fallback uses `su - postgres` / pg_ctlcluster; the
 # per-run script runs those bits via sudo-less gosu as needed. The app itself

@@ -1765,6 +1765,7 @@ def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
         ("FETCH_REF", "cloudbench-fetch-ref.sh"),
         ("SYNC_DEPS", "cloudbench-sync-deps.sh"),
         ("SYNC_PRISMA", "cloudbench-sync-prisma-client.sh"),
+        ("NGROK_INSTALL", "cloudbench-install-ngrok.sh"),
         ("CURRENT_RUN_ARTIFACT", "cloudbench-current-run-artifact.py"),
         ("PREPARE_PATCH", "cloudbench-prepare-patch.sh"),
         ("STATUS_SERVER", "cloudbench-status-server.py"),
@@ -1776,6 +1777,7 @@ def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
             "FETCH_REF": "CLOUDBENCH_GUEST_FETCH_REF_SCRIPT",
             "SYNC_DEPS": "CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT",
             "SYNC_PRISMA": "CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT",
+            "NGROK_INSTALL": "CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT",
             "CURRENT_RUN_ARTIFACT": "CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT",
             "PREPARE_PATCH": "CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT",
             "STATUS_SERVER": "CLOUDBENCH_GUEST_STATUS_SERVER",
@@ -1813,6 +1815,7 @@ def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:
     for source in (driver, worker, sync_deps):
         assert 'CONTROL_LIB_DIR="$CONTROL_DIR/lib"' in source
     assert "$REPO_DIR/scripts/cloudbench-fetch-ref.sh" not in driver
+    assert "$REPO_DIR/scripts/cloudbench-install-ngrok.sh" not in driver
     assert "$REPO_DIR/scripts/cloudbench-fetch-ref.sh" not in worker
     assert 'source "$REPO_DIR/scripts/lib/cloudbench-env.sh"' not in sync_deps
     assert 'CATALOG_SCRIPT="${CLOUDBENCH_CATALOG_SCRIPT:-$CONTROL_DIR/cloudbench_catalog.py}"' in driver
@@ -14866,6 +14869,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-fetch-ref.sh",
         "cloudbench-sync-deps.sh",
         "cloudbench-sync-prisma-client.sh",
+        "cloudbench-install-ngrok.sh",
         "cloudbench-current-run-artifact.py",
         "cloudbench-prepare-patch.sh",
         "cloudbench-status-server.py",
@@ -15189,6 +15193,7 @@ def test_script_snapshot_initialization_signal_and_publish_failure_clean_up(
             "cloudbench-fetch-ref.sh": ROOT / "scripts/cloudbench-fetch-ref.sh",
             "cloudbench-sync-deps.sh": ROOT / "scripts/cloudbench-sync-deps.sh",
             "cloudbench-sync-prisma-client.sh": ROOT / "scripts/cloudbench-sync-prisma-client.sh",
+            "cloudbench-install-ngrok.sh": ROOT / "scripts/cloudbench-install-ngrok.sh",
             "cloudbench-current-run-artifact.py": ROOT / "scripts/cloudbench-current-run-artifact.py",
             "cloudbench-prepare-patch.sh": ROOT / "scripts/cloudbench-prepare-patch.sh",
             "cloudbench-status-server.py": ROOT / "scripts/cloudbench-status-server.py",
@@ -19511,12 +19516,156 @@ def test_cloud_driver_exports_reachable_public_frontend_before_start_barrier() -
     driver = DRIVER_SCRIPT.read_text()
 
     assert "manifest_public_frontend_url()" in driver
-    assert 'curl -fsS --max-time 5 "$public_url/test_payment"' in driver
+    assert 'curl --parallel --parallel-immediate --fail-early' in driver
+    assert '--location --max-time 5' in driver
+    assert 'cmp -s "$probe_dir/origin" "$probe_dir/public"' in driver
     assert 'BENCHMARK_FRONTEND_URL="$public_url"' in driver
     assert "export BENCHMARK_FRONTEND_URL" in driver
     assert driver.index("wait_for_benchmark_frontend_url || finish 1") < driver.index(
         "synchronized start barrier ready"
     )
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["missing", "existing", "curl_error", "archive_invalid", "binary_invalid", "arm64", "unsupported", "production", "simulate", "historical", "existing_hangs", "downloaded_hangs"],
+)
+def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -> None:
+    """Execute the real stack-selection boundary with the observed missing tool."""
+    import tarfile
+
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    payload = tmp_path / "ngrok"
+    behavior = "exit 1\n" if scenario == "binary_invalid" else "exec sleep 20\n" if scenario == "downloaded_hangs" else "echo 'ngrok version fixture'\n"
+    payload.write_text("#!/bin/sh\n" + behavior)
+    payload.chmod(0o755)
+    archive = tmp_path / "ngrok.tgz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(payload, arcname="ngrok")
+    if scenario in {"existing", "historical", "existing_hangs"}:
+        shutil.copy2(payload, binaries / "ngrok")
+        if scenario == "existing_hangs":
+            (binaries / "ngrok").write_text("#!/bin/sh\nexec sleep 20\n")
+    architecture = "aarch64" if scenario == "arm64" else "riscv64" if scenario == "unsupported" else "x86_64"
+    (binaries / "uname").write_text(
+        f"#!/bin/sh\nif [ \"${{1:-}}\" = -s ]; then echo Linux; else echo {architecture}; fi\n"
+    )
+    (binaries / "curl").write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$DOWNLOAD_LEDGER\"\n"
+        "[ \"$SCENARIO\" != curl_error ] || exit 22\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  if [ \"$1\" = -o ]; then\n"
+        "    if [ \"$SCENARIO\" = archive_invalid ]; then printf invalid > \"$2\"; "
+        "else cp \"$NGROK_FIXTURE_ARCHIVE\" \"$2\"; fi\n"
+        "    exit 0\n"
+        "  fi\n  shift\ndone\nexit 2\n"
+    )
+    for name in ("uname", "curl"):
+        (binaries / name).chmod(0o755)
+    driver = DRIVER_SCRIPT.read_text()
+    start = driver.index('BENCH_TARGET_MODE_FOR_STACK=""')
+    end = driver.index("# The DB warm-start dump", start)
+    target = "prod" if scenario == "production" else "local"
+    requested_repo = tmp_path / "historical-repo" if scenario == "historical" else ROOT
+    requested_repo.mkdir(exist_ok=True)
+    installer_binding = next((line for line in driver.splitlines() if line.startswith("NGROK_INSTALL_SCRIPT=")), "")
+    command = (
+        "set -euo pipefail\n"
+        "log() { printf '%s\\n' \"$*\"; }\n"
+        "finish() { exit 17; }\n"
+        f"python3() {{ printf '%s\\n' {shlex.quote(target)}; }}\n"
+        "STACK_ENV=(); BENCH_TASK_LIST=(gate-kyc-card-mint); BASE_PORT=3001; WMH_PORT=3007\n"
+        f"BENCH_SIMULATE={'1' if scenario == 'simulate' else '0'}\n"
+        f"REPO_DIR={shlex.quote(str(requested_repo))}; BENCHMARK_TARGET_SCRIPT=unused\n"
+        f"CONTROL_DIR={shlex.quote(str(ROOT / 'scripts'))}\n{installer_binding}\n"
+        + driver[start:end]
+        + "printf 'BOOTSTRAP_DONE\\n'\n"
+    )
+    if scenario not in {"production", "simulate"}:
+        command += "ngrok version\n"
+    ledger = tmp_path / "downloads"
+    env = dict(os.environ, PATH=f"{binaries}:/usr/bin:/bin", NGROK_INSTALL_DIR=str(binaries),
+               NGROK_FIXTURE_ARCHIVE=str(archive), DOWNLOAD_LEDGER=str(ledger), SCENARIO=scenario)
+    with subprocess.Popen(["/bin/bash", "-c", command], env=env, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, start_new_session=True) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            pytest.fail("ngrok bootstrap did not bound its executable probe: " + stdout + stderr)
+    failed = scenario in {"curl_error", "archive_invalid", "binary_invalid", "unsupported", "downloaded_hangs"}
+    assert process.returncode == (17 if failed else 0), stdout + stderr
+    assert ("BOOTSTRAP_DONE" in stdout) is not failed
+    skip = scenario in {"existing", "historical", "production", "simulate", "unsupported"}
+    assert ledger.exists() is not skip
+    if ledger.exists():
+        arguments = ledger.read_text().splitlines()
+        assert arguments[arguments.index("--max-time") + 1] == "30"
+        assert arguments[arguments.index("--connect-timeout") + 1] == "10"
+        arch = "arm64" if scenario == "arm64" else "amd64"
+        assert f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-{arch}.tgz" in arguments
+    if failed or scenario in {"production", "simulate"}:
+        assert not (binaries / "ngrok").exists()
+
+
+@pytest.mark.parametrize("scenario", ["healthy", "http511", "redirect511", "interstitial200", "redirecthealthy", "wrong_html"])
+def test_cloud_bundled_frontend_readiness_uses_browser_identity(tmp_path: Path, scenario: str) -> None:
+    """Only the browser-visible response matching this origin admits a task."""
+    seen = []
+    expected = b'<!doctype html><html><div id="root"></div><script src="/assets/rose.js"></script></html>'
+
+    class Tunnel(BaseHTTPRequestHandler):
+        def do_GET(self):
+            user_agent = self.headers.get("User-Agent", "")
+            origin = self.server.server_port == origin_server.server_port
+            seen.append((origin, self.path, user_agent))
+            if not origin and scenario.startswith("redirect") and self.path == "/test_payment":
+                self.send_response(302)
+                self.send_header("Location", "/destination")
+                self.end_headers()
+                return
+            blocked = not origin and scenario in {"http511", "redirect511"} and "Mozilla/5.0" in user_agent
+            self.send_response(511 if blocked else 200)
+            self.end_headers()
+            challenged = not origin and scenario in {"interstitial200", "wrong_html"}
+            self.wfile.write(b"Network Authentication Required" if blocked or challenged else expected)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Tunnel)
+    origin_server = ThreadingHTTPServer(("127.0.0.1", 0), Tunnel)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    origin_thread = threading.Thread(target=origin_server.serve_forever, daemon=True)
+    thread.start()
+    origin_thread.start()
+    try:
+        driver = DRIVER_SCRIPT.read_text()
+        start = driver.index("wait_for_benchmark_frontend_url() {")
+        end = driver.index("# ── Normalize the task list", start)
+        command = (
+            "set -u\nlog() { :; }; seq() { printf '1\\n'; }; sleep() { :; }\n"
+            "BENCH_NEEDS_BUNDLED_FRONTEND=1; BENCH_SIMULATE=0; MANIFEST=fixture\n"
+            f"CONTEXT_DIR={shlex.quote(str(tmp_path))}; BASE_PORT={origin_server.server_port - 1}\n"
+            f"manifest_public_frontend_url() {{ printf 'http://127.0.0.1:{server.server_port}\\n'; }}\n"
+            + driver[start:end]
+            + "wait_for_benchmark_frontend_url\n"
+        )
+        result = subprocess.run(["/bin/bash", "-c", command], text=True, capture_output=True, timeout=10,
+                                env=dict(os.environ, NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1"))
+        assert result.returncode == (0 if scenario in {"healthy", "redirecthealthy"} else 1), result.stdout + result.stderr
+        assert any(origin and path == "/test_payment" for origin, path, _ in seen)
+        assert any(not origin and path == "/test_payment" for origin, path, _ in seen)
+        assert all("Mozilla/5.0" in user_agent for _, _, user_agent in seen)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        origin_server.shutdown()
+        origin_server.server_close()
+        origin_thread.join(timeout=5)
 
 
 def test_cloud_test_payment_tasks_launch_bundled_frontend_with_supabase_env() -> None:

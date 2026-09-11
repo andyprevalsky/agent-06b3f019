@@ -70,6 +70,7 @@ CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$CONTROL_DIR/cloudbench-fetch-ref.sh}"
 SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$CONTROL_DIR/cloudbench-sync-deps.sh}"
 SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$CONTROL_DIR/cloudbench-sync-prisma-client.sh}"
+NGROK_INSTALL_SCRIPT="${CLOUDBENCH_NGROK_INSTALL_SCRIPT:-$CONTROL_DIR/cloudbench-install-ngrok.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$CONTROL_DIR/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$CONTROL_DIR/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$CONTROL_DIR/cloudbench-status-server.py}"
@@ -352,12 +353,28 @@ wait_for_benchmark_frontend_url() {
         return 0
     fi
 
-    local public_url
+    local public_url probe_dir
+    local -a probe_args=(
+        --fail --silent --show-error --location --max-time 5
+        --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    )
+    probe_dir="$(mktemp -d "$CONTEXT_DIR/frontend-probe.XXXXXXXX")" || return 1
     public_url=""
     log "waiting for public frontend URL required by bundled browser/payment benchmark prompts..."
     for _ in $(seq 1 180); do
         public_url="$(manifest_public_frontend_url || true)"
-        if [ -n "$public_url" ] && curl -fsS --max-time 5 "$public_url/test_payment" >/dev/null 2>&1; then
+        # A successful status can still be a tunnel interstitial or redirect.
+        # Compare the browser-visible bytes to this stack's own frontend.
+        # Both requests share the existing five-second request ceiling.
+        if [ -n "$public_url" ] \
+            && curl --parallel --parallel-immediate --fail-early \
+                "${probe_args[@]}" --output "$probe_dir/origin" \
+                "http://127.0.0.1:$((BASE_PORT + 1))/test_payment" \
+                --next "${probe_args[@]}" --output "$probe_dir/public" \
+                "$public_url/test_payment" >/dev/null 2>&1 \
+            && [ -s "$probe_dir/origin" ] \
+            && cmp -s "$probe_dir/origin" "$probe_dir/public"; then
+            rm -rf "$probe_dir"
             BENCHMARK_FRONTEND_URL="$public_url"
             export BENCHMARK_FRONTEND_URL
             log "public benchmark frontend ready: $BENCHMARK_FRONTEND_URL"
@@ -366,7 +383,8 @@ wait_for_benchmark_frontend_url() {
         sleep 1
     done
 
-    log "FATAL: bundled browser/payment benchmark requires a public frontend URL, but $MANIFEST did not publish a reachable https urls.public"
+    rm -rf "$probe_dir"
+    log "FATAL: bundled browser/payment benchmark requires a public frontend URL serving this stack's frontend, but $MANIFEST did not publish a verified https urls.public"
     return 1
 }
 
@@ -948,6 +966,12 @@ elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then
         "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     )
 else
+    # Older warm images baked cloudflared without its documented ngrok fallback.
+    # Materialize the same prerequisite as cloud-init before selecting a tunnel.
+    if ! bash "$NGROK_INSTALL_SCRIPT"; then
+        log "FATAL: could not install ngrok for isolated benchmark webhooks"
+        finish 1
+    fi
     STACK_ENV+=(
         "BENCHMARK_SKIP_WMH_BUILD=1"
         # Each isolated VM gets a random Quick Tunnel URL for this run. The URL

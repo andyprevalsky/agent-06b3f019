@@ -111,6 +111,7 @@ CLOUDBENCH_GUEST_RUN_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-run.sh"
 CLOUDBENCH_GUEST_FETCH_REF_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-fetch-ref.sh"
 CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-deps.sh"
 CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-prisma-client.sh"
+CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-install-ngrok.sh"
 CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-current-run-artifact.py"
 CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-prepare-patch.sh"
 CLOUDBENCH_GUEST_STATUS_SERVER="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-status-server.py"
@@ -3338,6 +3339,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env CLOUDBENCH_FETCH_REF_SCRIPT=/cloudbench-fetch-ref.sh
         --env CLOUDBENCH_SYNC_DEPS_SCRIPT=/cloudbench-sync-deps.sh
         --env CLOUDBENCH_SYNC_PRISMA_SCRIPT=/cloudbench-sync-prisma-client.sh
+        --env CLOUDBENCH_NGROK_INSTALL_SCRIPT=/cloudbench-install-ngrok.sh
         --env CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/cloudbench-current-run-artifact.py
         --env CLOUDBENCH_PREPARE_PATCH_SCRIPT=/cloudbench-prepare-patch.sh
         --env CLOUDBENCH_STATUS_SERVER_SCRIPT=/cloudbench-status-server.py
@@ -3377,6 +3379,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --file-local "/cloudbench-fetch-ref.sh=$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT"
         --file-local "/cloudbench-sync-deps.sh=$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT"
         --file-local "/cloudbench-sync-prisma-client.sh=$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT"
+        --file-local "/cloudbench-install-ngrok.sh=$CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT"
         --file-local "/cloudbench-current-run-artifact.py=$CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT"
         --file-local "/cloudbench-prepare-patch.sh=$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT"
         --file-local "/cloudbench-status-server.py=$CLOUDBENCH_GUEST_STATUS_SERVER"
@@ -3719,6 +3722,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
+    echo "export CLOUDBENCH_NGROK_INSTALL_SCRIPT=/data/cloudbench-install-ngrok.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
     echo "export CLOUDBENCH_PREPARE_PATCH_SCRIPT=/data/cloudbench-prepare-patch.sh"
     echo "export CLOUDBENCH_SEED_BUDGET_LIB=/data/cloudbench-seed-budget.sh"
@@ -3815,7 +3819,7 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
@@ -3829,6 +3833,7 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT" /data/cloudbench-sync-prisma-client.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_NGROK_INSTALL_SCRIPT" /data/cloudbench-install-ngrok.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CURRENT_RUN_ARTIFACT_SCRIPT" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT" /data/cloudbench-prepare-patch.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_STATUS_SERVER" /data/cloudbench-status-server.py >>"$stage_err" 2>&1 \
