@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { checkSync } from 'recheck';
 
 import { checkPatternSafety } from '../../domains/data/regexSafety';
 
@@ -91,6 +92,23 @@ function run(): void {
     reason:
       'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
   });
+
+  let analyzerAttempts = 0;
+  const recoveredAfterLoadTimeout = checkPatternSafety('(invoice|receipt|order)\\s+#?[0-9]+', '', ((
+    _source: string,
+    _flags: string,
+    _options: { timeout: number }
+  ) => {
+    analyzerAttempts += 1;
+    if (analyzerAttempts === 1) throw new Error('simulated load-induced analyzer timeout');
+    return { status: 'safe' };
+  }) as typeof checkSync);
+  assert.equal(analyzerAttempts, 2, 'a single analyzer timeout must be retried once');
+  assert.equal(
+    recoveredAfterLoadTimeout.ok,
+    true,
+    'a realistic range query must stay usable after one analyzer timeout'
+  );
 
   process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
 }
