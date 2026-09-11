@@ -96,7 +96,17 @@ B="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --s
 
 tmp="$(mktemp -d)"
 cleanup() {
+  local status=$? diagnostics
+  if [ "$status" -ne 0 ]; then
+    diagnostics="${BLACKBOX_TEST_ARTIFACT_DIR:-$ROOT_DIR/.context/test-runs}/fleet-proof-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if mkdir -p -m 700 "$diagnostics"; then
+      cp -R "$tmp/." "$diagnostics/" || true
+      chmod -R go-rwx "$diagnostics" || true
+      echo "Fixture failure evidence retained: $diagnostics" >&2
+    fi
+  fi
   rm -rf "$tmp"
+  return "$status"
 }
 trap cleanup EXIT
 cat >"$tmp/fake-fleet" <<'SH'

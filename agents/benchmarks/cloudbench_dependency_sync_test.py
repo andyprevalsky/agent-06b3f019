@@ -1384,6 +1384,206 @@ def test_boot_launch_wires_ipv6_status_server_and_driver_health() -> None:
     )
 
 
+def _boot_fixture_process_identity():
+    spec = importlib.util.spec_from_file_location("boot_fixture_process_identity", ROOT / "scripts/process-identity.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _terminate_boot_fixture_tree(process: subprocess.Popen) -> None:
+    """Reap this still-owned boot process and its snapshotted descendants."""
+    if process.poll() is not None:
+        return
+    table = subprocess.run(
+        ["ps", "-axo", "pid=,ppid=,lstart="], check=True, capture_output=True, text=True
+    ).stdout
+    records = {}
+    children = {}
+    for raw in table.splitlines():
+        if not raw.strip():
+            continue
+        pid_text, parent_text, birth = raw.split(None, 2)
+        pid, parent = int(pid_text), int(parent_text)
+        assert pid not in records and birth.strip(), "ambiguous fixture process identity"
+        records[pid] = (parent, " ".join(birth.split()))
+        children.setdefault(parent, []).append(pid)
+    # Popen still owns the root; a numeric PID read from a stale file does not.
+    if process.poll() is not None:
+        return
+    assert records.get(process.pid, (None,))[0] == os.getpid(), "fixture root ownership changed"
+    targets = []
+    identity = _boot_fixture_process_identity()
+
+    def collect(pid: int) -> None:
+        try:
+            birth = identity.current_identity(pid)
+        except (OSError, ValueError, IndexError):
+            observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+            assert (observed.returncode == 1 and not observed.stdout.strip()) or observed.stdout.strip().startswith("Z")
+            return
+        ancestry = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid=,lstart="], capture_output=True, text=True
+        )
+        if ancestry.returncode == 1 and not ancestry.stdout.strip():
+            return
+        fields = ancestry.stdout.split(None, 1)
+        assert ancestry.returncode == 0 and len(fields) == 2, "fixture ancestry inspection failed"
+        assert (int(fields[0]), " ".join(fields[1].split())) == records[pid], "fixture ancestry changed"
+        targets.append((pid, birth))
+        for child_pid in children.get(pid, []):
+            collect(child_pid)
+
+    def same_birth_live(pid: int, birth: str) -> bool:
+        observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+        if observed.returncode == 1 and not observed.stdout.strip():
+            return False
+        assert observed.returncode == 0 and observed.stdout.strip(), "fixture process inspection failed"
+        if observed.stdout.strip().startswith("Z"):
+            return False
+        try:
+            return identity.current_identity(pid) == birth
+        except (OSError, ValueError, IndexError):
+            # A target can finish between ps and the native identity syscall.
+            absent = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+            assert (absent.returncode == 1 and not absent.stdout.strip()) or absent.stdout.strip().startswith("Z")
+            return False
+
+    collect(process.pid)
+    # Capture first, then stop parents before children so reparenting cannot
+    # lose a detached benchmark or let a waiting launcher start more work.
+    for pid, birth in targets:
+        # Reuse the OS-native check-and-signal critical section. ps lstart is
+        # second-resolution and cannot distinguish same-second PID reuse.
+        result = identity.main(["process-identity.py", "--expect", birth, "--signal", "KILL", str(pid)])
+        if result != identity.EXIT_OK:
+            assert not same_birth_live(pid, birth), "fixture identity could not be signalled safely"
+    process.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and any(same_birth_live(pid, birth) for pid, birth in targets):
+        time.sleep(0.02)
+    assert not any(same_birth_live(pid, birth) for pid, birth in targets), "fixture descendants survived cleanup"
+
+
+@pytest.mark.parametrize("fixture_failure", [False, True])
+def test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixture_failure: bool
+) -> None:
+    """The actual cleanup helper must work on macOS and failing test paths."""
+    real_read_text = Path.read_text
+    identity = _boot_fixture_process_identity()
+
+    def no_proc_children(path: Path, *args, **kwargs):
+        if str(path).startswith("/proc/") and path.name == "children":
+            raise FileNotFoundError(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_proc_children)
+    child_script = tmp_path / "child.py"
+    child_script.write_text(
+        "import json,os,subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        "grandchild=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], start_new_session=True)\n"
+        "Path(sys.argv[1]).write_text(json.dumps([os.getpid(),grandchild.pid]))\n"
+        "time.sleep(60)\n"
+    )
+    ready = tmp_path / "children.json"
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(
+        "import subprocess,sys,time\n"
+        "subprocess.Popen([sys.executable,sys.argv[1],sys.argv[2]], start_new_session=True)\n"
+        "time.sleep(60)\n"
+    )
+    foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    boot = subprocess.Popen([sys.executable, str(launcher), str(child_script), str(ready)])
+    captured = {}
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "fixture descendants did not start"
+        for pid in json.loads(ready.read_text()):
+            captured[pid] = identity.current_identity(pid)
+
+        def exercise_cleanup():
+            try:
+                if fixture_failure:
+                    raise RuntimeError("fixture assertion path")
+            finally:
+                _terminate_boot_fixture_tree(boot)
+
+        if fixture_failure:
+            with pytest.raises(RuntimeError, match="fixture assertion path"):
+                exercise_cleanup()
+        else:
+            exercise_cleanup()
+        assert boot.poll() is not None
+        assert foreign.poll() is None, "unrelated process was signalled"
+        for pid in captured:
+            state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+            assert not state.stdout.strip() or state.stdout.strip().startswith("Z"), "detached fixture child survived"
+    finally:
+        # Exact fallback also keeps the intentional before-failure run bounded.
+        for pid, birth in captured.items():
+            identity.main(["process-identity.py", "--expect", birth, "--signal", "KILL", str(pid)])
+        if boot.poll() is None:
+            boot.kill()
+        boot.wait(timeout=2)
+        foreign.terminate()
+        foreign.wait(timeout=2)
+
+
+def test_boot_payload_fixture_cleanup_rejects_reused_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PID with unchanged second-level ps birth cannot authorize replacement cleanup."""
+    load_identity = _boot_fixture_process_identity
+    identity = load_identity()
+    current_identity = identity.current_identity
+    ready = tmp_path / "child.pid"
+    script = tmp_path / "parent.py"
+    script.write_text(
+        "import subprocess,sys,time\nfrom pathlib import Path\n"
+        "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], start_new_session=True)\n"
+        "Path(sys.argv[1]).write_text(str(child.pid))\ntime.sleep(60)\n"
+    )
+    boot = subprocess.Popen([sys.executable, str(script), str(ready)])
+    child_pid = None
+    child_identity = None
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists()
+        child_pid = int(ready.read_text())
+        child_identity = current_identity(child_pid)
+        identity_reads = 0
+
+        def replaced_after_capture(pid):
+            nonlocal identity_reads
+            observed = current_identity(pid)
+            if pid == child_pid:
+                identity_reads += 1
+                if identity_reads == 1:
+                    prefix, units = observed.rsplit(":", 1)
+                    return f"{prefix}:{int(units) ^ 1:0{len(units)}d}"
+            return observed
+
+        monkeypatch.setattr(identity, "current_identity", replaced_after_capture)
+        monkeypatch.setattr(sys.modules[__name__], "_boot_fixture_process_identity", lambda: identity)
+        _terminate_boot_fixture_tree(boot)
+        assert boot.poll() is not None
+        state = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="], capture_output=True, text=True)
+        assert state.stdout.strip() and not state.stdout.strip().startswith("Z"), "stale identity killed replacement"
+        assert identity_reads >= 2, "native identity was not captured and revalidated"
+    finally:
+        if child_pid is not None and child_identity is not None:
+            # Use a fresh unpatched native module for the intentional-failure fallback.
+            load_identity().main(["process-identity.py", "--expect", child_identity, "--signal", "KILL", str(child_pid)])
+        if boot.poll() is None:
+            boot.kill()
+        boot.wait(timeout=2)
+
+
 def test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack(
     tmp_path: Path,
 ) -> None:
@@ -1661,6 +1861,8 @@ cloudbench_env_value() { return 0; }
         stderr=subprocess.DEVNULL,
     )
 
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
     def request(path: str, *, method: str = "GET") -> int:
         req = urllib.request.Request(
             f"http://127.0.0.1:{status_port}{path}",
@@ -1668,7 +1870,7 @@ cloudbench_env_value() { return 0; }
             headers={"Authorization": f"Bearer {auth_token}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=1) as response:
+            with opener.open(req, timeout=1) as response:
                 return int(response.status)
         except urllib.error.HTTPError as exc:
             return int(exc.code)
@@ -1721,36 +1923,7 @@ cloudbench_env_value() { return 0; }
             "driver cleanup evidence interrupt_status=1 cleanup_ack=1"
         )
     finally:
-
-        def kill_exact_process_tree(pid: int) -> None:
-            children_file = Path(f"/proc/{pid}/task/{pid}/children")
-            try:
-                children = [int(value) for value in children_file.read_text().split()]
-            except (FileNotFoundError, ProcessLookupError):
-                children = []
-            for child_pid in children:
-                kill_exact_process_tree(child_pid)
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-        driver_pid_file = data_dir / "cloudbench-driver.pid"
-        if driver_pid_file.is_file():
-            kill_exact_process_tree(int(driver_pid_file.read_text()))
-        if boot.poll() is None:
-            boot.terminate()
-            try:
-                boot.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                boot.kill()
-                boot.wait(timeout=2)
-        if status_pid_file.is_file():
-            status_pid = int(status_pid_file.read_text())
-            try:
-                os.kill(status_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        _terminate_boot_fixture_tree(boot)
 
 
 def test_boot_and_legacy_launch_pin_the_complete_guest_control_bundle() -> None:

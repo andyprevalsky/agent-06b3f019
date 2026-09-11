@@ -222,9 +222,9 @@ names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
 For a consecutive full-catalog no-INFRA gate, run
 `scripts/run-bench stability-proof -k K --concurrency N --seed S`. It executes K
 sequential random slices of N isolated ready tasks from the unified first-party
-and Polar catalog. `PASSED`, `FAILED`, and `SKIPPED` terminal batch results
-advance the streak; missing/malformed results and `INFRA_ERROR`, `ERROR`, or
-`CANCELLED` fail closed. Its offline fake-provider regression runs inside the
+and Polar catalog. Actual `PASSED` and `FAILED` terminal batch results
+advance the streak; `SKIPPED`, missing/malformed results, `INFRA_ERROR`, `ERROR`,
+and `CANCELLED` fail closed. Its offline fake-provider regression runs inside the
 existing deploy test path, adding no live benchmark stage, cost, or deploy wait.
 
 Local execution is explicit:
@@ -307,6 +307,14 @@ of truth; do not duplicate them into other files.
   need OpenAI account credits (+ OpenRouter access to the `rose-1-ultra` waterfall
   models); `admin-health` needs Amplitude + admin-Stripe creds; `agentcard` needs
   `AGENTCARD_PUBLIC_URL`.
+  The agents `benchmark` blackbox domain also contains real Blue Bottle LLM
+  judge replays. Full agents coverage needs the complete authoritative env and
+  working outbound access; HTTP capture does not replace live responses with
+  mocks. On Andy's Mac, run that full suite natively when an isolated Linux
+  container lacks those prerequisites, and retain Linux checks for the cloud
+  controller and affected platform-specific regressions. Keep Linux `TMPDIR`
+  outside the checkout (for example `/var/tmp`): production archive guards
+  intentionally redirect paths under the repository.
 
 ## Eval Suite
 

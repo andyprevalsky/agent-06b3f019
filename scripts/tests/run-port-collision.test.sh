@@ -176,21 +176,6 @@ unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
 unset -f sleep
 echo "PASS: cold isolated seed validates and caps retry delays"
 
-# Concurrent /deploy structural gates + aborted prior runs leave orphan
-# `python3 -m http.server` listeners in 61000-61999 (observed: 11 orphans
-# blocking find_free_port's lsof check-then-use window → "listener did not
-# start"). Reap only this gate's range before allocating.
-reap_orphan_http_servers() {
-    local pid cmd
-    for pid in $(lsof -tiTCP:61000-61999 -sTCP:LISTEN 2>/dev/null || true); do
-        cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-        case "$cmd" in
-            *'http.server'*) kill "$pid" 2>/dev/null || true ;;
-        esac
-    done
-}
-reap_orphan_http_servers
-
 find_free_port() {
     local port
     # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
@@ -247,6 +232,17 @@ wait_for_connection() {
     exit 1
 }
 
+# On Bash 3.2 a subshell without exec forks the server. Killing only $! then
+# leaves that server orphaned. Every listener launcher must own its socket.
+assert_listener_owned() {
+    local pid="$1" port="$2"
+    if ! lsof -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "FAIL: recorded fixture PID $pid does not own listener $port" >&2
+        exit 1
+    fi
+    printf 'PASS: fixture PID %s owns listener %s\n' "$pid" "$port"
+}
+
 wait_for_frontend_test_port="$(find_free_port)"
 wait_for_frontend_test_root="$TMP_ROOT/frontend-ready"
 wait_for_frontend_test_log="$TMP_ROOT/frontend-ready.log"
@@ -255,7 +251,7 @@ printf '%s\n' 'ready' > "$wait_for_frontend_test_root/test_payment"
 (
     sleep 0.4
     cd "$wait_for_frontend_test_root"
-    python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
+    exec python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
         >"$wait_for_frontend_test_log" 2>&1
 ) &
 frontend_test_pid=$!
@@ -266,6 +262,7 @@ if ! FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
     echo "FAIL: frontend readiness must wait for a slow bundled build before tunnel smoke" >&2
     exit 1
 fi
+assert_listener_owned "$frontend_test_pid" "$wait_for_frontend_test_port"
 echo "PASS: frontend readiness waits for a delayed local frontend"
 
 failed_frontend_log="$TMP_ROOT/frontend-failed.log"
@@ -310,10 +307,11 @@ mkdir -p "$foreign_dir"
 foreign_port="$(find_free_port)"
 (
     cd "$foreign_dir"
-    python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
 wait_for_port "$foreign_port"
+assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$foreign_port"
 
 if ! port_requires_reassign "$foreign_port"; then
     echo "FAIL: expected a non-worktree listener to require port reassignment" >&2
@@ -330,10 +328,11 @@ unset "PIDS[$last_index]"
 own_port="$(find_free_port)"
 (
     cd "$ROOT_DIR"
-    python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
 wait_for_port "$own_port"
+assert_listener_owned "${PIDS[${#PIDS[@]}-1]}" "$own_port"
 
 if port_requires_reassign "$own_port"; then
     echo "FAIL: expected a current-worktree listener to be handled by cleanup, not reassignment" >&2

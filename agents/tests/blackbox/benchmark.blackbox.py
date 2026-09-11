@@ -386,7 +386,7 @@ def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
         cwd=repo_root, text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "9 passed" in result.stdout
+    assert "12 passed" in result.stdout
 
 
 def test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate():

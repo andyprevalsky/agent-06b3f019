@@ -24,6 +24,8 @@ WORKER = """
 import asyncio, json, logging, os, signal, sys, time
 from pathlib import Path
 sys.path.insert(0, os.environ["FIXTURE_AGENTS_PATH"])
+from tests.env_defaults import apply_test_env_defaults
+apply_test_env_defaults()
 from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
 logging.disable(logging.CRITICAL)
 
@@ -41,6 +43,29 @@ async def main():
 asyncio.run(main())
 Path("asyncio-run-returned").touch()
 """
+
+
+def _worker_startup_failure(root: Path, process: subprocess.Popen) -> str:
+    diagnostics = {}
+    for name in ("worker.log", "supervisor.log"):
+        path = root / name
+        if not path.exists():
+            continue
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 8192))
+            tail = stream.read(8192)
+        diagnostics[name] = tail.decode(errors="replace")
+        artifact_dir = os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR")
+        if artifact_dir:
+            retained = Path(artifact_dir) / "recording-worker-startup" / root.name / name
+            retained.parent.mkdir(parents=True, exist_ok=True)
+            retained.write_bytes(tail)
+            retained.chmod(0o600)
+    return (
+        f"recorder never reached the loopback archive; supervisor exit={process.poll()}; "
+        f"startup logs={json.dumps(diagnostics)}"
+    )
 
 
 def test_recording_archive_worker_exit_has_no_serial_publication_tail():
@@ -108,6 +133,7 @@ def test_recording_archive_worker_exit_has_no_serial_publication_tail():
         # Allowlisted child environment excludes real provider credentials and endpoints.
         env = {
             "PATH": os.environ.get("PATH", ""),
+            "PYTHON_DOTENV_DISABLED": "1",
             "FIXTURE_AGENTS_PATH": str(AGENTS),
             "WORKER_PROCESSES": "1",
             "NAVI_WORKER_LOG_STREAM": "false",
@@ -123,15 +149,16 @@ def test_recording_archive_worker_exit_has_no_serial_publication_tail():
             "no_proxy": "*",
             "ANONYMIZED_TELEMETRY": "false",
         }
-        process = subprocess.Popen(
-            [sys.executable, str(AGENTS / "scripts/local_worker_supervisor.py")],
-            cwd=root,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        with (root / "supervisor.log").open("wb") as output:
+            process = subprocess.Popen(
+                [sys.executable, str(AGENTS / "scripts/local_worker_supervisor.py")],
+                cwd=root,
+                env=env,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+            )
         try:
-            assert first_request.wait(15), "recorder never reached the loopback archive"
+            assert first_request.wait(15), _worker_startup_failure(root, process)
             assert not failures, failures
             process.send_signal(signal.SIGTERM)
             deadline = time.monotonic() + 5
