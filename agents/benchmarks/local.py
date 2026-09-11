@@ -1383,7 +1383,7 @@ def start_services(
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
         # Cloud/Linux VMs often cannot create Docker overlay mounts; system Postgres is
         # the supported local benchmark path (see CLAUDE.md Cursor Cloud section).
-        if os.name != "nt" and os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() not in {
+        if sys.platform == "linux" and os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() not in {
             "1",
             "true",
             "yes",

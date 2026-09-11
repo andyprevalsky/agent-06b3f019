@@ -114,6 +114,9 @@ does not provide their `mapfile`/associative-array operations.
 Backend/frontend dependencies may require a newer Node than the Mac app; use
 an installed compatible Node (22.13.0 was verified) for those packages and
 retain 20.10.0 for `mac-app`.
+Isolated macOS benchmarks use a separate Docker Postgres server per run. Keep
+the automatic system-Postgres fallback limited to Linux; separate databases on
+one system server still share its connection limit during parallel smoke runs.
 Keep the Mac awake during long validations. `caffeinate -is` prevents idle sleep,
 but closing the lid on battery can still suspend the controller and local
 WebSockets while cloud tasks continue. Check `pmset -g log` before treating a

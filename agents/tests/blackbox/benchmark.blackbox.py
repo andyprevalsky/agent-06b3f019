@@ -13413,6 +13413,55 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
             local_bench._release_port_range(base)
 
 
+def test_local_start_services_limits_automatic_system_postgres_to_linux():
+    """Darwin isolated runs retain Docker selection or an explicit system-PG opt-in."""
+    from unittest.mock import Mock, patch
+
+    from benchmarks import local as local_bench
+
+    observed = []
+    cases = [
+        ("darwin", None, None),
+        ("darwin", "false", "false"),
+        ("darwin", "true", "true"),
+        ("linux", None, "true"),
+        ("linux", "true", "true"),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        for index, (platform, configured, expected) in enumerate(cases):
+            context_dir = Path(tmp) / f"platform-{index}"
+            stack = local_bench.ServiceStack(
+                run_id=f"platform-{index}",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name=f"blackbox-platform-{index}",
+                base_port=55130,
+            )
+            environment = {"BENCHMARK_SEED_DUMP": str(Path(tmp) / "canonical.dump")}
+            if configured is not None:
+                environment["ROSE_USE_SYSTEM_PG"] = configured
+            process = Mock()
+            manifest = {"ports": {"backend": 55130}}
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(local_bench.sys, "platform", platform),
+                patch.object(local_bench.subprocess, "Popen", return_value=process) as launch,
+                patch.object(local_bench, "wait_for_services", return_value=manifest),
+                patch.object(local_bench, "_release_port_range"),
+            ):
+                assert local_bench.start_services(stack, clean_first=False) == (process, manifest)
+                launch.assert_called_once()
+                args, kwargs = launch.call_args
+                assert args[0] == ["bash", "scripts/run.sh", "--benchmark"]
+                assert kwargs["env"]["BENCHMARK_ISOLATED_RUN"] == "true"
+                assert kwargs["env"]["CONDUCTOR_WORKSPACE_NAME"] == stack.workspace_name
+                assert os.environ.get("ROSE_USE_SYSTEM_PG") == configured
+                observed.append((platform, configured, kwargs["env"].get("ROSE_USE_SYSTEM_PG")))
+    assert observed == cases, f"isolated database platform selection changed: {observed}"
+
+
 def test_local_start_services_releases_port_reservation_after_readiness():
     """A ready isolated stack must release its startup-only port reservation."""
     from unittest.mock import Mock, patch
@@ -18401,6 +18450,10 @@ async def run_all_tests():
     r.record(
         "local_automatic_port_range_avoids_ephemeral_clients",
         test_local_automatic_port_range_avoids_linux_ephemeral_clients,
+    )
+    r.record(
+        "local_start_services_database_platform_selection",
+        test_local_start_services_limits_automatic_system_postgres_to_linux,
     )
     r.record(
         "local_start_services_ready_port_release",
