@@ -167,3 +167,64 @@ benchmark definitions or acceptance criteria were relaxed.
 
 Compare native provider wire events with decoded calls before treating a
 completion stall as a missing tool, parser defect or proven model limitation.
+
+### Follow-up: repeated failure and bounded affinity controls
+
+The unchanged four-task gate on `10e8df231859970a3db513fbf39ae260d934c592`
+ran as `406e6853-7bee-4c44-9282-1771934adc9f`. Three tasks passed; idempotent
+abandonment, root `bf9b2c89-9c5d-4fb6-916f-8c433ec814f2`, failed after the
+unchanged 900-second cap (908.1 seconds including final observation). Its
+payment snapshot was settled: purchase CLEARED, wallet CONSUMED, Stripe charge
+succeeded with zero capturable balance, and the issued card CLOSED with zero
+balance. No open payment attention or refund remained.
+
+After two successful browser invocations, two native GPT responses reached the
+length limit without selecting tools. The root then delegated three formatting
+or consistency checks of the already obtained checkout results. Its final
+captured execute call selected `attempt_completion` through Claude, too late
+for the root to become COMPLETED within the budget. All eight root execute
+calls retained the same six-tool contract, SHA-256
+`bc7e0d23ef0b87a4a6d992d34d9577e2cf59f08ac5ce3cdd718d4ec3db885f82`.
+Some delegated children also recorded TLS bad-record-MAC and unclosed-session
+errors. Those observations do not establish a missing completion declaration.
+
+Bounded captured-input controls executed no returned tools:
+
+- Three original-model and three stronger-model calls alternated on the same
+  endpoint, changing only the model in a body reconstructed through the native
+  builder. All six selected `attempt_completion({})`. This does not support a
+  model-intelligence diagnosis.
+- A full-client replay advertised all six functions with `tool_choice=required`.
+  The raw provider selected `wait_for`, and the decoder preserved that call.
+- Those reconstructed bodies differed only in `prompt_cache_key`. The transport
+  also derives three routing headers from that key. Six subsequent requests
+  alternated this coupled affinity condition while holding model, endpoint,
+  authentication, input, instructions, tools and generation settings constant.
+  The client-derived affinity selected completion in zero of three requests
+  (one wait and two incomplete/max_messages responses); the direct-builder
+  affinity selected completion in all three. Every response was HTTP 200.
+
+The common body excluding affinity had SHA-256
+`945b2b12bf347d3165bcace394034ade2a5be9708fcf37be177a6e523be5e716`.
+This demonstrates affinity-dependent behavior in these captured-input controls.
+It does **not** capture or reproduce the historical wire identity: production
+passes an explicit `cache_sequence_id`, whereas these replays used the fallback
+namespace, and dump serialization removes an internal system boundary used in
+cache-scope hashing. The cache key and derived routing headers are one coupled
+condition, not independently isolated causes. No cache busting, routing change,
+model substitution, timeout increase or prompt repair is justified by this
+comparison. Provider handling remains an open causal gap.
+
+The next unchanged control, run `19624b67-ae9e-4228-8b1c-9e55945fbb67`,
+passed this exact idempotency task in 323.5 seconds, root
+`8df0d54d-4891-4935-becf-9df8a7450ff0`. A later pass establishes that run's
+outcome; it does not close this case. The full gate passed all four tasks; the final abandonment task passed in
+231.0 seconds. No runtime completion-selection change preceded this control.
+
+Raw requests, SSE, captured dumps and credentials remain private under
+`.context/acceptance/idempotent-gate5-observation/`,
+`.context/acceptance/idempotent-gate5-replay/` and
+`.context/acceptance/idempotent-gate5-affinity-replay/`. Read the replay README
+for the exact controls and limitations. The canonical publisher verified the
+[failed task's browser terminal states and recordings](https://www.roselabs.ai/?agent-id=bf9b2c89-9c5d-4fb6-916f-8c433ec814f2).
+The case remains **OPEN / undetermined**; no completion-runtime repair landed.

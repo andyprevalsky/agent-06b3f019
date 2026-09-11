@@ -286,3 +286,107 @@ investigation preserved those constraints and made no runtime changes.
 ## Reusable lesson
 
 Capture CDP request timing and independent browser/renderer liveness during the actual stall before assigning browser latency to the host, proxy, model, or provider.
+
+### Follow-up: native reconnect exhaustion and unchanged control
+
+Two later full-smoke invocations used committed revision
+`10e8df231859970a3db513fbf39ae260d934c592`. Their biometrics task definition,
+420-second limit and criteria remained unchanged. These observations do not
+establish that the original run's DOM waits had the same cause.
+
+The first follow-up was run `0b998ea6-5a2b-468b-bc15-1af306675a5e`, root
+`243f9283-340d-4c55-aca1-2b0f90d8a74e`, isolated context
+`1789090658-11322-44698`. Browser task
+`a6f4f10b-b72c-5db1-8612-0da6974c3381` connected through production CDP at
+01:39:00Z on September 11. At **01:39:48.897338Z**, the connection log records
+`keepalive ping timeout`, sent close code `1011`, and `no close frame received`.
+This identifies the local heartbeat expiry that triggered closure, without
+identifying why a pong was not received.
+
+Native reconnect did run. Attempts started at 01:39:48.897728Z,
+01:39:59.907702Z and 01:40:11.911287Z; each failed with
+`TimeoutError: timed out during opening handshake` after approximately ten
+seconds. Exhaustion was logged at 01:40:21.914051Z. Navigation then surfaced
+`ConnectionError: WebSocket connection closed`. Eight generic recovery loops
+ran before the browser failed at 01:40:25.217780Z with the aggregate
+`BrowserStateRequestEvent` ValueError: no handler returned a non-None result.
+The DownloadsWatchdog and DOMWatchdog wrappers were marked completed with no
+usable state. Those completion markers do not indicate successful DOM work.
+
+The independently reviewed diagnostic helper made two bounded attempts:
+
+| Attempt | UTC start | UTC end | Result |
+| --- | --- | --- | --- |
+| 1 | 01:39:35.676 | 01:39:40.707 | Separate connection setup exceeded five seconds |
+| 2 | 01:39:56.012 | 01:40:01.039 | Same setup failure; overlapped native reconnect |
+
+Neither connection attempt returned a WebSocket to the helper; no CDP command,
+target attachment or browser/renderer probe occurred. The first attempt ended
+8.190 seconds before the detected production drop. Connection setup and
+cancellation can still interact with transport/provider state: **observer
+effects remain unresolved**. The source paths use the same selected Kernel
+session-row contract and identity URL materializer, no additional auth headers,
+`proxy=None`, and the same default TLS implementation. Runtime endpoint byte
+equality and wire-stage timing were not captured. An unexpired decoded token
+timestamp excludes only that expiry condition, not authentication rejection.
+[Kernel's documented support for simultaneous frameworks](https://www.kernel.sh/docs/integrations/overview)
+does not prove what happened to this session's handshakes.
+
+Bounded read-only provider telemetry retrieval returned ten events for the first
+session, with `X-Has-More=false`: four CDP connects, one early client-close
+disconnect and five command records. The last received commands were
+`Page.navigate` at 01:39:02.997670Z and `Input.dispatchMouseEvent` at
+01:39:02.997755Z. The worker warned at 01:39:17.946600Z that
+`BrowserSession.on_NavigateToUrlEvent` had run for more than 15 seconds. That
+navigation wait was already present 17.729 seconds before the first helper
+attempt. Command receipt does not establish command completion.
+
+The returned provider records contained no later connection, system or monitor
+event through 01:42:10Z. Operational connection/control/system/captcha capture
+was enabled, while CDP console/network/page/interaction capture was not enabled
+and associated monitor events were consequently not expected. The installed SDK
+documents bounded retention, unavailable data, category filtering within pages
+and sequence gaps. Sequence numbers 1–10 were contiguous, but this does not
+prove the absent tail was captured. The replacement session had hundreds of
+records and a bounded tail sample through 01:41:57.887865Z; it supplies a cadence
+comparison, not an outage control. No known provider log source/path was present
+in the evidence, so none was guessed. Provider VM/proxy failure and a telemetry
+gap remain indistinguishable from these records alone.
+
+The root autonomously spawned replacement browser task
+`e51ddc3b-29aa-5403-b8f1-3151fc493cae`. The root was then deleted and the exact
+smoke controller was terminated; it exited 143. **This invocation has no
+canonical terminal biometrics task outcome.** Both exact owned Kernel sessions
+were subsequently verified deleted through provider GETs, with one replay each.
+The host's retained sleep log had no Sleep/Wake/DarkWake transition in the
+18:38–18:41 local window.
+
+A private offline replay used the installed library's actual native reconnect
+cleanup, client replacement, retry/backoff, event finalization and watchdog
+wrappers. It injected the three observed timeout responses at
+`CDPClient.start`, ending with `ws=None` and `reconnecting=False`; the state
+request then reproduced the exact aggregate ValueError with both wrappers
+completed/None. A reconnecting-state comparison produced ConnectionError.
+Independent review passed, with zero network connections. This characterizes
+the downstream failure response; it does **not** reproduce the missed pong,
+handshake failure or observer effect, and does not establish a repair for the
+original transport failure.
+
+The next unchanged invocation used **no extra CDP observer**: run
+`63368a7a-25f2-4222-8e0a-235f66f06f15`, root
+`735b3331-fedd-42f0-b86e-2021d35930f3`, context
+`1789091187-41086-37918`, browser task
+`e8d2e5aa-0f6a-589b-b461-112b9ab8b4b2`. Its canonical report card records
+**PASSED in 379.5 seconds**. The retained logs contain 41 completed browser
+Claude calls (96.342 seconds of summed model round trips), 43 completed Claude
+calls including schema/verifier, and zero heartbeat-timeout, drop-callback,
+reconnect-attempt, DOM-timeout or browser-automation-failure markers. This fresh
+session's pass does not resolve the earlier cause or rule out observer effects.
+
+Private evidence, summaries and the reviewed offline replay are retained under
+`.context/acceptance/biometrics-slow-rca/smoke-5/` and `smoke-6/`, with 0700
+directories and 0600 files. The case remains **OPEN / undetermined**. The
+remaining causal gap is request/receive/dispatch timing and remote
+transport/browser evidence during the actual failure, including the effect of
+connection setup/cancellation. No production timeout, prompt, task or criterion
+was changed for this investigation.

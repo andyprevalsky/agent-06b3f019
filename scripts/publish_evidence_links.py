@@ -171,6 +171,9 @@ def validate_browser_agents_terminated_with_recording(
       * a FINISHED recording message with a reachable ``recording_view_url`` or a
         fetchable ``recording_file_pointer``
     Agents with no browser tasks pass.
+    Code agents share lifecycle action names with browsers. Explicit code
+    identity exempts those tasks unless the same task also has browser evidence;
+    lifecycle events with unknown identity retain the fail-closed checks.
     """
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
@@ -183,7 +186,11 @@ def validate_browser_agents_terminated_with_recording(
             continue
         action = str(meta.get("action_type") or "")
         tool_name = str(meta.get("toolName") or "")
-        browser_related = tool_name == "spawn_browser_agent" or action in {
+        code_related = tool_name == "spawn_claude_code_agent" or meta.get("agentType") == "code"
+        explicit_browser = tool_name == "spawn_browser_agent" or meta.get("agentType") == "browser" or action in {
+            "browser", "recording", "network_recording",
+        }
+        browser_related = explicit_browser or action in {
             "browser",
             "session_init",
             "session_started",
@@ -192,12 +199,17 @@ def validate_browser_agents_terminated_with_recording(
             "network_recording",
             "task_complete",
         }
-        if not browser_related:
+        if not browser_related and not code_related:
             continue
         state = tasks.setdefault(
-            task_id, {"seen": False, "complete": False, "recording_ok": False}
+            task_id, {
+                "seen": False, "complete": False, "recording_ok": False,
+                "code": False, "browser": False,
+            }
         )
-        if action in {
+        state["code"] = state["code"] or code_related
+        state["browser"] = state["browser"] or explicit_browser
+        if explicit_browser or action in {
             "browser",
             "session_init",
             "session_started",
@@ -214,7 +226,7 @@ def validate_browser_agents_terminated_with_recording(
 
     failures: list[str] = []
     for task_id, state in sorted(tasks.items()):
-        if not state["seen"]:
+        if not state["seen"] or (state["code"] and not state["browser"]):
             continue
         if not state["complete"]:
             failures.append(

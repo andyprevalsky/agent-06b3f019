@@ -29,7 +29,13 @@ cd "$ROOT_DIR"
 RUNS="${FLEET_INFRA_PROOF_RUNS:-10}"
 WIDTH="${FLEET_INFRA_PROOF_WIDTH:-20}"
 SEED="${FLEET_INFRA_PROOF_SEED:-20260908}"
-TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-1800}"
+TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-7200}"
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
+case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
+  ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
+export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS
 DRY_SAMPLE=0
 MODE=infra
 ARTIFACT_DIR="${FLEET_INFRA_PROOF_ARTIFACT_DIR:-/opt/cursor/artifacts}"
@@ -47,7 +53,7 @@ Options:
   --width <n>        Parallel tasks per fleet (default 20)
   --concurrency <n>  Alias for --width
   --seed <n>         Deterministic sampling seed (default 20260908)
-  --timeout <s>      Per-fleet controller timeout (default 1800)
+  --timeout <s>      Per-fleet controller timeout (default 7200)
   -h, --help         Show this help
 EOF
 }
@@ -147,7 +153,7 @@ fi
 echo "   fail closed: any INFRA outcome aborts remaining slices"
 
 python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" "$MODE" <<'PY'
-import json, sys, time
+import json, os, sys, time
 path, proof_id, runs, width, seed, timeout, mode = sys.argv[1:]
 json.dump(
     {
@@ -157,6 +163,7 @@ json.dump(
         "width": int(width),
         "seed": int(seed),
         "timeout_seconds": int(timeout),
+        "benchmark_wall_clock_backstop_seconds": int(os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"]),
         "mode": mode,
         "slices": [],
         "status": "running",

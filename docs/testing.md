@@ -67,6 +67,17 @@ cd front-end && bash scripts/run-blackbox-tests.sh terminal      # single domain
 
 ### Smoke Benchmarks (`agents/benchmarks/`)
 
+Rose root-agent execution has a separate 120-minute wall-clock backstop, including Polar
+tasks whose normal budget is browser steps. For a deliberately bounded test run,
+set `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` on the launcher. Local and cloud
+Rose agent runs then pause work five minutes after root creation even if they are
+still progressing, including time spent preparing attachments and realtime capture.
+Existing shorter task timeouts and browser-step budgets still apply. Provisioning,
+evaluator work, evidence collection and verified teardown have their own bounds;
+they must finish rather than be cut off with a process kill. This setting does
+not change catalog prompts, task timeouts or grading criteria. Cloud `--timeout`
+controls the controller watchdog and is not a substitute for this execution cap.
+
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.
 
 ```bash

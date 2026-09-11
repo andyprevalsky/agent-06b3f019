@@ -36,6 +36,46 @@ agent = "00000000-0000-4000-8000-000000000001"
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 
+# Captured Claude Code lifecycle events share task_started/task_complete with
+# browser agents, but a code terminal has no browser recording to attach.
+code_messages = [
+    msg(task_id="code-1", toolName="spawn_claude_code_agent",
+        action_type="claude_code_started", toolStatus="IN_PROGRESS"),
+    msg(task_id="code-1", toolName="spawn_claude_code_agent",
+        action_type="task_started", toolStatus="FINISHED"),
+    msg(task_id="code-1", toolName="code_agent_sdk_events",
+        action_type="system", agentType="code", toolStatus="FINISHED"),
+    msg(task_id="code-1", toolName="spawn_claude_code_agent",
+        action_type="task_complete", toolStatus="FINISHED"),
+]
+assert mod.validate_browser_agents_terminated_with_recording(agent, code_messages) == []
+
+# A code marker cannot hide browser evidence on the same task, regardless of
+# event ordering. Unknown legacy lifecycle identities still fail closed.
+for browser_start in (
+    msg(task_id="code-1", toolName="spawn_browser_agent",
+        action_type="browser", toolStatus="IN_PROGRESS"),
+    msg(task_id="code-1", toolName="spawn_agent", agentType="browser",
+        action_type="task_started", toolStatus="IN_PROGRESS"),
+):
+    for messages in ([browser_start, *code_messages], [*code_messages, browser_start]):
+        failures = mod.validate_browser_agents_terminated_with_recording(agent, messages)
+        assert any("no correctly attached recording" in f for f in failures), failures
+failures = mod.validate_browser_agents_terminated_with_recording(
+    agent, [msg(task_id="unknown", action_type="task_complete", toolStatus="FINISHED")]
+)
+assert any("no correctly attached recording" in f for f in failures), failures
+
+# Explicit browser identity cannot bypass checks when action names evolve.
+for identity in ({"agentType": "browser", "toolName": "spawn_agent"},
+                 {"toolName": "spawn_browser_agent"}):
+    for action in ("system", "future_action", ""):
+        failures = mod.validate_browser_agents_terminated_with_recording(
+            agent, [msg(task_id="identity-only", action_type=action, **identity)]
+        )
+        assert any("has not terminated" in f for f in failures), failures
+        assert any("no correctly attached recording" in f for f in failures), failures
+
 # Live browser without task_complete / recording → fail both
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,

@@ -50,6 +50,7 @@ _CONFIG_SCALAR_KEYS = {
     "region",
     "run_timeout_seconds",
     "child_run_timeout_seconds",
+    "benchmark_wall_clock_backstop_seconds",
     "synchronized_start",
     "first_run_stack_wait_seconds",
     "per_box_barrier_wait_seconds",

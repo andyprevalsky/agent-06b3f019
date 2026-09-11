@@ -3860,11 +3860,64 @@ def _detect_infra_errors_from_fly(agent_ids: List[str]) -> List[str]:
     return errors
 
 
+def benchmark_wall_clock_backstop_seconds() -> int:
+    """Independent safety ceiling; catalog and Polar step budgets remain intact."""
+    value = os.environ.get("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", "7200")
+    if not value.isascii() or not value.isdigit() or int(value) <= 0:
+        raise ValueError("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer")
+    return int(value)
+
+
 async def poll_agent(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None,
+) -> Tuple[dict, int, int, Optional[str]]:
+    """Bound polling for callers that have already prepared an agent."""
+    async def execute(snapshot: dict):
+        return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+
+    return await _run_with_agent_execution_backstop(base_url, agent_id, execute)
+
+
+async def _run_with_agent_execution_backstop(
+    base_url: str,
+    agent_id: str,
+    execute: Callable[[dict], Awaitable[Any]],
+    started_at: Optional[float] = None,
+) -> Any:
+    """Bound all post-create execution, including preparation and checkpoints."""
+    seconds = benchmark_wall_clock_backstop_seconds()
+    print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
+    snapshot: dict = {}
+    started_at = asyncio.get_running_loop().time() if started_at is None else started_at
+    deadline = asyncio.timeout_at(started_at + seconds)
+    try:
+        async with deadline:
+            return await execute(snapshot)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+    # Stop paid work before diagnostics; the normal task path subsequently
+    # waits for terminal browser evidence and performs payment/agent cleanup.
+    if not await pause_agent(base_url, agent_id):
+        raise RuntimeError(f"Could not pause agent after {seconds}s wall-clock backstop")
+    data = await get_agent(base_url, agent_id)
+    metadata = dict(snapshot.get("_benchmark") or {})
+    metadata["wall_clock_backstop_seconds"] = seconds
+    data["_benchmark"] = {**data.get("_benchmark", {}), **metadata}
+    reason = f"Timeout after {seconds}s (wall-clock backstop={seconds}s)"
+    print(f"    ⏰ {reason}")
+    return data, metadata.get("approvals_triggered", 0), metadata.get("approvals_resolved", 0), reason
+
+
+async def _poll_agent(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+    realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None,
+    timeout_snapshot: Optional[dict] = None,
 ) -> Tuple[dict, int, int, Optional[str]]:
     """
     Poll agent until terminal state, timeout, or early-failure.
@@ -3972,6 +4025,8 @@ async def poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        if timeout_snapshot is not None:
+            timeout_snapshot["_benchmark"] = data["_benchmark"]
         if seen_attention_kinds:
             data["_benchmark"]["attention_request_kind_seen"] = seen_attention_kinds[-1]
             if task.expected_attention_kind:
@@ -12170,88 +12225,83 @@ async def run_single_task(
                 fast_mode_cache_enabled=fast_mode_cache,
             )
 
-        # Handle attachments: create agent first, upload files, then post file messages
-        if all_attachments:
-            agent_id = await create_agent(base_url, task)
+        agent_id = await create_agent(base_url, task)
+        execution_started_at = asyncio.get_running_loop().time()
+
+        async def execute_agent(snapshot: dict):
+            nonlocal grep_fixture_manifest
             if on_agent_created:
                 on_agent_created(task.name, agent_id)
             print(f"    Agent created: {agent_id[:12]}...")
-            await start_realtime_capture()
-            await start_realtime_monitor()
-
-            file_pointers = []
-            for attach_filename in all_attachments:
-                filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
-                if not os.path.exists(filepath):
-                    raise FileNotFoundError(f"Test asset not found: {filepath}")
-
-                # Slice CSV if row_start/row_end are set
-                if filepath.endswith(".csv") and task.row_start is not None and task.row_end is not None:
-                    filepath = slice_csv(filepath, task.row_start, task.row_end)
-                    temp_csv_paths.append(filepath)
-
-                print(f"    Uploading {attach_filename}...")
-                fp = await upload_attachment(base_url, agent_id, filepath)
-                file_pointers.append(fp)
-                print("    ✅ Uploaded, FilePointer received")
-
-            # Post a message with all file pointers so the agent can see them
-            if file_pointers:
-                await post_attachment_message(base_url, agent_id, file_pointers)
-                print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
-            await post_world_model_update_events(base_url, agent_id)
-            start_fixture_ref = await archive_agent_start(base_url, agent_id)
-            if start_fixture_ref:
-                print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
-        else:
-            agent_id = await create_agent(base_url, task)
-            if on_agent_created:
-                on_agent_created(task.name, agent_id)
-            print(f"    Agent created: {agent_id[:12]}...")
-            if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
+            if not all_attachments and task.name == GREP_EXPLORE_STRESS_TASK_NAME:
                 grep_fixture_manifest = _run_grep_fixture("apply-agent-network", agent_id)
                 print("    🔎 Attached seeded agent_network branch")
             await start_realtime_capture()
             await start_realtime_monitor()
+            if all_attachments:
+                file_pointers = []
+                for attach_filename in all_attachments:
+                    filepath = os.path.join(TEST_ASSETS_DIR, attach_filename)
+                    if not os.path.exists(filepath):
+                        raise FileNotFoundError(f"Test asset not found: {filepath}")
+
+                    # Slice CSV if row_start/row_end are set
+                    if filepath.endswith(".csv") and task.row_start is not None and task.row_end is not None:
+                        filepath = slice_csv(filepath, task.row_start, task.row_end)
+                        temp_csv_paths.append(filepath)
+
+                    print(f"    Uploading {attach_filename}...")
+                    fp = await upload_attachment(base_url, agent_id, filepath)
+                    file_pointers.append(fp)
+                    print("    ✅ Uploaded, FilePointer received")
+
+                # Post a message with all file pointers so the agent can see them
+                if file_pointers:
+                    await post_attachment_message(base_url, agent_id, file_pointers)
+                    print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
             await post_world_model_update_events(base_url, agent_id)
             start_fixture_ref = await archive_agent_start(base_url, agent_id)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
 
-        if checkpoint_source_index is not None:
-            if checkpoint_source_out is None:
-                raise ValueError("checkpoint_source_out is required in checkpoint source mode")
-            data = await poll_agent_until_message_index(
-                base_url,
-                agent_id,
-                task,
-                checkpoint_source_index,
-                checkpoint_source_boundary,
-            )
-            messages = data.get("messages", []) or []
-            export_checkpoint_source_from_local_db(
-                agent_id,
-                source_out=checkpoint_source_out,
-                tree_out=checkpoint_tree_out,
-            )
-            duration = time.time() - start
-            return TaskResult(
-                name=task.name,
-                passed=True,
-                agent_id=agent_id,
-                status=(data.get("agent") or {}).get("status", "PAUSED"),
-                benchmark_status='PASSED',
-                progress_score=(data.get("agent") or {}).get("progress", 0),
-                duration_seconds=round(duration, 1),
-                cost_cents=0,
-                message_count=len(messages),
-                failure_reason=None,
-            )
+            if checkpoint_source_index is not None:
+                if checkpoint_source_out is None:
+                    raise ValueError("checkpoint_source_out is required in checkpoint source mode")
+                data = await poll_agent_until_message_index(
+                    base_url,
+                    agent_id,
+                    task,
+                    checkpoint_source_index,
+                    checkpoint_source_boundary,
+                )
+                messages = data.get("messages", []) or []
+                export_checkpoint_source_from_local_db(
+                    agent_id,
+                    source_out=checkpoint_source_out,
+                    tree_out=checkpoint_tree_out,
+                )
+                duration = time.time() - start
+                return TaskResult(
+                    name=task.name,
+                    passed=True,
+                    agent_id=agent_id,
+                    status=(data.get("agent") or {}).get("status", "PAUSED"),
+                    benchmark_status='PASSED',
+                    progress_score=(data.get("agent") or {}).get("progress", 0),
+                    duration_seconds=round(duration, 1),
+                    cost_cents=0,
+                    message_count=len(messages),
+                    failure_reason=None,
+                )
 
-        # Poll until done (or early-fail)
-        data, approvals_triggered, approvals_resolved, early_fail_reason = await poll_agent(
-            base_url, agent_id, task, realtime_monitor
+            return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+
+        execution_result = await _run_with_agent_execution_backstop(
+            base_url, agent_id, execute_agent, started_at=execution_started_at
         )
+        if isinstance(execution_result, TaskResult):
+            return execution_result
+        data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
         early_fail_reason = _annotate_needs_auth_failure(task, early_fail_reason, data)
         if realtime_monitor:
             await realtime_monitor.stop()
@@ -13740,6 +13790,7 @@ def _parallel_task_phases(
 
 
 async def main_async(args):
+    benchmark_wall_clock_backstop_seconds()  # Reject invalid limits before live setup.
     if args.list:
         print("\nBenchmark Tasks:")
         print(f"  {'Name':<25} {'Title':<35} {'Tags'}")

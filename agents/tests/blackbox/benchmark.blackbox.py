@@ -1507,7 +1507,8 @@ def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
     import benchmarks.run_benchmark as bench
 
     source = inspect.getsource(bench.run_single_task)
-    poll_index = source.index("await poll_agent(")
+    # Preparation and polling now share the creation-time execution deadline.
+    poll_index = source.index("await _run_with_agent_execution_backstop(")
     cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
     pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
     refresh_index = source.index("_refresh_agent_after_pause_for_browser_terminal", poll_index)

@@ -1472,6 +1472,7 @@ import benchmarks.run_benchmark as runner
 
 
 async def fake_main_async(_args):
+    assert runner.benchmark_wall_clock_backstop_seconds() == 300
     task = runner.get_task_by_name("parallel-tool-calls")
     task.tags = []
 
@@ -1525,7 +1526,7 @@ async def fake_main_async(_args):
     runner.get_agent_tree = get_tree
     runner.post_world_model_update_events = return_none
     runner.archive_agent_start = return_none
-    runner.poll_agent = poll_forever
+    runner._poll_agent = poll_forever
     runner.get_agent = get_agent
     runner.collect_logs = collect_logs
     runner.finalize_archive_and_score_world_model = finalize
@@ -1617,6 +1618,7 @@ cloudbench_env_value() { return 0; }
             "CLOUDBENCH_STATUS_PORT": str(status_port),
             "CLOUDBENCH_TEST_STATUS_PID_FILE": str(status_pid_file),
             "CLOUDBENCH_TEST_DELETE_MARKER": str(delete_marker),
+            "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS": "300",
             "CLOUDBENCH_HEARTBEAT_SECONDS": "30",
             "BENCH_DASHPORT": str(dashboard_port),
             "CONDUCTOR_PORT": str(base_port),
@@ -6766,7 +6768,9 @@ def _make_execution_provenance(tmp_path: Path) -> tuple[Path, Path, Path]:
             "--config-value",
             "region=iad",
             "--config-value",
-            "run_timeout_seconds=3600",
+            "run_timeout_seconds=7200",
+            "--config-value",
+            "benchmark_wall_clock_backstop_seconds=300",
             "--output",
             str(provenance),
         ],
@@ -6789,7 +6793,8 @@ def test_execution_provenance_binds_immutable_snapshot_not_mutable_checkout(
     assert re.fullmatch(r"[0-9a-f]{64}", document["controller_snapshot"]["sha256"])
     assert document["config"]["values"] == {
         "region": "iad",
-        "run_timeout_seconds": "3600",
+        "run_timeout_seconds": "7200",
+        "benchmark_wall_clock_backstop_seconds": "300",
     }
 
     # Editing the checkout after snapshot creation cannot alter the attested
@@ -8087,6 +8092,13 @@ registry_machine_details() {{
     *) return 2 ;;
   esac
 }}
+fleet_registry_reconcile_mounted_volume() {{
+  case "$3" in
+    {first_machine}) printf vol_first ;;
+    {second_machine}) printf vol_second ;;
+    *) return 2 ;;
+  esac
+}}
 reap_machine() {{
   printf 'machine %s\\n' "$1" >> "$CALLS"
   [ "$1" != {first_machine} ] || return 75
@@ -9317,6 +9329,7 @@ else:
     script = f"""set -uo pipefail
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
@@ -11293,6 +11306,7 @@ OUTPUT="$3"
 UNEXPECTED="$4"
 CALLS="$5"
 FLEET_REGISTRY_DIR="$REGISTRY"
+FLEET_AUDIT_ROOT="${{REGISTRY%/*/*}}/audits"
 FLEET_REGISTRY_PUBLISHED=0
 KEEP_CLONES=0
 RUN_ID=original-run
@@ -11600,6 +11614,8 @@ def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
             "registry_machine_details() {",
             "registry_record_is_stale_phantom() {",
             "registry_record_is_stale_pre_volume_id() {",
+            "fleet_registry_resume_volume_migrations() {",
+            "fleet_registry_reconcile_mounted_volume() {",
             "reap_registry_clones() {",
         )
     )
@@ -11642,6 +11658,10 @@ FLY() {{
       ;;
     "machine status")
       [ "$3" = {machine_id} ] || return 97
+      if [ "${{@: -1}}" = -d ]; then
+        printf '%s\n' '{{"mounts":[{{"volume":"{machine_volume}","path":"/data"}}]}}'
+        return 0
+      fi
       if [ -e "$DESTROYED_MACHINE" ]; then
         printf "Error: machine %s was not found in app '%s'\\n" "$3" "$APP" >&2
         return 1
@@ -19782,3 +19802,305 @@ def test_autoscaler_finalization_budget_covers_worker_provisioning_contract() ->
     autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
     assert '"worker capacity below desired: $ready_workers/$desired_workers workers queue-ready"' in autoscaler
     assert '"worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready"' in autoscaler
+
+
+def _migration_owner_fixture(tmp_path: Path) -> tuple[Path, Path, str, str]:
+    owner = "4f" * 16
+    registry = tmp_path / "ownership" / owner
+    audit = tmp_path / "audits" / owner
+    clone = "cloudbench-migrated"
+    machine = "822717a77d2638"
+    workspace = tmp_path / "workspace"
+    runs = workspace / ".context/fleet/runs"
+    (runs / "fixture-run").mkdir(parents=True)
+    for directory in (registry / "clones", audit / "fresh", audit / "expected-fresh", audit / "by-machine-id"):
+        directory.mkdir(parents=True)
+    (registry / "meta").write_text(
+        f"version=2\napp=bench-app\nfleet_owner_token={owner}\nrun_id=fixture-run\n"
+        "host=test-host\npid=999999\npid_start=Mon Jan 1 00:00:00 2001\n"
+        f"workspace_root={workspace}\nruns_root={runs}\naudit_dir={audit}\n"
+        f"owned_ids_file={audit / 'owned-clones.ids'}\nowned_names_file={audit / 'owned-clones.names'}\ncleanup_policy=reap\n"
+    )
+    (audit / "meta").write_text(
+        f"version=1\nfleet_owner_token={owner}\nrun_id=fixture-run\napp=bench-app\nworkspace_root={workspace}\nstatus=incomplete\n"
+        "hub_disposition=not-applicable\nhub_owner_file=\nhub_owner_token=\nhub_pid=\nhub_pid_start=\nhub_argv_sha256=\n"
+    )
+    (audit / "expected-fresh" / clone).write_text(f"clone_name={clone}\nsource_machine_id=feedface000001\n")
+    (audit / "by-machine-id" / machine).write_text(f"{clone}\n")
+    (audit / "fresh" / clone).write_text(
+        f"version=1\nfleet_owner_token={owner}\nrun_id=fixture-run\napp=bench-app\nclone_name={clone}\n"
+        f"source=fresh-clone\nsource_machine_id=feedface000001\nmachine_id={machine}\n"
+        "volume_id=vol_old\ndisposition=owned\n"
+    )
+    (registry / "clones" / clone).write_text(f"name={clone}\nid={machine}\nvolume_id=vol_old\n")
+    return registry, audit, clone, machine
+
+
+def test_owned_worker_volume_follows_exact_provider_migration(tmp_path: Path) -> None:
+    """Replay the captured same-Machine/new-mount boundary before destruction."""
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    fleet = FLEET_SCRIPT.read_text()
+    signatures = ["registry_meta_value() {", "fleet_registry_volume_for_id() {"]
+    for signature in ("fleet_registry_resume_volume_migrations() {", "fleet_registry_reconcile_mounted_volume() {"):
+        if signature in fleet:
+            signatures.append(signature)
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in signatures)
+    script = f'''set -eu
+ROOT_DIR={shlex.quote(str(ROOT))}
+VOLUME_MIGRATION_HELPER="$ROOT_DIR/scripts/cloudbench-volume-migration.py"
+APP=bench-app
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+WARM_VOLUME_ID=vol_warm
+{functions}
+registry_machine_details() {{ printf 'started {clone} fdaa::1\n'; }}
+machine_config_exact_read() {{ printf '%s\n' '{{"mounts":[{{"volume":"vol_new","path":"/data"}}]}}'; }}
+FLY() {{
+  [ "$1 $2" = 'volumes show' ] || exit 90
+  case "$3" in
+    vol_old) printf '%s\n' '{{"id":"vol_old","state":"pending_destroy","attached_machine_id":null}}' ;;
+    vol_new) printf '%s\n' '{{"id":"vol_new","state":"created","attached_machine_id":"{machine}"}}' ;;
+    *) exit 91 ;;
+  esac
+}}
+fleet_registry_volume_for_id {machine}
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "vol_new", "stale recorded volume would orphan the exact migrated mount"
+    assert "volume_id=vol_new\n" in (registry / "clones" / clone).read_text()
+    assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
+    journals = list((audit / "volume-migrations" / machine).glob("*.json"))
+    assert len(journals) == 1
+    receipt = json.loads(journals[0].read_text())
+    assert receipt["old_volume_state"] == "pending_destroy"
+    assert receipt["old_attached_machine_id"] is None
+    assert receipt["new_attached_machine_id"] == machine
+
+
+def _migration_command(registry: Path, audit: Path, clone: str, machine: str, *, action: str = "reconcile") -> list[str]:
+    return [
+        sys.executable, str(ROOT / "scripts/cloudbench-volume-migration.py"), action,
+        "--registry", str(registry), "--audit-root", str(audit.parent), "--app", "bench-app",
+        "--clone", clone, "--machine", machine, "--protected-volume", "vol_warm",
+    ]
+
+
+def _migration_evidence(machine: str, old: str = "vol_old", new: str = "vol_new") -> list[dict]:
+    return [
+        {"mounts": [{"volume": new, "path": "/data"}]},
+        {"id": old, "state": "pending_destroy", "attached_machine_id": None},
+        {"id": new, "state": "created", "attached_machine_id": machine},
+    ]
+
+
+@pytest.mark.parametrize("crash_window", ["journal", "audit"])
+def test_volume_migration_journal_recovers_interrupted_publication(tmp_path: Path, crash_window: str) -> None:
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    environment = os.environ.copy()
+    environment.update(CLOUDBENCH_TEST_MODE="1", CLOUDBENCH_TEST_MIGRATION_CRASH=crash_window)
+    interrupted = subprocess.run(
+        _migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine)),
+        text=True, capture_output=True, timeout=10, env=environment,
+    )
+    assert interrupted.returncode != 0
+    journal = audit / "volume-migrations" / machine / "vol_old.json"
+    immutable_receipt = journal.read_bytes()
+    assert "volume_id=vol_old\n" in (registry / "clones" / clone).read_text()
+    expected_audit_volume = "vol_new" if crash_window == "audit" else "vol_old"
+    assert f"volume_id={expected_audit_volume}\n" in (audit / "fresh" / clone).read_text()
+    for _ in range(2):
+        resumed = subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), text=True, capture_output=True, timeout=10)
+        assert resumed.returncode == 0, resumed.stderr
+        assert "volume_id=vol_new\n" in (registry / "clones" / clone).read_text()
+        assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
+        assert journal.read_bytes() == immutable_receipt
+    # A second host migration appends a new terminal-volume receipt; it cannot
+    # rewrite the first receipt or lose the original volume in the final audit.
+    second = subprocess.run(_migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine, "vol_new", "vol_newer")), text=True, capture_output=True, timeout=10)
+    assert second.returncode == 0, second.stderr
+    assert journal.read_bytes() == immutable_receipt
+    verify = [sys.executable, str(ROOT / "scripts/cloudbench-volume-migration.py"), "verify", "--audit", str(audit), "--owner", registry.name, "--run-id", "fixture-run", "--app", "bench-app"]
+    assert subprocess.run(verify, capture_output=True, timeout=10).returncode == 0
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace("disposition=owned", "disposition=destroyed-provider-retained"))
+    (registry / "clones" / clone).unlink()
+    assert subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), capture_output=True, timeout=10).returncode == 0
+    assert subprocess.run(verify, capture_output=True, timeout=10).returncode == 0
+    # Corrupt terminal evidence must prevent sealing a teardown audit.
+    invalid = json.loads(journal.read_text())
+    invalid["old_volume_state"] = "created"
+    journal.write_text(json.dumps(invalid))
+    assert subprocess.run(verify, capture_output=True, timeout=10).returncode != 0
+
+
+@pytest.mark.parametrize("fault", [
+    "live-old", "attached-old", "missing-old-attachment", "foreign-new", "wrong-old-id",
+    "multiple-mounts", "warm-volume", "foreign-owner", "registry-conflict", "registry-symlink",
+    "audit-symlink", "journal-symlink", "duplicate-provider-key",
+])
+def test_volume_migration_rejects_ambiguous_or_foreign_authority(tmp_path: Path, fault: str) -> None:
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    evidence = _migration_evidence(machine)
+    record = registry / "clones" / clone
+    fresh = audit / "fresh" / clone
+    if fault == "live-old":
+        evidence[1]["state"] = "created"
+    elif fault == "attached-old":
+        evidence[1]["attached_machine_id"] = machine
+    elif fault == "missing-old-attachment":
+        del evidence[1]["attached_machine_id"]
+    elif fault == "foreign-new":
+        evidence[2]["attached_machine_id"] = "deadbeef000001"
+    elif fault == "wrong-old-id":
+        evidence[1]["id"] = "vol_unowned"
+    elif fault == "multiple-mounts":
+        evidence[0]["mounts"].append({"volume": "vol_other"})
+    elif fault == "warm-volume":
+        evidence = _migration_evidence(machine, new="vol_warm")
+    elif fault == "foreign-owner":
+        fresh.write_text(fresh.read_text().replace(registry.name, "8d" * 16))
+    elif fault == "registry-conflict":
+        record.write_text(record.read_text().replace("vol_old", "vol_foreign"))
+    elif fault in {"registry-symlink", "audit-symlink"}:
+        target = record if fault == "registry-symlink" else fresh
+        outside = tmp_path / "outside"
+        target.rename(outside)
+        target.symlink_to(outside)
+    elif fault == "journal-symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (audit / "volume-migrations").symlink_to(outside, target_is_directory=True)
+    before_record = record.read_bytes()
+    before_fresh = fresh.read_bytes()
+    request = json.dumps(evidence)
+    if fault == "duplicate-provider-key":
+        request = request.replace('"state": "pending_destroy"', '"state": "created", "state": "pending_destroy"')
+    result = subprocess.run(_migration_command(registry, audit, clone, machine), input=request, text=True, capture_output=True, timeout=10)
+    assert result.returncode != 0, f"unsafe {fault} migration was accepted"
+    assert record.read_bytes() == before_record
+    assert fresh.read_bytes() == before_fresh
+
+
+def test_guest_recovery_accepts_proven_migration_before_authenticated_shutdown(tmp_path: Path) -> None:
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
+        "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
+        "fleet_registry_reconcile_mounted_volume() {", "machine_guest_recovery_configuration() {",
+    ))
+    config = {"mounts": [{"volume": "vol_new", "path": "/data"}], "env": {
+        "CLOUDBENCH_BARRIER_TOKEN": "fixture-barrier", "CLOUDBENCH_RUN_TOKEN": "fixture-run-token", "CLOUDBENCH_STATUS_PORT": "43127",
+    }}
+    script = f'''set -eu
+ROOT_DIR={shlex.quote(str(ROOT))}
+VOLUME_MIGRATION_HELPER="$ROOT_DIR/scripts/cloudbench-volume-migration.py"
+APP=bench-app
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+{functions}
+registry_machine_details() {{ printf 'started {clone} fdaa::1\n'; }}
+machine_config_exact_read() {{ printf '%s\n' {shlex.quote(json.dumps(config))}; }}
+FLY() {{
+  [ "$1 $2" = 'volumes show' ] || exit 90
+  case "$3" in
+    vol_old) printf '%s\n' '{{"id":"vol_old","state":"pending_destroy","attached_machine_id":null}}' ;;
+    vol_new) printf '%s\n' '{{"id":"vol_new","state":"created","attached_machine_id":"{machine}"}}' ;;
+    *) exit 91 ;;
+  esac
+}}
+machine_guest_recovery_configuration {machine} vol_old {shlex.quote(str(registry))} {clone}
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "fixture-barrier\tfixture-run-token\t43127"
+    assert "volume_id=vol_new\n" in (registry / "clones" / clone).read_text()
+
+
+def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path: Path) -> None:
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
+        "registry_meta_value() {", "fleet_registry_resume_volume_migrations() {",
+        "fleet_registry_reconcile_mounted_volume() {", "reap_registry_clones() {",
+        "fleet_audit_update_registry_clone() {", "fleet_registry_remove_if_empty() {",
+        "fleet_audit_finalize_provider_teardown() {", "reap_machine() {",
+        "reap_volume() {", "volume_inventory_contains_id() {",
+    ))
+    workspace = tmp_path / "workspace"
+    runs = workspace / ".context/fleet/runs"
+    calls = tmp_path / "calls"
+    destroyed = tmp_path / "destroyed"
+    script = f'''set -uo pipefail
+ROOT_DIR={shlex.quote(str(workspace))}
+VOLUME_MIGRATION_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-volume-migration.py'))}
+APP=bench-app
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+REGISTRY={shlex.quote(str(registry))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+OWNED_CLONES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.ids"
+OWNED_CLONE_NAMES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.names"
+FLEET_OWNER_TOKEN={registry.name}
+RUN_ID=fixture-run
+RUNS_ROOT={shlex.quote(str(runs))}
+FLEET_DIR="$RUNS_ROOT/$RUN_ID"
+GIT_COMMON_DIR={shlex.quote(str(tmp_path / 'common'))}
+POOL_CLAIMS_DIR="$GIT_COMMON_DIR/claims"
+PROVISION_POOL=1
+CALLS={shlex.quote(str(calls))}
+DESTROYED={shlex.quote(str(destroyed))}
+{functions}
+registry_machine_details() {{ [ ! -e "$DESTROYED" ] || return 1; printf 'started {clone} fdaa::1\n'; }}
+machine_config_exact_read() {{ printf '%s\n' '{{"mounts":[{{"volume":"vol_new","path":"/data"}}]}}'; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2 $3" in
+    'volumes show vol_old') printf '%s\n' '{{"id":"vol_old","state":"pending_destroy","attached_machine_id":null}}' ;;
+    'volumes show vol_new')
+      if [ -e "$DESTROYED" ]; then
+        printf 'Error: failed to get volume vol_new: volume not found\n' >&2
+        return 1
+      fi
+      printf '%s\n' '{{"id":"vol_new","state":"created","attached_machine_id":"{machine}"}}' ;;
+    'machine destroy --force') [ "$4" = {machine} ] || return 91; touch "$DESTROYED" ;;
+    'volumes destroy vol_new') : ;;
+    *) return 92 ;;
+  esac
+}}
+reap_registry_clones "$REGISTRY" forced || exit 81
+[ -f "$REGISTRY/migration-locks/{machine}" ] || exit 82
+[ ! -e "$REGISTRY/clones/{clone}" ] || exit 83
+fleet_audit_finalize_provider_teardown || exit 84
+fleet_registry_resume_volume_migrations "$REGISTRY" || exit 87
+fleet_registry_remove_if_empty "$REGISTRY" || exit 85
+[ ! -e "$REGISTRY" ] || exit 86
+'''
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
+    assert "volume_id=vol_new\n" in (audit / "fresh" / clone).read_text()
+    journal = audit / "volume-migrations" / machine / "vol_old.json"
+    assert journal.is_file()
+    assert (runs / "fixture-run/teardown-ownership/volume-migrations" / machine / "vol_old.json").read_bytes() == journal.read_bytes()
+    assert "volumes destroy vol_old" not in calls.read_text()
+    assert "volumes destroy vol_new" in calls.read_text()
+
+
+@pytest.mark.parametrize("registry_present", [True, False])
+def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, registry_present: bool) -> None:
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    first = subprocess.run(_migration_command(registry, audit, clone, machine), input=json.dumps(_migration_evidence(machine)), text=True, capture_output=True, timeout=10)
+    assert first.returncode == 0, first.stderr
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace("disposition=owned", "disposition=transfer-pending-stopped"))
+    before_audit = fresh.read_bytes()
+    record = registry / "clones" / clone
+    before_record = record.read_bytes()
+    if not registry_present:
+        record.unlink()
+    result = subprocess.run(_migration_command(registry, audit, clone, machine, action="resume"), text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert fresh.read_bytes() == before_audit
+    assert record.exists() is registry_present
+    if registry_present:
+        assert record.read_bytes() == before_record

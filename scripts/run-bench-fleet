@@ -44,7 +44,7 @@
 #                      controller's exact exit status (durable supervisors)
 #   --recover-stale-owner <32-hex-token>
 #                      internal exact-owner recovery after forced cancellation
-#   --timeout <s>      per-bench ceiling passed to run-bench-cloud (default 3600)
+#   --timeout <s>      controller ceiling passed to run-bench-cloud (default 7200)
 #   --autoscale-max N  per-bench ceiling including the primary; must be >=2
 #                      (default 15 = prod MAX_MACHINES)
 #   --infra-probe      fleet substrate canary: bring-up + barrier + DONE without
@@ -668,6 +668,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench_result.py" \
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
@@ -719,6 +720,7 @@ CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
 EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-session-cleanup.py"
 GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
+VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
 STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
 STALE_OWNER_RECOVERY_PLAN_FILE=""
@@ -829,7 +831,13 @@ BENCH_REF=""
 # never see its own runs). CONDUCTOR_PORT=3001 → 8765 (the historical default).
 DASH_BASE="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 KEEP_CLONES="0"
-RUN_TIMEOUT="3600"
+RUN_TIMEOUT="7200"
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
+case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
+export BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS
 AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
 # A compute-only benchmark worker cannot observe controller-owned clones, so
@@ -2867,6 +2875,12 @@ fleet_audit_finalize_provider_teardown() {
     local shared_only="${FLEET_AUDIT_SHARED_ONLY:-0}"
     local shared_only_reason="${FLEET_AUDIT_SHARED_ONLY_REASON:-}"
     local tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/meta.tmp.$$"
+    if [ -e "$FLEET_TEARDOWN_OWNERSHIP_DIR/volume-migrations" ] \
+        || [ -L "$FLEET_TEARDOWN_OWNERSHIP_DIR/volume-migrations" ]; then
+        python3 "$VOLUME_MIGRATION_HELPER" verify \
+            --audit "$FLEET_TEARDOWN_OWNERSHIP_DIR" --owner "$FLEET_OWNER_TOKEN" \
+            --run-id "$RUN_ID" --app "$APP" || return 1
+    fi
     find "$FLEET_TEARDOWN_OWNERSHIP_DIR/expected-fresh" -mindepth 1 -maxdepth 1 \
         -type f -exec basename {} \; | LC_ALL=C sort \
         > "$OWNED_CLONE_NAMES_FILE.tmp.$$" \
@@ -3552,6 +3566,61 @@ fleet_registry_record_volume() {  # fleet_registry_record_volume <clone-name> <v
         || { rm -f "$tmp"; return 1; }
 }
 
+fleet_registry_resume_volume_migrations() {  # <registry> [machine-id]; replay captured exact identity transitions
+    local registry="$1" journal="$FLEET_AUDIT_ROOT/${1##*/}/volume-migrations"
+    local -a machine_args=()
+    [ -z "${2:-}" ] || machine_args=(--machine "$2")
+    [ -e "$journal" ] || [ -L "$journal" ] || return 0
+    python3 "$VOLUME_MIGRATION_HELPER" resume \
+        --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$APP" "${machine_args[@]}"
+}
+
+fleet_registry_reconcile_mounted_volume() {  # <registry> <clone-name> <machine-id>; current exact volume on stdout
+    local registry="$1" clone_name="$2" id="$3" record="$1/clones/$2"
+    local volume_id config current details detail_status old_volume new_volume
+    fleet_registry_resume_volume_migrations "$registry" "$id" || return 1
+    [ -f "$record" ] && [ ! -L "$record" ] \
+        && [ "$(registry_meta_value "$record" name)" = "$clone_name" ] \
+        && [ "$(registry_meta_value "$record" id)" = "$id" ] || return 1
+    volume_id="$(registry_meta_value "$record" volume_id)"
+    case "$volume_id" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
+    if details="$(registry_machine_details "$id")"; then detail_status=0; else detail_status=$?; fi
+    if [ "$detail_status" -eq 1 ]; then
+        printf '%s' "$volume_id"
+        return 0
+    fi
+    [ "$detail_status" -eq 0 ] \
+        && [ "$(printf '%s' "$details" | awk '{print $2}')" = "$clone_name" ] || return 1
+    config="$(machine_config_exact_read "$id")" || return 1
+    current="$(python3 -c '
+import json, re, sys
+try:
+    config = json.load(sys.stdin)
+    mounts = config.get("mounts")
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        raise ValueError()
+    volume = mounts[0].get("volume")
+    if not isinstance(volume, str) or re.fullmatch(r"vol_[A-Za-z0-9_-]+", volume) is None:
+        raise ValueError()
+    print(volume)
+except (ValueError, TypeError, AttributeError):
+    raise SystemExit(1)
+' <<< "$config")" || return 1
+    if [ "$current" != "$volume_id" ]; then
+        # A migration forks a new Volume but preserves its exact Machine ID.
+        # Only explicit terminal, unattached old-volume state plus the current
+        # exact mounted/attached replacement permits the journal transaction.
+        old_volume="$(FLY volumes show "$volume_id" -a "$APP" --json)" || return 1
+        new_volume="$(FLY volumes show "$current" -a "$APP" --json)" || return 1
+        printf '[%s,%s,%s]\n' "$config" "$old_volume" "$new_volume" \
+            | python3 "$VOLUME_MIGRATION_HELPER" reconcile \
+                --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$APP" \
+                --clone "$clone_name" --machine "$id" \
+                --protected-volume "${WARM_VOLUME_ID:-}" || return 1
+    fi
+    printf '%s' "$current"
+}
+
 fleet_registry_volume_for_id() {  # fleet_registry_volume_for_id <machine-id>
     local id="$1" record clone_name recorded_id volume_id found=""
     for record in "$FLEET_REGISTRY_DIR"/clones/*; do
@@ -3566,6 +3635,10 @@ fleet_registry_volume_for_id() {  # fleet_registry_volume_for_id <machine-id>
             [ -n "$volume_id" ] \
                 && registry_record_machine_identity "$record" "$clone_name" "$id" "$volume_id" \
                 || return 1
+        fi
+        if [ "$(registry_meta_value "$FLEET_REGISTRY_DIR/meta" version)" = "2" ]; then
+            volume_id="$(fleet_registry_reconcile_mounted_volume \
+                "$FLEET_REGISTRY_DIR" "$clone_name" "$id")" || return 1
         fi
         found="$volume_id"
     done
@@ -4292,6 +4365,10 @@ recover_registry_audit_only_fresh() {  # <v2-registry> [exact]; repair audit-bef
     local registry="$1" recovery_scope="${2:-}" owner="${1##*/}" meta="$1/meta" audit expected fresh
     local clone_name source_id disposition id volume_id resolved record
     [ "$(registry_meta_value "$meta" version)" = "2" ] || return 0
+    if [ -e "$FLEET_AUDIT_ROOT/$owner/volume-migrations" ] \
+        || [ -L "$FLEET_AUDIT_ROOT/$owner/volume-migrations" ]; then
+        fleet_registry_resume_volume_migrations "$registry" || return 1
+    fi
     case "$owner" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#owner}" -eq 32 ] || return 1
     audit="$(registry_meta_value "$meta" audit_dir)"
@@ -4625,6 +4702,10 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
                 unresolved=1
                 continue
             fi
+        fi
+        if [ "$registry_version" = "2" ]; then
+            volume_id="$(fleet_registry_reconcile_mounted_volume \
+                "$registry" "$clone_name" "$id")" || return 1
         fi
         if [ "$mode" = "stale" ]; then
             case "$state" in
@@ -5825,9 +5906,28 @@ with plan.open("w", encoding="utf-8") as handle:
 PY
 }
 
-machine_guest_recovery_configuration() {  # <machine-id> <expected-volume>; token, guest-token, status-port
-    local id="$1" expected_volume="$2" config
+machine_guest_recovery_configuration() {  # <machine-id> <expected-volume> [registry] [clone-name]; token, guest-token, status-port
+    local id="$1" expected_volume="$2" registry="${3:-}" clone_name="${4:-}" config mounted_volume
     config="$(machine_config_exact_read "$id")" || return 1
+    if [ -n "$registry" ] && [ -n "$clone_name" ]; then
+        mounted_volume="$(python3 -c '
+import json, sys
+try:
+    mounts = json.load(sys.stdin).get("mounts")
+    if not isinstance(mounts, list) or len(mounts) != 1 or not isinstance(mounts[0], dict):
+        raise ValueError()
+    value = mounts[0].get("volume")
+    if not isinstance(value, str):
+        raise ValueError()
+    print(value)
+except (ValueError, TypeError, AttributeError):
+    raise SystemExit(1)
+' <<< "$config")" || return 1
+        if [ "$mounted_volume" != "$expected_volume" ]; then
+            expected_volume="$(fleet_registry_reconcile_mounted_volume \
+                "$registry" "$clone_name" "$id")" || return 1
+        fi
+    fi
     EXPECTED_VOLUME="$expected_volume" python3 -c '
 import json
 import os
@@ -6518,6 +6618,11 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local -a recovery_clone_names recovery_machine_ids recovery_machine_states
     local -a recovery_guest_tokens recovery_proxy_ports
 
+    if [ -e "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ] \
+        || [ -L "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ]; then
+        fleet_registry_resume_volume_migrations "$registry" || return 1
+    fi
+
     STALE_OWNER_RECOVERY_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-guest-recovery.XXXXXX")" \
         || return 1
     if ! fleet_registry_build_guest_recovery_plan \
@@ -6563,7 +6668,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                         ;;
                 esac
                 configuration="$(machine_guest_recovery_configuration \
-                    "$machine_id" "$volume_id")" || {
+                    "$machine_id" "$volume_id" "$registry" "$clone_name")" || {
                     echo "❌ [$bench] exact guest shutdown configuration is unsafe" >&2
                     cleanup_stale_owner_recovery_proxies || true
                     return 1
@@ -9603,6 +9708,7 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "region=$REGION"
     --config-value "run_timeout_seconds=$RUN_TIMEOUT"
     --config-value "child_run_timeout_seconds=$CHILD_RUN_TIMEOUT"
+    --config-value "benchmark_wall_clock_backstop_seconds=${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}"
     --config-value "synchronized_start=$SYNCHRONIZED_START"
     --config-value "first_run_stack_wait_seconds=$FIRST_RUN_STACK_WAIT_SECONDS"
     --config-value "per_box_barrier_wait_seconds=$PER_BOX_BARRIER_WAIT_SECONDS"
