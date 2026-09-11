@@ -24,7 +24,7 @@ sources:
   - agent 0b4c3920-33c5-4b74-a6c9-7a280fe97611
   - hub run c9d3f3b8-4ea0-4104-b6dc-b70b0d8cbad1
 repro: agents/tests/blackbox/benchmark.blackbox.py::test_local_start_services_limits_automatic_system_postgres_to_linux
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -115,16 +115,29 @@ After: all five unchanged cases passed. Evidence is retained in
 `.context/acceptance/local-database-platform-repro.log` and
 `.context/acceptance/local-database-platform-fixed.log`.
 
-**Causal platform proof complete; benchmark outcome pending.** Docker creation
-currently uses `postgres:16-alpine` without a `max_connections` override. This
-change restores server isolation; it does not increase per-server capacity.
-The failed run's database had already been removed by canonical teardown when
-the follow-up read-only capacity query ran, so no historical per-stack
-connection count is claimed. The unchanged mass-agent rerun must verify the
-actual selected Docker database and sample its connection usage during fan-out
-before concluding isolation is sufficient. Its canonical PG16 fixture must
-preserve the reviewed data. Shared system Postgres must not be restarted or
-reconfigured to make this one run pass.
+**Verified in the full seven-case local smoke rerun.** The mass-agent run
+`1d988f58-1931-404b-a90d-dbcd4fc91542` passed in 391 seconds. Its root,
+`23dcc1bc-036f-44e3-9bb4-92c5f00842b8`, and all fifty direct children reached
+`COMPLETED`. The result is
+`agents/benchmarks/runs/20260911_004023_test-mass-agent-run-0.json`; the full
+smoke gate exited zero in `.context/acceptance/deploy-smoke-bench-3.log`.
+
+The exact fresh manifest,
+`.context/benchmarks/1789086767-20693-21578/services.json`, records
+`use_system_postgres=false` and its owned Docker database at port 23545.
+Its unchanged `postgres:16-alpine` server had `max_connections=100`.
+Ten-second samples reached 56 connections; this is the highest sampled value,
+not a claim about unobserved instantaneous peaks. Backend logs contained zero
+connection-admission errors and zero batch workflow-start failures. All twelve
+workers were also verified healthy with working SDK capacity self-scrapes.
+
+The PG16 seed retained all 69 reviewed business-table hashes, 3,825 WhatsApp
+messages, and a connected WhatsApp integration, including a second dump/restore
+verification. Evidence is in
+`.context/acceptance/canonical-pg16/verified.json`. No shared system Postgres
+server was restarted or reconfigured. The earlier failure's downstream repair
+behaviors were not changed; the successful normal path completed without the
+workflow-start admission failure that triggered them.
 
 ## Human feedback
 

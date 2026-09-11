@@ -54,20 +54,25 @@ Frontmatter is a constrained dialect (scalars and ` -` lists only) so it stays
 parseable by python, the node structural test, and plain grep alike. Full field
 rules live in the validator: `scripts/rca_archive.py`.
 
-| field                | meaning                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------- |
-| `id`                 | must equal the filename stem: `<YYYY-MM-DD>-<slug-naming-the-cause>`                  |
-| `date`               | when the incident was root-caused                                                     |
-| `surface`            | `back-end`, `front-end`, `agents`, `mac-app`, `infra`, `harness`, `cross`             |
-| `component`          | narrowest owning module (`prisma-migrations`, `rose-client`, …)                       |
-| `classification`     | Step 4 bucket of `docs/root-cause-analysis.md`                                        |
-| `problem_class`      | Step 5a problem bucket — the generalizable class, not the instance                    |
-| `first_bad_boundary` | where data first went wrong                                                           |
-| `symptoms`           | the literal strings a future engineer would grep for — **the primary search surface** |
-| `tags`               | lowercase kebab keywords: technology + failure mode                                   |
-| `sources`            | provenance: `PR #N`, `commit <sha>`, `memory:<name>`, `plan:<path>`, `agent <uuid>`, `fleet run <id>`   |
-| `repro`              | the checked-in test that fails pre-fix and passes post-fix, or `none-recorded`        |
-| `status`             | `fixed`, `open`, `mitigated`, `wontfix`, `superseded`                                 |
+| field                | meaning                                                                                               |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| `id`                 | must equal the filename stem: `<YYYY-MM-DD>-<slug-naming-the-cause>`                                  |
+| `date`               | when the incident was root-caused                                                                     |
+| `surface`            | `back-end`, `front-end`, `agents`, `mac-app`, `infra`, `harness`, `cross`                             |
+| `component`          | narrowest owning module (`prisma-migrations`, `rose-client`, …)                                       |
+| `classification`     | Step 4 bucket of `docs/root-cause-analysis.md`                                                        |
+| `problem_class`      | Step 5a problem bucket — the generalizable class, not the instance                                    |
+| `first_bad_boundary` | where data first went wrong                                                                           |
+| `symptoms`           | the literal strings a future engineer would grep for — **the primary search surface**                 |
+| `tags`               | lowercase kebab keywords: technology + failure mode                                                   |
+| `sources`            | provenance: `PR #N`, `commit <sha>`, `memory:<name>`, `plan:<path>`, `agent <uuid>`, `fleet run <id>` |
+| `repro`              | the checked-in test that fails pre-fix and passes post-fix, or `none-recorded`                        |
+| `status`             | `fixed`, `open`, `mitigated`, `wontfix`, `superseded`                                                 |
+
+Use `classification: undetermined` when the evidence does not yet establish a
+Step 4 cause. It is valid only for `status: open`; resolving or mitigating a case
+requires an evidence-backed classification. Describe the remaining causal proof
+in **Diagnosis** rather than assigning blame or model limitations prematurely.
 
 Five required sections:
 
