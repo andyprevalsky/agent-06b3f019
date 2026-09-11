@@ -17316,6 +17316,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
+@_in_browser_activity_context
 async def test_browser_supervisor_recovery_clicks_generic_dismiss_button():
     from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
 
@@ -17362,6 +17363,7 @@ async def test_browser_supervisor_recovery_clicks_generic_dismiss_button():
     assert buttons[1].clicked is True
     page.reload.assert_not_awaited()
 
+@_in_browser_activity_context
 async def test_browser_supervisor_recovery_uses_fallback_url_when_page_url_missing():
     from domains.spawn_browser_agent_v3.handler import _perform_generic_browser_recovery
 
@@ -17424,6 +17426,7 @@ async def test_goto_action_returns_current_url_for_recovery_fallback():
     recorded_result = action_history.record_action.await_args.kwargs["result"]
     assert recorded_result["current_url"] == "https://order.example.com/menu"
 
+@_in_browser_activity_context
 async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     from domains.spawn_browser_agent_v3.handler import (
         _browser_supervisor_snapshot,
@@ -19439,6 +19442,93 @@ async def test_browser_work_checkpoint_preserves_cancel_after_completed_await():
         assert events == expected, f"browser continued work after cancellation: {events}"
 
 
+async def test_browser_recovery_stops_after_cancelled_completed_await():
+    """Nested recovery must not restart work after a bounded await loses Task.cancel."""
+    from temporalio import activity
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.handler import _run_browser_supervisor_recovery
+
+    operations = ["snapshot", "focus", "escape", "buttons", "reload", "message"]
+    for mode, boundary in [("normal", "snapshot"), ("pending", "snapshot")] + [
+        ("completed", operation) for operation in operations[:-1]
+    ]:
+        environment = ActivityEnvironment()
+        ready = asyncio.Event()
+        result = asyncio.get_running_loop().create_future()
+        observed = []
+        post_cancel = []
+
+        async def operation(name, value=None):
+            observed.append(name)
+            if activity.is_cancelled():
+                post_cancel.append(name)
+            if name == boundary:
+                ready.set()
+                await result
+            return value
+
+        class Page:
+            url = "https://example.test/"
+            context = SimpleNamespace(pages=[])
+
+            @property
+            def keyboard(self):
+                return self
+
+            async def evaluate(self, script):
+                return await operation("snapshot", {"url": self.url})
+
+            async def bring_to_front(self):
+                await operation("focus")
+
+            async def press(self, key):
+                await operation("escape")
+
+            def locator(self, selector):
+                return self
+
+            async def all(self):
+                return await operation("buttons", [])
+
+            async def reload(self):
+                await operation("reload")
+
+        async def save_message(**kwargs):
+            return await operation("message", True)
+
+        async def work():
+            try:
+                await _run_browser_supervisor_recovery(
+                    agent_id="cancel-recovery-root", task_id="cancel-recovery-browser",
+                    browser_url=Page.url, tool_call_id="cancel-recovery-tool", iteration=1,
+                    reason="action_timeout", input_page=Page(), dom_service=None,
+                    browser_turn_messages=[], reload_page=True,
+                )
+                observed.append("returned")
+            except asyncio.CancelledError:
+                observed.append("cancelled")
+            finally:
+                await asyncio.sleep(0)
+                activity.heartbeat("recording cleanup")
+                observed.append("cleanup")
+
+        with patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", new=save_message):
+            running = asyncio.create_task(environment.run(work))
+            await asyncio.wait_for(ready.wait(), timeout=2)
+            if mode == "pending":
+                environment.cancel()
+            else:
+                result.set_result(None)
+                if mode == "completed":
+                    asyncio.get_running_loop().call_soon(environment.cancel)
+            await asyncio.wait_for(running, timeout=2)
+        expected = operations + ["returned", "cleanup"] if mode == "normal" else [
+            *operations[:operations.index(boundary) + 1], "cancelled", "cleanup"
+        ]
+        assert observed == expected, f"{mode}/{boundary}: recovery continued after cancellation: {observed}"
+        assert post_cancel == [], f"{mode}/{boundary}: side effects after cancellation latch: {post_cancel}"
+
+
 async def test_browser_activity_heartbeat_survives_event_loop_block():
     """Thread pump must keep heartbeating while the browser event loop is blocked."""
     from domains.spawn_browser_agent_v3.activity_heartbeat import BrowserActivityHeartbeat
@@ -20456,6 +20546,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_work_checkpoint_preserves_cancellation",
         test_browser_work_checkpoint_preserves_cancel_after_completed_await,
+    )
+    await r.record_async(
+        "browser_recovery_stops_after_cancelled_completed_await",
+        test_browser_recovery_stops_after_cancelled_completed_await,
     )
     await r.record_async(
         "browser_activity_heartbeat_survives_event_loop_block",

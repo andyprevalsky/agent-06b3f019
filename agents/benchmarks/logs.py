@@ -33,6 +33,7 @@ Supabase note:
 """
 
 import asyncio
+import heapq
 import json
 import os
 import shutil
@@ -233,6 +234,7 @@ def fetch_local_worker_logs(
     start_time: Optional[datetime] = None,
     *,
     limit: int = 20000,
+    newest: bool = False,
 ) -> List[str]:
     """Read agent-scoped lines from local worker log files.
 
@@ -240,21 +242,45 @@ def fetch_local_worker_logs(
     When ``start_time`` is set and a line parses as JSON with a timestamp, lines
     before the window are skipped. Errors reading a file are returned as a
     single placeholder line so callers can see the failure mode.
+    ``newest`` retains the latest ``limit`` lines across files, ordered by JSON
+    timestamp (file modification time for unstructured lines). It scans all
+    files up to their opening byte size, keeping at most ``limit`` rows in memory,
+    so an early busy worker cannot hide another worker's later cleanup or extend
+    the read indefinitely. Default prefix reads are unchanged.
     """
     paths = _local_worker_log_paths()
-    if not paths:
+    if not paths or limit <= 0:
         return []
 
     start_ts = start_time.astimezone(timezone.utc) if start_time is not None else None
     matched: List[str] = []
+    recent: list[tuple[float, int, str]] = []
+    sequence = 0
+
+    def retain(line: str, timestamp: float) -> None:
+        nonlocal sequence
+        sequence += 1
+        item = (timestamp, sequence, line)
+        if len(recent) < limit:
+            heapq.heappush(recent, item)
+        else:
+            heapq.heappushpop(recent, item)
+
     for path in paths:
         try:
-            with open(path, errors="replace") as handle:
-                for line in handle:
+            with open(path, "rb" if newest else "r", errors=None if newest else "replace") as handle:
+                stat = os.fstat(handle.fileno()) if newest else None
+                file_timestamp = stat.st_mtime if stat is not None else 0
+                remaining = stat.st_size if stat is not None else -1
+                while raw_line := handle.readline(remaining):
+                    if newest:
+                        remaining -= len(raw_line)
+                    line = raw_line.decode(errors="replace") if isinstance(raw_line, bytes) else raw_line
                     line = line.rstrip("\n")
                     if not line or not _line_mentions_agent(line, agent_id):
                         continue
-                    if start_ts is not None:
+                    timestamp = file_timestamp
+                    if start_ts is not None or newest:
                         try:
                             payload = json.loads(line)
                         except json.JSONDecodeError:
@@ -266,15 +292,25 @@ def fetch_local_worker_logs(
                                     ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
                                     if ts.tzinfo is None:
                                         ts = ts.replace(tzinfo=timezone.utc)
-                                    if ts < start_ts:
+                                    if start_ts is not None and ts < start_ts:
                                         continue
+                                    timestamp = ts.timestamp()
                                 except ValueError:
                                     pass
+                    if newest:
+                        retain(line, timestamp)
+                        continue
                     matched.append(line)
                     if len(matched) >= limit:
                         return matched
         except OSError as exc:
-            matched.append(f"[local-worker] Error reading {path}: {exc}")
+            error_line = f"[local-worker] Error reading {path}: {exc}"
+            if newest:
+                retain(error_line, datetime.now(timezone.utc).timestamp())
+            else:
+                matched.append(error_line)
+    if newest:
+        return [line for _, _, line in sorted(recent)]
     return matched
 
 

@@ -61,6 +61,7 @@ from .activity_heartbeat import (
     browser_activity_checkpoint,
     start_browser_activity_heartbeat,
     stop_browser_activity_heartbeat,
+    wait_for_browser_work,
 )
 from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .cdp_urls import steel_cdp_connection_url
@@ -2381,6 +2382,7 @@ async def _browser_supervisor_snapshot(
     supervisor is called when that path may already be wedged.
     """
 
+    browser_activity_checkpoint("starting browser recovery snapshot")
     snapshot: Dict[str, Any] = {
         "url": "",
         "title": "",
@@ -2393,7 +2395,7 @@ async def _browser_supervisor_snapshot(
     page = input_page
     if page is None and dom_service is not None:
         with contextlib.suppress(Exception):
-            page = await asyncio.wait_for(dom_service.session.get_current_page(), timeout=timeout_s)
+            page = await wait_for_browser_work(dom_service.session.get_current_page(), timeout=timeout_s)
 
     if page is None:
         return snapshot
@@ -2428,7 +2430,7 @@ async def _browser_supervisor_snapshot(
         )
 
     with contextlib.suppress(Exception):
-        page_data = await asyncio.wait_for(_read_page(), timeout=timeout_s)
+        page_data = await wait_for_browser_work(_read_page(), timeout=timeout_s)
         if isinstance(page_data, dict):
             snapshot.update(page_data)
 
@@ -2441,7 +2443,7 @@ async def _browser_supervisor_snapshot(
                 {
                     "index": idx,
                     "url": getattr(tab, "url", "") or "",
-                    "title": await asyncio.wait_for(tab.title(), timeout=1.5),
+                    "title": await wait_for_browser_work(tab.title(), timeout=1.5),
                 }
             )
         snapshot["tabs"] = tabs
@@ -2484,16 +2486,17 @@ async def _perform_generic_browser_recovery(
 ) -> List[str]:
     """Try safe, site-agnostic unstick actions on the active page."""
 
+    browser_activity_checkpoint("starting browser recovery actions")
     actions: List[str] = []
     if input_page is None:
         return actions
 
     with contextlib.suppress(Exception):
-        await asyncio.wait_for(input_page.bring_to_front(), timeout=timeout_s)
+        await wait_for_browser_work(input_page.bring_to_front(), timeout=timeout_s)
         actions.append("bring_to_front")
 
     with contextlib.suppress(Exception):
-        await asyncio.wait_for(input_page.keyboard.press("Escape"), timeout=timeout_s)
+        await wait_for_browser_work(input_page.keyboard.press("Escape"), timeout=timeout_s)
         actions.append("press_escape")
 
     async def _click_dismiss_button() -> Optional[str]:
@@ -2519,7 +2522,7 @@ async def _perform_generic_browser_recovery(
         return None
 
     with contextlib.suppress(Exception):
-        clicked = await asyncio.wait_for(_click_dismiss_button(), timeout=timeout_s)
+        clicked = await wait_for_browser_work(_click_dismiss_button(), timeout=timeout_s)
         if clicked:
             actions.append(clicked)
 
@@ -2527,13 +2530,13 @@ async def _perform_generic_browser_recovery(
         with contextlib.suppress(Exception):
             current_url = getattr(input_page, "url", "") or ""
             if current_url.startswith(("http://", "https://")):
-                await asyncio.wait_for(
+                await wait_for_browser_work(
                     input_page.reload(),
                     timeout=timeout_s + 2,
                 )
                 actions.append("reload")
             elif fallback_url.startswith(("http://", "https://")):
-                await asyncio.wait_for(
+                await wait_for_browser_work(
                     input_page.goto(fallback_url, wait_until="domcontentloaded", timeout=int(timeout_s * 1000)),
                     timeout=timeout_s + 2,
                 )

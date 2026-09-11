@@ -211,3 +211,130 @@ fixture still missing ActivityEnvironment. That failed subset passes after its
 context correction. The fourteen cleanup regressions and the previously run
 eighteen execution-backstop regressions pass. Live task verification remains
 required, and this incident remains open.
+
+## Recurrence: attempt fourteen — cancellation delivery and retained diagnostics
+
+Proof `capability-stability-20260911204913-52338` stopped at its first slice.
+Nine roots produced ordinary PASSED/FAILED outcomes and durable evidence; root
+`d8b57dcc-ed76-4309-8821-44fa3ca4babd` produced ERROR with
+`Cloud evidence finalization failed: TimeoutError`. Zero slices are accepted.
+Independent reads subsequently verified all ten machines, eleven volumes and
+nine unique Kernel sessions terminal. Cleanup does not retroactively accept the
+failed slice. The source was `140bb417ce07636ee17a743df5aca7953e597673` and every
+actual root used the authorized 300-second backstop.
+
+Temporal history records cancellation requests for all four browser activities
+at 21:20:39.115 UTC. Two returned cancelled at 21:21:58.617 and 21:22:39.521;
+two had no terminal activity event before workflow termination at 21:23:01.822.
+The activity cancellation log at 21:21:28.616 belongs to browser `33cafd97`
+by its span ID; adjacent log ordering had initially suggested the wrong browser.
+Backend logs record one successful native recording message at 21:22:00.852
+and three later attempts receiving 404 after deletion. Thus recordings were
+late, rather than all four finalizers never starting. The retained worker
+snapshot ended at 21:21:37, and a canonical ClickHouse query returned no later
+rows. Neither workflow cancellation requests nor eventual activity returns
+identify the exact live SDK delivery instant or the await that consumed it.
+The live missing-recording attribution remains open.
+
+Two independent, local causal reductions now cover cancellation boundaries:
+
+- Actual nested recovery with Temporal ActivityEnvironment continued through
+  focus, Escape, button lookup, reload and message save after a completed
+  `asyncio.wait_for` lost simultaneous Task.cancel. The permanent browser
+  blackbox reproduces cancellation at five separate work awaits, with normal
+  and pending-cancel controls. `wait_for_browser_work` now checks the persistent
+  cancellation latch on every exit, including a concurrent timeout. Only the
+  eight recovery work waits use it; recording/resource cleanup retains its
+  existing cancellation behavior and all timeout values. The unchanged owning
+  test failed before and passed afterward; the full browser domain passed in
+  38.0 seconds. Independent replay also verified normal errors and timeouts.
+- The actual native Temporal Worker batched the existing 15-second application
+  heartbeats behind its default 60-second transport throttle. A strict local
+  gRPC service returned `cancel_requested` only in a real heartbeat response;
+  no test injected Task.cancel. The permanent test reads the production Worker
+  heartbeat expression, or the actual SDK default when omitted, and requires
+  delivery within the existing cadence plus five seconds. It failed at
+  60.015474 seconds before the change and passed at 15.006745 seconds afterward.
+  Normal completion and awaited cleanup/shutdown controls also passed. The
+  production worker now caps transport batching at that existing 15-second
+  cadence. This is not a 15-second end-to-end recording guarantee. The test is
+  registered in the owning worker blackbox and therefore in `/deploy`.
+
+The new native fixture also observed the existing thread heartbeat fallback
+creating an unawaited SDK coroutine before retrying on the activity loop. That
+is a separately retained limitation: the thread alone cannot guarantee native
+RPC progress while the SDK activity loop is blocked. It is not assigned as the
+cause of this incident. The earlier thread-only fake callback test did not prove
+that stronger claim. Initial independent fixture attempts missing legitimate
+DescribeNamespace/ShutdownWorker RPC handlers are retained as invalid fixture
+setup and excluded from causal evidence.
+
+The archive and controller now retain the missing diagnostic boundaries. A
+failed final archive read preserves its last full tree observation, timestamp,
+and unready state separately from publishable messages. Success removes that
+unready observation. Failed batches refresh exact-root local worker logs after
+provider release, preserving earlier logs and recording capture errors without
+changing the cleanup verdict. Permanent tests failed on missing observations
+and late worker rows before the change; the same tests pass afterward and all
+21 batch cases pass. Independent review found that a busy worker could exhaust
+the old prefix reader before later cleanup in another worker file. The new
+permanent finalizer regression failed in 0.40 seconds after 20,000 earlier rows
+hid the late worker.3 recording line. The unchanged test passes with late events
+in either worker.0 or worker.3. Failure diagnostics now retain the newest
+20,000 matching lines across files by structured timestamp, using file mtime
+and stable line order for unstructured text. Default prefix reads stay unchanged;
+prior evidence is preserved, so two capped captures can retain up to 40,000
+diagnostic lines. This is separate from the acceptance transcript. Reader
+controls cover timestamp/time fields, naive timestamps, invalid/unstructured
+lines, time windows, default ordering and the cap. A second independent review
+reproduced a moving-EOF read: a producer extended a five-row file while the
+reader consumed fifty rows without returning. The permanent UTF-8 actual-file
+regression failed in 0.42 seconds before the fix and passes unchanged afterward.
+Newest reads now snapshot each opened file size and read only that many bytes;
+appends cannot prolong awaited cleanup. The heap remains capped at 20,000 rows.
+
+The controller had separately rejected its final log reads with
+`bench.log could not be read after 5 bounded retries`. Its validated prefix was
+intact, and a separate exact data-plane tail contained DONE; the discarded
+transport/protocol metadata prevents a more specific historical attribution.
+The reader now retains at most twenty failure records containing offset, curl
+exit, status, byte count and the allowlisted range/generation headers. It never
+commits a failed response body, stores credentials, acknowledges cleanup, or
+changes retries. The actual partial-response/wrong-offset regression failed
+before metadata retention and passes afterward; the 16.34 MB terminal catch-up
+control also passes.
+
+At 10,000 active activities the throttle change permits approximately 667
+periodic heartbeat RPCs per second instead of 167 when the old maximum was
+binding; it adds no per-agent threads, connections or shared fan-in. The
+persistent cancellation check is constant local work per recovery await.
+Diagnostic capture is bounded to the exact run/tree and the existing local log
+reader limit; controller failure history is capped at twenty records.
+
+The unchanged pre-fix local benchmark ran from isolated worktree
+`rose-pr1299-rca14-baseline` at 140bb417c, using
+`scripts/run-bench --local polar-odysseys-4246dec196c9 --run-id proof14-baseline-local`
+and the authorized 300-second root backstop. Root
+`70dbce76-4d16-4503-b1bb-8b7c962a857c` returned ordinary FAILED after the
+backstop (one browser had only one trajectory step); all four recordings were
+attached. Thus the exact cloud archive ERROR did not reproduce locally; the
+outcome-reproduction gap remains open. Independent provider reads confirmed
+all four sessions returned 404, all owned processes were absent, and the exact
+DB container and volume were removed. Canonical publication verified the
+[durable FE](https://www.roselabs.ai/?agent-id=70dbce76-4d16-4503-b1bb-8b7c962a857c)
+and rendered the final root LLM dump. The native worker blackbox passed all
+17 checks in 41.3 seconds, including the real-SDK cancellation regression.
+The fixed local run used the same task and 300-second backstop. Root
+`7d0687bf-a5b9-4639-9501-56d06948362d` produced ordinary FAILED (timeout),
+with its browser terminated and recording attached. Canonical publication
+verified its durable FE and final LLM dump, and independent checks verified
+the exact browser session, processes and database absent. A nonfatal SSL error
+in the runner's Hub mirror attempt is retained; canonical publication then
+succeeded, so no missing evidence is treated as acceptable. The run is not
+proof of capability completion or of the original cloud ERROR's cause. Its
+scratch observer exited143 after cleanup; the separate local cleanup argv-match
+RCA records that new owning-boundary defect. Full gates on the final source and
+a fresh ten-by-ten cloud proof remain required. The prior thirteen passing prerequisite gates applied
+to 140bb417c and do not certify these subsequent changes. Normal 7200-second
+root backstops, the temporary 300-second validation limit, recording readiness,
+provider ownership, and all cleanup/infra rejection criteria remain unchanged.

@@ -70,6 +70,7 @@ from domains.spawn_agent.service import (
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
+from domains.spawn_browser_agent_v3.config import HEARTBEAT_KEEPALIVE_SECONDS
 from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,
     spawn_browser_agent_activity_v3,
@@ -1296,6 +1297,9 @@ async def main():
         ),
         max_concurrent_activity_task_polls=config.temporal.max_concurrent_activity_task_polls,
         max_concurrent_workflow_task_polls=config.temporal.max_concurrent_workflow_task_polls,
+        # Cancellation reaches long-running activities in heartbeat responses.
+        # Do not batch the browser's 15s keepalive behind the SDK's 60s default.
+        max_heartbeat_throttle_interval=timedelta(seconds=HEARTBEAT_KEEPALIVE_SECONDS),
         nonsticky_to_sticky_poll_ratio=config.temporal.nonsticky_to_sticky_poll_ratio,
         workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.

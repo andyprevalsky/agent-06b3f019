@@ -86,6 +86,7 @@ from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
     extract_message_transcript,
+    fetch_local_worker_logs,
     load_env_var,
     start_fly_log_collector,
     start_supabase_realtime_collector,
@@ -5485,6 +5486,11 @@ async def _refresh_browser_archive_snapshot(
             if not expected.issubset(ids):
                 raise RuntimeError("archive tree omitted an owned agent")
             snapshots = dict(zip(sorted(ids), await asyncio.gather(*(get_agent(base_url, aid) for aid in sorted(ids)))))
+            logs["browser_archive_observation"] = {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "ready": False,
+                "snapshots": snapshots,
+            }
             latest = snapshots[agent_id]
             if time.monotonic() >= deadline:
                 raise TimeoutError("browser archive refresh exceeded its readiness bound")
@@ -5497,6 +5503,7 @@ async def _refresh_browser_archive_snapshot(
                 latest["_benchmark"] = {**latest.get("_benchmark", {}), **data.get("_benchmark", {})}
                 logs["messages"] = extract_message_transcript(latest)
                 logs["tree"] = tree
+                logs.pop("browser_archive_observation", None)
                 return latest
             if time.monotonic() >= deadline:
                 raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
@@ -5582,6 +5589,17 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         result.benchmark_status = "ERROR"
                         result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
                 if result is not None:
+                    if evidence["errors"]:
+                        try:
+                            cleanup_worker_logs = await asyncio.to_thread(fetch_local_worker_logs, aid, newest=True)
+                            # Preserve the prior capture alongside the newest 20k
+                            # diagnostics (at most 40k for two capped captures).
+                            logs["worker_logs"] = list(dict.fromkeys([
+                                *(logs.get("worker_logs") or []), *cleanup_worker_logs,
+                            ]))
+                            evidence["worker_logs_observed_at"] = datetime.now(timezone.utc).isoformat()
+                        except Exception as capture_error:
+                            evidence["worker_logs_capture_error"] = str(capture_error) or type(capture_error).__name__
                     result.logs = logs
         finally:
             if identity is not None:

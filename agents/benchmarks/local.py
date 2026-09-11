@@ -710,7 +710,7 @@ def _descendant_pids(root: int) -> set[int]:
 def _port_listener_pids(port: int) -> set[int]:
     try:
         out = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True, timeout=3, check=False
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=3, check=False
         ).stdout
     except Exception:
         return set()
@@ -746,35 +746,18 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
 def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
     """Reap an isolated stack's processes scoped strictly to THIS run.
 
-    The run_id only appears in run.sh's (and ngrok's) command line — the backend
-    (`tsx src/server.ts`) and worker (`python worker.py`) carry it only in their
-    environment, and they routinely reparent to launchd, so a command-line match
-    alone leaks them. We instead union three run-specific signals — command-line
-    run_id match, the manifest's recorded PIDs + their process trees, and the
-    listeners on this run's unique service ports — then gate every candidate on
-    cwd-under-this-worktree so a sibling worktree's stack is never touched.
+    Use the manifest's recorded services and their descendants, plus listeners
+    on its service ports for reparented backend/vite processes. A command merely
+    mentioning the run ID may be an observer or the caller waiting for our exit;
+    it is never evidence that the process belongs to this stack. Gate candidates
+    on cwd-under-this-worktree so a sibling worktree's stack is never touched.
     """
     if not stack.isolated or not stack.run_id or stack.run_id == "existing":
         return
 
     targets: set[int] = set()
 
-    # 1) command-line run_id match (run.sh, ngrok)
-    with contextlib.suppress(Exception):
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=3, check=False
-        )
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            pid_text, _, command = stripped.partition(" ")
-            with contextlib.suppress(ValueError):
-                if stack.run_id in command:
-                    targets.add(int(pid_text))
-
-    # 2) manifest PIDs (run_sh + recorded services) and their process trees, plus
-    #    3) listeners on this run's unique ports (catches reparented backend/vite).
+    # Manifest PIDs and their process trees, plus service-port listeners.
     with contextlib.suppress(Exception):
         with open(stack.manifest_path) as f:
             manifest = json.load(f)

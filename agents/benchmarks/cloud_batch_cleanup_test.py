@@ -4,6 +4,7 @@ import asyncio
 import copy
 import functools
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,22 @@ async def test_archive_does_not_accept_terminal_without_recording():
     ):
         with pytest.raises(TimeoutError):
             await bench._refresh_browser_archive_snapshot("http://localhost:1", ROOT, {}, {}, timeout_seconds=0.01)
+
+
+@async_case
+async def test_failed_archive_retains_last_observation_without_publishing_it():
+    snapshots = {ROOT: {"messages": browser_rows(attached=False)}}
+    logs = {"messages": [{"text": "pre-pause snapshot"}]}
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}])),
+        patch.object(bench, "get_agent", AsyncMock(return_value=snapshots[ROOT])),
+    ):
+        with pytest.raises(TimeoutError):
+            await bench._refresh_browser_archive_snapshot("http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01)
+    assert logs["browser_archive_observation"]["snapshots"] == snapshots
+    assert logs["browser_archive_observation"]["ready"] is False
+    assert logs["browser_archive_observation"]["observed_at"]
+    assert logs["messages"] == [{"text": "pre-pause snapshot"}]
 
 
 @async_case
@@ -380,6 +397,127 @@ async def test_failed_batch_retains_ownership_and_each_failure_cause():
     assert evidence["errors"] == ["archive: TimeoutError", "provider: HTTP 403"]
     assert "TimeoutError" in row.failure_reason and "HTTP 403" in row.failure_reason
     assert "cloud_provider_cleanup" not in row.logs
+
+
+@async_case
+async def test_failed_batch_retains_worker_logs_through_provider_release():
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    row = result(ROOT)
+    row.logs = {"worker_logs": [f"{ROOT} before task result"]}
+    with tempfile.TemporaryDirectory() as temporary:
+        log_dir = Path(temporary) / "logs"
+        log_dir.mkdir()
+        late_line = f"{ROOT} recording cleanup after final archive observation"
+
+        def close(*args, **kwargs):
+            (log_dir / "worker.3.log").write_text(late_line + "\n")
+            return {"root_agent_id": ROOT}
+
+        with (
+            patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": temporary}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(cleanup, "exact_root_sessions", return_value=before),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(side_effect=TimeoutError())),
+            patch.object(bench, "delete_agent", AsyncMock()),
+            patch.object(cleanup, "close_exact_root_sessions", close),
+        ):
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+        assert row.logs["worker_logs"] == [f"{ROOT} before task result", late_line]
+        assert row.logs["cloud_cleanup_evidence"]["worker_logs_observed_at"]
+        assert row.benchmark_status == "ERROR"
+
+
+
+@async_case
+async def test_failed_batch_keeps_late_logs_after_prefix_cap():
+    """A busy earlier worker must not hide cleanup from any later capture."""
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    for late_file in ("worker.0.log", "worker.3.log"):
+        row = result(ROOT)
+        prior = f"{ROOT} before task result"
+        row.logs = {"worker_logs": [prior]}
+        with tempfile.TemporaryDirectory() as temporary:
+            log_dir = Path(temporary) / "logs"
+            log_dir.mkdir()
+            old = [json.dumps({"timestamp": "2026-09-11T01:00:00Z", "agent_id": ROOT, "event": f"old {index}"}) for index in range(20000)]
+            (log_dir / "worker.1.log").write_text("\n".join(old) + "\n")
+            late = json.dumps({"timestamp": "2026-09-11T02:00:00Z", "agent_id": ROOT, "event": "recording cleanup"})
+
+            def close(*args, **kwargs):
+                (log_dir / late_file).write_text(late + "\n")
+                return {"root_agent_id": ROOT}
+
+            with (
+                patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR": temporary}),
+                patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+                patch.object(cleanup, "exact_root_sessions", return_value=before),
+                patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(side_effect=TimeoutError())),
+                patch.object(bench, "delete_agent", AsyncMock()),
+                patch.object(cleanup, "close_exact_root_sessions", close),
+            ):
+                with pytest.raises(RuntimeError):
+                    await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+            assert late in row.logs["worker_logs"], f"late cleanup omitted from {late_file}"
+            assert prior in row.logs["worker_logs"]
+            assert len(row.logs["worker_logs"]) == 20001
+            assert row.benchmark_status == "ERROR"
+
+
+
+def test_latest_worker_logs_order_across_files_with_bounded_retention():
+    from datetime import datetime, timezone
+
+    from benchmarks import logs
+
+    with tempfile.TemporaryDirectory() as temporary:
+        first = Path(temporary) / "worker.0.log"
+        second = Path(temporary) / "worker.1.log"
+        recent = json.dumps({"timestamp": "2026-09-11T02:00:00Z", "agent_id": ROOT, "event": "recent"})
+        old = json.dumps({"time": "2026-09-11T01:00:00", "agent_id": ROOT, "event": "old"})
+        plain = f"{ROOT} unstructured cleanup"
+        invalid = json.dumps({"timestamp": "invalid", "agent_id": ROOT})
+        first.write_text(recent + "\n" + old + "\n")
+        second.write_text(plain + "\n" + invalid + "\n" + "unrelated agent\n")
+        modified = datetime(2026, 9, 11, 3, tzinfo=timezone.utc).timestamp()
+        os.utime(second, (modified, modified))
+        with patch.object(logs, "_local_worker_log_paths", return_value=[str(first), str(second)]):
+            assert logs.fetch_local_worker_logs(ROOT, limit=2) == [recent, old]
+            assert logs.fetch_local_worker_logs(ROOT, limit=3, newest=True) == [recent, plain, invalid]
+            assert logs.fetch_local_worker_logs(ROOT, limit=1, newest=True) == [invalid]
+            assert logs.fetch_local_worker_logs(ROOT, limit=0, newest=True) == []
+            window = datetime(2026, 9, 11, 1, 30, tzinfo=timezone.utc)
+            assert logs.fetch_local_worker_logs(ROOT, window, limit=4, newest=True) == [recent, plain, invalid]
+
+
+
+def test_latest_worker_logs_stop_at_opening_file_size():
+    from benchmarks import logs
+
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "worker.log"
+        initial = [f"{ROOT} initial café {index}" for index in range(5)]
+        path.write_text("\n".join(initial) + "\n")
+        mentions = logs._line_mentions_agent
+        checks = 0
+
+        def append_while_reading(line, agent_id):
+            nonlocal checks
+            checks += 1
+            # A finite producer proves moving EOF without making the test hang.
+            if checks <= 10:
+                with path.open("a") as writer:
+                    writer.write(f"{ROOT} appended cleanup {checks}\n")
+            return mentions(line, agent_id)
+
+        with (
+            patch.object(logs, "_local_worker_log_paths", return_value=[str(path)]),
+            patch.object(logs, "_line_mentions_agent", append_while_reading),
+        ):
+            captured = logs.fetch_local_worker_logs(ROOT, limit=3, newest=True)
+        assert captured == initial[-3:]
+        assert checks == len(initial), "reader chased a producer beyond its opening snapshot"
+        assert "appended cleanup" in path.read_text()
 
 
 def test_failed_release_retains_terminal_database_and_successful_provider_receipts():

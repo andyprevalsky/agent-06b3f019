@@ -13304,6 +13304,108 @@ def _pid_is_live(pid: int) -> bool:
     return bool(status) and not status.startswith("Z")
 
 
+
+def test_local_cleanup_does_not_signal_processes_that_only_mention_run_id():
+    """A run label in an observer/launcher's argv is not service ownership."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        run_id = "cleanup-observer-" + root.name
+        owned = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        observer = None
+        try:
+            observer = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)", run_id],
+                cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            manifest = root / "services.json"
+            manifest.write_text(json.dumps({"services": [{"name": "owned", "pid": owned.pid}], "ports": {}}))
+            stack = local_bench.ServiceStack(
+                run_id=run_id, context_dir=root, manifest_path=manifest,
+                service_log=root / "services.log", isolated=True,
+            )
+            with patch.object(local_bench, "REPO_ROOT", root):
+                local_bench._kill_scoped_processes_by_run_id(stack)
+            assert observer.poll() is None, "cleanup killed an unrelated observer that mentioned the run ID"
+            assert owned.poll() is not None, "manifest-owned process survived cleanup"
+        finally:
+            for process in (owned, observer):
+                if process is not None:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+
+
+
+def test_local_cleanup_port_candidates_exclude_connected_clients():
+    """Retire the actual listener without adopting its same-worktree client."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    server_code = """import socket,sys,time
+from pathlib import Path
+server=socket.socket(); server.bind(('127.0.0.1',0)); server.listen(1)
+path=Path(sys.argv[1]); pending=path.with_suffix('.tmp')
+pending.write_text(str(server.getsockname()[1])); pending.replace(path)
+connection,address=server.accept()
+time.sleep(60)
+"""
+    client_code = """import socket,sys,time
+from pathlib import Path
+connection=socket.create_connection(('127.0.0.1',int(sys.argv[1])))
+Path(sys.argv[2]).write_text('connected')
+time.sleep(60)
+"""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        port_file = root / "port.txt"
+        ready = root / "connected"
+        server = subprocess.Popen(
+            [sys.executable, "-c", server_code, str(port_file)], cwd=root,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        client = None
+        try:
+            deadline = time.monotonic() + 5
+            while not port_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert port_file.exists(), "private TCP listener never became ready"
+            port = int(port_file.read_text())
+            client = subprocess.Popen(
+                [sys.executable, "-c", client_code, str(port), str(ready)], cwd=root,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), "private TCP client never connected"
+            candidates = local_bench._port_listener_pids(port)
+            assert server.pid in candidates, "owned listener was not discovered"
+            assert client.pid not in candidates, "connected client was misclassified as the service listener"
+            manifest = root / "services.json"
+            manifest.write_text(json.dumps({"services": [], "ports": {"backend": port}}))
+            stack = local_bench.ServiceStack(
+                run_id="scoped-port-control", context_dir=root, manifest_path=manifest,
+                service_log=root / "services.log", isolated=True,
+            )
+            with patch.object(local_bench, "REPO_ROOT", root):
+                local_bench._kill_scoped_processes_by_run_id(stack)
+            assert server.poll() is not None, "owned listener survived cleanup"
+            assert client.poll() is None, "cleanup killed the unrelated connected client"
+        finally:
+            for process in (server, client):
+                if process is not None:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+
+
 def test_local_stop_services_removes_pre_manifest_owned_database():
     """Pre-manifest rollback derives only the exact isolated DB resource names."""
     from unittest.mock import patch
@@ -18030,6 +18132,8 @@ def _with_tmp_path(test_fn):
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("local_cleanup_preserves_run_id_observers", test_local_cleanup_does_not_signal_processes_that_only_mention_run_id)
+    r.record("local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients)
     from benchmarks import cloud_batch_cleanup_test
     for name in sorted(dir(cloud_batch_cleanup_test)):
         if not name.startswith("test_"):

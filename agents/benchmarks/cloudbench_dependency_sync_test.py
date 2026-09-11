@@ -7869,6 +7869,8 @@ def _cloudbench_incremental_log_functions() -> str:
             "cloudbench_response_header() {",
             "cloudbench_response_status() {",
             "cloudbench_store_log_generation() {",
+            "refresh_bench_log_checked() {",
+            "record_bench_log_read_failure() {",
             "refresh_bench_log() {",
             "refresh_bench_log_to_eof() {",
         )
@@ -17936,6 +17938,7 @@ BENCH_LOG_HEADERS_FILE="$4"
 BENCH_LOG_GENERATION_FILE="$6"
 BENCH_LOG_PROGRESS_FILE="$7"
 RUN_LOG_TOKEN=run-token
+OUT_DIR="$(dirname "$SSH_LOG")"
 for expected_failure in partial wrong-offset; do
     if refresh_bench_log 1; then
         printf '%s response unexpectedly committed\n' "$expected_failure" >&2
@@ -17967,6 +17970,15 @@ done
         assert result.returncode == 0, result.stderr
         assert controller_log.read_bytes() == original.read_bytes()
         assert requests_seen == 2
+        failures = json.loads((tmp_path / "remote-logs/bench-log-read-failures.json").read_text())
+        assert len(failures) == 2
+        assert failures[0]["curl_exit"] == 18
+        assert failures[0]["http_status"] == "206"
+        assert failures[0]["received_bytes"] == 5
+        assert failures[1]["curl_exit"] == 0
+        assert failures[1]["http_status"] == "206"
+        assert failures[1]["request_offset"] == len(original.read_bytes())
+        assert failures[1]["content_range"].startswith(f"bytes {len(original.read_bytes()) + 1}-")
     finally:
         server.shutdown()
         server.server_close()

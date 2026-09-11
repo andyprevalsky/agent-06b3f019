@@ -594,6 +594,15 @@ def test_worker_shutdown_joins_native_observability_requests():
             tests["test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit"](outcome, phase)
 
 
+def test_worker_cancellation_uses_application_heartbeat_cadence():
+    """Run the native transport regression through the owning deploy domain."""
+    import runpy
+
+    tests = runpy.run_path(str(WORKER_PATH.parent / "tests/unit/test_worker_heartbeat_cancellation.py"))
+    with tempfile.TemporaryDirectory() as temporary:
+        tests["test_worker_delivers_cancellation_at_application_heartbeat_cadence"](Path(temporary))
+
+
 async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
     """A stop during an owned HTTP call must prevent the rest of its fleet loop."""
     from types import SimpleNamespace
@@ -665,6 +674,7 @@ async def run_all_tests():
     r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
     r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
+    r.record("worker_cancellation_heartbeat_cadence", test_worker_cancellation_uses_application_heartbeat_cadence)
     await r.record_async(
         "worker_metrics_stop_prevents_later_fleet_requests",
         test_worker_metrics_stop_prevents_later_peer_and_provider_requests,

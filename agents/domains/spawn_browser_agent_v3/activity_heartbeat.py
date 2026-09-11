@@ -18,7 +18,7 @@ import asyncio
 import contextvars
 import logging
 import threading
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from temporalio import activity
 
@@ -27,6 +27,7 @@ from .config import HEARTBEAT_KEEPALIVE_SECONDS
 logger = logging.getLogger(__name__)
 
 KEEPALIVE_MESSAGE = "browser keepalive (renderer/CDP may be blocked by a bot-challenge)"
+_WorkResult = TypeVar("_WorkResult")
 
 
 class BrowserActivityHeartbeat:
@@ -139,3 +140,19 @@ def browser_activity_checkpoint(*details: object) -> None:
     if activity.is_cancelled():
         raise asyncio.CancelledError
     activity.heartbeat(*details)
+
+
+async def wait_for_browser_work(
+    work: Awaitable[_WorkResult], *, timeout: float,
+) -> _WorkResult:
+    """Preserve cancellation when Python 3.11 wait_for returns a completed child.
+
+    This is a work boundary, never a recording or resource-cleanup wrapper.
+    Checking in finally also prevents a simultaneous timeout from sending a
+    cancelled activity into another recovery step.
+    """
+    try:
+        return await asyncio.wait_for(work, timeout=timeout)
+    finally:
+        if activity.is_cancelled():
+            raise asyncio.CancelledError

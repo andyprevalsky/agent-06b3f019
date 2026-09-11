@@ -4245,11 +4245,14 @@ read_bench_log() {
     local offset="${1:-}" limit="${2:-${CLOUDBENCH_LOG_CHUNK_BYTES:-262144}}"
     local anchor="${3:-}" generation="${4:-}"
     local headers="${BENCH_LOG_HEADERS_FILE:-/dev/null}"
+    BENCH_LOG_READ_EXIT=1
+    BENCH_LOG_REQUEST_OFFSET="${offset:-0}"
     [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
     if [ -z "$offset" ]; then
         offset="$(wc -c < "$SSH_LOG" | tr -d ' ')"
     fi
     [[ "$offset" =~ ^[0-9]+$ ]] || return 2
+    BENCH_LOG_REQUEST_OFFSET="$offset"
     [[ "$limit" =~ ^[1-9][0-9]*$ ]] || return 2
     [ "$limit" -le 262144 ] || return 2
     if [ -z "$anchor" ]; then
@@ -4265,11 +4268,14 @@ read_bench_log() {
         generation="$(cat "$BENCH_LOG_GENERATION_FILE" 2>/dev/null || true)"
     fi
     [ -z "$generation" ] || [[ "$generation" =~ ^[0-9a-f]{32}$ ]] || return 2
+    local curl_exit=0
     curl --noproxy '*' -sS --max-time 6 -D "$headers" \
         -H "X-Cloudbench-Log-Anchor: $anchor" \
         -H "X-Cloudbench-Log-Generation: $generation" \
         "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log?offset=$offset&limit=$limit" \
-        2>/dev/null
+        2>/dev/null || curl_exit=$?
+    BENCH_LOG_READ_EXIT="$curl_exit"
+    return "$curl_exit"
 }
 cloudbench_response_header() {  # <name> <header-file>
     awk -F ':' -v wanted="$1" '
@@ -4290,7 +4296,7 @@ cloudbench_store_log_generation() {  # <generation>
     printf '%s\n' "$generation" > "$temporary" \
         && mv -f "$temporary" "$BENCH_LOG_GENERATION_FILE"
 }
-refresh_bench_log() {  # [maximum bounded chunks]
+refresh_bench_log_checked() {  # [maximum bounded chunks]
     local max_chunks="${1:-1}" limit="${CLOUDBENCH_LOG_CHUNK_BYTES:-262144}"
     local chunks=0 offset status body_size range server_size server_generation server_continuity known_generation
     local range_start range_end range_total expected_size next_offset
@@ -4314,7 +4320,6 @@ refresh_bench_log() {  # [maximum bounded chunks]
         if ! read_bench_log "$offset" "$limit" > "$BENCH_LOG_CHUNK_FILE"; then
             # curl can leave a response prefix after a timeout/reset. Keep it in
             # scratch; the last validated cumulative log remains byte-identical.
-            : > "$BENCH_LOG_CHUNK_FILE"
             return 1
         fi
         status="$(cloudbench_response_status "$BENCH_LOG_HEADERS_FILE")"
@@ -4394,6 +4399,61 @@ refresh_bench_log() {  # [maximum bounded chunks]
         esac
     done
     return 0
+}
+record_bench_log_read_failure() {
+    # Keep only bounded response metadata, never an unvalidated body or headers
+    # that could contain credentials. This diagnostic cannot acknowledge a run.
+    [ -n "${OUT_DIR:-}" ] || return 0
+    python3 - "$OUT_DIR/remote-logs/bench-log-read-failures.json" \
+        "$BENCH_LOG_HEADERS_FILE" "$BENCH_LOG_CHUNK_FILE" \
+        "${BENCH_LOG_READ_EXIT:-1}" "${BENCH_LOG_REQUEST_OFFSET:-0}" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+
+destination, headers_path, chunk_path, curl_exit, offset = sys.argv[1:]
+headers = {}
+status = ""
+for line in pathlib.Path(headers_path).read_text(errors="replace").splitlines():
+    if line.startswith("HTTP/"):
+        parts = line.split()
+        status = parts[1] if len(parts) > 1 else ""
+        headers = {}
+    elif ":" in line:
+        name, value = line.split(":", 1)
+        if name.lower() in {"content-range", "x-cloudbench-log-generation", "x-cloudbench-log-continuity"}:
+            headers[name.lower()] = value.strip()[:256]
+path = pathlib.Path(destination)
+try:
+    prior = json.loads(path.read_text())
+except (OSError, ValueError):
+    prior = []
+if not isinstance(prior, list):
+    prior = []
+record = {
+    "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "request_offset": int(offset),
+    "curl_exit": int(curl_exit),
+    "http_status": status,
+    "received_bytes": pathlib.Path(chunk_path).stat().st_size,
+    "content_range": headers.get("content-range", ""),
+    "generation": headers.get("x-cloudbench-log-generation", ""),
+    "continuity": headers.get("x-cloudbench-log-continuity", ""),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps([*prior[-19:], record], indent=2) + "\n")
+temporary.replace(path)
+PY
+}
+refresh_bench_log() {  # [maximum bounded chunks]
+    local refresh_exit=0
+    refresh_bench_log_checked "${1:-1}" || refresh_exit=$?
+    if [ "$refresh_exit" -ne 0 ]; then
+        record_bench_log_read_failure || true
+    fi
+    return "$refresh_exit"
 }
 refresh_bench_log_to_eof() {
     local max_chunks="${CLOUDBENCH_TERMINAL_LOG_MAX_CHUNKS:-128}"
