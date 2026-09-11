@@ -195,6 +195,37 @@ individual POSTs during the batch, and an unrelated root flushing successfully.
 The exact unchanged local benchmark before/after outcome, complete deploy checks,
 and a fresh ten-by-ten cloud campaign remain required. This case remains OPEN.
 
+### Canonical local outcome attempts, 2026-09-11
+
+The unchanged `scripts/run-bench --local polar-bu-034` task ran on original
+`9ef00e668` and candidate `d6739b3b0`, with eight workers, R2 archival, the same
+canonical seed fixture, and the temporary 300-second execution backstop. Both
+complete task catalogs have identical SHA-256 values between these checkouts.
+Both tasks paused at the backstop: 329.2 seconds including cleanup before, and
+approximately 326 seconds after. These are ordinary failed task outcomes, not
+business passes or local reproductions of the cloud infrastructure failure.
+
+The original local run used native Kernel replay throughout. The candidate
+rotated its browser session and successfully started another native replay.
+Neither entered the screenshot-recorder publication path, and neither made
+archive requests after its workers reported stopped. The failing cloud run
+instead switched to screenshot recording after proxy rotation and a native
+replay stop failure. Therefore the exact local outcome-reproduction gap remains
+open; the permanent recorder/executor regression is the causal before/after
+proof. The live cloud validation must still exercise the batch publication path.
+
+Both local runs have independently verified terminal browser sessions, removed
+isolated databases, and published terminal Hub bundles with actual last LLM dumps:
+
+- Before: [agent f2e90489](https://www.roselabs.ai/?agent-id=f2e90489-9de8-468c-b846-71c9de934dc3),
+  76 messages and 30 root LLM dumps.
+- After: [agent 2b0a79b8](https://www.roselabs.ai/?agent-id=2b0a79b8-7d8e-4d7a-b757-49acfcc2ba0f),
+  48 messages and 15 root LLM dumps.
+
+Private receipts are under `.context/acceptance/recording-archive-local-before-6/`
+and `.context/acceptance/recording-archive-local-after-1/`. Earlier local bootstrap
+attempts created no agent tasks and are excluded from the causal evidence.
+
 ## Human feedback
 
 The user requires ten sequential cloud slices of ten with zero infrastructure
