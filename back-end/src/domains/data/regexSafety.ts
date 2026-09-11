@@ -88,16 +88,33 @@ export function checkPatternSafety(
   ) {
     return { ok: true };
   }
-  let diagnostics;
-  try {
-    diagnostics = analyze(source, flags, { timeout: timeoutMs });
-  } catch {
-    // A timeout is most likely for the complex patterns this guard exists to
-    // stop, especially when the host is under load. Never let an unclassified
-    // pattern reach Postgres's backtracking regex engine.
+  // Retries share one wall-clock deadline. Each checkSync invocation otherwise
+  // starts a fresh timeout, which would multiply request-path latency by the
+  // retry count under load.
+  const deadlineAt = Date.now() + timeoutMs;
+  const runAnalyzer = () => {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return null;
+    try {
+      return analyze(source, flags, { timeout: remainingMs });
+    } catch {
+      return null;
+    }
+  };
+  // Two retries absorb a load-induced analyzer timeout without raising the
+  // shared deadline or accepting an unclassified pattern. A third unknown
+  // still fail-closes — the guard exists to keep catastrophic regex out of
+  // Postgres.
+  let diagnostics = runAnalyzer();
+  if (diagnostics === null || diagnostics.status === 'unknown') {
+    diagnostics = runAnalyzer();
+  }
+  if (diagnostics === null || diagnostics.status === 'unknown') {
+    diagnostics = runAnalyzer();
+  }
+  if (diagnostics === null || diagnostics.status === 'unknown') {
     return unclassifiedPatternRejection();
   }
-  if (diagnostics.status === 'unknown') return unclassifiedPatternRejection();
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
   const tooComplex =

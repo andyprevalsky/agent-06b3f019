@@ -202,22 +202,17 @@ export async function fetchAgentPhoneMessagesSince(
   limit: number
 ): Promise<AgentPhoneSmsMessage[]> {
   const identity = await repo.findAgentIdentityForMessages(userId);
-  const hasProviderNumber =
-    identity?.phoneProviderNumberId !== null &&
-    identity?.phoneProviderNumberId !== undefined &&
-    identity.phoneProviderNumberId !== '';
-  const hasPhone =
-    identity?.phone !== null && identity?.phone !== undefined && identity.phone !== '';
-  if (identity?.phoneProvider !== 'agentphone' || (!hasProviderNumber && !hasPhone)) {
+  const numberId = identity?.phoneProviderNumberId?.trim() ?? '';
+  const phoneNumber = identity?.phone?.trim() ?? '';
+  if (identity?.phoneProvider !== 'agentphone' || (numberId === '' && phoneNumber === '')) {
     return [];
   }
 
-  const messages = await listInboundMessagesForNumber({
-    numberId: identity.phoneProviderNumberId,
-    phoneNumber: identity.phone,
-    since,
-    limit,
-  });
+  const messages = await listInboundMessagesForNumber(
+    numberId !== ''
+      ? { numberId, phoneNumber: phoneNumber || null, since, limit }
+      : { phoneNumber, since, limit }
+  );
 
   return messages.map((message) => ({
     ...message,
