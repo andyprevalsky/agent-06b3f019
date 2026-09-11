@@ -1508,7 +1508,7 @@ async def fake_main_async(_args):
 
     def exact_sessions(_url, aid):
         assert aid == "root-agent"
-        return {{"tree_agent_ids": [aid], "browser_sessions": []}}
+        return {{"root_user_id": "00000000-0000-4000-8000-000000000001", "tree_agent_ids": [aid], "browser_sessions": []}}
 
     def close_sessions(_url, aid, _before, *, evidence):
         assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"

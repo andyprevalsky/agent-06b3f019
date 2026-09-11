@@ -1021,6 +1021,7 @@ SELECT json_build_object(
     if include_sealing_state:
         statement = statement.replace(
             "'root_exists', EXISTS(",
+            f"'root_user_id', (SELECT \"userId\" FROM \"Agent\" WHERE id = '{root_agent_id}'), "
             "'unsealed_tree_agent_ids', COALESCE((SELECT json_agg(id ORDER BY id) FROM tree WHERE \"deletedAt\" IS NULL), '[]'::json), 'root_exists', EXISTS(",
             1,
         )

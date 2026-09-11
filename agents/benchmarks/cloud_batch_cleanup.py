@@ -64,6 +64,8 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
     tree = value.get("tree_agent_ids")
     if (
         value.get("root_exists") is not True
+        or not isinstance(value.get("root_user_id"), str)
+        or recovery["SAFE_AGENT"].fullmatch(value["root_user_id"]) is None
         or not isinstance(tree, list)
         or root_id not in tree
         or any(not isinstance(a, str) or recovery["SAFE_AGENT"].fullmatch(a) is None for a in tree)

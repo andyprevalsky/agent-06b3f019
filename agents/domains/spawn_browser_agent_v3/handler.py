@@ -9883,6 +9883,21 @@ Based on this feedback, I need to continue working on the task and address the i
 # ========================================
 
 
+def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
+    """Close a browser task when its manager abandons a pending resume.
+
+    Activity cleanup intentionally leaves approval/auth tasks open for a later
+    activity call. If the manager returns instead, it owns the terminal event.
+    """
+    return ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title="Browser automation stopped",
+        message=reason,
+        status=MessageStatus.ERROR,
+        metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete", "task_id": task_id},
+    )
+
+
 class SpawnBrowserAgentManagerV3(ToolManager):
     """Manager using browser-use BrowserSession + Rose API."""
 
@@ -10224,6 +10239,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "task_id": result.get("task_id"),
                             },
                         )
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id, 'User rejected the browser action.',
+                        )
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
@@ -10440,6 +10458,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                         if waited_for_agentcard_setup:
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, "Agent payment setup remains incomplete.",
+                            )
                             return
 
                         waited_for_agentcard_setup = True
@@ -10461,6 +10482,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "Timed out waiting for AgentCard setup",
                                 agentcard_status=setup_info["agentcard_status"],
                                 attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
+                            )
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, "Agent payment setup did not finish before this browser task ended.",
                             )
                             return
 
@@ -10543,6 +10567,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     "action_type": "purchase_cancelled",
                                 },
                             )
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, 'Payment approval was cancelled.',
+                            )
                             return
 
                         # Resolved — retry the mint now that the user has subscribed.
@@ -10557,6 +10584,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     "toolName": "spawn_browser_agent",
                                     "action_type": "purchase_blocked",
                                 },
+                            )
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, 'The required payment gate was not resolved.',
                             )
                             return
 
@@ -10588,6 +10618,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     "action_type": "purchase_cancelled",
                                 },
                             )
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, 'Payment approval was cancelled.',
+                            )
                             return
 
                         card = await mint_payment_card()
@@ -10601,6 +10634,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     "toolName": "spawn_browser_agent",
                                     "action_type": "purchase_blocked",
                                 },
+                            )
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id, 'The required payment gate was not resolved.',
                             )
                             return
 
@@ -10619,6 +10655,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "task_id": result.get("task_id"),
                                 "action_type": "purchase_funding_delayed",
                             },
+                        )
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id, 'Payment funding did not finish before this browser task ended.',
                         )
                         return
 
@@ -10753,6 +10792,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "action_type": "auth_assistance",
                             },
                         )
+                        yield _browser_abandoned_resume_event(
+                            result.get("task_id") or known_task_id, 'Authentication assistance could not be started.',
+                        )
                         return
 
                     workflow_instance.is_paused = True
@@ -10876,6 +10918,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 raise
 
             last_result = locals().get("result")
+            terminal_task_id = (
+                last_result.get("task_id") if isinstance(last_result, dict) else None
+            ) or locals().get("known_task_id")
             logger.error(
                 "Browser manager failed",
                 agent_id=agent_id,
@@ -10898,7 +10943,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+                metadata={
+                    "toolName": "spawn_browser_agent",
+                    "action_type": "task_complete",
+                    **({"task_id": terminal_task_id} if terminal_task_id else {}),
+                },
             )
 
 

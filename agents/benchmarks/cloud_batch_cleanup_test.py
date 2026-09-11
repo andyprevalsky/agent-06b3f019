@@ -154,7 +154,7 @@ async def test_batch_continues_exact_cleanup_after_recording_or_delete_failure()
             events.append(("query", aid))
             if failure == "query" and aid == ROOT:
                 raise RuntimeError("database unavailable")
-            return {"tree_agent_ids": [aid], "browser_sessions": []}
+            return {"root_user_id": ROOT, "tree_agent_ids": [aid], "browser_sessions": []}
 
         async def snapshot(_url, aid, _data, logs, **_kwargs):
             events.append(("snapshot", aid))
@@ -188,7 +188,10 @@ async def test_batch_continues_exact_cleanup_after_recording_or_delete_failure()
         ):
             with pytest.raises(RuntimeError):
                 await bench._finalize_owned_cloud_batch("http://localhost:1", results, {})
-        assert events[:2] == [("pause", ROOT), ("pause", CHILD)]
+        pauses = [("pause", ROOT)] if failure != "query" else []
+        pauses.append(("pause", CHILD))
+        assert [event for event in events if event[0] == "pause"] == pauses
+        assert max(events.index(event) for event in pauses) < events.index(("snapshot", CHILD))
         assert (
             events.index(("snapshot", CHILD))
             < events.index(("archive", CHILD))
@@ -261,6 +264,7 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
         (context / "services.json").write_text(json.dumps(manifest))
         payload = {
             "root_exists": True,
+            "root_user_id": ROOT,
             "root_deleted": True,
             "unsealed_tree_agent_ids": [CHILD],
             "tree_agent_ids": [ROOT, CHILD],
@@ -286,6 +290,11 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
                 cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
             payload["unsealed_tree_agent_ids"] = []
             assert cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True) == payload
+            for invalid_owner in (None, "", 42, "not-a-user-id"):
+                payload["root_user_id"] = invalid_owner
+                with pytest.raises(RuntimeError, match="incomplete"):
+                    cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True)
+            payload["root_user_id"] = ROOT
             with pytest.raises(RuntimeError, match="owned local stack"):
                 cleanup.exact_root_sessions("https://production.example", ROOT)
 
@@ -355,7 +364,7 @@ def test_exact_provider_cleanup_identifies_client_without_accepting_forbidden():
 
 @async_case
 async def test_failed_batch_retains_ownership_and_each_failure_cause():
-    before = {"tree_agent_ids": [ROOT], "browser_sessions": [{"agent_id": ROOT, "provider": "steel", "session_id": "owned-session"}]}
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"agent_id": ROOT, "provider": "steel", "session_id": "owned-session"}]}
     row = result(ROOT)
     with (
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
@@ -438,3 +447,129 @@ def test_recovery_manifest_keeps_promoted_sessions_from_exact_database_evidence(
                 publish(bad)
                 with pytest.raises(helper["CleanupEvidenceError"]):
                     helper["provider_manifest"](args)
+
+
+@async_case
+async def test_deferred_cleanup_uses_exact_database_owner():
+    import os
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    owners = {
+        '00000000-0000-4000-8000-000000000001': bench.GATE_FIXTURE_TASK_USER_IDS['gate-kyc-card-mint'],
+        '00000000-0000-4000-8000-000000000002': '00000000-0000-4000-8000-000000000104',
+    }
+    paused, requests = set(), []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            aid = self.path.split('/')[-2]
+            user = self.headers.get('X-User-Id')
+            requests.append(('pause', aid, user))
+            status = 200 if owners.get(aid) == user else 404
+            if status == 200:
+                paused.add(aid)
+            body = json.dumps({'success': status == 200}).encode()
+            self.send_response(status)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_DELETE(self):
+            aid = self.path.split('/')[-1]
+            requests.append(('delete', aid, self.headers.get('X-User-Id')))
+            self.send_response(204)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f'http://localhost:{server.server_port}'
+
+    def query(_url, aid):
+        return {'root_user_id': owners[aid], 'tree_agent_ids': [aid], 'browser_sessions': []}
+
+    async def snapshot(_url, aid, _data, _logs, **_kwargs):
+        assert aid in paused, 'Owner-restricted pause failed before the recording barrier'
+        assert bench._current_benchmark_user_id() == owners[aid]
+        return {'messages': []}
+
+    async def archive(_url, aid, _name, **_kwargs):
+        assert bench._current_benchmark_user_id() == owners[aid]
+        return 'fixture-archive', None
+
+    def close(_url, aid, _before, **_kwargs):
+        return {'root_agent_id': aid, 'root_deleted': True}
+
+    async def run():
+        results = [SimpleNamespace(agent_id=aid, name=aid, logs={}, passed=True,
+                    benchmark_status='PASSED', status='ACTIVE', failure_reason=None) for aid in owners]
+        await bench._finalize_owned_cloud_batch(base, results, {})
+        assert all(r.passed for r in results)
+        assert bench._current_benchmark_user_id() == bench.USER_ID
+        assert os.environ['BENCHMARK_RUN_USER_ID'] == bench.USER_ID
+
+    try:
+        with (
+            patch.dict(os.environ, {'BENCHMARK_RUN_USER_ID': bench.USER_ID, 'NO_PROXY': 'localhost,127.0.0.1'}),
+            patch.object(bench, 'API_KEY', 'fixture-key'),
+            patch.object(bench, '_auth_mode', 'api_key'),
+            patch.object(bench, '_cached_headers', None),
+            patch.object(bench, '_cached_headers_user_id', None),
+            patch.object(bench.cloud_batch_cleanup, 'exact_root_sessions', query),
+            patch.object(bench, '_refresh_browser_archive_snapshot', snapshot),
+            patch.object(bench, 'finalize_archive_and_score_world_model', archive),
+            patch.object(bench.cloud_batch_cleanup, 'close_exact_root_sessions', close),
+        ):
+            await run()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert requests == [('pause', aid, owner) for aid, owner in owners.items()] + [('delete', aid, owner) for aid, owner in owners.items()]
+
+
+@async_case
+async def test_cleanup_identity_isolated_and_reset_after_cancellation():
+    import os
+    ambient = bench.USER_ID
+    fixture_owner = bench.GATE_FIXTURE_TASK_USER_IDS["gate-kyc-card-mint"]
+    before = {"root_user_id": fixture_owner, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    entered, observed = asyncio.Event(), asyncio.Event()
+
+    async def sibling():
+        await entered.wait()
+        assert bench._current_benchmark_user_id() == ambient
+        assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient
+        observed.set()
+
+    async def snapshot(*_args, **_kwargs):
+        assert bench._current_benchmark_user_id() == fixture_owner
+        entered.set()
+        await observed.wait()
+        raise asyncio.CancelledError()
+
+    async def delete(*_args):
+        assert bench._current_benchmark_user_id() == fixture_owner
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_RUN_USER_ID": ambient}),
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),
+        patch.object(bench, "delete_agent", delete),
+        patch.object(cleanup, "close_exact_root_sessions", return_value={"root_agent_id": ROOT}),
+    ):
+        observer = asyncio.create_task(sibling())
+        try:
+            async with asyncio.timeout(2):
+                with pytest.raises(asyncio.CancelledError):
+                    await bench._finalize_owned_cloud_batch("http://localhost:1", [result(ROOT)], {})
+                await observer
+        finally:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+        assert bench._current_benchmark_user_id() == ambient
+        assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient

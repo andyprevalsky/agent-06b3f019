@@ -3409,3 +3409,4 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 207.1, "cost_cents": 13.0, "timestamp": "2026-09-11T02:41:22.550173+00:00", "agent_id": "0c7d47fa-43cc-4bb2-848c-8a0a387e126f"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 323.5, "cost_cents": 22.0, "timestamp": "2026-09-11T02:41:22.550173+00:00", "agent_id": "8df0d54d-4891-4935-becf-9df8a7450ff0"}
 {"task": "agent-payment-abandonment", "duration_seconds": 231.0, "cost_cents": 2.0, "timestamp": "2026-09-11T02:41:22.550173+00:00", "agent_id": "a5382df3-ab69-4686-8b94-56099fb25da7"}
+{"task": "gate-kyc-card-mint", "duration_seconds": 72.8, "cost_cents": 1.0, "timestamp": "2026-09-11T11:25:15.366448+00:00", "agent_id": "c06f7817-42ff-4239-a3cc-9025212c0976"}

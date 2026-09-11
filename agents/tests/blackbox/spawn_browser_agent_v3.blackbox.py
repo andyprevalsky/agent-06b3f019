@@ -19016,6 +19016,184 @@ async def test_manager_payment_gate_reports_company_funding_deadline():
     delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
     assert delayed.metadata["action_type"] == "purchase_funding_delayed"
 
+class _TerminalBoundaryHandle:
+    def __init__(self, result):
+        self.result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("completed activity was cancelled")
+
+    def __await__(self):
+        async def value():
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+        return value().__await__()
+
+
+def _browser_manager_terminal_events(events):
+    return [
+        event
+        for event in events
+        if (getattr(event, "metadata", None) or {}).get("action_type") == "task_complete"
+    ]
+
+
+async def _drive_browser_manager_terminal_boundary(kind, has_id=True):
+    from domains.spawn_browser_agent_v3 import handler as h
+    from tools.base import MessageStatus
+    from tools.request_user_approval import UserRejectedError
+
+    wf = SimpleNamespace(
+        user_id="fixture-user",
+        agent_id="fixture-agent",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+    )
+    first = {
+        "status": "awaiting_write_approval",
+        "question": "Fixture approval?",
+        "approval_type": "write",
+        "current_url": "https://example.test/",
+        "write_lock_approvals": {},
+    }
+    if kind.startswith("auth"):
+        first = {"status": "awaiting_auth_assistance", "base_site": "example.test"}
+    if kind == "auth-pending":
+        first["request_id"] = "request-fixture"
+    if has_id:
+        first["task_id"] = "task-fixture"
+    if kind == "activity-error":
+        first = RuntimeError("fixture activity failure")
+    if kind == "missing-result":
+        first = None
+
+    ids = []
+    events = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    def start(*_args, **kwargs):
+        ids.append(kwargs["args"][4])
+        return _TerminalBoundaryHandle(
+            first
+            if len(ids) == 1
+            else {"task_id": ids[-1], "success": True, "message": "done"}
+        )
+
+    async def approve(*_args, **_kwargs):
+        if kind in ("write-pending", "write-cancel"):
+            entered.set()
+            await release.wait()
+            return {"attention_request_id": "fixture-approval"}
+        if kind == "approval-error":
+            raise RuntimeError("fixture approval failure")
+        raise UserRejectedError("fixture rejected")
+
+    async def wait_condition(*_args, **_kwargs):
+        if kind == "auth-pending" and wf.is_paused:
+            entered.set()
+            await release.wait()
+            wf._signal_responses["request-fixture"] = "fixture response"
+
+    async def collect():
+        async for event in h.SpawnBrowserAgentManagerV3().execute_tool(
+            wf, {"goal": "fixture action"}, "fixture-tool"
+        ):
+            events.append(event)
+
+    with (
+        patch.object(h.workflow, "start_activity", side_effect=start),
+        patch.object(h.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(
+            h.workflow, "now", return_value=datetime(2026, 9, 11, tzinfo=timezone.utc)
+        ),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct",
+            side_effect=approve,
+        ),
+    ):
+        task = asyncio.create_task(collect())
+        try:
+            if kind in ("write-pending", "auth-pending", "write-cancel"):
+                await asyncio.wait_for(entered.wait(), 2)
+                assert not task.done() and not _browser_manager_terminal_events(events)
+                if kind == "write-cancel":
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    else:
+                        raise AssertionError("manager swallowed task cancellation")
+                    assert not _browser_manager_terminal_events(events)
+                    return {
+                        "case": kind,
+                        "cancellation_propagated": True,
+                        "premature_terminal": False,
+                    }
+                release.set()
+            await asyncio.wait_for(task, 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    completed = _browser_manager_terminal_events(events)
+    assert len(completed) == 1, (kind, len(completed))
+    expected_id = "task-fixture" if has_id and isinstance(first, dict) else ids[0]
+    assert completed[0].metadata["task_id"] == expected_id, (kind, completed[0].metadata)
+    assert completed[0].status == (
+        MessageStatus.FINISHED
+        if kind in ("write-pending", "auth-pending")
+        else MessageStatus.ERROR
+    )
+    assert len(ids) == (2 if kind in ("write-pending", "auth-pending") else 1)
+    return {
+        "case": kind,
+        "result_has_id": has_id,
+        "exact_terminal_count": 1,
+        "terminal_identity_correct": True,
+        "activity_starts": len(ids),
+    }
+
+
+async def test_manager_terminal_scope_and_pending_resumes():
+    for kind in ("write-rejected", "auth-missing", "approval-error"):
+        for has_id in (True, False):
+            await _drive_browser_manager_terminal_boundary(kind, has_id)
+    for kind in ("activity-error", "missing-result", "write-pending", "auth-pending", "write-cancel"):
+        await _drive_browser_manager_terminal_boundary(kind)
+
+
+async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
+    from tools.base import MessageStatus
+
+    for scenario in ("kyc-rejected", "subscription-rejected", "kyc-blocked", "subscription-blocked", "setup-repeated", "setup-timeout", "funding-timeout"):
+        if scenario.startswith(("kyc-", "subscription-")):
+            status = "kyc_required" if scenario.startswith("kyc-") else "subscription_required"
+            options = {"mint_results": [{"status": status}], "reject_gate": scenario.endswith("rejected")}
+        elif scenario.startswith("setup-"):
+            options = {
+                "mint_results": [{"status": "agentcard_setup_required", "connectUrl": "https://setup.example/connect"}],
+                "agentcard_connected": scenario == "setup-repeated",
+            }
+        else:
+            options = {"mint_results": [{"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": 5}]}
+        events, _, _, _ = await _drive_payment_card_gate(**options)
+        terminals = [event for event in events if (getattr(event, "metadata", None) or {}).get("action_type") == "task_complete"]
+        assert len(terminals) == 1, f"{scenario}: manager returned without exactly one terminal event"
+        assert terminals[0].metadata["task_id"] == "task-1"
+        assert terminals[0].status == MessageStatus.ERROR
+        assert events[-1] is terminals[0]
+
+
 # ========================================
 # Runner
 # ========================================
@@ -21474,6 +21652,14 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
         test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
+    )
+    await r.record_async(
+        "manager_terminal_scope_and_pending_resumes",
+        test_manager_terminal_scope_and_pending_resumes,
+    )
+    await r.record_async(
+        "manager_abandoned_payment_resume_terminal",
+        test_manager_abandoned_payment_resumes_close_exact_browser_task,
     )
     await r.record_async(
         "manager_payment_gate_kyc_rejected",
