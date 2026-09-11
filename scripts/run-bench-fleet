@@ -9231,6 +9231,38 @@ if [ -z "$SNAP_ID" ]; then
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
     exit 1
 fi
+# Freeze one workspace patch before maintenance and reuse it for every guest.
+FLEET_PATCH_FILE=""
+FLEET_PATCH_SHA256=""
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
+    FLEET_PATCH_FILE="$(mktemp)"
+    fleet_patch_rc=0
+    cloudbench_prepare_workspace_patch \
+        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
+        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
+    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+        # The unpushed HEAD carries only content the patch generator excludes
+        # (append-only history ledgers), so the base ref already IS the code
+        # under test. Shipping nothing is exactly equivalent here.
+        rm -f "$FLEET_PATCH_FILE"
+        FLEET_PATCH_FILE=""
+        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
+    elif [ "$fleet_patch_rc" -ne 0 ]; then
+        echo "❌ could not create the fleet local workspace patch" >&2
+        exit 1
+    fi
+fi
+if [ -n "$FLEET_PATCH_FILE" ]; then
+    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
+    [ -n "$FLEET_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the fleet local workspace patch" >&2
+        exit 1
+    }
+fi
+
+
 # ── Preflight: will clones inherit up-to-date dep trees from this snapshot? ──
 # When the warm snapshot's node_modules/venv are stale vs the current ref's
 # manifests, EVERY clone pays a multi-minute rsync refresh on bring-up — the
@@ -9286,10 +9318,9 @@ warm_deps_preflight() {
             return 0
         fi
     fi
-    # Uncommitted manifest edits can't be healed centrally (--refresh-deps syncs
-    # the committed ref), and the task-box path intentionally refuses to install
-    # from the network. Fail before provisioning instead of advertising an
-    # impossible per-box fallback.
+    # Require committed dependency changes before rebuilding the shared donor.
+    # Maintenance receives the same base + pinned patch as task guests, including
+    # unpublished commits. Task boxes still never install from the network.
     if ! git -C "$ROOT_DIR" diff --quiet HEAD -- agents/requirements.txt \
         '*package.json' '*package-lock.json' 2>/dev/null; then
         echo "❌ dep manifests are DIRTY vs HEAD — commit them before the central dependency rebuild" >&2
@@ -9308,7 +9339,9 @@ warm_deps_preflight() {
         export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
     fi
     unset _refresh_tok_b64
-    if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
+    if CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
+       CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
+       bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         s_node=""; s_py=""; s_epoch=""; new_snap=""
         [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
         snap_epoch="$(snapshot_created_epoch "$new_snap")"
@@ -9650,35 +9683,6 @@ print_code_provenance
 BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001)+2
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
-FLEET_PATCH_FILE=""
-FLEET_PATCH_SHA256=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
-        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
-    FLEET_PATCH_FILE="$(mktemp)"
-    fleet_patch_rc=0
-    cloudbench_prepare_workspace_patch \
-        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
-        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
-    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
-        # The unpushed HEAD carries only content the patch generator excludes
-        # (append-only history ledgers), so the base ref already IS the code
-        # under test. Shipping nothing is exactly equivalent here.
-        rm -f "$FLEET_PATCH_FILE"
-        FLEET_PATCH_FILE=""
-        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
-    elif [ "$fleet_patch_rc" -ne 0 ]; then
-        echo "❌ could not create the fleet local workspace patch" >&2
-        exit 1
-    fi
-fi
-if [ -n "$FLEET_PATCH_FILE" ]; then
-    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
-    [ -n "$FLEET_PATCH_SHA256" ] || {
-        echo "❌ could not fingerprint the fleet local workspace patch" >&2
-        exit 1
-    }
-fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
     inventory_machine_field "$1" private_ip 2>/dev/null || true

@@ -1696,6 +1696,41 @@ echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" "$GIT_SYNC_TO" 2>&1 | grep -av '^Connec
     return 0
 }
 
+# Apply exactly the fleet's workspace after fetching its reachable base. Keep
+# staging outside the checkout, validate bytes on BOTH sides, and clean only this
+# maintenance invocation's files. The caller holds the shared warm-source lease.
+warm_source_apply_patch() {  # <machine-id> <patch-file> <pinned-sha256>
+    local mid="$1" patch="$2" digest="$3"
+    local remote_dir="${REMOTE_REPO%/*}/cloudbench-warm-patch.$$"
+    [ -s "$patch" ] && [ -n "$digest" ] \
+        && [ "$(cloudbench_env_sha256 "$patch")" = "$digest" ] || {
+        echo "❌ warm workspace patch checksum mismatch" >&2
+        return 1
+    }
+    _sftp_put_warm_patch() {
+        ssh_exec "$mid" "mkdir -p '$remote_dir'; rm -f '$remote_dir/workspace.diff' '$remote_dir/prepare.sh'" >/dev/null &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+            "$patch" "$remote_dir/workspace.diff" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 \
+            "$CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT" "$remote_dir/prepare.sh"
+    }
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" _sftp_put_warm_patch; then
+        ssh_exec "$mid" "rm -f '$remote_dir/workspace.diff' '$remote_dir/prepare.sh'; rmdir '$remote_dir'" >/dev/null || true
+        echo "❌ failed to upload the pinned warm workspace patch" >&2
+        return 1
+    fi
+    ssh_exec "$mid" "set -e
+trap 'rm -f \"$remote_dir/workspace.diff\" \"$remote_dir/prepare.sh\"; rmdir \"$remote_dir\"' EXIT
+actual=\$(sha256sum '$remote_dir/workspace.diff' | cut -d ' ' -f1)
+[ \"\$actual\" = '$digest' ] || { echo 'FATAL: warm workspace patch checksum mismatch' >&2; exit 1; }
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='$REMOTE_REPO'
+bash '$remote_dir/prepare.sh' '$REMOTE_REPO' '$remote_dir/workspace.diff'
+git -C '$REMOTE_REPO' apply --check '$remote_dir/workspace.diff'
+git -C '$REMOTE_REPO' apply '$remote_dir/workspace.diff'" "${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
+}
+
 # SSH-exec a shell snippet on the machine, streaming output.
 # $1 = machine id, $2 = remote shell command, $3 = optional timeout seconds
 # (default CLOUDBENCH_SSH_EXEC_TIMEOUT or 1800). Always bound via _with_timeout:
@@ -2278,6 +2313,44 @@ if [ "$MODE" = "refresh-deps" ]; then
         echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
         exit 1
     fi
+    REFRESH_PATCH_FILE=""
+    REFRESH_PATCH_SHA256=""
+    REFRESH_OWNED_PATCH=""
+    cleanup_refresh_deps() {
+        if [ -n "${maintenance_mid:-}" ]; then
+            park_warm_source "${mid:-$maintenance_mid}" || true
+        fi
+        release_app_environment_lock
+        [ -z "$REFRESH_OWNED_PATCH" ] || rm -f "$REFRESH_OWNED_PATCH"
+    }
+    trap cleanup_refresh_deps EXIT
+    trap 'cleanup_refresh_deps; exit 130' INT
+    trap 'cleanup_refresh_deps; exit 143' TERM
+    if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
+        if [ -n "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}" ]; then
+            REFRESH_PATCH_FILE="$CLOUDBENCH_LOCAL_PATCH_SOURCE"
+            REFRESH_PATCH_SHA256="${CLOUDBENCH_LOCAL_PATCH_SHA256:-}"
+            [ -s "$REFRESH_PATCH_FILE" ] && [ -n "$REFRESH_PATCH_SHA256" ] \
+                && [ "$(cloudbench_env_sha256 "$REFRESH_PATCH_FILE")" = "$REFRESH_PATCH_SHA256" ] || {
+                echo "❌ shared warm workspace patch is missing or its pinned checksum mismatches" >&2
+                exit 1
+            }
+        else
+            # Direct maintenance also supports committed, unpublished changes:
+            # compare the workspace with the fetchable base, never just HEAD.
+            REFRESH_OWNED_PATCH="$(mktemp)"
+            refresh_patch_rc=0
+            cloudbench_prepare_workspace_patch "$ROOT_DIR" "$EXPECTED_REF" \
+                "$REFRESH_OWNED_PATCH" "$ROOT_DIR/scripts/create-worktree-patch.sh" || refresh_patch_rc=$?
+            if [ "$refresh_patch_rc" -eq 0 ]; then
+                REFRESH_PATCH_FILE="$REFRESH_OWNED_PATCH"
+                REFRESH_PATCH_SHA256="$(cloudbench_env_sha256 "$REFRESH_PATCH_FILE")"
+            elif [ "$refresh_patch_rc" -ne "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+                echo "❌ could not freeze the warm workspace patch" >&2
+                exit 1
+            fi
+        fi
+    fi
     EXPECTED_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
     EXPECTED_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     [ -n "$EXPECTED_NODE_FP" ] && [ -n "$EXPECTED_PY_FP" ] || {
@@ -2286,13 +2359,6 @@ if [ "$MODE" = "refresh-deps" ]; then
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
-    cleanup_refresh_deps() {
-        park_warm_source "${mid:-${maintenance_mid:-}}" || true
-        release_app_environment_lock
-    }
-    trap cleanup_refresh_deps EXIT
-    trap 'cleanup_refresh_deps; exit 130' INT
-    trap 'cleanup_refresh_deps; exit 143' TERM
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
 
@@ -2324,6 +2390,10 @@ if [ "$MODE" = "refresh-deps" ]; then
     if [ "$sync_rc" -ne 0 ]; then
         echo "❌ exact remote checkout failed" >&2
         exit 1
+    fi
+
+    if [ -n "$REFRESH_PATCH_FILE" ]; then
+        warm_source_apply_patch "$mid" "$REFRESH_PATCH_FILE" "$REFRESH_PATCH_SHA256" || exit 1
     fi
 
     echo "📦 rebuilding/syncing warm dependency trees for the exact checked-out ref ..."

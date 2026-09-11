@@ -1261,7 +1261,7 @@ def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
 ) -> None:
     """A clean local commit still needs a patch when guests can fetch only its base."""
     fleet = FLEET_SCRIPT.read_text()
-    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip() {", 1)[0]
+    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     repo = tmp_path / "repo"
     checkout = tmp_path / "checkout"
     output_patch = tmp_path / "fleet.patch"
@@ -1315,7 +1315,7 @@ def test_fleet_launch_survives_a_ledger_only_unpushed_head(tmp_path: Path) -> No
     the base ref instead of killing the fleet.
     """
     fleet = FLEET_SCRIPT.read_text()
-    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip() {", 1)[0]
+    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "agents/benchmarks/history").mkdir(parents=True)
@@ -2344,7 +2344,7 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     assert 'create-worktree-patch.sh"' in patch_block
     assert "cloudbench_prepare_workspace_patch" in patch_block
     fleet = FLEET_SCRIPT.read_text()
-    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip()", 1)[0]
+    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in fleet_patch_block
     assert '!= "1"' in fleet_patch_block
     provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
@@ -13508,6 +13508,7 @@ def _preflight_harness(
     fake_cloud.write_text(
         "#!/usr/bin/env bash\n"
         'echo "refresh-deps $*" >> "$CALLS_FILE"\n'
+        'echo "PATCH=${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}:${CLOUDBENCH_LOCAL_PATCH_SHA256:-}" >> "$CALLS_FILE"\n'
         f'printf "NODEFP PYFP 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
         f"exit {refresh_status}\n"
     )
@@ -13525,6 +13526,8 @@ APP=bench-app
 VOL_ID=vol_warm
 SNAP_ID=snap-current
 BENCH_REF=abc123
+FLEET_PATCH_FILE="$ROOT/pinned.diff"
+FLEET_PATCH_SHA256=pinned-digest
 BENCHES=(a b c)
 ROOT_DIR="$ROOT"
 RUN_BENCH_CLOUD_BIN="$ROOT/scripts/run-bench-cloud"
@@ -13574,8 +13577,9 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
     assert "SNAP_AFTER=snap-transaction" in result.stdout
+    assert f"PATCH={tmp_path / 'b/root/pinned.diff'}:pinned-digest" in calls.read_text()
 
-    # (c) dirty manifests cannot be fetched/rebuilt centrally and must fail
+    # (c) shared dependency rebuilds require committed manifests and must fail
     # before provisioning; the old advertised per-box fallback hits the same
     # immutable donor mismatch and cannot work.
     result, calls = _preflight_harness(tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
@@ -13599,6 +13603,123 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     assert "--refresh-deps" in result.stdout + result.stderr
     assert calls.read_text() == ""
 
+
+
+@pytest.mark.parametrize("scenario", ["pinned", "direct", "bad_digest", "tampered_upload", "fetch_failure", "patch_conflict", "no_delta"])
+def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, scenario: str) -> None:
+    """Execute maintenance with real git/patches and a local transport boundary.
+
+    A committed feature requirement differs from its fetchable main ancestor.
+    Refresh must build that same pinned workspace, or fail before dependency
+    installation/snapshot publication. Provider allocation and installs are fake.
+    """
+    repo = tmp_path / "controller"
+    repo.mkdir()
+    _write_manifests(repo, requirements="temporalio>=1.18.1\n")
+    (repo / "scripts/cloudbench-sync-deps.sh").write_text(
+        '#!/usr/bin/env bash\nset -eu\ncat "$2/agents/requirements.txt" > "$BUILT_REQUIREMENTS"\n'
+    )
+    shutil.copy(WORKTREE_PATCH_SCRIPT, repo / "scripts/create-worktree-patch.sh")
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.com")
+    git("config", "user.name", "Fixture")
+    git("add", ".")
+    git("commit", "-qm", "fetchable main")
+    base = git("rev-parse", "HEAD")
+    guest = tmp_path / "warm"
+    subprocess.run(["git", "clone", "-q", str(repo), str(guest)], check=True)
+    if scenario != "no_delta":
+        (repo / "agents/requirements.txt").write_text("temporalio[grpc]>=1.18.1\n")
+        (repo / "scripts/branch-only-helper.txt").write_text("same source as task guests\n")
+        git("add", ".")
+        git("commit", "-qm", "unpublished requirements")
+    patch = tmp_path / "workspace.diff"
+    with patch.open("w") as out:
+        subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), base], cwd=repo, stdout=out, check=True)
+    digest = hashlib.sha256(patch.read_bytes()).hexdigest()
+    cloud = CLOUD_SCRIPT.read_text()
+    mode = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then'):cloud.index("# MODE: --refresh-wmh")]
+    apply_helper = ""
+    if "warm_source_apply_patch() {" in cloud:
+        apply_helper = _extract_fleet_function(cloud, "warm_source_apply_patch() {")
+    common = tmp_path / "common"
+    common.mkdir()
+    built = tmp_path / "built-requirements"
+    calls = tmp_path / "calls"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gosu").write_text('#!/usr/bin/env bash\nshift\nexec "$@"\n')
+    (bin_dir / "gosu").chmod(0o755)
+    (bin_dir / "chown").write_text('#!/usr/bin/env bash\nexit 0\n')
+    (bin_dir / "chown").chmod(0o755)
+    script = f'''set -euo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+MODE=refresh-deps
+ROOT_DIR={shlex.quote(str(repo))}
+REMOTE_REPO={shlex.quote(str(guest))}
+BENCH_REF={base}
+APP=fixture
+MACHINE_NAME=cloudbench-warm
+GIT_COMMON_DIR={shlex.quote(str(common))}
+CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT={shlex.quote(str(ROOT / "scripts/cloudbench-prepare-patch.sh"))}
+CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
+ensure_app() {{ echo ensure >> "$CALLS"; }}
+acquire_app_environment_lock() {{ echo lock >> "$CALLS"; }}
+release_app_environment_lock() {{ :; }}
+resolve_machine_id() {{ echo warm-fixture; }}
+write_state() {{ :; }}
+prepare_warm_source() {{ echo prepare >> "$CALLS"; }}
+require_machine_ready() {{ :; }}
+park_warm_source() {{ echo parked >> "$CALLS"; }}
+warm_source_fetch_ref() {{
+    [ "$SCENARIO" != fetch_failure ] || return 1
+    git -C "$REMOTE_REPO" reset --hard "$2" >/dev/null
+    if [ "$SCENARIO" = patch_conflict ]; then
+        echo unrelated > "$REMOTE_REPO/agents/requirements.txt"
+    fi
+}}
+ssh_exec() {{ bash -c "$2"; }}
+FLY() {{
+    if [ "$1 $2 $3" = 'ssh sftp put' ]; then
+        cp "${{@: -2:1}}" "${{@: -1}}"
+        if [ "$SCENARIO" = tampered_upload ] && [ "${{@: -2:1}}" = "$CLOUDBENCH_LOCAL_PATCH_SOURCE" ]; then
+            echo corrupt >> "${{@: -1}}"
+        fi
+    else
+        echo '[{{"name":"cloudbench-warm","config":{{"mounts":[{{"volume":"vol-exact"}}]}}}}]'
+    fi
+}}
+stop_machine_strict() {{ echo stopped >> "$CALLS"; }}
+create_volume_snapshot_exact() {{ echo snapshot >> "$CALLS"; CREATED_SNAPSHOT_ID=snap-exact; }}
+{apply_helper}
+{mode}
+'''
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
+        "SCENARIO": scenario, "BUILT_REQUIREMENTS": str(built),
+    }
+    if scenario not in ("direct", "no_delta"):
+        env.update(CLOUDBENCH_LOCAL_PATCH_SOURCE=str(patch), CLOUDBENCH_LOCAL_PATCH_SHA256=("0" * 64 if scenario == "bad_digest" else digest))
+    result = subprocess.run(["bash", "-c", script], cwd=repo, env=env, text=True, capture_output=True, timeout=20)
+    success = scenario in ("pinned", "direct", "no_delta")
+    assert (result.returncode == 0) == success, result.stdout + result.stderr
+    if success:
+        assert built.read_bytes() == (repo / "agents/requirements.txt").read_bytes()
+        assert (common / "cloudbench-warm-deps.fp").read_text().split()[3] == "snap-exact"
+        assert calls.read_text().splitlines()[-3:] == ["stopped", "snapshot", "parked"]
+        assert subprocess.check_output(["git", "-C", str(guest), "rev-parse", "HEAD"], text=True).strip() == base
+        if scenario != "no_delta":
+            assert (guest / "scripts/branch-only-helper.txt").read_text() == "same source as task guests\n"
+    else:
+        assert not built.exists(), "invalid source must not install dependencies"
+        assert not (common / "cloudbench-warm-deps.fp").exists()
+        assert "snapshot" not in (calls.read_text() if calls.exists() else "")
+        if scenario == "bad_digest":
+            assert not calls.exists(), "reject mutated controller patch before provider maintenance"
 
 def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     cloud = CLOUD_SCRIPT.read_text()
@@ -13624,6 +13745,7 @@ def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     assert "central dep refresh failed; refusing to provision" in fleet
     assert "clones will pay the per-box rsync" not in fleet
     assert "warm_deps_preflight || exit 1" in fleet
+    assert fleet.index('FLEET_PATCH_FILE=""') < fleet.index("warm_deps_preflight || exit 1")
 
 
 def test_refresh_deps_requires_confirmed_stop_before_snapshot(tmp_path: Path) -> None:
