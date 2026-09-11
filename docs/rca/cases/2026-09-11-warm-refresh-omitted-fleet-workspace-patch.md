@@ -87,6 +87,11 @@ The focused maintenance suite passes 25 cases on macOS; 41 patch, refresh,
 and boot cases pass on Linux, and the full Linux benchmark blackbox passes.
 Independent RCA review reran nine source/handoff/ordering cases successfully
 and found no source-binding, cleanup-ownership, or relaxed-bound issue.
+Live maintenance on e42b11d6e passed all ref/fingerprint checks, stopped the
+warm source, and published exact snapshot vs_a56XkOMV2e9h80PZ66x. The required
+canary subsequently exposed a separate exact-ref fast-path defect: the dirty
+snapshot worktree was treated as clean and patched twice. See
+`2026-09-11-exact-ref-fast-path-retained-patched-worktree.md`. No Polar task ran.
 Live retry, exact teardown, durable evidence, and the ten consecutive ten-task
 slices remain required before closing this case.
 

@@ -401,7 +401,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
             "-q",
             str(behavioral_suite),
             "-k",
-            "central_refresh_ or refresh_deps_ or warm_deps_preflight or isolated_backend or local_predeploy_skips_wmh",
+            "central_refresh_ or refresh_deps_ or fetch_ref_restores_dirty_exact_sha or warm_deps_preflight or isolated_backend or local_predeploy_skips_wmh",
         ],
         cwd=repo_root,
         text=True,
@@ -412,8 +412,8 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
     # Count tracks the -k filter above. I-03/I-04 token+fetch-ref cases,
     # controller-token/private-repo auth, bounded dependency-refresh ownership,
-    # isolated-backend queue alignment, and exact workspace replay cover 25 cases.
-    assert "25 passed" in result.stdout
+    # isolated-backend queue alignment, and exact workspace replay cover 31 cases.
+    assert "31 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():

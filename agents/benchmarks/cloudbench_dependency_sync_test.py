@@ -3357,6 +3357,91 @@ def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
     assert after == before
 
 
+
+@pytest.mark.parametrize("scenario", ["clean", "unstaged", "staged", "mixed", "index_only", "snapshot_replay"])
+def test_fetch_ref_restores_dirty_exact_sha_before_patch_replay(tmp_path: Path, scenario: str) -> None:
+    """A matching HEAD can still contain a prior patch from the warm snapshot."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    real_git = shutil.which("git")
+    assert real_git
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+        return subprocess.run([real_git, "-C", str(repo), *args], capture_output=True, text=True, check=check)
+
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.com")
+    git("config", "user.name", "Fixture")
+    base_files = {
+        "tracked.txt": "base\n", "deleted.txt": "keep\n", "rename-source.txt": "rename\n",
+        "literal[1].txt": "literal\n", "line\nbreak.txt": "newline path\n",
+        ".gitignore": "venv/\n.env\n",
+    }
+    for name, data in base_files.items():
+        (repo / name).write_text(data)
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").stdout.strip()
+    # A matching local base must never require remote credentials or a fetch.
+    git("remote", "add", "origin", "https://github.com/fixture/not-accessible.git")
+    patch = tmp_path / "workspace.diff"
+    if scenario != "clean":
+        (repo / "tracked.txt").write_text("branch version\n")
+    if scenario in ("staged", "mixed", "index_only"):
+        git("add", "tracked.txt")
+    if scenario == "index_only":
+        (repo / "tracked.txt").write_text(base_files["tracked.txt"])
+    if scenario == "mixed":
+        (repo / "deleted.txt").unlink()
+        git("mv", "rename-source.txt", "renamed file.txt")
+        (repo / "literal[1].txt").write_text("changed literal\n")
+        (repo / "line\nbreak.txt").write_text("changed newline\n")
+        (repo / "staged-new.txt").write_text("remove staged addition\n")
+        git("add", "staged-new.txt")
+    if scenario == "snapshot_replay":
+        (repo / "branch-created.txt").write_text("incoming created file\n")
+        with patch.open("w") as handle:
+            subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), base], cwd=repo, stdout=handle, check=True)
+        # This is the materialized warm snapshot: HEAD is base, tracked source
+        # is patched, and the patch's created file is still untracked.
+    (repo / "venv").mkdir()
+    (repo / "venv/installed.txt").write_text("retain installed dependencies\n")
+    (repo / ".env").write_text("fixture-local-config\n")
+    (repo / "foreign-untracked.txt").write_text("retain unrelated untracked data\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "git-calls"
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$GIT_CALLS"\n'
+        'case " $* " in *" fetch "*|*" reset "*|*" checkout "*|*" gc "*) exit 99 ;; esac\n'
+        f'exec {shlex.quote(real_git)} "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(FETCH_SCRIPT), str(repo), base], cwd=repo,
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", "GIT_CALLS": str(calls), "CLOUDBENCH_GIT_MIN_FREE_KB": "999999999999"},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git("diff", "--quiet", "HEAD", "--", check=False).returncode == 0, "matching HEAD left tracked workspace changes from the prior warm patch"
+    assert git("diff", "--cached", "--quiet", "HEAD", "--", check=False).returncode == 0, "matching working files hid staged changes"
+    assert git("rev-parse", "HEAD").stdout.strip() == base
+    for name, data in base_files.items():
+        assert (repo / name).read_text() == data
+    assert not (repo / "staged-new.txt").exists()
+    assert not (repo / "renamed file.txt").exists()
+    assert (repo / "venv/installed.txt").read_text() == "retain installed dependencies\n"
+    assert (repo / ".env").read_text() == "fixture-local-config\n"
+    assert (repo / "foreign-untracked.txt").read_text() == "retain unrelated untracked data\n"
+    if scenario == "clean":
+        assert " restore " not in calls.read_text()
+    if scenario == "snapshot_replay":
+        subprocess.run(["bash", str(ROOT / "scripts/cloudbench-prepare-patch.sh"), str(repo), str(patch)], check=True)
+        git("apply", str(patch))
+        assert (repo / "tracked.txt").read_text() == "branch version\n"
+        assert (repo / "branch-created.txt").read_text() == "incoming created file\n"
+
 def test_fetch_ref_keeps_auth_header_out_of_git_argv() -> None:
     fetch = FETCH_SCRIPT.read_text()
 
@@ -13677,7 +13762,7 @@ require_machine_ready() {{ :; }}
 park_warm_source() {{ echo parked >> "$CALLS"; }}
 warm_source_fetch_ref() {{
     [ "$SCENARIO" != fetch_failure ] || return 1
-    git -C "$REMOTE_REPO" reset --hard "$2" >/dev/null
+    bash {shlex.quote(str(FETCH_SCRIPT))} "$REMOTE_REPO" "$2" >/dev/null
     if [ "$SCENARIO" = patch_conflict ]; then
         echo unrelated > "$REMOTE_REPO/agents/requirements.txt"
     fi
