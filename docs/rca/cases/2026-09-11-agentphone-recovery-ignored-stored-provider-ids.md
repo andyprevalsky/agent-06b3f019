@@ -20,6 +20,7 @@ tags:
   - scan-bound
 sources:
   - agent 89f3e1d7-f820-4cc6-9306-f85ed6ab0849
+  - PR #1304
 repro: back-end/src/tests/blackbox/agentphone-recovery-scan-bound.blackbox.ts
 status: fixed
 ---
