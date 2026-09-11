@@ -137,6 +137,17 @@ Forced selection was a diagnostic control only; no payment tools were executed
 by the replays. A later unchanged gate pass establishes that run's outcome and
 must not retroactively close this causal investigation.
 
+The same unmodified task later passed in 375.1 seconds on `50284e1e`, agent
+`8b48ad6e-3ec1-452f-a71e-c2f57dc017d7`, in run
+`dbd2a71a-6ced-403b-adf8-75dfeedc6d0c`. That run passed all four AgentCard
+lifecycle tasks. The worker-port repair landed between these runs; no
+completion-selection repair did. This later outcome does not establish the
+cause of the earlier repeated waits, so this case remains open.
+
+The canonical evidence publisher verified the later
+[passing task and browser recordings](https://www.roselabs.ai/?agent-id=8b48ad6e-3ec1-452f-a71e-c2f57dc017d7),
+including 106 messages and every browser's terminal state and recording.
+
 The archive itself previously required an asserted cause even for unresolved
 cases. Its validator now accepts `classification: undetermined` only with
 `status: open`. The existing archive structural suite reproduced rejection of

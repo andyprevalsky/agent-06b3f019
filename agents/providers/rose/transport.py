@@ -45,7 +45,7 @@ ANTHROPIC_API_KEY_BETA_HEADER = ",".join(
 ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.81 (external, sdk-ts, agent-sdk/0.2.75)"
+ANTHROPIC_USER_AGENT = "claude-cli/2.1.251 (external, sdk-ts, agent-sdk/0.2.75)"
 
 # Caller specifies the per-attempt connect/header deadline. 60s matches
 # WATERFALL_TIMEOUT_MS in research config; claude_auth.py uses the same
@@ -188,7 +188,7 @@ async def post_anthropic_stream(
                     error_body_len=len(error_body),
                 )
                 # Attach body to response for the caller's error classifier.
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
+                setattr(response, "_rose_error_body", error_body)
             yield response
 
 
@@ -228,7 +228,7 @@ async def post_openai_responses_stream(
                     status=response.status_code,
                     error_body_len=len(error_body),
                 )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
+                setattr(response, "_rose_error_body", error_body)
             yield response
 
 
@@ -271,7 +271,7 @@ async def post_openrouter_stream(
                     # only; raw body stays on the response for the classifier.
                     error_body_len=len(error_body),
                 )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
+                setattr(response, "_rose_error_body", error_body)
             yield response
 
 
@@ -312,7 +312,7 @@ async def post_codex_stream(
                     error_body_len=len(error_body),
                     error_body_preview=error_body[:1000],
                 )
-                response._rose_error_body = error_body  # type: ignore[attr-defined]
+                setattr(response, "_rose_error_body", error_body)
             yield response
 
 
