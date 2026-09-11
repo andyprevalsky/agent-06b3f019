@@ -591,7 +591,7 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         my_surface = (os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or "").strip()
 
         def _machine_surface(machine: dict) -> str:
-            env = ((machine.get("config") or {}).get("env") or {})
+            env = (machine.get("config") or {}).get("env") or {}
             return str(env.get("TEMPORAL_WORKER_SURFACE_HASH") or "").strip()
 
         # Overlapping generations share one Fly app. Only actuate machines that
@@ -932,8 +932,40 @@ async def monitor_event_loop_lag(
             since_emit = 0.0
 
 
+def _start_sdk_runtime(port: int) -> tuple[Runtime, int]:
+    """Bind the exporter, retaining its actual address for the worker's scraper.
+
+    The SDK cannot return an ephemeral bind's port or adopt a reserved socket.
+    For local secondary workers only, ask the kernel for a free candidate and
+    retry a proven bind collision during the socket-to-SDK handoff. Fixed ports
+    and unrelated startup failures keep their original fail-fast behavior.
+    """
+    attempts = 10 if port == 0 else 1
+    for attempt in range(attempts):
+        selected_port = port
+        if port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                reservation.bind(("0.0.0.0", 0))
+                selected_port = reservation.getsockname()[1]
+        try:
+            runtime = Runtime(
+                telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{selected_port}"))
+            )
+        except ValueError as error:
+            collision = "Failed starting Prometheus exporter" in str(error) and "Address already in use" in str(error)
+            if port != 0 or not collision or attempt + 1 == attempts:
+                raise
+            logger.warning(
+                "Worker metrics bind collision; selecting a new port", port=selected_port, attempt=attempt + 1
+            )
+            continue
+        return runtime, selected_port
+    raise AssertionError("runtime port allocation exhausted without a result")
+
+
 async def main():
     """Main worker entry point."""
+    global SDK_METRICS_PORT, HEALTH_CHECK_PORT
 
     # Trace-archive writes (gzip + AES-GCM + backend POST) must never run inline
     # on the worker event loop — they stall stream reads for every concurrent
@@ -962,10 +994,17 @@ async def main():
     # Set up Temporal SDK runtime with Prometheus metrics exporter.
     # Exposes worker_task_slots_used/available from the SDK slot suppliers
     # on a local port. The autoscaler scrapes these to get real capacity.
-    runtime = Runtime(telemetry=TelemetryConfig(metrics=PrometheusConfig(bind_address=f"0.0.0.0:{SDK_METRICS_PORT}")))
+    runtime, SDK_METRICS_PORT = _start_sdk_runtime(SDK_METRICS_PORT)
 
     # Start health check server
     _health_thread = run_health_server(config.health_check_port)
+    HEALTH_CHECK_PORT = _health_thread.port
+    logger.info(
+        "Worker observability endpoints bound",
+        worker_index=os.getenv("WORKER_INDEX", "0"),
+        sdk_metrics_port=SDK_METRICS_PORT,
+        health_check_port=HEALTH_CHECK_PORT,
+    )
 
     logger.info(
         "Starting Temporal worker",
@@ -1140,14 +1179,10 @@ async def main():
             raise RuntimeError("TEMPORAL_WORKER_BUILD_ID is required when worker activation is enabled")
         deployment_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
         if not deployment_token:
-            raise RuntimeError(
-                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN is required when worker activation is enabled"
-            )
+            raise RuntimeError("TEMPORAL_WORKER_DEPLOYMENT_TOKEN is required when worker activation is enabled")
         validation_task_queue = os.getenv("TEMPORAL_WORKER_VALIDATION_TASK_QUEUE")
         if not validation_task_queue:
-            raise RuntimeError(
-                "TEMPORAL_WORKER_VALIDATION_TASK_QUEUE is required when worker activation is enabled"
-            )
+            raise RuntimeError("TEMPORAL_WORKER_VALIDATION_TASK_QUEUE is required when worker activation is enabled")
         validation_worker = Worker(
             client,
             task_queue=validation_task_queue,

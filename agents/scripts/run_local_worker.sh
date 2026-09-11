@@ -54,7 +54,7 @@ echo ""
 #
 # Each process needs unique metrics/health ports (they bind a Prometheus and a
 # Flask server). Worker 0 keeps the run.sh-provided ports so the readiness check
-# and autoscaler polling keep working; workers 1..N-1 get offset ports and their
+# and autoscaler polling keep working; workers 1..N-1 bind dynamic ports and their
 # own log file (navi-worker-log.<i>.txt).
 WORKER_PROCESSES="${WORKER_PROCESSES:-1}"
 BASE_METRICS_PORT="${SDK_METRICS_PORT:-9090}"
@@ -80,11 +80,11 @@ else
             if [ "$log" = "$LOG_FILE.$i.$LOG_FILE" ]; then
                 log="$LOG_FILE.$i"
             fi
-            # Use a high, unlikely-to-collide range for secondary workers so we
-            # never clash with this workspace's other service ports (db/frontend/
-            # mac-app sit just above the metrics/health base) or sibling worktrees.
-            mp="$(( (BASE_METRICS_PORT % 1000) + 19000 + i ))"
-            hp="$(( (BASE_HEALTH_PORT % 1000) + 19500 + i ))"
+            # Secondary workers have no fixed external endpoint. Let startup
+            # bind free ports and retain the actual metrics port for self-scrapes;
+            # arithmetic outside the workspace's allocation aliases other runs.
+            mp=0
+            hp=0
             : > "$log"
         fi
         SDK_METRICS_PORT="$mp" HEALTH_CHECK_PORT="$hp" WORKER_INDEX="$i" \

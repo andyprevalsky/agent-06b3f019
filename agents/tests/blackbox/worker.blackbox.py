@@ -2,6 +2,14 @@
 
 import ast
 import asyncio
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 from _test_utils import BlackboxResult, teardown_mock
@@ -208,6 +216,256 @@ def test_activity_admission_closes_on_cpu_pressure():
         pass
 
 
+def test_local_workers_do_not_alias_an_occupied_secondary_port():
+    """A sibling's health listener cannot remove this run's worker capacity."""
+    launcher = WORKER_PATH.parent / "scripts" / "run_local_worker.sh"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / ".env").touch()
+        (root / "worker.py").write_text(
+            "import json, os, signal, socket\n"
+            "sockets = []\n"
+            "for key in ('SDK_METRICS_PORT', 'HEALTH_CHECK_PORT'):\n"
+            "    sock = socket.socket()\n"
+            "    sock.bind(('0.0.0.0', int(os.environ[key])))\n"
+            "    sock.listen()\n"
+            "    sockets.append(sock)\n"
+            "ready = 'ready-' + os.environ['WORKER_INDEX']\n"
+            "with open(ready + '.tmp', 'w') as output:\n"
+            "    json.dump([sock.getsockname()[1] for sock in sockets], output)\n"
+            "os.replace(ready + '.tmp', ready)\n"
+            "signal.pause()\n"
+        )
+        # Reserve a real sibling listener at the launcher's old modulo-derived
+        # metrics port. Keep it bound throughout startup; never kill its owner.
+        blocker = socket.socket()
+        primary = socket.socket()
+        primary.bind(("127.0.0.1", 0))
+        primary_port = primary.getsockname()[1]
+        for _ in range(50):
+            old_secondary = primary_port % 1000 + 19001
+            try:
+                blocker.bind(("0.0.0.0", old_secondary))
+                break
+            except OSError:
+                primary.close()
+                primary = socket.socket()
+                primary.bind(("127.0.0.1", 0))
+                primary_port = primary.getsockname()[1]
+        else:
+            blocker.close()
+            primary.close()
+            raise AssertionError("could not reserve an isolated collision fixture")
+        blocker.listen()
+        health = socket.socket()
+        health.bind(("127.0.0.1", 0))
+        health_port = health.getsockname()[1]
+        primary.close()
+        health.close()
+        env = {
+            **os.environ,
+            "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
+            "WORKER_PROCESSES": "2",
+            "SDK_METRICS_PORT": str(primary_port),
+            "HEALTH_CHECK_PORT": str(health_port),
+            "NAVI_WORKER_LOG_STREAM": "false",
+            "NAVI_WORKER_LOG_FILE": str(root / "worker.log"),
+        }
+        process = subprocess.Popen(
+            ["bash", str(launcher)],
+            cwd=root,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if (root / "ready-0").exists() and (root / "ready-1").exists():
+                    break
+                if (root / "worker.1.log").exists() and "Address already in use" in (root / "worker.1.log").read_text():
+                    break
+                time.sleep(0.02)
+            assert (root / "ready-1").exists(), (
+                "Secondary worker died on a sibling's occupied port: " + (root / "worker.1.log").read_text()
+            )
+            ports = [json.loads((root / f"ready-{index}").read_text()) for index in range(2)]
+            assert ports[0] == [primary_port, health_port]
+            assert len({port for pair in ports for port in pair}) == 4
+            assert old_secondary not in ports[1]
+            assert blocker.getsockname()[1] == old_secondary
+        finally:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+            blocker.close()
+
+
+def test_dynamic_worker_metrics_are_discoverable_and_scrapable():
+    """Port zero selects a live exporter and updates the port used by self-scrapes."""
+    import urllib.request
+    import worker
+
+    runtime, port = worker._start_sdk_runtime(0)
+    assert runtime is not None
+    assert port > 0
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(f"http://127.0.0.1:{port}/metrics", timeout=2) as response:
+        assert response.status == 200
+
+
+def test_dynamic_worker_metrics_retry_only_address_collisions():
+    """An SDK bind handoff race is retried; fixed ports and other errors fail."""
+    from unittest.mock import patch
+    import worker
+
+    collision = ValueError("Failed starting Prometheus exporter: Address already in use (os error 48)")
+    actual_runtime = worker.Runtime
+    blocker = socket.socket()
+    attempts = []
+
+    def race_exporter_bind(*, telemetry):
+        address = telemetry.metrics.bind_address
+        attempts.append(address)
+        if len(attempts) == 1:
+            blocker.bind(("0.0.0.0", int(address.rsplit(":", 1)[1])))
+            blocker.listen()
+        return actual_runtime(telemetry=telemetry)
+
+    try:
+        with patch.object(worker, "Runtime", side_effect=race_exporter_bind):
+            runtime, port = worker._start_sdk_runtime(0)
+            assert runtime is not None and port > 0
+            assert len(attempts) == 2
+            assert attempts[0] != attempts[1]
+    finally:
+        blocker.close()
+    for port, error in [(9090, collision), (0, ValueError("invalid telemetry configuration"))]:
+        with patch.object(worker, "Runtime", side_effect=error) as create:
+            try:
+                worker._start_sdk_runtime(port)
+                raise AssertionError("expected startup failure")
+            except ValueError as raised:
+                assert raised is error
+            assert create.call_count == 1
+    with patch.object(worker, "Runtime", side_effect=collision) as create:
+        try:
+            worker._start_sdk_runtime(0)
+            raise AssertionError("expected bounded startup failure")
+        except ValueError as raised:
+            assert raised is collision
+        assert create.call_count == 10
+
+
+def test_dynamic_worker_health_server_reports_the_bound_port():
+    """Health port zero binds before returning and remains reachable over loopback."""
+    import urllib.request
+    from health_server import run_health_server
+
+    thread = run_health_server(0)
+    try:
+        assert thread.port > 0
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for host in ("127.0.0.1", "[::1]"):
+            with opener.open(f"http://{host}:{thread.port}/metrics", timeout=2) as response:
+                assert response.status == 200
+    finally:
+        if hasattr(thread, "server"):
+            thread.server.shutdown()
+            thread.server.server_close()
+            thread.join(timeout=2)
+
+
+async def test_worker_startup_publishes_bound_ports_before_temporal_connect():
+    """Actual startup uses the bound endpoints for metrics and peer-health reads."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import worker
+
+    class StopBeforeTemporal(Exception):
+        pass
+
+    threads = []
+    runtimes = []
+    start_health = worker.run_health_server
+    start_runtime = worker._start_sdk_runtime
+
+    def capture_health(port):
+        thread = start_health(port)
+        threads.append(thread)
+        return thread
+
+    def capture_runtime(port):
+        result = start_runtime(port)
+        runtimes.append(result)
+        return result
+
+    config = SimpleNamespace(
+        environment="development",
+        health_check_port=0,
+        temporal=SimpleNamespace(address="localhost:7233", namespace="test", task_queue="test", api_key=""),
+    )
+    try:
+        with (
+            patch.dict(os.environ, {"WORKER_INDEX": "1"}),
+            patch.object(worker, "SDK_METRICS_PORT", 0),
+            patch.object(worker, "HEALTH_CHECK_PORT", 0),
+            patch.object(worker, "load_config", return_value=config),
+            patch.object(worker, "run_health_server", side_effect=capture_health),
+            patch.object(worker, "_start_sdk_runtime", side_effect=capture_runtime),
+            patch.object(worker.Client, "connect", new=AsyncMock(side_effect=StopBeforeTemporal)),
+        ):
+            try:
+                await worker.main()
+                raise AssertionError("expected test boundary before Temporal")
+            except StopBeforeTemporal:
+                pass
+            assert worker.SDK_METRICS_PORT == runtimes[0][1] > 0
+            assert worker.HEALTH_CHECK_PORT == threads[0].port > 0
+            assert worker.SDK_METRICS_PORT != worker.HEALTH_CHECK_PORT
+            http = SimpleNamespace(
+                get=AsyncMock(return_value=SimpleNamespace(text='temporal_num_pollers{poller_type="activity_task"} 2'))
+            )
+            metrics = await worker._get_sdk_worker_metrics(http)
+            assert metrics["activity_task_pollers"] == 2
+            http.get.assert_awaited_once_with(f"http://localhost:{runtimes[0][1]}/metrics", timeout=2.0)
+    finally:
+        for thread in threads:
+            thread.server.shutdown()
+            thread.server.server_close()
+            thread.join(timeout=2)
+
+
+async def test_worker_health_bind_failure_stops_before_temporal_connect():
+    """A fixed health-port collision must fail startup, leaving its owner intact."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    import worker
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as blocker:
+        blocker.bind(("::", 0))
+        blocker.listen()
+        port = blocker.getsockname()[1]
+        config = SimpleNamespace(environment="development", health_check_port=port)
+        connect = AsyncMock()
+        with (
+            patch.dict(os.environ, {"WORKER_INDEX": "0"}),
+            patch.object(worker, "SDK_METRICS_PORT", 0),
+            patch.object(worker, "load_config", return_value=config),
+            patch.object(worker, "_start_sdk_runtime", return_value=(None, 0)),
+            patch.object(worker.Client, "connect", new=connect),
+        ):
+            try:
+                await worker.main()
+                raise AssertionError("expected occupied health port to fail startup")
+            except SystemExit as error:
+                assert error.code == 1
+            connect.assert_not_awaited()
+            assert blocker.getsockname()[1] == port
+            with socket.create_connection(("::1", port), timeout=2):
+                pass
+
+
 async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
@@ -221,6 +479,14 @@ async def run_all_tests():
     )
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
+    r.record("local_workers_do_not_alias_occupied_ports", test_local_workers_do_not_alias_an_occupied_secondary_port)
+    r.record("dynamic_worker_metrics_discoverable", test_dynamic_worker_metrics_are_discoverable_and_scrapable)
+    r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
+    r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
+    await r.record_async(
+        "worker_startup_bound_ports", test_worker_startup_publishes_bound_ports_before_temporal_connect
+    )
+    await r.record_async("worker_health_bind_failure", test_worker_health_bind_failure_stops_before_temporal_connect)
     teardown_mock()
     return r.summary()
 
