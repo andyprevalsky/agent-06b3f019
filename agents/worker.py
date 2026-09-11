@@ -254,6 +254,7 @@ WORKFLOW_SATURATION_SCALE_UP = float(os.getenv("WORKFLOW_SATURATION_SCALE_UP", "
 WORKFLOW_SLOT_TARGET_OCCUPANCY = float(os.getenv("WORKFLOW_SLOT_TARGET_OCCUPANCY", "0.6"))
 ADMISSION_PRESSURE_SCALE_UP_SECS = 60
 POLL_INTERVAL_SECS = 1  # 3 Temporal API calls/s — well within 1000 req/s limit
+METRICS_RPC_TIMEOUT = timedelta(seconds=5)
 LOG_INTERVAL_SECS = 30  # Periodic summary log (avoid 86k lines/day at 1s polls)
 SDK_METRICS_PORT = int(os.getenv("SDK_METRICS_PORT", "9090"))
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
@@ -494,7 +495,11 @@ def _extract_metric_value(metrics_text: str, metric_name: str) -> float | None:
     return None
 
 
-async def _get_fleet_memory_used_percent(http: httpx.AsyncClient, local_memory_used_percent: float) -> float:
+async def _get_fleet_memory_used_percent(
+    http: httpx.AsyncClient,
+    local_memory_used_percent: float,
+    stop_event: asyncio.Event | None = None,
+) -> float:
     """Return max machine memory percent across the Fly worker fleet.
 
     Only the elected leader can start machines, so the leader must consider
@@ -511,8 +516,12 @@ async def _get_fleet_memory_used_percent(http: httpx.AsyncClient, local_memory_u
 
     memory_samples = [local_memory_used_percent]
     for ip in peers:
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
             resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+            if stop_event is not None and stop_event.is_set():
+                break
             if resp.status_code != 200:
                 continue
             value = _extract_metric_value(resp.text, "machine_memory_used_percent")
@@ -529,6 +538,7 @@ async def _get_fleet_activity_admission_unavailable_count(
     *,
     local_activity_admission_open: bool,
     current_machines: int,
+    stop_event: asyncio.Event | None = None,
 ) -> int:
     """Return count of workers currently closed to new activity work."""
     fly_app = os.getenv("FLY_APP_NAME")
@@ -542,8 +552,12 @@ async def _get_fleet_activity_admission_unavailable_count(
     unavailable = 0
     samples = 0
     for ip in peers:
+        if stop_event is not None and stop_event.is_set():
+            break
         try:
             resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+            if stop_event is not None and stop_event.is_set():
+                break
             if resp.status_code != 200:
                 continue
             value = _extract_metric_value(resp.text, "activity_admission_open")
@@ -566,12 +580,14 @@ def _activity_admission_scale_threshold(current_machines: int) -> int:
     return max(2, math.ceil(current_machines * 0.20))
 
 
-async def _scale_fleet(desired: int, http: httpx.AsyncClient):
+async def _scale_fleet(desired: int, http: httpx.AsyncClient, stop_event: asyncio.Event | None = None):
     """Start/stop Fly machines to reach desired count. Called by leader only.
 
     Machines must be pre-provisioned up to MAX_MACHINES (e.g. `fly scale count 10`).
     This function starts/stops existing machines — it does not create or destroy them.
     """
+    if stop_event is not None and stop_event.is_set():
+        return
     fly_app = os.getenv("FLY_APP_NAME")
     fly_token = os.getenv("FLY_API_TOKEN")
     if not fly_app or not fly_token:
@@ -585,6 +601,8 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
             f"{FLY_MACHINES_API}/apps/{fly_app}/machines",
             headers=headers,
         )
+        if stop_event is not None and stop_event.is_set():
+            return
         resp.raise_for_status()
         machines = resp.json()
 
@@ -606,6 +624,8 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         if desired > current and stopped:
             to_start = min(desired - current, len(stopped))
             for m in stopped[:to_start]:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 try:
                     await http.post(
                         f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/start",
@@ -619,6 +639,8 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
             to_stop = current - desired
             candidates = [m for m in started if m["id"] != my_machine_id]
             for m in candidates[:to_stop]:
+                if stop_event is not None and stop_event.is_set():
+                    return
                 try:
                     await http.post(
                         f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
@@ -637,6 +659,7 @@ async def poll_queue_metrics(
     task_queue: str,
     activity_admission_snapshot: ActivityAdmissionSnapshot,
     max_workflow_slots: int,
+    stop_event: asyncio.Event,
 ):
     """Adaptive autoscaler: poll Temporal, compute desired machines, actuate via Fly API.
 
@@ -677,15 +700,25 @@ async def poll_queue_metrics(
 
     from temporalio.api.enums.v1 import TaskQueueType
     from temporalio.api.taskqueue.v1 import TaskQueue as TaskQueueProto
-    from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+    from temporalio.api.workflowservice.v1 import CountWorkflowExecutionsRequest, DescribeTaskQueueRequest
 
     async with httpx.AsyncClient(timeout=10.0) as http:
-        while True:
+        while not stop_event.is_set():
             try:
                 # ── Observe current state ─────────────────────────────────
-                count_result = await client.count_workflows(
-                    f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
+                # This loop owns retries. The high-level count_workflows call
+                # retries internally, so its per-attempt deadline does not bound
+                # shutdown when a namespace keeps returning RESOURCE_EXHAUSTED.
+                count_result = await client.workflow_service.count_workflow_executions(
+                    CountWorkflowExecutionsRequest(
+                        namespace=namespace,
+                        query=f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"',
+                    ),
+                    retry=False,
+                    timeout=METRICS_RPC_TIMEOUT,
                 )
+                if stop_event.is_set():
+                    return
                 workflow_count = count_result.count
 
                 backlog = 0
@@ -696,17 +729,23 @@ async def poll_queue_metrics(
                                 namespace=namespace,
                                 task_queue=TaskQueueProto(name=task_queue),
                                 task_queue_type=task_type,
-                            )
+                            ),
+                            retry=False,
+                            timeout=METRICS_RPC_TIMEOUT,
                         )
                         if resp.task_queue_status:
                             backlog += resp.task_queue_status.backlog_count_hint
                     except Exception as e:
                         logger.warning("Failed to describe task queue", error=str(e), task_queue_type=str(task_type))
+                    if stop_event.is_set():
+                        return
 
                 # Get raw capacity/tuner signals from the SDK. Some SDK builds
                 # expose slots_used but not slots_available; keep missing values
                 # as None so diagnostics do not confuse unknown with zero.
                 sdk_metrics = await _get_sdk_worker_metrics(http)
+                if stop_event.is_set():
+                    return
                 if sdk_metrics is None:
                     sdk_metrics = {}
                 activity_slots_used = sdk_metrics.get("activity_slots_used")
@@ -719,7 +758,9 @@ async def poll_queue_metrics(
                     scale_capacity_source = "fallback_missing_sdk_available_slots"
 
                 memory_used_percent = _get_machine_memory_used_percent()
-                fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent)
+                fleet_memory_used_percent = await _get_fleet_memory_used_percent(http, memory_used_percent, stop_event)
+                if stop_event.is_set():
+                    return
                 memory_pressure = fleet_memory_used_percent >= MEMORY_SCALE_UP_THRESHOLD_PERCENT
                 current_machines = _count_fly_peers()
                 is_leader = _am_i_leader()
@@ -729,7 +770,10 @@ async def poll_queue_metrics(
                     http,
                     local_activity_admission_open=activity_admission_open,
                     current_machines=current_machines,
+                    stop_event=stop_event,
                 )
+                if stop_event.is_set():
+                    return
                 activity_admission_scale_threshold = _activity_admission_scale_threshold(current_machines)
 
                 # ── Adaptive scaling decision ─────────────────────────────
@@ -831,7 +875,7 @@ async def poll_queue_metrics(
                 if is_leader and AUTOSCALER_ACTUATE and _desired_machines != current_machines:
                     if _desired_machines > current_machines:
                         _last_scale_up_time = time.monotonic()
-                    await _scale_fleet(_desired_machines, http)
+                    await _scale_fleet(_desired_machines, http, stop_event)
 
                 # ── Smart logging (every 30s or on state change) ──────────
                 now_mono = time.monotonic()
@@ -869,7 +913,10 @@ async def poll_queue_metrics(
             except Exception as e:
                 logger.warning("Failed to poll queue metrics", error=str(e))
 
-            await asyncio.sleep(POLL_INTERVAL_SECS)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL_SECS)
+            except asyncio.TimeoutError:
+                pass
 
 
 async def monitor_event_loop_lag(
@@ -1228,21 +1275,6 @@ async def main():
         production_task_queue=production_task_queue,
     )
 
-    # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
-    asyncio.create_task(
-        poll_queue_metrics(
-            client,
-            config.temporal.namespace,
-            production_task_queue,
-            activity_admission_snapshot,
-            config.temporal.max_concurrent_workflows,
-        ),
-    )
-
-    # Start event-loop lag monitor (direct measurement of scheduling starvation
-    # under high concurrency — see monitor_event_loop_lag docstring).
-    asyncio.create_task(monitor_event_loop_lag())
-
     # Warm the planner-RAG index (one encrypted object from the archive
     # backend) so the first set_plan on this worker does not pay the cold
     # load. Best-effort: retrieval degrades to "no reference plans".
@@ -1316,6 +1348,22 @@ async def main():
     # Register signal handlers with the event loop (asyncio-compatible)
     loop.add_signal_handler(signal.SIGINT, handle_shutdown)
     loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
+
+    # Own these tasks through worker drain. Cancelling a Python Temporal RPC
+    # future does not join its native completion callback; leaving that callback
+    # to interpreter finalization can deadlock the SDK runtime's thread pool.
+    metrics_stop = asyncio.Event()
+    metrics_task = asyncio.create_task(
+        poll_queue_metrics(
+            client,
+            config.temporal.namespace,
+            production_task_queue,
+            activity_admission_snapshot,
+            config.temporal.max_concurrent_workflows,
+            metrics_stop,
+        ),
+    )
+    lag_task = asyncio.create_task(monitor_event_loop_lag())
 
     try:
         # Run worker and shutdown event concurrently
@@ -1394,6 +1442,15 @@ async def main():
         # it returns as soon as all tasks finish (typically fast).
         with contextlib.suppress(Exception):
             await drain_background_browser_cleanups()
+        # Keep metrics available while activities drain, then prevent new polls
+        # and let the current bounded SDK call complete without cancellation.
+        metrics_stop.set()
+        try:
+            await metrics_task
+        finally:
+            lag_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await lag_task
         if _profiler is not None:
             _profiler.disable()
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"

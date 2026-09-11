@@ -584,6 +584,66 @@ async def test_worker_health_bind_failure_stops_before_temporal_connect():
                 pass
 
 
+def test_worker_shutdown_joins_native_observability_requests():
+    """Exercise actual process exit against a parent-owned gRPC fault fixture."""
+    import runpy
+
+    tests = runpy.run_path(str(WORKER_PATH.parent / "tests/unit/test_worker_observability_shutdown.py"))
+    for phase in ("count", "describe"):
+        for outcome in ("success", "resource_exhausted", "deadline"):
+            tests["test_worker_entrypoint_joins_inflight_metrics_rpc_before_exit"](outcome, phase)
+
+
+async def test_worker_metrics_stop_prevents_later_peer_and_provider_requests():
+    """A stop during an owned HTTP call must prevent the rest of its fleet loop."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import worker
+
+    for phase in ("memory", "admission", "list", "start", "stop"):
+        stopped = asyncio.Event()
+        calls = []
+
+        async def get(url, **kwargs):
+            calls.append(("get", url))
+            if phase in ("memory", "admission", "list"):
+                stopped.set()
+            return SimpleNamespace(
+                status_code=200,
+                text="machine_memory_used_percent 30\nactivity_admission_open 1\n",
+                raise_for_status=lambda: None,
+                json=lambda: [
+                    {"id": f"fixture-{index}", "state": "stopped" if phase == "start" else "started"}
+                    for index in range(4)
+                ],
+            )
+
+        async def post(url, **kwargs):
+            calls.append(("post", url))
+            stopped.set()
+            return SimpleNamespace(status_code=200)
+
+        http = SimpleNamespace(get=get, post=post)
+        with (
+            patch.dict(os.environ, {
+                "FLY_APP_NAME": "worker-stop-fixture", "FLY_API_TOKEN": "fixture",
+                "FLY_MACHINE_ID": "fixture-owner", "TEMPORAL_WORKER_SURFACE_HASH": "",
+            }),
+            patch.object(worker, "_get_peer_ips", return_value=["::1", "::2", "::3", "::4"]),
+        ):
+            if phase == "memory":
+                await worker._get_fleet_memory_used_percent(http, 20, stopped)
+            elif phase == "admission":
+                await worker._get_fleet_activity_admission_unavailable_count(
+                    http, local_activity_admission_open=True, current_machines=4, stop_event=stopped,
+                )
+            else:
+                await worker._scale_fleet(4 if phase == "start" else 0, http, stopped)
+        assert [method for method, _ in calls] == (
+            ["get", "post"] if phase in ("start", "stop") else ["get"]
+        ), f"{phase}: another fleet request began after shutdown"
+
+
 async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
@@ -604,6 +664,11 @@ async def run_all_tests():
     r.record("dynamic_worker_metrics_discoverable", test_dynamic_worker_metrics_are_discoverable_and_scrapable)
     r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
+    r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
+    await r.record_async(
+        "worker_metrics_stop_prevents_later_fleet_requests",
+        test_worker_metrics_stop_prevents_later_peer_and_provider_requests,
+    )
     await r.record_async(
         "worker_startup_bound_ports", test_worker_startup_publishes_bound_ports_before_temporal_connect
     )
