@@ -94,6 +94,7 @@ SOURCE_PREFIXES = (
     "agent ",
     "fleet run ",
     "hub run ",
+    "benchmark run ",
     "task ",
 )
 TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
