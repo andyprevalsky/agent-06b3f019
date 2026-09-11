@@ -2,6 +2,7 @@
 # run-fleet-infra-stability-proof — sequential multi-slice cloud fleet
 # durability proof. Default mode is a $0 INFRA probe; --capability runs the
 # sampled benchmark tasks and advances past ordinary evaluator failures.
+# SKIPPED tasks do not prove actual execution and abort a capability proof.
 #
 # Runs RUNS sequential fleets. Each fleet is WIDTH catalog-sampled tasks in
 # parallel under --infra-probe --strict-barrier (no LLM / run_benchmark).
@@ -25,6 +26,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 RUNS="${FLEET_INFRA_PROOF_RUNS:-10}"
 WIDTH="${FLEET_INFRA_PROOF_WIDTH:-20}"
@@ -40,6 +42,7 @@ DRY_SAMPLE=0
 MODE=infra
 ARTIFACT_DIR="${FLEET_INFRA_PROOF_ARTIFACT_DIR:-/opt/cursor/artifacts}"
 FLEET_BIN="${FLEET_INFRA_PROOF_FLEET_BIN:-$ROOT_DIR/scripts/run-bench-fleet}"
+RECOVERY_BIN="${FLEET_INFRA_PROOF_RECOVERY_BIN:-$ROOT_DIR/scripts/run-bench-fleet}"
 
 usage() {
   cat <<'EOF'
@@ -47,7 +50,7 @@ Usage: bash scripts/run-fleet-infra-stability-proof [options]
 
 Options:
   --dry-sample       Print all slices as JSON; no Fly / no fleet launch.
-  --capability       Run real tasks; ordinary benchmark failures still advance.
+  --capability       Require PASSED/FAILED real tasks; SKIPPED/INFRA abort.
   --runs <n>         Number of sequential fleets (default 10)
   -k <n>             Alias for --runs
   --width <n>        Parallel tasks per fleet (default 20)
@@ -139,6 +142,7 @@ if ! mkdir -p "$ARTIFACT_DIR" 2>/dev/null || [ ! -d "$ARTIFACT_DIR" ]; then
 fi
 PROOF_DIR="$STATE_ROOT/$PROOF_ID"
 mkdir -p "$PROOF_DIR"
+GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir)"
 SUMMARY_JSON="$PROOF_DIR/summary.json"
 SUMMARY_ARTIFACT="$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}.log"
 
@@ -146,7 +150,7 @@ echo "🛡  fleet $MODE stability proof"
 echo "   runs=$RUNS width=$WIDTH seed=$SEED timeout=${TIMEOUT}s"
 echo "   proof_id=$PROOF_ID"
 if [ "$MODE" = capability ]; then
-  echo "   mode: real benchmark execution; FAILED advances, INFRA aborts"
+  echo "   mode: real benchmark execution; FAILED advances, SKIPPED/INFRA abort"
 else
   echo "   mode: --infra-probe (strict barrier, \$0, no LLM)"
 fi
@@ -183,7 +187,8 @@ record_slice() {
   shift 5
   local -a names=("$@")
   python3 - "$SUMMARY_JSON" "$idx" "$rc" "$classification" "$log_path" "$batch_path" "${names[@]}" <<'PY'
-import json, sys, time
+import json, os, sys, time
+from pathlib import Path
 path = sys.argv[1]
 idx = int(sys.argv[2])
 rc = int(sys.argv[3])
@@ -192,6 +197,11 @@ log_path = sys.argv[5]
 batch_path = sys.argv[6] or None
 names = sys.argv[7:]
 data = json.loads(open(path).read() or "{}")
+cleanup_path = Path(log_path).with_suffix('.cleanup.json')
+try:
+    cleanup = json.loads(cleanup_path.read_text())
+except (OSError, ValueError):
+    cleanup = {}
 data.setdefault("slices", []).append(
     {
         "slice": idx,
@@ -201,13 +211,21 @@ data.setdefault("slices", []).append(
         "names": names,
         "log": log_path,
         "batch_run": batch_path,
+        "fleet_owner_token": cleanup.get('fleet_owner_token'),
+        "cleanup_receipt": str(cleanup_path) if cleanup else None,
+        "cleanup_status": cleanup.get('status'),
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 )
 if classification == "infra":
     data["status"] = "failed"
     data["failed_slice"] = idx
-open(path, "w").write(json.dumps(data, indent=2) + "\n")
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    handle.write(json.dumps(data, indent=2) + '\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
 PY
 }
 
@@ -320,7 +338,7 @@ if any(type(task.get("passed")) is not bool for task in tasks):
     print(f"infra\t{batch_path}")
 elif any(status not in known for status in statuses):
     print(f"infra\t{batch_path}")
-elif any(status in {"INFRA_ERROR", "ERROR", "CANCELLED"} for status in statuses):
+elif any(status in {"SKIPPED", "INFRA_ERROR", "ERROR", "CANCELLED"} for status in statuses):
     print(f"infra\t{batch_path}")
 elif any(task["passed"] != (status == "PASSED") for task, status in zip(tasks, statuses)):
     print(f"infra\t{batch_path}")
@@ -334,21 +352,259 @@ PY
 finalize() {
   local status="$1"
   python3 - "$SUMMARY_JSON" "$status" "$PASSED" <<'PY'
-import json, sys, time
+import json, os, sys, time
 path, status, passed = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.loads(open(path).read() or "{}")
 data["status"] = status
 data["passed_slices"] = passed
 data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-open(path, "w").write(json.dumps(data, indent=2) + "\n")
+from pathlib import Path
+receipts = [json.loads(item.read_text()) for item in Path(path).parent.glob('slice-*.cleanup.json')]
+data['cleanup_status'] = 'verified' if all(item.get('status') == 'verified' for item in receipts) else 'failed_retained'
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    handle.write(json.dumps(data, indent=2) + '\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
 PY
   cp -f "$SUMMARY_JSON" "$ARTIFACT_DIR/fleet_${MODE}_stability_proof_${PROOF_ID}_summary.json" 2>/dev/null || true
 }
 
+# Persist the obligation before launching any command capable of allocating.
+# The immutable tracked session leader remains the authority for cancellation;
+# an exit status alone never authorizes provider recovery.
+write_slice_cleanup() {
+  python3 - "$slice_cleanup" "$slice_owner_token" "$1" "$slice_group_drained" \
+    "${slice_pid:-}" "${slice_pid_start:-}" "${slice_group_token:-}" "$ROOT_DIR" <<'PY'
+import hashlib, json, os, sys
+from pathlib import Path
+path, owner, status, drained, pid, birth, token, workspace = sys.argv[1:]
+data = dict(version=1, fleet_owner_token=owner, workspace_root=workspace,
+            status=status, process_group_drained=drained == '1',
+            pid=int(pid) if pid else None, pid_start=birth, group_token=token,
+            proof_sha256=hashlib.sha256((Path(workspace) / 'scripts/run-fleet-infra-stability-proof').read_bytes()).hexdigest())
+tmp = Path(path + '.tmp')
+with tmp.open('w') as handle:
+    json.dump(data, handle, indent=2)
+    handle.write('\n')
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(tmp, path)
+PY
+}
+
+proof_owner_terminal() {  # <allow-never-allocated>
+  python3 - "$GIT_COMMON_DIR" "$slice_owner_token" "$ROOT_DIR" "$PROOF_DIR/runs" "$1" <<'PY'
+import hashlib, re, sys
+from pathlib import Path
+common, owner, workspace, runs, allow_empty = sys.argv[1:]
+registry = Path(common) / 'cloudbench-fleet-ownership' / owner
+audit = Path(common) / 'cloudbench-fleet-audits' / owner
+
+def fields(path):
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('missing or unsafe audit metadata')
+    pairs = [line.split('=', 1) for line in path.read_text().splitlines()]
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError('duplicate audit metadata')
+    return result
+
+def digest(root):
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError('unsafe audit directory')
+    result = hashlib.sha256()
+    for path in sorted(root.rglob('*'), key=lambda item: str(item.relative_to(root))):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise ValueError('unsafe audit entry')
+        if path.is_file() and path.name != 'source-audit':
+            relative, data = str(path.relative_to(root)).encode(), path.read_bytes()
+            result.update(len(relative).to_bytes(8, 'big'))
+            result.update(relative)
+            result.update(len(data).to_bytes(8, 'big'))
+            result.update(data)
+    return result.hexdigest()
+
+try:
+    if registry.exists() or registry.is_symlink():
+        raise ValueError('owner registry remains')
+    if not audit.exists() and not audit.is_symlink() and allow_empty == '1':
+        raise SystemExit(0)
+    metadata = fields(audit / 'meta')
+    run_id = metadata.get('run_id', '')
+    if (metadata.get('version') != '1' or metadata.get('fleet_owner_token') != owner
+        or metadata.get('workspace_root') != str(Path(workspace).resolve())
+        or metadata.get('status') != 'provider-teardown-verified'
+        or not metadata.get('app') or not re.fullmatch(r'[A-Za-z0-9._-]+', run_id)
+        or run_id in {'.', '..'}):
+        raise ValueError('terminal audit identity is incomplete or mismatched')
+    run = Path(runs) / run_id
+    if run.is_symlink() or run.resolve().parent != Path(runs).resolve():
+        raise ValueError('unsafe audit run path')
+    mirror = run / 'teardown-ownership'
+    binding = fields(mirror / 'source-audit')
+    actual = digest(audit)
+    if (binding.get('path') != str(audit) or binding.get('sha256') != actual
+        or digest(mirror) != actual):
+        raise ValueError('terminal audit mirror is not bound to its exact shared source')
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+PY
+}
+
+recover_proof_slice() {
+  [ "$slice_recovery_attempted" = 0 ] || return "$slice_recovery_rc"
+  slice_recovery_attempted=1
+  slice_recovery_rc=1
+  if [ "$slice_identity_valid" != 1 ] \
+    || [ "$(cloudbench_process_group_state "$slice_pid")" != absent ] \
+    || cloudbench_pid_exists "$slice_pid"; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  slice_group_drained=1
+  write_slice_cleanup running || return 1
+  local registry="$GIT_COMMON_DIR/cloudbench-fleet-ownership/$slice_owner_token"
+  local audit="$GIT_COMMON_DIR/cloudbench-fleet-audits/$slice_owner_token"
+  # Neither a dangling link nor a truncated terminal marker is absence/proof.
+  if [ -L "$registry" ] || [ -L "$audit" ] || [ -L "$audit/meta" ]; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  if proof_owner_terminal 1; then
+    slice_recovery_rc=0
+  else
+    env CLOUDBENCH_SCRIPT_SNAPSHOT= CLOUDBENCH_SCRIPT_SNAPSHOT_OWNER_MODE=borrow \
+      bash "$RECOVERY_BIN" --recover-stale-owner "$slice_owner_token" \
+      > "$PROOF_DIR/slice-$i.recovery.log" 2>&1 && slice_recovery_rc=0
+    cat "$PROOF_DIR/slice-$i.recovery.log" || true
+    # Require canonical retirement and its exact immutable audit mirror after
+    # recovery, even when the external command reports success.
+    proof_owner_terminal 0 || slice_recovery_rc=1
+  fi
+  if [ "$slice_recovery_rc" = 0 ]; then
+    write_slice_cleanup verified || slice_recovery_rc=1
+  fi
+  if [ "$slice_recovery_rc" != 0 ]; then write_slice_cleanup failed_retained; fi
+  return "$slice_recovery_rc"
+}
+
+run_owned_proof_slice() {
+  local slice_cleanup="$PROOF_DIR/slice-$i.cleanup.json"
+  local slice_owner="$PROOF_DIR/slice-$i.owner" slice_status="$PROOF_DIR/slice-$i.status"
+  local slice_raw_log="$PROOF_DIR/slice-$i.controller.log" slice_log_fd="" relay_failed=0
+  local slice_pid="" slice_pid_start="" slice_group_token="" slice_group_drained=0
+  local slice_recovery_attempted=0 slice_recovery_rc=1 controller_rc=1 relay_pid slice_identity_valid=0
+  local self_pid="$BASHPID"
+  trap ':' HUP INT TERM
+  write_slice_cleanup pending || return 1
+  printf 'pid=%s\npid_start=%s\n' "$self_pid" \
+    "$(ps -p "$self_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+    > "$PROOF_DIR/active-waiter.owner"
+  if [ -s "$PROOF_DIR/cancel.request" ]; then
+    write_slice_cleanup verified
+    return 143
+  fi
+  if ! cloudbench_detach_reexec_tracked "$slice_owner" "$slice_raw_log" \
+    env FLEET_STABILITY_SLICE="$i" CLOUDBENCH_FLEET_OWNER_TOKEN="$slice_owner_token" \
+      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" bash -c '
+status_file="$1"; shift
+status=1
+write_status() { printf "%s\n" "$status" > "$status_file.tmp" && mv "$status_file.tmp" "$status_file"; }
+trap write_status EXIT
+trap "status=129; exit 129" HUP
+trap "status=130; exit 130" INT
+trap "status=143; exit 143" TERM
+"$@"
+status=$?
+exit "$status"
+' proof-slice "$slice_status" bash "$FLEET_BIN" "$@"; then
+    write_slice_cleanup failed_retained
+    return 1
+  fi
+  slice_pid="$(cloudbench_tracked_owner_value "$slice_owner" pid)"
+  slice_pid_start="$(cloudbench_tracked_owner_value "$slice_owner" pid_start)"
+  slice_group_token="$(cloudbench_tracked_owner_value "$slice_owner" group_token)"
+  if [[ "$slice_pid" =~ ^[1-9][0-9]*$ ]] \
+    && [ "$(cloudbench_tracked_owner_value "$slice_owner" pgid)" = "$slice_pid" ] \
+    && [ -n "$slice_pid_start" ] && [[ "$slice_group_token" =~ ^[0-9a-f]{32}$ ]]; then
+    slice_identity_valid=1
+  fi
+  write_slice_cleanup pending
+  # Stream a durable log independently of its consumer. Completion travels
+  # through an anonymous pipe, so ENOSPC cannot strand a relay waiting for a
+  # marker file which could not be created. Drain final bytes after the signal.
+  exec {slice_log_fd}> >(python3 -u -c '
+import os, select, sys
+from pathlib import Path
+complete = False
+with Path(sys.argv[1]).open() as handle:
+    while True:
+        chunk = handle.read()
+        if chunk:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+        elif complete:
+            break
+        elif select.select([0], [], [], .1)[0]:
+            os.read(0, 1)
+            complete = True
+' "$slice_raw_log") || relay_failed=1
+  relay_pid=$!
+  cloudbench_wait_tracked_detached "$slice_owner" "$slice_status" recover_proof_slice
+  controller_rc=$?
+  # The waiter resets its temporary traps. Further cancellation must not kill
+  # the canonical recovery process which is now the remaining resource owner.
+  trap ':' HUP INT TERM
+  recover_proof_slice || true
+  if [ -n "$slice_log_fd" ]; then
+    printf . >&"$slice_log_fd" || relay_failed=1
+    exec {slice_log_fd}>&-
+  fi
+  wait "$relay_pid" || relay_failed=1
+  if [ "$relay_failed" != 0 ]; then
+    printf "failed\n" > "$PROOF_DIR/slice-$i.log-failed" || controller_rc=70
+  fi
+  rm -f "$PROOF_DIR/active-waiter.owner"
+  return "$controller_rc"
+}
+
+forward_proof_cancellation() {
+  local pid birth signal_name="${proof_signal:-}"
+  if [ -z "$signal_name" ]; then
+    [ -s "$PROOF_DIR/cancel.request" ] || return 0
+    signal_name="$(cat "$PROOF_DIR/cancel.request")"
+  fi
+  case "$signal_name" in HUP|INT|TERM) ;; *) return 1 ;; esac
+  # In-memory intent remains actionable even if a full disk rejects the record.
+  printf '%s\n' "$signal_name" > "$PROOF_DIR/cancel.request" 2>/dev/null || true
+  pid="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid)"
+  birth="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid_start)"
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  # Address the exact waiter, whose existing trap forwards once to the tracked
+  # group and enforces the existing cancellation/drain deadlines.
+  if cloudbench_pid_matches_start "$pid" "$birth"; then
+    kill -s "$signal_name" "$pid" 2>/dev/null || true
+  fi
+}
+
+# Body completion is process-owned, not dependent on optional disk records.
+# Keep its anonymous pipe open through both the body and logger; EOF proves
+# both have finished even if every terminal/identity record write was rejected.
 set +e
-{
+exec {proof_console_fd}>&1
+exec {proof_completion_reader}< <(
+  exec {proof_completion_writer}>&1
+(
+  trap 'rc=$?; printf "%s\n" "$rc" >&"$proof_completion_writer" || true; printf "%s\n" "$rc" > "$PROOF_DIR/controller.exit" || true; exit "$rc"' EXIT
+  trap '' PIPE
+  body_self_pid="$BASHPID"
+  printf 'pid=%s\npid_start=%s\n' "$body_self_pid" \
+    "$(ps -p "$body_self_pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
+    > "$PROOF_DIR/controller.owner"
   set -e
-  echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED"
+  echo "proof_id=$PROOF_ID runs=$RUNS width=$WIDTH seed=$SEED" || true
   for ((i = 0; i < RUNS; i++)); do
     mapfile -t BENCHES < <(
       python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" sample \
@@ -358,53 +614,47 @@ set +e
         --slice "$i"
     )
     if [ "${#BENCHES[@]}" -ne "$WIDTH" ]; then
-      echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2
+      echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2 || true
       FAILED_SLICE="$i"
       FAILED_RC=2
       record_slice "$i" 2 infra "$PROOF_DIR/slice-${i}.log" "" "${BENCHES[@]:-}"
       finalize failed
       # stdout only — the outer `tee "$SUMMARY_ARTIFACT"` captures these lines;
       # a second `tee -a` races the outer writer and can clobber failure lines.
-      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)"
+      echo "❌ INFRA STABILITY PROOF FAILED at slice $i (sample)" || true
       exit 2
     fi
 
     SLICE_LOG="$PROOF_DIR/slice-${i}.log"
-    echo ""
-    echo "════════════════════════════════════════════════════════════"
-    echo "▶ slice $((i + 1))/$RUNS  (index=$i, width=$WIDTH)"
-    echo "  tasks: ${BENCHES[*]}"
-    echo "  log: $SLICE_LOG"
-    echo "════════════════════════════════════════════════════════════"
+    echo "" || true
+    echo "════════════════════════════════════════════════════════════" || true
+    echo "▶ slice $((i + 1))/$RUNS  (index=$i, width=$WIDTH)" || true
+    echo "  tasks: ${BENCHES[*]}" || true
+    echo "  log: $SLICE_LOG" || true
+    echo "════════════════════════════════════════════════════════════" || true
 
     set +e
-    if [ "$MODE" = capability ]; then
-      slice_owner_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-      FLEET_STABILITY_SLICE="$i" \
-      CLOUDBENCH_FLEET_OWNER_TOKEN="$slice_owner_token" \
-      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
-        bash "$FLEET_BIN" \
-          "${BENCHES[@]}" \
-          --timeout "$TIMEOUT" \
-          --foreground \
-          2>&1 | tee "$SLICE_LOG"
-      slice_pipe_status=("${PIPESTATUS[@]}")
-    else
-      FLEET_STABILITY_SLICE="$i" \
-      CLOUDBENCH_RUNS_ROOT="$PROOF_DIR/runs" \
-        bash "$FLEET_BIN" \
-          "${BENCHES[@]}" \
-          --infra-probe \
-          --timeout "$TIMEOUT" \
-          --foreground \
-          2>&1 | tee "$SLICE_LOG"
-      slice_pipe_status=("${PIPESTATUS[@]}")
-    fi
+    slice_owner_token="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    slice_args=("${BENCHES[@]}" --timeout "$TIMEOUT" --foreground)
+    if [ "$MODE" != capability ]; then slice_args+=(--infra-probe); fi
+    run_owned_proof_slice "${slice_args[@]}" 2>&1 | tee "$SLICE_LOG"
+    slice_pipe_status=("${PIPESTATUS[@]}")
     rc="${slice_pipe_status[0]}"
     set -e
 
-    if [ "${slice_pipe_status[1]}" -ne 0 ]; then
-      echo "❌ slice log publication failed" >&2
+    cleanup_status="$(python3 - "$PROOF_DIR/slice-$i.cleanup.json" <<'PYREAD'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1]))['status'])
+except (OSError, ValueError, KeyError):
+    print('failed_retained')
+PYREAD
+)"
+    if [ -s "$PROOF_DIR/cancel.request" ] || [ "$cleanup_status" != verified ]; then
+      classification=infra
+      batch_path=""
+    elif [ "${slice_pipe_status[1]}" -ne 0 ] || [ -s "$PROOF_DIR/slice-$i.log-failed" ]; then
+      echo "❌ slice log publication failed" >&2 || true
       classification=infra
       batch_path=""
     elif [ "$MODE" = capability ]; then
@@ -424,23 +674,56 @@ set +e
       FAILED_RC="$rc"
       [ "$FAILED_RC" -ne 0 ] || FAILED_RC=1
       finalize failed
-      echo "❌ ${MODE^^} STABILITY PROOF FAILED at slice $i (fleet exit=$rc)"
-      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining"
+      echo "❌ ${MODE^^} STABILITY PROOF FAILED at slice $i (fleet exit=$rc)" || true
+      echo "   zero INFRA required on ALL $RUNS slices — aborting remaining" || true
       exit "$FAILED_RC"
     fi
 
     PASSED=$((PASSED + 1))
-    echo "✅ slice $i NO-INFRA classification=$classification ($PASSED/$RUNS)"
+    echo "✅ slice $i NO-INFRA classification=$classification ($PASSED/$RUNS)" || true
   done
 
   finalize passed
-  echo ""
-  echo "✅ ${MODE^^} STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)"
-  echo "   summary: $SUMMARY_JSON"
-} 2>&1 | tee "$SUMMARY_ARTIFACT"
-pipeline_status=("${PIPESTATUS[@]}")
+  echo "" || true
+  echo "✅ ${MODE^^} STABILITY PROOF PASSED: $PASSED/$RUNS slices × $WIDTH parallel (zero INFRA)" || true
+  echo "   summary: $SUMMARY_JSON" || true
+) 2>&1 | tee "$SUMMARY_ARTIFACT" >&"$proof_console_fd"
+)
+proof_pipeline_pid=$!
+exec {proof_console_fd}>&-
+proof_signal=""
+trap 'proof_signal=HUP' HUP
+trap 'proof_signal=INT' INT
+trap 'proof_signal=TERM' TERM
+proof_body_rc=""
+proof_completion_invalid=0
+while :; do
+  forward_proof_cancellation
+  IFS= read -r -t .1 -u "$proof_completion_reader" proof_completion_line
+  completion_read_rc=$?
+  if [ "$completion_read_rc" = 0 ]; then
+    if [[ "$proof_completion_line" =~ ^[0-9]{1,3}$ ]] && [ "$proof_completion_line" -le 255 ] \
+      && [ -z "$proof_body_rc" ]; then
+      proof_body_rc="$proof_completion_line"
+    else
+      proof_completion_invalid=1
+    fi
+  elif [ "$completion_read_rc" = 1 ]; then
+    break
+  fi
+  # A timeout/signal only wakes cancellation forwarding. Even a terminal frame
+  # is not permission to leave before the body and its logger close the pipe.
+done
+exec {proof_completion_reader}<&-
+wait "$proof_pipeline_pid"
+pipeline_rc=$?
+trap - HUP INT TERM
 set -e
-if [ "${pipeline_status[1]}" -ne 0 ]; then
-  echo "⚠️  optional artifact log failed; canonical proof status remains in $SUMMARY_JSON" >&2
+if [ "$proof_completion_invalid" = 0 ]; then
+  if [ -n "$proof_body_rc" ]; then exit "$proof_body_rc"; fi
+  # Rejected status publication can suppress the frame as well as the file.
+  # The reaped pipeline still supplies a real failure result; never invent pass.
+  if [ "$pipeline_rc" -ne 0 ]; then exit "$pipeline_rc"; fi
 fi
-exit "${pipeline_status[0]}"
+echo "❌ proof supervisor exited without a terminal status; ownership remains recorded in $PROOF_DIR" >&2
+exit 1

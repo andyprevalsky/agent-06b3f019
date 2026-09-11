@@ -363,4 +363,6 @@ assert [item["classification"] for item in summary["slices"]] == [
 ]
 PY
 
+python3 "$ROOT_DIR/scripts/tests/fleet-stability-cleanup.test.py"
+
 echo "All fleet infra stability proof structural checks passed."

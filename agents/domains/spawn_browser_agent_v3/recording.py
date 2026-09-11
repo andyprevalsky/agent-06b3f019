@@ -23,14 +23,14 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
 from types import SimpleNamespace
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
 
-from helpers.trace_archive import archive_bytes, archive_enabled
+from helpers.trace_archive import archive_bytes, archive_enabled, archive_files
 from helpers.tracing import current_root_agent_id
 
 logger = structlog.get_logger()
@@ -43,6 +43,21 @@ _BACKGROUND_RECORDING_ARCHIVE_TASKS: set[asyncio.Task[Any]] = set()
 _BACKGROUND_RECORDING_ARCHIVE_SLOTS = threading.BoundedSemaphore(4)
 
 
+def _archive_recording_directory(output_dir: Path, root_agent_id: str, task_id: str) -> bool:
+    def artifacts():
+        for file_path in output_dir.rglob("*"):
+            if file_path.is_file():
+                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+                yield (
+                    f"media/browser/{task_id}/{file_path.relative_to(output_dir).as_posix()}",
+                    file_path,
+                    content_type,
+                    False if content_type.startswith(("image/", "video/", "audio/")) else None,
+                )
+
+    return archive_files(root_agent_id=root_agent_id, artifacts=artifacts())
+
+
 def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool) -> bool:
     """Bound recording archive work without queueing thousands of filesystem walks."""
     if not _BACKGROUND_RECORDING_ARCHIVE_SLOTS.acquire(blocking=False):
@@ -53,9 +68,9 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
         )
         return False
 
-    async def _run() -> None:
+    async def _run() -> bool:
         try:
-            await recorder._archive_recording_artifacts()
+            return await recorder._archive_recording_artifacts()
         finally:
             _BACKGROUND_RECORDING_ARCHIVE_SLOTS.release()
 
@@ -66,9 +81,11 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
         _BACKGROUND_RECORDING_ARCHIVE_TASKS.discard(completed)
         if completed.cancelled():
             return
-        with contextlib.suppress(Exception):
-            completed.result()
-        if cleanup_after:
+        try:
+            archived = completed.result()
+        except Exception:
+            return
+        if cleanup_after and archived:
             recorder.cleanup_local_artifacts(persisted=True)
 
     task.add_done_callback(_finished)
@@ -728,8 +745,8 @@ class SimulatedBrowserRecorder:
         frames_json = json.dumps(self.frames, ensure_ascii=False).replace("</", "<\\/")
         frame_csp_json = json.dumps(
             '<meta http-equiv="Content-Security-Policy" '
-            'content="default-src \'none\'; img-src data: blob:; '
-            'style-src \'unsafe-inline\'; font-src data:">'
+            "content=\"default-src 'none'; img-src data: blob:; "
+            "style-src 'unsafe-inline'; font-src data:\">"
         )
         title = html.escape(f"Simulated browser recording {self.task_id}")
         return f"""<!doctype html>
@@ -738,21 +755,14 @@ class SimulatedBrowserRecorder:
 <body><div id="app"><header><button id="play">Play</button><input id="timeline" type="range" min="0" value="0"><span id="meta"></span></header><div id="stage"></div></div>
 <script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp={frame_csp_json};range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
 
-    async def _archive_recording_artifacts(self) -> None:
+    async def _archive_recording_artifacts(self) -> bool:
         if not archive_enabled():
-            return
+            return True
         root_agent_id = current_root_agent_id() or self.agent_id
-        await asyncio.to_thread(self._archive_recording_artifacts_sync, root_agent_id)
+        return await asyncio.to_thread(self._archive_recording_artifacts_sync, root_agent_id)
 
-    def _archive_recording_artifacts_sync(self, root_agent_id: str) -> None:
-        for file_path in self.output_dir.rglob("*"):
-            if file_path.is_file():
-                archive_bytes(
-                    root_agent_id=root_agent_id,
-                    path=f"media/browser/{self.task_id}/{file_path.relative_to(self.output_dir).as_posix()}",
-                    body=file_path.read_bytes(),
-                    content_type=mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
-                )
+    def _archive_recording_artifacts_sync(self, root_agent_id: str) -> bool:
+        return _archive_recording_directory(self.output_dir, root_agent_id, self.task_id)
 
     def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
         return _schedule_background_recording_archive(self, cleanup_after=cleanup_after)
@@ -1496,27 +1506,15 @@ class BrowserAgentRecorder:
             )
             return None
 
-    async def _archive_recording_artifacts(self) -> None:
+    async def _archive_recording_artifacts(self) -> bool:
         if not archive_enabled():
-            return
+            return True
         archive_root_agent_id = current_root_agent_id() or self.agent_id
-        await asyncio.to_thread(self._archive_recording_artifacts_sync, archive_root_agent_id)
+        return await asyncio.to_thread(self._archive_recording_artifacts_sync, archive_root_agent_id)
 
-    def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> None:
+    def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> bool:
         try:
-            for file_path in self.output_dir.rglob("*"):
-                if not file_path.is_file():
-                    continue
-                relative = file_path.relative_to(self.output_dir).as_posix()
-                content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-                is_media = content_type.startswith(("image/", "video/", "audio/"))
-                archive_bytes(
-                    root_agent_id=archive_root_agent_id,
-                    path=f"media/browser/{self.task_id}/{relative}",
-                    body=file_path.read_bytes(),
-                    content_type=content_type,
-                    compress=False if is_media else None,
-                )
+            return _archive_recording_directory(self.output_dir, archive_root_agent_id, self.task_id)
         except Exception as exc:  # noqa: BLE001 - archive is best-effort
             logger.warning(
                 "Browser agent recording archive failed",
@@ -1524,6 +1522,7 @@ class BrowserAgentRecorder:
                 task_id=self.task_id,
                 error=str(exc)[:300],
             )
+            return False
 
     def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
         """Copy trace artifacts only after the FE pointer is durable."""
@@ -1730,12 +1729,10 @@ class BrowserAgentRecorder:
         if self.replay_view_urls and playback_frames:
             frame_offset_ms = min(int(frame.get("ts_ms") or 0) for frame in playback_frames)
             playback_frames = [
-                {**frame, "ts_ms": max(0, int(frame.get("ts_ms") or 0) - frame_offset_ms)}
-                for frame in playback_frames
+                {**frame, "ts_ms": max(0, int(frame.get("ts_ms") or 0) - frame_offset_ms)} for frame in playback_frames
             ]
             cursor_events = [
-                {**event, "ts_ms": max(0, int(event.get("ts_ms") or 0) - frame_offset_ms)}
-                for event in cursor_events
+                {**event, "ts_ms": max(0, int(event.get("ts_ms") or 0) - frame_offset_ms)} for event in cursor_events
             ]
         frames_json = json.dumps(playback_frames)
         cursor_events_json = json.dumps(cursor_events)
@@ -2596,25 +2593,15 @@ class BrowserNetworkRecorder:
         generation = self._network_generation
         cdp = cdp_client.register
         cdp.Network.requestWillBeSent(
-            lambda event, session_id: self._on_request_will_be_sent(
-                event, session_id, generation
-            )
+            lambda event, session_id: self._on_request_will_be_sent(event, session_id, generation)
         )
         cdp.Network.responseReceived(
-            lambda event, session_id: self._on_response_received(
-                event, session_id, generation
-            )
+            lambda event, session_id: self._on_response_received(event, session_id, generation)
         )
         cdp.Network.loadingFinished(
-            lambda event, session_id: self._on_loading_finished(
-                event, session_id, generation, cdp_client
-            )
+            lambda event, session_id: self._on_loading_finished(event, session_id, generation, cdp_client)
         )
-        cdp.Network.loadingFailed(
-            lambda event, session_id: self._on_loading_failed(
-                event, session_id, generation
-            )
-        )
+        cdp.Network.loadingFailed(lambda event, session_id: self._on_loading_failed(event, session_id, generation))
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
         await self._start_console_capture(cdp_client, cdp_session.session_id, generation)
@@ -2643,14 +2630,10 @@ class BrowserNetworkRecorder:
         try:
             if runtime_register is not None and runtime_send is not None:
                 runtime_register.consoleAPICalled(
-                    lambda event, event_session_id: self._on_console_api_called(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_console_api_called(event, event_session_id, generation)
                 )
                 runtime_register.exceptionThrown(
-                    lambda event, event_session_id: self._on_exception_thrown(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_exception_thrown(event, event_session_id, generation)
                 )
                 await runtime_send.enable(session_id=session_id)
         except Exception as exc:
@@ -2664,9 +2647,7 @@ class BrowserNetworkRecorder:
         try:
             if log_register is not None and log_send is not None:
                 log_register.entryAdded(
-                    lambda event, event_session_id: self._on_log_entry_added(
-                        event, event_session_id, generation
-                    )
+                    lambda event, event_session_id: self._on_log_entry_added(event, event_session_id, generation)
                 )
                 await log_send.enable(session_id=session_id)
         except Exception as exc:
@@ -2787,9 +2768,7 @@ class BrowserNetworkRecorder:
             if not request_id:
                 continue
             generation = int(entry.get("browser_generation") or 0)
-            request_key = (
-                request_id if generation == 0 else f"{generation}:{request_id}"
-            )
+            request_key = request_id if generation == 0 else f"{generation}:{request_id}"
             recorder.entries[request_key] = dict(entry)
         recorder.console_entries = [
             dict(item) for item in (console_payload.get("entries") or []) if isinstance(item, dict)
@@ -2890,14 +2869,10 @@ class BrowserNetworkRecorder:
                     "backup_eligibility": credential.get("backupEligibility"),
                     "backup_state": credential.get("backupState"),
                     "credential_id_sha256": (
-                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest()
-                        if credential_id
-                        else None
+                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest() if credential_id else None
                     ),
                     "authenticator_id_sha256": (
-                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest()
-                        if authenticator_id
-                        else None
+                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest() if authenticator_id else None
                     ),
                     "session_id": session_id,
                     "browser_generation": generation,
@@ -3042,11 +3017,7 @@ class BrowserNetworkRecorder:
             "body_file",
             "failed",
         )
-        redacted = {
-            field: entry.get(field)
-            for field in scalar_fields
-            if entry.get(field) is not None
-        }
+        redacted = {field: entry.get(field) for field in scalar_fields if entry.get(field) is not None}
         redacted["url"] = _redact_url_query(str(entry.get("url") or ""))
         redacted["request_headers"] = _diagnostic_headers(entry.get("request_headers"))
         redacted["response_headers"] = _diagnostic_headers(entry.get("response_headers"))
@@ -3105,11 +3076,7 @@ class BrowserNetworkRecorder:
             self._discard_body(oldest_key)
 
     def _request_key(self, request_id: str, generation: int | None = None) -> str:
-        effective_generation = (
-            generation
-            if generation is not None
-            else getattr(self, "_network_generation", 0)
-        )
+        effective_generation = generation if generation is not None else getattr(self, "_network_generation", 0)
         # Keep direct, unstarted unit fixtures readable while production
         # connections always use a generation-prefixed key.
         return request_id if effective_generation == 0 else f"{effective_generation}:{request_id}"
@@ -3351,10 +3318,7 @@ class BrowserNetworkRecorder:
                         url=_redact_url_query(blocked_url),
                         cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
                     )
-                elif (
-                    not blocked_url_is_script_cdn
-                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
-                ):
+                elif not blocked_url_is_script_cdn and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS:
                     logger.warning(
                         "Critical resource block ignored: generic-script exit cap reached",
                         agent_id=self.agent_id,
@@ -3693,7 +3657,11 @@ class BrowserNetworkRecorder:
                 if not isinstance(entry, dict):
                     continue
                 entry_level = str(entry.get("level") or entry.get("kind") or "log").lower()
-                if level_filter and entry_level != level_filter and str(entry.get("kind") or "").lower() != level_filter:
+                if (
+                    level_filter
+                    and entry_level != level_filter
+                    and str(entry.get("kind") or "").lower() != level_filter
+                ):
                     continue
                 text = str(entry.get("text") or "")
                 url = str(entry.get("url") or "")
@@ -3728,9 +3696,9 @@ class BrowserNetworkRecorder:
                 row = {
                     "source": "network",
                     "timestamp_ms": entry.get("response_ts_ms") or entry.get("request_ts_ms"),
-                    "level": "error" if entry.get("failed") or (
-                        isinstance(entry.get("status"), int) and entry.get("status") >= 400
-                    ) else "info",
+                    "level": "error"
+                    if entry.get("failed") or (isinstance(entry.get("status"), int) and entry.get("status") >= 400)
+                    else "info",
                     "text": summary,
                     "url": entry.get("url"),
                     "status": entry.get("status"),
@@ -3777,9 +3745,9 @@ class BrowserNetworkRecorder:
         include_response_body_metadata: bool = True,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         current_entries = [self._redacted_network_entry(entry) for entry in self.entries.values()]
-        durable_entries = (
-            list(getattr(self, "_diagnostic_entries", [])) + current_entries
-        )[-getattr(self, "_max_entries", 600) :]
+        durable_entries = (list(getattr(self, "_diagnostic_entries", [])) + current_entries)[
+            -getattr(self, "_max_entries", 600) :
+        ]
         if not include_response_body_metadata:
             body_metadata_fields = {
                 "body_size",
@@ -3790,11 +3758,7 @@ class BrowserNetworkRecorder:
                 "body_error",
             }
             durable_entries = [
-                {
-                    key: value
-                    for key, value in entry.items()
-                    if key not in body_metadata_fields
-                }
+                {key: value for key, value in entry.items() if key not in body_metadata_fields}
                 for entry in durable_entries
             ]
         network_payload = {
@@ -3837,9 +3801,7 @@ class BrowserNetworkRecorder:
         """
         if not self.network_index_path.exists() or not self.console_index_path.exists():
             return None
-        network_payload, console_payload = self._diagnostics_payloads(
-            include_response_body_metadata=False
-        )
+        network_payload, console_payload = self._diagnostics_payloads(include_response_body_metadata=False)
         output = io.BytesIO()
         with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.writestr(
@@ -3858,9 +3820,7 @@ class BrowserNetworkRecorder:
             return {}
         root_agent_id = current_root_agent_id() or self.agent_id
         refs: Dict[str, str] = {}
-        network_payload, console_payload = self._diagnostics_payloads(
-            include_response_body_metadata=False
-        )
+        network_payload, console_payload = self._diagnostics_payloads(include_response_body_metadata=False)
         for kind, path, payload in (
             ("network", self.network_index_path, network_payload),
             ("console", self.console_index_path, console_payload),
@@ -3937,4 +3897,3 @@ def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> st
         return None
     url = str(rejection.get("url") or "").strip()
     return url or None
-

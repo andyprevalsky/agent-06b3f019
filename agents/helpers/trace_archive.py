@@ -22,7 +22,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import httpx
 import structlog
@@ -635,7 +635,66 @@ def _post_backend_artifact(
         return None
 
 
+@contextmanager
+def _archive_publication_lease(root_agent_id: str, *, exclusive: bool, deadline: Optional[float] = None):
+    """Coordinate batch publication and outbox recovery across threads/processes.
+
+    Shared batch leases preserve recording concurrency. Recovery takes the
+    exclusive lease, so it cannot adopt live batches or acknowledge them early.
+    Kernel-owned flock releases on process death; the durable pairs remain.
+    """
+    lock_root = _local_root().parent / "trace-archive-publication-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(_safe_segment(root_agent_id).encode()).hexdigest()
+    with (lock_root / f"{name}.lock").open("a+b") as handle:
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        acquired = False
+        try:
+            if deadline is None:
+                fcntl.flock(handle.fileno(), operation)
+                acquired = True
+            else:
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), operation | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.01, remaining))
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _drain_backend_outbox(
+    limit: int = 8,
+    root_agent_id: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> int:
+    if root_agent_id is None:
+        try:
+            root = _outbox_root()
+            bundles = sorted(item.name for item in root.iterdir() if item.is_dir()) if root.exists() else []
+        except OSError:
+            return 0
+        drained = 0
+        for bundle in bundles:
+            if drained >= limit:
+                break
+            drained += _drain_backend_outbox(limit - drained, bundle, deadline)
+        return drained
+    # Automatic retries skip a busy owner instead of queueing behind it.
+    with _archive_publication_lease(root_agent_id, exclusive=True, deadline=time.monotonic()) as acquired:
+        if not acquired:
+            return 0
+        return _drain_backend_outbox_unlocked(limit, root_agent_id, deadline)
+
+
+def _drain_backend_outbox_unlocked(
     limit: int = 8,
     root_agent_id: Optional[str] = None,
     deadline: Optional[float] = None,
@@ -766,6 +825,137 @@ _ARCHIVE_PENDING_BY_ROOT: dict[str, set[Future[None]]] = {}
 # (observed: 355s backend log gap → suite-wide ConnectErrors). Oversized
 # artifacts are dropped with a warning — archive is best-effort by contract.
 _DEFAULT_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+# Match the backend batch contract, below its existing 100 MiB JSON parser cap.
+_BATCH_MAX_RECORDS = 256
+_BATCH_MAX_BYTES = 64 * 1024 * 1024
+_BATCH_MAX_CIPHERTEXT_BYTES = 33 * 1024 * 1024
+
+
+def _publish_artifact_batch(root_agent_id: str, artifacts: list[dict[str, Any]]) -> bool:
+    """Keep every encrypted pair durable until the complete batch is acknowledged."""
+    for artifact in artifacts:
+        _write_outbox(
+            root_agent_id, artifact["path"], base64.b64decode(artifact["ciphertextB64"]), artifact["metadata"]
+        )
+    url = _backend_archive_url()
+    api_key = _backend_api_key()
+    if not url or not api_key:
+        return False
+    try:
+        response = _backend_http_client().post(
+            url.rsplit("/", 1)[0] + "/artifacts",
+            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            json={"rootAgentId": root_agent_id, "artifacts": artifacts},
+        )
+        if response.status_code != 200:
+            logger.warning("trace_archive.batch_store_failed", status=response.status_code, count=len(artifacts))
+            return False
+        acknowledgement = response.json().get("artifacts")
+        expected_paths = {artifact["path"] for artifact in artifacts}
+        if not isinstance(acknowledgement, list) or len(acknowledgement) != len(artifacts):
+            return False
+        if any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("ref"), str)
+            or not item["ref"]
+            or not isinstance(item.get("path"), str)
+            for item in acknowledgement
+        ):
+            return False
+        if {item["path"] for item in acknowledgement} != expected_paths:
+            return False
+        for artifact in artifacts:
+            _delete_outbox(
+                root_agent_id,
+                artifact["path"],
+                expected_ciphertext_sha256=artifact["metadata"]["ciphertext_sha256"],
+            )
+        return True
+    except Exception as exc:
+        logger.warning("trace_archive.batch_store_error", error_type=type(exc).__name__, count=len(artifacts))
+        return False
+
+
+def archive_files(*, root_agent_id: str, artifacts: Iterable[tuple[str, Path, str, Optional[bool]]]) -> bool:
+    if not archive_enabled():
+        return True
+    safe_root = _safe_segment(root_agent_id)
+    completion: Future[None] = Future()
+    _track_archive_future(safe_root, completion)
+    try:
+        with _archive_publication_lease(safe_root, exclusive=False):
+            return _archive_files_owned(root_agent_id=safe_root, artifacts=artifacts)
+    finally:
+        completion.set_result(None)
+
+
+def _archive_files_owned(*, root_agent_id: str, artifacts: Iterable[tuple[str, Path, str, Optional[bool]]]) -> bool:
+    """Synchronously stream file encryption into bounded, individually readable batches.
+
+    Call from a worker thread. Cancellation must not discard an accepted batch;
+    callers retain their source directory until every batch is acknowledged.
+    A failed batch retains the ordinary encrypted outbox pairs for existing retry.
+    """
+    if not archive_enabled():
+        return True
+    safe_root = _safe_segment(root_agent_id)
+    batch: list[dict[str, Any]] = []
+    # Reserve JSON framing/escaping overhead; compact serialization matches httpx.
+    framing_bytes = len(json.dumps({"rootAgentId": safe_root, "artifacts": []}).encode())
+    batch_bytes = framing_bytes
+    all_acknowledged = True
+    for path, file_path, content_type, compress in artifacts:
+        safe_path = _safe_path(path)
+        if not safe_path or safe_path != path or _outbox_artifact_target(Path(path)) != Path(path):
+            all_acknowledged = False
+            continue
+        artifact_limit = min(_max_artifact_bytes(), _DEFAULT_MAX_ARTIFACT_BYTES)
+        if file_path.stat().st_size > artifact_limit:
+            all_acknowledged = False
+            continue
+        with file_path.open("rb") as source:
+            body = source.read(artifact_limit + 1)
+        if len(body) > artifact_limit:
+            del body
+            all_acknowledged = False
+            continue
+        encrypted = encrypt_artifact(body, path=path, content_type=content_type, compress=compress)
+        del body
+        if encrypted is None:
+            all_acknowledged = False
+            continue
+        ciphertext, metadata = encrypted
+        if not _use_r2_archive():
+            if not store_encrypted_artifact(
+                root_agent_id=safe_root, path=path, ciphertext=ciphertext, metadata=metadata
+            ):
+                all_acknowledged = False
+            continue
+        if len(ciphertext) > _BATCH_MAX_CIPHERTEXT_BYTES or len(json.dumps(metadata).encode()) > 8192:
+            del encrypted, ciphertext
+            all_acknowledged = False
+            continue
+        artifact = {"path": path, "ciphertextB64": base64.b64encode(ciphertext).decode("ascii"), "metadata": metadata}
+        # Do not allocate another full base64-sized JSON copy just to size it.
+        artifact_bytes = (
+            len(artifact["ciphertextB64"])
+            + len(json.dumps({**artifact, "ciphertextB64": ""}, ensure_ascii=False, separators=(",", ":")).encode())
+            + 1
+        )
+        del encrypted, ciphertext
+        if artifact_bytes + framing_bytes > _BATCH_MAX_BYTES:
+            all_acknowledged = False
+            continue
+        if batch and (len(batch) >= _BATCH_MAX_RECORDS or batch_bytes + artifact_bytes > _BATCH_MAX_BYTES):
+            if not _publish_artifact_batch(safe_root, batch):
+                all_acknowledged = False
+            batch = []
+            batch_bytes = framing_bytes
+        batch.append(artifact)
+        batch_bytes += artifact_bytes
+    if batch and not _publish_artifact_batch(safe_root, batch):
+        all_acknowledged = False
+    return all_acknowledged
 
 
 def _max_artifact_bytes() -> int:
@@ -847,11 +1037,14 @@ def flush_archive_writes(root_agent_id: str, timeout_s: float = 25.0) -> bool:
             return False
 
     if _use_r2_archive():
-        while _root_outbox_has_artifacts(safe_root):
-            if time.monotonic() >= deadline:
+        with _archive_publication_lease(safe_root, exclusive=True, deadline=deadline) as acquired:
+            if not acquired:
                 return False
-            if _drain_backend_outbox(limit=64, root_agent_id=safe_root, deadline=deadline) == 0:
-                return False
+            while _root_outbox_has_artifacts(safe_root):
+                if time.monotonic() >= deadline:
+                    return False
+                if _drain_backend_outbox_unlocked(limit=64, root_agent_id=safe_root, deadline=deadline) == 0:
+                    return False
     return True
 
 

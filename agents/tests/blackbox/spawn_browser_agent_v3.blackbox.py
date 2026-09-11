@@ -2332,15 +2332,18 @@ async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
         "BROWSER_AGENT_RECORDING_INTERVAL_SECONDS": os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"),
     }
     old_archive_root = trace_archive._LOCAL_ROOT
-    old_store = trace_archive.store_encrypted_artifact
+    old_publish = trace_archive._publish_artifact_batch
     try:
         uploaded_paths = []
 
-        def fake_store_encrypted_artifact(*, root_agent_id, path, ciphertext, metadata):
-            uploaded_paths.append((root_agent_id, path, len(ciphertext), metadata))
-            return f"r2://fake/{root_agent_id}/{path}"
+        def fake_publish_artifact_batch(root_agent_id, artifacts):
+            uploaded_paths.extend(
+                (root_agent_id, item["path"], len(base64.b64decode(item["ciphertextB64"])), item["metadata"])
+                for item in artifacts
+            )
+            return True
 
-        trace_archive.store_encrypted_artifact = fake_store_encrypted_artifact
+        trace_archive._publish_artifact_batch = fake_publish_artifact_batch
         with tempfile.TemporaryDirectory() as recordings, tempfile.TemporaryDirectory() as archive:
             os.environ["ENVIRONMENT"] = "production"
             os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
@@ -2368,7 +2371,7 @@ async def test_browser_agent_recording_enabled_by_trace_archive_in_prod():
             assert all(size > 0 for _root, _path, size, _metadata in uploaded_paths)
     finally:
         trace_archive._LOCAL_ROOT = old_archive_root
-        trace_archive.store_encrypted_artifact = old_store
+        trace_archive._publish_artifact_batch = old_publish
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -2601,16 +2604,32 @@ async def test_browser_recording_background_archive_keeps_event_loop_responsive(
         for index in range(3):
             (recorder.output_dir / f"frame-{index}.png").write_bytes(b"frame")
 
-        original_read_bytes = Path.read_bytes
+        original_open = Path.open
 
-        def slow_read_bytes(path):
-            time_module.sleep(0.05)
-            return original_read_bytes(path)
+        def slow_open(path, *args, **kwargs):
+            opened = original_open(path, *args, **kwargs)
+            if args != ("rb",):
+                return opened
+
+            class SlowRead:
+                def __enter__(self):
+                    opened.__enter__()
+                    return self
+
+                def __exit__(self, *error):
+                    return opened.__exit__(*error)
+
+                def read(self, *read_args):
+                    time_module.sleep(0.05)
+                    return opened.read(*read_args)
+
+            return SlowRead()
 
         with (
             patch.object(recording, "archive_enabled", return_value=True),
-            patch.object(recording, "archive_bytes", return_value={"ref": "archive-ref"}),
-            patch.object(Path, "read_bytes", slow_read_bytes),
+            patch("helpers.trace_archive._publish_artifact_batch", return_value=True),
+            patch("helpers.trace_archive.store_encrypted_artifact", return_value="archive-ref"),
+            patch.object(Path, "open", slow_open),
         ):
             assert recorder.archive_recording_artifacts_in_background() is True
             started = time_module.monotonic()

@@ -190,8 +190,8 @@ campaign, and repeated isolated trial. Do not invoke `run-bench-fleet`,
   → scripts/run-bench stability-proof -k K --concurrency N --seed S
       → K sequential random ready-catalog slices, N isolated tasks per slice
       → terminal _batch/run.json classification
-           ├─ PASSED / FAILED / SKIPPED → record and advance
-           └─ INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
+           ├─ PASSED / FAILED → record and advance
+           └─ SKIPPED / INFRA_ERROR / ERROR / CANCELLED → fail closed and reset the streak
 ~~~
 
 Named selections are `daily`, `pre-deploy`, `rose-bench`, `polar-bench`, and
@@ -211,7 +211,8 @@ For a consecutive no-INFRA acceptance gate, use
 draws every slice from the unified ready catalog (`tasks.json` plus
 `polar_tasks.json`), and every slice runs to a terminal batch projection before
 the next starts. An ordinary benchmark/evaluator failure counts as a completed
-slice; missing, malformed, `INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
+slice; skipped tasks do not prove execution. Missing, malformed, `SKIPPED`,
+`INFRA_ERROR`, `ERROR`, or `CANCELLED` task results
 abort the command so the streak can restart only after RCA and a fix.
 
 The command contract is exercised end to end with fake provider children inside
