@@ -1,8 +1,8 @@
 """Web search domain constants and defaults."""
 
-# Parallel AI Search API
-PARALLEL_API_URL = "https://api.parallel.ai/v1beta/search"
-PARALLEL_BETA_HEADER = "search-extract-2025-10-10"
+# Parallel AI Search API (V1 Turbo — same contract as chat web_search)
+PARALLEL_API_URL = "https://api.parallel.ai/v1/search"
+PARALLEL_SEARCH_MODE = "turbo"
 
 # Defaults. Capped at the source so parallel-fanout sub-agents don't dump
 # 60k chars / 15k tokens of search answer into context per call (see
@@ -14,8 +14,8 @@ DEFAULT_MAX_RESULTS = 5
 # Display
 QUERY_DISPLAY_MAX_LENGTH = 100
 
-# Pricing: Parallel AI Search flat rate per query ($0.005 for 10 results = 0.5 cents)
-COST_CENTS_PER_QUERY = 0.5
+# Pricing: Parallel Search Turbo = $1 / 1,000 requests = 0.1 cents / query
+COST_CENTS_PER_QUERY = 0.1
 
 # HTTP / activity timeouts (seconds)
 HTTP_TIMEOUT = 60.0

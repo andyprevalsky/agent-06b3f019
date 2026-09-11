@@ -15,22 +15,21 @@ from _test_utils import (
 
 def _setup():
     setup_mock({
-        "api.parallel.ai/v1beta/search": {
+        "api.parallel.ai/v1/search": {
             "status": 200,
             "json": {
                 "results": [
                     {
                         "title": "AI Trends 2026",
                         "url": "https://example.com/ai-trends",
-                        "text": "The latest trends in AI...",
+                        "excerpts": ["The latest trends in AI..."],
                     },
                     {
                         "title": "Machine Learning Guide",
                         "url": "https://example.com/ml-guide",
-                        "text": "A comprehensive guide to ML...",
+                        "excerpts": ["A comprehensive guide to ML..."],
                     },
                 ],
-                "answer": "AI trends in 2026 include...",
             },
         },
     })
@@ -75,18 +74,25 @@ async def test_web_search_boundary():
         )
 
     call = assert_captured_call(
-        url_contains="api.parallel.ai/v1beta/search",
+        url_contains="api.parallel.ai/v1/search",
         method="POST",
         header_present="x-api-key",
     )
     body = json.loads(call["requestBody"])
-    # Activity sends "objective" and "search_queries", not "query"
+    # Activity sends Parallel V1 Turbo contract (same as chat web_search)
+    assert body["mode"] == "turbo"
     assert body["objective"] == "quantum computing breakthroughs"
     assert "quantum computing breakthroughs" in body["search_queries"]
+    assert body.get("max_results") is None, "V1 max_results must be nested"
+    assert body.get("excerpts") is None, "V1 excerpt settings must be nested"
+    assert body["advanced_settings"] == {
+        "max_results": 5,
+        "excerpt_settings": {"max_chars_per_result": 8000},
+    }
 
-    # Verify beta header
+    # V1 turbo must not send the beta header
     headers_lower = {k.lower(): v for k, v in call["requestHeaders"].items()}
-    assert "parallel-beta" in headers_lower
+    assert "parallel-beta" not in headers_lower
 
 
 async def test_web_search_ddgs_fallback():
