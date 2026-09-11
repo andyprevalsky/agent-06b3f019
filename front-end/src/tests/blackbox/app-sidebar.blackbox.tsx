@@ -186,11 +186,12 @@ describe('AppSidebar', () => {
         status: 'COMPLETED',
         created_at: '2026-01-01T00:00:00Z',
       }),
-      // Active (processing) — should come first regardless of timestamps
+      // Active cloud agent (processing) — should come first regardless of timestamps
       makeAgent({
         agent_id: 'active',
         goal: 'Still running',
         status: 'ACTIVE',
+        temporal_workflow_id: 'wf-active',
         created_at: '2023-01-01T00:00:00Z',
       }),
     ];
