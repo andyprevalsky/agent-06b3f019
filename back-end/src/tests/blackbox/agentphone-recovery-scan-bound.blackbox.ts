@@ -254,6 +254,71 @@ async function testMismatchedStoredNumberOwnerIsNotReused() {
   });
 }
 
+async function testRecoveredAgentIsNotDeletedWhenNumberCreateFails() {
+  await withUser(async (userId) => {
+    const existingAgentId = 'agt-recovered';
+    const releasedNumberId = 'num-released';
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: null,
+        phoneProvider: `agentphone:recovery:${Date.now()}:${randomUUID()}`,
+        phoneProviderAgentId: existingAgentId,
+        phoneProviderNumberId: releasedNumberId,
+      },
+    });
+
+    const calls = installProvider((url, method) => {
+      if (method === 'GET' && url === `https://agentphone.test/v1/agents/${existingAgentId}`) {
+        return Response.json({ id: existingAgentId, name: 'Rose', numbers: [] });
+      }
+      if (method === 'GET' && url === `https://agentphone.test/v1/numbers/${releasedNumberId}`) {
+        return Response.json({
+          id: releasedNumberId,
+          phoneNumber: '+19129142430',
+          status: 'released',
+          agentId: existingAgentId,
+        });
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
+        return new Response(JSON.stringify({ detail: 'area code unavailable' }), {
+          status: 422,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'DELETE' && url === `https://agentphone.test/v1/agents/${existingAgentId}`) {
+        throw new Error('must not delete a recovered AgentPhone agent after number-create failure');
+      }
+      throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+    });
+
+    try {
+      await createAgentPhoneNumber({ userId });
+      assert.fail('expected recovered-agent number creation to fail closed');
+    } catch (error) {
+      assert.equal(
+        isAgentPhoneEmailFallbackSafe(error),
+        true,
+        'a confirmed number-create failure on a recovered agent must allow email fallback'
+      );
+      assert.match(String(error), /failed for recovered provider agent/);
+    }
+
+    assert.equal(
+      calls.filter((call) => call.method === 'DELETE').length,
+      0,
+      'number-create failure must not delete a recovered provider agent'
+    );
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+    assert.equal(
+      identity.phoneProviderAgentId,
+      existingAgentId,
+      'must keep the recovered agent id'
+    );
+  });
+}
+
 async function testRecoveryCreateRejectionAllowsEmailFallback() {
   await withUser(async (userId) => {
     await prisma.agentIdentity.create({
@@ -320,6 +385,10 @@ async function main(): Promise<void> {
     [
       'recovery create 4xx after an empty scan allows email fallback',
       testRecoveryCreateRejectionAllowsEmailFallback,
+    ],
+    [
+      'number-create failure does not delete a recovered AgentPhone agent',
+      testRecoveredAgentIsNotDeletedWhenNumberCreateFails,
     ],
   ] as const) {
     try {

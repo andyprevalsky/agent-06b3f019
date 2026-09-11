@@ -28,7 +28,7 @@ status: fixed
 ## Problem
 
 Prod agent `89f3e1d7-f820-4cc6-9306-f85ed6ab0849` (goal: get the file of
-*Outwitting the Devil*) spawned fourteen browser agents. Every
+_Outwitting the Devil_) spawned fourteen browser agents. Every
 `spawn_browser_agent` died at initialization before opening Kobo:
 
 `Browser session init failed after 5 transient-proxy retries:
@@ -86,10 +86,16 @@ later retry has a keyed handle.
 user, not O(account-agents) against one shared provider account. The 10k list
 bound remains a fail-closed absence proof, never a success gate for a known id.
 
+Number-create cleanup deletes only an agent created in the same attempt.
+Recovered agents (stored id or unique marker) stay intact if `POST /numbers`
+fails; email fallback is still allowed. Inbound conversation listing requires
+`numberId` or `phoneNumber` before paging.
+
 Cemented by `back-end/src/tests/blackbox/agentphone-recovery-scan-bound.blackbox.ts`
 (stored IDs skip the list; later-page unique marker returns without completeness;
-incomplete scan without a handle still fail-closes). Related AgentPhone
-blackboxes stay green. Do not fail-open create after an incomplete scan.
+incomplete scan without a handle still fail-closes; recovered agent is not
+deleted when number create fails). Related AgentPhone blackboxes stay green. Do
+not fail-open create after an incomplete scan.
 
 ## Human feedback
 

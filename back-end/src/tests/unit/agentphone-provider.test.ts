@@ -163,7 +163,22 @@ async function main() {
       'inbound lookup must paginate past the first 100 conversations'
     );
 
-    console.log('agentphone-provider: 7 passed, 0 failed');
+    const inboundBeforeGuard = inboundCalls.length;
+    await assert.rejects(
+      () =>
+        listInboundMessagesForNumber({
+          since: new Date(Date.now() - 60_000),
+          limit: 10,
+        } as never),
+      /requires numberId or phoneNumber/
+    );
+    assert.equal(
+      inboundCalls.length,
+      inboundBeforeGuard,
+      'missing inbound selector must not fetch conversation pages'
+    );
+
+    console.log('agentphone-provider: 8 passed, 0 failed');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.AGENTPHONE_API_KEY;

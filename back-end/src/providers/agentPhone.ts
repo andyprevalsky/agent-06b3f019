@@ -47,6 +47,11 @@ type AgentPhoneAgent = {
   numbers: Record<string, unknown>[];
 };
 
+type ResolvedProvisioningAgent = {
+  agent: AgentPhoneAgent;
+  createdThisAttempt: boolean;
+};
+
 class AgentPhoneHttpError extends Error {
   constructor(
     message: string,
@@ -333,10 +338,13 @@ async function resolveAgentForProvisioning(params: {
   existingAgentId: string | null;
   leaseMarker: string | null;
   requestDeadlineAt: number;
-}): Promise<AgentPhoneAgent> {
+}): Promise<ResolvedProvisioningAgent> {
   if (params.existingAgentId) {
     try {
-      return await getAgent(params.existingAgentId, params.requestDeadlineAt);
+      return {
+        agent: await getAgent(params.existingAgentId, params.requestDeadlineAt),
+        createdThisAttempt: false,
+      };
     } catch (error) {
       log.warn('Stored AgentPhone agent id was not recoverable; continuing keyed lookup', {
         userId: params.userId,
@@ -349,7 +357,7 @@ async function resolveAgentForProvisioning(params: {
   if (params.recoveryRequired) {
     try {
       const recovered = await findAgentByMarker(params.marker, params.requestDeadlineAt);
-      if (recovered !== null) return recovered;
+      if (recovered !== null) return { agent: recovered, createdThisAttempt: false };
     } catch (error) {
       throw new AgentPhoneProvisioningError(
         `AgentPhone recovery scan failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -361,7 +369,7 @@ async function resolveAgentForProvisioning(params: {
   try {
     const created = await createAgent(params.displayName, params.marker, params.requestDeadlineAt);
     await persistCreatedAgentId(params.userId, params.leaseMarker, created.id);
-    return created;
+    return { agent: created, createdThisAttempt: true };
   } catch (error) {
     if (isConfirmedAgentCreateRejection(error)) {
       throw new AgentPhoneProvisioningError(
@@ -382,7 +390,7 @@ async function resolveAgentForProvisioning(params: {
       if (recovered === null) {
         throw new Error('no exact provisioning marker was visible after a complete scan');
       }
-      return recovered;
+      return { agent: recovered, createdThisAttempt: false };
     } catch (reconcileError) {
       throw new AgentPhoneProvisioningError(
         `AgentPhone agent creation is uncertain; reconciliation failed: ${
@@ -411,7 +419,7 @@ async function provisionAgentPhoneNumber(
   const displayName = params.agentName?.trim() || 'Rose';
   const areaCode = params.areaCode?.trim() || defaultAreaCode();
   const marker = markerForUser(params.userId);
-  const agent = await resolveAgentForProvisioning({
+  const { agent, createdThisAttempt } = await resolveAgentForProvisioning({
     userId: params.userId,
     displayName,
     marker,
@@ -455,7 +463,9 @@ async function provisionAgentPhoneNumber(
           phoneNumber: reconciledNumber.phoneNumber,
         };
       }
-      await deleteAgent(agent.id, requestDeadlineAt);
+      if (createdThisAttempt) {
+        await deleteAgent(agent.id, requestDeadlineAt);
+      }
     } catch (reconcileError) {
       throw new AgentPhoneProvisioningError(
         `AgentPhone number creation is uncertain; reconciliation or cleanup failed: ${
@@ -465,9 +475,13 @@ async function provisionAgentPhoneNumber(
       );
     }
     throw new AgentPhoneProvisioningError(
-      `AgentPhone number creation failed and provider-agent cleanup was confirmed: ${
-        createError instanceof Error ? createError.message : String(createError)
-      }`,
+      createdThisAttempt
+        ? `AgentPhone number creation failed and provider-agent cleanup was confirmed: ${
+            createError instanceof Error ? createError.message : String(createError)
+          }`
+        : `AgentPhone number creation failed for recovered provider agent: ${
+            createError instanceof Error ? createError.message : String(createError)
+          }`,
       true
     );
   }

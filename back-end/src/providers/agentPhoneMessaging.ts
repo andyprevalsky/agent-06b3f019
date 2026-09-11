@@ -75,13 +75,31 @@ export async function sendAgentPhoneMessage(params: {
   };
 }
 
-export async function listInboundMessagesForNumber(params: {
-  numberId?: string | null;
-  phoneNumber?: string | null;
+export type AgentPhoneInboundListParams = {
   since: Date;
   limit: number;
-}): Promise<AgentPhoneInboundMessage[]> {
+} & (
+  | { numberId: string; phoneNumber?: string | null }
+  | { phoneNumber: string; numberId?: string | null }
+);
+
+function inboundSelector(params: AgentPhoneInboundListParams): {
+  numberId: string;
+  phoneNumber: string;
+} {
+  const numberId = params.numberId?.trim() ?? '';
+  const phoneNumber = params.phoneNumber?.trim() ?? '';
+  if (numberId === '' && phoneNumber === '') {
+    throw new Error('AgentPhone inbound list requires numberId or phoneNumber');
+  }
+  return { numberId, phoneNumber };
+}
+
+export async function listInboundMessagesForNumber(
+  params: AgentPhoneInboundListParams
+): Promise<AgentPhoneInboundMessage[]> {
   if (!isAgentPhoneConfigured()) return [];
+  const selector = inboundSelector(params);
   const requestDeadlineAt = messagingDeadlineAt();
   const conversations: Record<string, unknown>[] = [];
   for (let page = 0; page < MAX_CONVERSATION_PAGES; page += 1) {
@@ -107,8 +125,8 @@ export async function listInboundMessagesForNumber(params: {
       const conversationNumberId = stringValue(conversation.phoneNumberId);
       const conversationNumber = stringValue(conversation.phoneNumber);
       return (
-        (params.numberId ? conversationNumberId === params.numberId : false) ||
-        samePhone(conversationNumber, params.phoneNumber)
+        (selector.numberId !== '' && conversationNumberId === selector.numberId) ||
+        (selector.phoneNumber !== '' && samePhone(conversationNumber, selector.phoneNumber))
       );
     });
     conversations.push(...matches);
