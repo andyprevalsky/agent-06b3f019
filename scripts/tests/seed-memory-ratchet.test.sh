@@ -132,4 +132,52 @@ require_text "$MEASUREMENT" \
     'restore that original mode before measuring' \
     "restore validation must not leave errexit enabled for the measured seed"
 
+# Execute the actual progress statement: unbraced variables adjoining Unicode
+# punctuation can be parsed as a different identifier by macOS Bash.
+MEASUREMENT="$MEASUREMENT" TEST_SHELL="$BASH" python3 - <<'PY'
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+source = Path(os.environ["MEASUREMENT"]).read_text()
+statements = [
+    line.strip()
+    for line in source.splitlines()
+    if "restoring source into " in line
+]
+assert len(statements) == 1, statements
+cleanup = re.search(r"(?ms)^cleanup\(\) \{.*?^trap cleanup_all EXIT INT TERM$", source)
+assert cleanup is not None
+for locale in ("C", "en_US.UTF-8", "C.UTF-8"):
+    for pipeline_failure in (False, True):
+        command = "\n".join([
+            'dropdb() { printf "drop %s\\n" "${!#}" >> "$TRACE"; }',
+            cleanup.group(),
+            'unset SEED_TEST_UNSET; printf "%s\\n" "$SEED_TEST_UNSET" | tee -a "$SUMMARY"'
+            if pipeline_failure else statements[0],
+            'status=$?; printf "after:%s\\n" "$status" >> "$TRACE"; exit "$status"',
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            trace = Path(directory) / "cleanup.log"
+            summary = Path(directory) / "summary.txt"
+            script = Path(directory) / "source-progress.sh"
+            script.write_text(command + "\n")
+            env = dict(os.environ, LC_ALL=locale, LC_CTYPE=locale, LANG=locale,
+                       SRC_DB="local_source", TARGET_DB="local_target", USE_SYSTEM_PG="true",
+                       SUMMARY=str(summary), TRACE=str(trace))
+            result = subprocess.run(
+                [os.environ["TEST_SHELL"], "-uo", "pipefail", str(script)],
+                env=env, capture_output=True, timeout=5,
+            )
+            assert (result.returncode != 0) is pipeline_failure, (locale, result.stderr)
+            expected = b"" if pipeline_failure else "   restoring source into local_source…\n".encode()
+            assert result.stdout == summary.read_bytes() == expected, (locale, result.stdout)
+            assert trace.read_text() == (
+                f"after:{result.returncode}\ndrop local_target\ndrop local_source\n"
+            ), (locale, pipeline_failure, trace.read_text())
+print("PASS: source progress is locale-safe and pipeline children cannot retire owner databases")
+PY
+
 echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
