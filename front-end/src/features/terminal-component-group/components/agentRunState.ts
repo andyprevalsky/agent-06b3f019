@@ -6,17 +6,25 @@
  * because the question a user asks when scanning the list is only ever "is this
  * moving, is it stuck on me, or is it over?":
  *
- *   ACTIVE     STARTING_UP, ACTIVE          animated  — it is moving on its own
+ *   ACTIVE     STARTING_UP, ACTIVE          animated  — cloud agent is moving
+ *              (with a Temporal workflow id)
  *   NEEDS_HELP unanswered attention request static    — blocked until you act
  *              OUT_OF_CREDITS
  *              COST_LIMIT_REACHED
  *              PAUSED
  *   DONE       COMPLETED, FAILED            static    — terminal, nothing to do
+ *              ACTIVE with no workflow id             — chat mode, never escalated
  *
  * Motion is the signal that separates the families: only ACTIVE animates, so a
  * still row always means "no progress is happening". That inverts the usual
  * spinner-everywhere pattern on purpose — an animation that never stops stops
  * meaning anything.
+ *
+ * Chat-mode roots stay `ACTIVE` in the DB forever (they never open a Temporal
+ * workflow). Without a workflow id there is no cloud agent running, so the
+ * sidebar treats them as DONE — otherwise every finished chat would animate
+ * "Working" forever. STARTING_UP without a workflow still animates: that is the
+ * brief optimistic create / first-turn load before chat settles.
  *
  * NEEDS_HELP outranks the raw status: an agent can hold an unanswered question
  * while its row still reads ACTIVE (the workflow is parked on the request, not
@@ -99,7 +107,13 @@ export function agentRunStatus(
     case 'FAILED':
       return { state: 'done', failed: true, label: 'Failed' };
     case 'STARTING_UP':
+      return { state: 'active', label: 'Working' };
     case 'ACTIVE':
+      // Chat-mode roots never get a Temporal workflow; ACTIVE without one is idle
+      // chat, not a running cloud agent.
+      if (agent.temporal_workflow_id === null) {
+        return { state: 'done', failed: false, label: 'Completed' };
+      }
       return { state: 'active', label: 'Working' };
   }
 }
