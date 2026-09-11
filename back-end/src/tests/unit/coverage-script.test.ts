@@ -279,13 +279,18 @@ assert.match(
 );
 assert.match(
   unitRunner,
-  /spawn\(process\.execPath, \['--experimental-test-module-mocks', '--import', 'tsx', file\]/,
+  /spawn\(\s*process\.execPath,\s*\['--experimental-test-module-mocks', '--import', 'tsx', file\]/,
   'unit files must avoid npm and tsx wrapper processes under V8 coverage'
 );
 assert.match(
   unitRunner,
   /BACKEND_UNIT_CONCURRENCY/,
   'unit runner must expose its bounded process-pool size'
+);
+assert.match(
+  unitRunner,
+  /SERIAL_FIRST_FILES = new Set\(\['regex-safety\.test\.ts'\]\)/,
+  'regex-safety must run isolated before the parallel unit pool so recheck is not starved'
 );
 assert.match(
   unitRunner,

@@ -16,6 +16,10 @@ const unitDir = join(backendDir, 'src', 'tests', 'unit');
 const logDir = join(backendDir, 'coverage', 'unit-run');
 const requestedConcurrency = Number.parseInt(process.env.BACKEND_UNIT_CONCURRENCY ?? '6', 10);
 const coverageDir = process.env.BACKEND_UNIT_COVERAGE_DIR;
+// Recheck is CPU-heavy. Under coverage it shares the host with the backend and
+// 160 blackbox domains, so a 1s analyzer budget times out even on safe range
+// queries. Run those files first, alone, then start the parallel pool.
+const SERIAL_FIRST_FILES = new Set(['regex-safety.test.ts']);
 
 if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
   console.error('BACKEND_UNIT_CONCURRENCY must be a positive integer.');
@@ -182,14 +186,19 @@ async function findTests(directory: string): Promise<string[]> {
 
 async function main(): Promise<void> {
   const tests = await findTests(unitDir);
-  const concurrency = Math.min(requestedConcurrency, tests.length || 1);
+  const serialFirst = tests.filter((file) => SERIAL_FIRST_FILES.has(basename(file)));
+  const parallelTests = tests.filter((file) => !SERIAL_FIRST_FILES.has(basename(file)));
+  const concurrency = Math.min(requestedConcurrency, parallelTests.length || 1);
   const results: UnitResult[] = [];
   const activeChildren = new Set<ChildProcess>();
   let nextTestIndex = 0;
   let interrupted = false;
 
   await mkdir(logDir, { recursive: true });
-  console.log(`Running ${tests.length} unit test file(s) with concurrency=${concurrency}...`);
+  console.log(
+    `Running ${tests.length} unit test file(s) with concurrency=${concurrency}` +
+      (serialFirst.length > 0 ? ` after ${serialFirst.length} isolated analyzer file(s)...` : '...')
+  );
 
   function stopChildren(signal: NodeJS.Signals): void {
     interrupted = true;
@@ -203,15 +212,19 @@ async function main(): Promise<void> {
     const startedAt = performance.now();
     const chunks: Buffer[] = [];
     // Preserve one isolated process per file without npm/tsx wrapper processes.
-    const child = spawn(process.execPath, ['--experimental-test-module-mocks', '--import', 'tsx', file], {
-      cwd: backendDir,
-      env: {
-        ...process.env,
-        ...localDatabaseEnv,
-        ...(coverageDir === undefined ? {} : { NODE_V8_COVERAGE: coverageDir }),
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn(
+      process.execPath,
+      ['--experimental-test-module-mocks', '--import', 'tsx', file],
+      {
+        cwd: backendDir,
+        env: {
+          ...process.env,
+          ...localDatabaseEnv,
+          ...(coverageDir === undefined ? {} : { NODE_V8_COVERAGE: coverageDir }),
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
     activeChildren.add(child);
     child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk));
     child.stderr?.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -244,9 +257,14 @@ async function main(): Promise<void> {
   async function worker(): Promise<void> {
     while (!interrupted) {
       const index = nextTestIndex++;
-      if (index >= tests.length) return;
-      results.push(await runTest(tests[index]));
+      if (index >= parallelTests.length) return;
+      results.push(await runTest(parallelTests[index]));
     }
+  }
+
+  for (const file of serialFirst) {
+    if (interrupted) break;
+    results.push(await runTest(file));
   }
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));

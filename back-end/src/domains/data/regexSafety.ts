@@ -95,10 +95,13 @@ export function checkPatternSafety(
       return null;
     }
   };
-  // One retry absorbs a load-induced analyzer timeout without raising the
-  // deadline or accepting an unclassified pattern. A second unknown still
+  // Two retries absorb a load-induced analyzer timeout without raising the
+  // deadline or accepting an unclassified pattern. A third unknown still
   // fail-closes — the guard exists to keep catastrophic regex out of Postgres.
   let diagnostics = runAnalyzer();
+  if (diagnostics === null || diagnostics.status === 'unknown') {
+    diagnostics = runAnalyzer();
+  }
   if (diagnostics === null || diagnostics.status === 'unknown') {
     diagnostics = runAnalyzer();
   }
