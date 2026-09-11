@@ -178,7 +178,56 @@ async function main() {
       'missing inbound selector must not fetch conversation pages'
     );
 
-    console.log('agentphone-provider: 8 passed, 0 failed');
+    inboundCalls.length = 0;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = input.toString();
+      inboundCalls.push(url);
+      if (url.includes('/conversations?')) {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: 'conv-ws', phoneNumberId: 'number-1', phoneNumber: '+19125550100' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/conversations/conv-ws/messages')) {
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: 'in-ws',
+                direction: 'inbound',
+                body: 'keep whitespace-only phoneNumber from dropping matches',
+                receivedAt: new Date().toISOString(),
+                fromNumber: '+19729777432',
+                toNumber: '+19125550100',
+                channel: 'sms',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`unexpected inbound fetch: ${url}`);
+    }) as typeof fetch;
+
+    const whitespaceInbound = await listInboundMessagesForNumber({
+      numberId: 'number-1',
+      phoneNumber: '   ',
+      since: new Date(Date.now() - 60_000),
+      limit: 10,
+    });
+    assert.equal(
+      whitespaceInbound.length,
+      1,
+      'whitespace-only phoneNumber must not filter out inbound matches'
+    );
+    assert.equal(
+      whitespaceInbound[0]?.body,
+      'keep whitespace-only phoneNumber from dropping matches'
+    );
+
+    console.log('agentphone-provider: 9 passed, 0 failed');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.AGENTPHONE_API_KEY;

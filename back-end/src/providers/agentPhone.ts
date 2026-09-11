@@ -297,8 +297,9 @@ async function getNumber(
   const data = await parseJson(response);
   if (response.status === 404) return null;
   if (!response.ok) {
-    throw new Error(
-      `AgentPhone number reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
+    throw new AgentPhoneHttpError(
+      `AgentPhone number reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`,
+      response.status
     );
   }
   return activeNumberFromRecord(asRecord(data));
@@ -445,13 +446,22 @@ async function provisionAgentPhoneNumber(
   }
 
   if (claim.existingNumberId) {
-    const storedNumber = await getNumber(claim.existingNumberId, requestDeadlineAt);
-    if (storedNumber && storedNumber.agentId === agent.id) {
-      return {
-        agentId: agent.id,
-        numberId: storedNumber.id,
-        phoneNumber: storedNumber.phoneNumber,
-      };
+    try {
+      const storedNumber = await getNumber(claim.existingNumberId, requestDeadlineAt);
+      if (storedNumber && storedNumber.agentId === agent.id) {
+        return {
+          agentId: agent.id,
+          numberId: storedNumber.id,
+          phoneNumber: storedNumber.phoneNumber,
+        };
+      }
+    } catch (error) {
+      throw new AgentPhoneProvisioningError(
+        `Stored AgentPhone number lookup is uncertain: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        false
+      );
     }
   }
 

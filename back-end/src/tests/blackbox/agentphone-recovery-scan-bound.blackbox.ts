@@ -303,6 +303,54 @@ async function testStoredAgentLookup500DoesNotCreateSuccessor() {
   });
 }
 
+async function testStoredNumberLookup500DoesNotCreateNumber() {
+  await withUser(async (userId) => {
+    const existingAgentId = 'agt-number-uncertain';
+    const existingNumberId = 'num-uncertain';
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: null,
+        phoneProvider: `agentphone:recovery:${Date.now()}:${randomUUID()}`,
+        phoneProviderAgentId: existingAgentId,
+        phoneProviderNumberId: existingNumberId,
+      },
+    });
+
+    let numberCreates = 0;
+    installProvider((url, method) => {
+      if (method === 'GET' && url === `https://agentphone.test/v1/agents/${existingAgentId}`) {
+        return Response.json({ id: existingAgentId, name: 'Rose', numbers: [] });
+      }
+      if (method === 'GET' && url === `https://agentphone.test/v1/numbers/${existingNumberId}`) {
+        return new Response(JSON.stringify({ detail: 'upstream unavailable' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
+        numberCreates += 1;
+        throw new Error('must not create a number after an unconfirmed stored-number lookup');
+      }
+      throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+    });
+
+    try {
+      await createAgentPhoneNumber({ userId });
+      assert.fail('expected stored-number lookup uncertainty to fail closed');
+    } catch (error) {
+      assert.equal(
+        isAgentPhoneEmailFallbackSafe(error),
+        false,
+        'an unconfirmed stored-number GET must not allow email fallback or a successor create'
+      );
+      assert.match(String(error), /Stored AgentPhone number lookup is uncertain/);
+    }
+    assert.equal(numberCreates, 0, 'a 500 on the stored number must never POST /numbers');
+  });
+}
+
 async function testRecoveredAgentIsNotDeletedWhenNumberCreateFails() {
   await withUser(async (userId) => {
     const existingAgentId = 'agt-recovered';
@@ -442,6 +490,10 @@ async function main(): Promise<void> {
     [
       'stored-agent 500 does not create a successor AgentPhone agent',
       testStoredAgentLookup500DoesNotCreateSuccessor,
+    ],
+    [
+      'stored-number 500 does not create a successor AgentPhone number',
+      testStoredNumberLookup500DoesNotCreateNumber,
     ],
   ] as const) {
     try {

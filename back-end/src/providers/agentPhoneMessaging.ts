@@ -161,7 +161,7 @@ export async function listInboundMessagesForNumber(
       if (direction !== 'inbound' || body === '' || Number.isNaN(receivedAt.getTime())) continue;
       if (receivedAt < params.since) continue;
       const to = stringValue(rawMessage.toNumber) || stringValue(rawMessage.to);
-      if (params.phoneNumber && to && !samePhone(to, params.phoneNumber)) continue;
+      if (selector.phoneNumber !== '' && to && !samePhone(to, selector.phoneNumber)) continue;
       messages.push({
         id: stringValue(rawMessage.id) || `${conversationId}:${receivedAt.toISOString()}:${body}`,
         from: stringValue(rawMessage.fromNumber) || stringValue(rawMessage.from),
