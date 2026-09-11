@@ -68,12 +68,25 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
 }
 
 describe('agentRunStatus', () => {
-  it('maps in-flight statuses to active', () => {
+  it('maps in-flight cloud-agent statuses to active', () => {
     for (const status of ['STARTING_UP', 'ACTIVE'] as const) {
-      const result = agentRunStatus(makeAgent({ status }));
+      const result = agentRunStatus(makeAgent({ status, temporal_workflow_id: 'wf-1' }));
       expect(result.state).toBe('active');
       expect(result.label).toBe('Working');
     }
+  });
+
+  it('treats ACTIVE chat-mode agents (no Temporal workflow) as done', () => {
+    // Chat roots stay ACTIVE forever unless escalated. Without a workflow id
+    // there is no cloud agent running — the sidebar must not animate forever.
+    const result = agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: null }));
+    expect(result).toMatchObject({ state: 'done', failed: false, label: 'Completed' });
+  });
+
+  it('still animates STARTING_UP chat-mode agents during the first-turn load', () => {
+    const result = agentRunStatus(makeAgent({ status: 'STARTING_UP', temporal_workflow_id: null }));
+    expect(result.state).toBe('active');
+    expect(result.label).toBe('Working');
   });
 
   it('folds out-of-credits, cost-limit and paused into needs-help', () => {
@@ -103,7 +116,7 @@ describe('agentRunStatus', () => {
   });
 
   it('lets an unanswered attention request outrank an ACTIVE status', () => {
-    const agent = makeAgent({ status: 'ACTIVE' });
+    const agent = makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' });
     expect(agentRunStatus(agent).state).toBe('active');
 
     const blocked = agentRunStatus(agent, { hasAttentionRequest: true });
@@ -114,13 +127,15 @@ describe('agentRunStatus', () => {
   it('forces archived rows terminal even when the status is still ACTIVE', () => {
     // Archiving terminates the workflow but leaves `status` as the record of how
     // the run ended, so this row would otherwise animate forever.
-    const result = agentRunStatus(makeAgent({ status: 'ACTIVE' }), { isArchived: true });
+    const result = agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }), {
+      isArchived: true,
+    });
     expect(result.state).toBe('done');
     expect(result.label).toBe('Archived');
   });
 
   it('archived outranks an outstanding attention request', () => {
-    const result = agentRunStatus(makeAgent({ status: 'ACTIVE' }), {
+    const result = agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }), {
       isArchived: true,
       hasAttentionRequest: true,
     });
@@ -128,10 +143,13 @@ describe('agentRunStatus', () => {
   });
 
   it('isAgentActive tracks the active state', () => {
-    expect(isAgentActive(makeAgent({ status: 'ACTIVE' }))).toBe(true);
-    expect(isAgentActive(makeAgent({ status: 'ACTIVE' }), { hasAttentionRequest: true })).toBe(
-      false,
-    );
+    expect(isAgentActive(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))).toBe(true);
+    expect(
+      isAgentActive(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }), {
+        hasAttentionRequest: true,
+      }),
+    ).toBe(false);
+    expect(isAgentActive(makeAgent({ status: 'ACTIVE', temporal_workflow_id: null }))).toBe(false);
     expect(isAgentActive(makeAgent({ status: 'COMPLETED' }))).toBe(false);
   });
 });
@@ -139,7 +157,9 @@ describe('agentRunStatus', () => {
 describe('AgentStatusIndicator', () => {
   it('renders the ROSE dot matrix ONLY for the active state', () => {
     const { container: active } = render(
-      <AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} />,
+      <AgentStatusIndicator
+        status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))}
+      />,
     );
     expect(active.querySelectorAll('[data-letter] > span')).toHaveLength(25);
 
@@ -149,11 +169,22 @@ describe('AgentStatusIndicator', () => {
       );
       expect(container.querySelector('[data-letter]')).toBeNull();
     }
+
+    // Chat-mode ACTIVE (no workflow) is done — must not animate.
+    const { container: chatDone } = render(
+      <AgentStatusIndicator
+        status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: null }))}
+      />,
+    );
+    expect(chatDone.querySelector('[data-letter]')).toBeNull();
+    expect(chatDone.querySelector('[aria-label="Completed"]')).toBeTruthy();
   });
 
   it('starts the cycle on a correctly-shaped R', () => {
     const { container } = render(
-      <AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} />,
+      <AgentStatusIndicator
+        status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))}
+      />,
     );
     expect(container.querySelector('[data-letter]')?.getAttribute('data-letter')).toBe('R');
 
@@ -272,7 +303,11 @@ describe('AgentStatusIndicator', () => {
   });
 
   it('names each state for assistive tech', () => {
-    render(<AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} />);
+    render(
+      <AgentStatusIndicator
+        status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))}
+      />,
+    );
     expect(screen.getByLabelText('Working')).toBeTruthy();
 
     render(
@@ -298,7 +333,9 @@ describe('AgentStatusIndicator', () => {
     try {
       resetLetterPhaseForTests();
       const { container } = render(
-        <AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} />,
+        <AgentStatusIndicator
+          status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))}
+        />,
       );
       expect(container.querySelector('[data-letter]')?.getAttribute('data-letter')).toBe('R');
       // A COMPLETED R, not a half-drawn one: every lit cell sits at full opacity
@@ -345,8 +382,14 @@ describe('animation desync', () => {
     // Two rows, same status, same clock — they must not draw in unison.
     const { container } = render(
       <>
-        <AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} seed="a1" />
-        <AgentStatusIndicator status={agentRunStatus(makeAgent({ status: 'ACTIVE' }))} seed="b2" />
+        <AgentStatusIndicator
+          status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-1' }))}
+          seed="a1"
+        />
+        <AgentStatusIndicator
+          status={agentRunStatus(makeAgent({ status: 'ACTIVE', temporal_workflow_id: 'wf-2' }))}
+          seed="b2"
+        />
       </>,
     );
     const letters = Array.from(container.querySelectorAll('[data-letter]')).map((el) =>

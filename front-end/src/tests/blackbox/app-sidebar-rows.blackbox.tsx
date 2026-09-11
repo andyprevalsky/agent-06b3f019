@@ -126,7 +126,12 @@ describe('AppSidebar rows', () => {
 
   it('styles the task name identically in every run state', async () => {
     const agents = [
-      makeAgent({ agent_id: 'running', goal: 'Running now', status: 'ACTIVE' }),
+      makeAgent({
+        agent_id: 'running',
+        goal: 'Running now',
+        status: 'ACTIVE',
+        temporal_workflow_id: 'wf-running',
+      }),
       makeAgent({ agent_id: 'blocked', goal: 'Blocked now', status: 'OUT_OF_CREDITS' }),
       makeAgent({ agent_id: 'finished', goal: 'Finished now', status: 'COMPLETED' }),
       makeAgent({ agent_id: 'broken', goal: 'Broken now', status: 'FAILED' }),
@@ -145,6 +150,7 @@ describe('AppSidebar rows', () => {
         agent_id: 'running',
         goal: 'Running now',
         status: 'ACTIVE',
+        temporal_workflow_id: 'wf-running',
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
       makeAgent({
@@ -168,6 +174,7 @@ describe('AppSidebar rows', () => {
         agent_id: 'running',
         goal: 'Running now',
         status: 'ACTIVE',
+        temporal_workflow_id: 'wf-running',
         created_at: new Date(Date.now() - 4 * 60_000).toISOString(),
       }),
     ];
@@ -229,6 +236,7 @@ describe('AppSidebar rows', () => {
         agent_id: 'long',
         goal: 'Long haul',
         status: 'ACTIVE',
+        temporal_workflow_id: 'wf-long',
         created_at: new Date(Date.now() - (2 * 24 * 60 + 4 * 60) * 60_000).toISOString(),
       }),
     ];
@@ -242,6 +250,7 @@ describe('AppSidebar rows', () => {
         agent_id: 'active',
         goal: 'Still working',
         status: 'ACTIVE',
+        temporal_workflow_id: 'wf-active',
         created_at: '2026-05-01T00:00:00Z',
       }),
       makeAgent({
@@ -257,6 +266,22 @@ describe('AppSidebar rows', () => {
     // Older, but blocked on the user — a needs-help row buried under active runs
     // is one you never see.
     expect(nodes.map((n) => n.textContent)).toEqual(['Waiting on you', 'Still working']);
+  });
+
+  it('shows a checkmark for chat-mode agents that never started a cloud agent', async () => {
+    const agents = [
+      makeAgent({
+        agent_id: 'chat-only',
+        goal: '20g to floz',
+        status: 'ACTIVE',
+        temporal_workflow_id: null,
+      }),
+    ];
+    renderWithProviders(<AppSidebar {...defaultProps({ agents })} />);
+
+    expect(await screen.findByText('20g to floz')).toBeInTheDocument();
+    expect(screen.getByLabelText('Completed')).toBeInTheDocument();
+    expect(document.querySelector('[data-letter]')).toBeNull();
   });
 
   it('groups pinned agents under a Pinned header', async () => {
