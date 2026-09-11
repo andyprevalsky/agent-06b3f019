@@ -120,6 +120,26 @@ fi
     assert_controller_match 0 'bash notrun-predeploy-local'
     assert_controller_match 0 'python3 scripts/run_deploy_stage_helper.py'
 
+    # The tmux server is a worktree-cwd ancestor of every pane. Walking
+    # ancestors from Step 5 services and SIGTERM-ing it destroys every
+    # session in the worktree, including an in-flight isolated smoke run
+    # (observed as smoke supervisor death + a fake-pass EXIT trap).
+    assert_tmux_match() {
+        local expected="$1" command="$2" actual=0
+        MATCH_CMD="$command"
+        is_tmux_process 999999 && actual=1
+        if [ "$actual" -ne "$expected" ]; then
+            echo "FAIL: tmux match expected=$expected actual=$actual command=$command" >&2
+            exit 1
+        fi
+    }
+    assert_tmux_match 1 '/exec-daemon/tmux-root/bin/tmux -f /exec-daemon/tmux.portal.conf new-session -d -s backend-coverage'
+    assert_tmux_match 1 'tmux -f /exec-daemon/tmux.portal.conf attach-session -t deploy-smoke'
+    assert_tmux_match 1 'tmux new-session -d -s deploy-step5'
+    assert_tmux_match 0 'python scripts/tmux-helper.py'
+    assert_tmux_match 0 'bash scripts/run-tmuxinator'
+    assert_tmux_match 0 'bash scripts/run.sh --benchmark'
+
     # Foreign controller trees (isolated smoke under run-predeploy-local) must
     # be protected from a shared-stack kill-services sweep.
     sleep 1000 &

@@ -248,8 +248,20 @@ is_protected_benchmark_tree() {
     [ -z "$self_controller" ] || [ "$target_controller" != "$self_controller" ]
 }
 
+# The tmux server is a same-cwd ancestor of every pane started in this
+# worktree. Walking ancestors from Step 5 services and signalling it
+# destroys every session — including an isolated smoke supervisor that
+# kill-services is explicitly forbidden to touch (rule 27). Protect the
+# server and its clients; the services they wrap are still discovered
+# as descendants of run.sh.
+is_tmux_process() {
+    local cmd
+    cmd=$(cmd_of "$1")
+    echo "$cmd" | grep -Eq '(^|[[:space:]/])tmux([:[:space:]]|$)'
+}
+
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" || is_tmux_process "$1"
 }
 
 service_like_process() {
