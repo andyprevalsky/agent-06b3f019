@@ -10,6 +10,18 @@ import {
   type AgentPhoneOutboundMessage,
 } from './agentPhoneClient';
 
+const MESSAGING_TIMEOUT_MS = 10_000;
+const CONVERSATION_PAGE_SIZE = 100;
+const MAX_CONVERSATION_PAGES = 100;
+
+function messagingDeadlineAt(): number {
+  return Date.now() + MESSAGING_TIMEOUT_MS;
+}
+
+function messagingSignal(requestDeadlineAt: number): AbortSignal {
+  return AbortSignal.timeout(Math.max(1, requestDeadlineAt - Date.now()));
+}
+
 export async function sendAgentPhoneMessage(params: {
   agentId?: string | null;
   numberId?: string | null;
@@ -21,6 +33,7 @@ export async function sendAgentPhoneMessage(params: {
     throw new Error('AGENTPHONE_API_KEY is not configured');
   }
 
+  const requestDeadlineAt = messagingDeadlineAt();
   const response = await fetch(`${baseUrl()}/messages`, {
     method: 'POST',
     headers: authHeaders(),
@@ -35,6 +48,7 @@ export async function sendAgentPhoneMessage(params: {
             ? { agent_id: params.agentId }
             : {}),
     }),
+    signal: messagingSignal(requestDeadlineAt),
   });
   const data = await parseJson(response);
   if (!response.ok) {
@@ -68,26 +82,40 @@ export async function listInboundMessagesForNumber(params: {
   limit: number;
 }): Promise<AgentPhoneInboundMessage[]> {
   if (!isAgentPhoneConfigured()) return [];
-  const conversationsResponse = await fetch(`${baseUrl()}/conversations?limit=100&offset=0`, {
-    headers: authHeaders(),
-  });
-  const conversationsData = await parseJson(conversationsResponse);
-  if (!conversationsResponse.ok) {
-    throw new Error(
-      `AgentPhone conversations fetch failed: HTTP ${conversationsResponse.status} ${JSON.stringify(
-        conversationsData
-      ).slice(0, 300)}`
+  const requestDeadlineAt = messagingDeadlineAt();
+  const conversations: Record<string, unknown>[] = [];
+  for (let page = 0; page < MAX_CONVERSATION_PAGES; page += 1) {
+    const offset = page * CONVERSATION_PAGE_SIZE;
+    const conversationsResponse = await fetch(
+      `${baseUrl()}/conversations?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`,
+      {
+        headers: authHeaders(),
+        signal: messagingSignal(requestDeadlineAt),
+      }
     );
-  }
+    const conversationsData = await parseJson(conversationsResponse);
+    if (!conversationsResponse.ok) {
+      throw new Error(
+        `AgentPhone conversations fetch failed: HTTP ${conversationsResponse.status} ${JSON.stringify(
+          conversationsData
+        ).slice(0, 300)}`
+      );
+    }
 
-  const conversations = dataArray(conversationsData).filter((conversation) => {
-    const conversationNumberId = stringValue(conversation.phoneNumberId);
-    const conversationNumber = stringValue(conversation.phoneNumber);
-    return (
-      (params.numberId ? conversationNumberId === params.numberId : false) ||
-      samePhone(conversationNumber, params.phoneNumber)
-    );
-  });
+    const pageRows = dataArray(conversationsData);
+    const matches = pageRows.filter((conversation) => {
+      const conversationNumberId = stringValue(conversation.phoneNumberId);
+      const conversationNumber = stringValue(conversation.phoneNumber);
+      return (
+        (params.numberId ? conversationNumberId === params.numberId : false) ||
+        samePhone(conversationNumber, params.phoneNumber)
+      );
+    });
+    conversations.push(...matches);
+    if (pageRows.length === 0 || pageRows.length < CONVERSATION_PAGE_SIZE) {
+      break;
+    }
+  }
 
   const messages: AgentPhoneInboundMessage[] = [];
   for (const conversation of conversations) {
@@ -95,7 +123,7 @@ export async function listInboundMessagesForNumber(params: {
     if (conversationId === '') continue;
     const response = await fetch(
       `${baseUrl()}/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`,
-      { headers: authHeaders() }
+      { headers: authHeaders(), signal: messagingSignal(requestDeadlineAt) }
     );
     const data = await parseJson(response);
     if (!response.ok) {

@@ -114,19 +114,25 @@ function agentFromPayload(payload: Record<string, unknown>): AgentPhoneAgent | n
   };
 }
 
+function numberOwnerId(rawNumber: Record<string, unknown>): string {
+  return stringValue(rawNumber.agentId) || stringValue(rawNumber.agent_id);
+}
+
 function activeNumberFromRecord(
   rawNumber: Record<string, unknown>
-): { id: string; phoneNumber: string } | null {
+): { id: string; phoneNumber: string; agentId: string } | null {
   const id = stringValue(rawNumber.id);
   const phoneNumber = stringValue(rawNumber.phoneNumber);
   const status = stringValue(rawNumber.status);
   if (id !== '' && phoneNumber !== '' && (status === '' || status === 'active')) {
-    return { id, phoneNumber };
+    return { id, phoneNumber, agentId: numberOwnerId(rawNumber) };
   }
   return null;
 }
 
-function numberFromAgent(agent: AgentPhoneAgent): { id: string; phoneNumber: string } | null {
+function numberFromAgent(
+  agent: AgentPhoneAgent
+): { id: string; phoneNumber: string; agentId: string } | null {
   for (const rawNumber of agent.numbers) {
     const number = activeNumberFromRecord(rawNumber);
     if (number !== null) return number;
@@ -273,7 +279,7 @@ async function getAgent(agentId: string, requestDeadlineAt: number): Promise<Age
 async function getNumber(
   numberId: string,
   requestDeadlineAt: number
-): Promise<{ id: string; phoneNumber: string } | null> {
+): Promise<{ id: string; phoneNumber: string; agentId: string } | null> {
   const response = await fetch(`${baseUrl()}/numbers/${encodeURIComponent(numberId)}`, {
     headers: authHeaders(),
     signal: requestSignal(requestDeadlineAt),
@@ -285,7 +291,7 @@ async function getNumber(
       `AgentPhone number reconciliation failed: HTTP ${response.status} ${JSON.stringify(data).slice(0, 300)}`
     );
   }
-  return activeNumberFromRecord(data);
+  return activeNumberFromRecord(asRecord(data));
 }
 
 async function deleteAgent(agentId: string, requestDeadlineAt: number): Promise<void> {
@@ -344,13 +350,6 @@ async function resolveAgentForProvisioning(params: {
     try {
       const recovered = await findAgentByMarker(params.marker, params.requestDeadlineAt);
       if (recovered !== null) return recovered;
-      const created = await createAgent(
-        params.displayName,
-        params.marker,
-        params.requestDeadlineAt
-      );
-      await persistCreatedAgentId(params.userId, params.leaseMarker, created.id);
-      return created;
     } catch (error) {
       throw new AgentPhoneProvisioningError(
         `AgentPhone recovery scan failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -368,6 +367,14 @@ async function resolveAgentForProvisioning(params: {
       throw new AgentPhoneProvisioningError(
         `AgentPhone rejected agent creation: ${error instanceof Error ? error.message : String(error)}`,
         true
+      );
+    }
+    if (params.recoveryRequired) {
+      throw new AgentPhoneProvisioningError(
+        `AgentPhone recovery agent creation is uncertain: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        false
       );
     }
     try {
@@ -425,7 +432,7 @@ async function provisionAgentPhoneNumber(
 
   if (claim.existingNumberId) {
     const storedNumber = await getNumber(claim.existingNumberId, requestDeadlineAt);
-    if (storedNumber) {
+    if (storedNumber && storedNumber.agentId === agent.id) {
       return {
         agentId: agent.id,
         numberId: storedNumber.id,
@@ -533,7 +540,7 @@ export async function createAgentPhoneNumber(params: {
       await releaseAgentPhoneProvisioning(
         params.userId,
         claim.marker,
-        claim.recoveryRequired || !isAgentPhoneEmailFallbackSafe(error)
+        !isAgentPhoneEmailFallbackSafe(error)
       );
       throw error;
     }

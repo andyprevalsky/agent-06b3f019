@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { createAgentPhoneNumber } from '../../providers/agentPhone';
+import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from '../../providers/agentPhone';
 import { prisma } from '../../providers/database';
 
 const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
@@ -210,6 +210,94 @@ async function testIncompleteScanWithoutHitStillFailsClosed() {
   });
 }
 
+async function testMismatchedStoredNumberOwnerIsNotReused() {
+  await withUser(async (userId) => {
+    const existingAgentId = 'agt-owned';
+    const foreignNumberId = 'num-foreign';
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: null,
+        phoneProvider: `agentphone:recovery:${Date.now()}:${randomUUID()}`,
+        phoneProviderAgentId: existingAgentId,
+        phoneProviderNumberId: foreignNumberId,
+      },
+    });
+
+    let numberCreates = 0;
+    installProvider((url, method, init) => {
+      if (method === 'GET' && url === `https://agentphone.test/v1/agents/${existingAgentId}`) {
+        return Response.json({ id: existingAgentId, name: 'Rose', numbers: [] });
+      }
+      if (method === 'GET' && url === `https://agentphone.test/v1/numbers/${foreignNumberId}`) {
+        return Response.json({
+          id: foreignNumberId,
+          phoneNumber: '+19125550999',
+          status: 'active',
+          agentId: 'agt-someone-else',
+        });
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/numbers') {
+        numberCreates += 1;
+        const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+        assert.equal(body.agentId, existingAgentId);
+        return Response.json({ id: 'num-owned', phoneNumber: '+19125550111' });
+      }
+      throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+    });
+
+    const provisioned = await createAgentPhoneNumber({ userId });
+    assert.equal(provisioned?.numberId, 'num-owned');
+    assert.equal(provisioned?.phoneNumber, '+19125550111');
+    assert.equal(numberCreates, 1, 'a number owned by another agent must not be reused');
+  });
+}
+
+async function testRecoveryCreateRejectionAllowsEmailFallback() {
+  await withUser(async (userId) => {
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phoneProvider: `agentphone:recovery:${Date.now()}:${randomUUID()}`,
+      },
+    });
+
+    installProvider((url, method) => {
+      if (method === 'GET' && url.includes('/agents?limit=100&offset=')) {
+        return Response.json({ data: [], total: 0 });
+      }
+      if (method === 'POST' && url === 'https://agentphone.test/v1/agents') {
+        return new Response(JSON.stringify({ detail: 'agent quota exceeded' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected AgentPhone fetch: ${method} ${url}`);
+    });
+
+    try {
+      await createAgentPhoneNumber({ userId });
+      assert.fail('expected a confirmed agent-create rejection');
+    } catch (error) {
+      assert.equal(
+        isAgentPhoneEmailFallbackSafe(error),
+        true,
+        'a definitive provider 4xx after a complete empty scan must allow email fallback'
+      );
+      assert.match(String(error), /AgentPhone rejected agent creation/);
+    }
+
+    const identity = await prisma.agentIdentity.findUniqueOrThrow({ where: { userId } });
+    assert.equal(
+      identity.phoneProvider,
+      null,
+      'a confirmed rejection must clear the recovery marker so the next attempt is not stuck'
+    );
+  });
+}
+
 async function main(): Promise<void> {
   const results: Array<{ name: string; error?: string }> = [];
   for (const [name, fn] of [
@@ -224,6 +312,14 @@ async function main(): Promise<void> {
     [
       'incomplete oversized scan without a keyed handle still fails closed',
       testIncompleteScanWithoutHitStillFailsClosed,
+    ],
+    [
+      'stored number owned by another AgentPhone agent is not reused',
+      testMismatchedStoredNumberOwnerIsNotReused,
+    ],
+    [
+      'recovery create 4xx after an empty scan allows email fallback',
+      testRecoveryCreateRejectionAllowsEmailFallback,
     ],
   ] as const) {
     try {

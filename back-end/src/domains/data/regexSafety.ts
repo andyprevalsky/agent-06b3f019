@@ -88,16 +88,23 @@ export function checkPatternSafety(
   ) {
     return { ok: true };
   }
+  // Retries share one wall-clock deadline. Each checkSync invocation otherwise
+  // starts a fresh timeout, which would multiply request-path latency by the
+  // retry count under load.
+  const deadlineAt = Date.now() + timeoutMs;
   const runAnalyzer = () => {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return null;
     try {
-      return analyze(source, flags, { timeout: timeoutMs });
+      return analyze(source, flags, { timeout: remainingMs });
     } catch {
       return null;
     }
   };
   // Two retries absorb a load-induced analyzer timeout without raising the
-  // deadline or accepting an unclassified pattern. A third unknown still
-  // fail-closes — the guard exists to keep catastrophic regex out of Postgres.
+  // shared deadline or accepting an unclassified pattern. A third unknown
+  // still fail-closes — the guard exists to keep catastrophic regex out of
+  // Postgres.
   let diagnostics = runAnalyzer();
   if (diagnostics === null || diagnostics.status === 'unknown') {
     diagnostics = runAnalyzer();

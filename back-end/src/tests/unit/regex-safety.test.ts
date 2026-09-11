@@ -94,16 +94,22 @@ function run(): void {
   });
 
   let analyzerAttempts = 0;
+  const analyzerTimeouts: number[] = [];
   const recoveredAfterLoadTimeout = checkPatternSafety('(invoice|receipt|order)\\s+#?[0-9]+', '', ((
     _source: string,
     _flags: string,
-    _options: { timeout: number }
+    options: { timeout: number }
   ) => {
     analyzerAttempts += 1;
+    analyzerTimeouts.push(options.timeout);
     if (analyzerAttempts === 1) throw new Error('simulated load-induced analyzer timeout');
     return { status: 'safe' };
   }) as typeof checkSync);
   assert.equal(analyzerAttempts, 2, 'a single analyzer timeout must be retried once');
+  assert.ok(
+    analyzerTimeouts.every((timeout) => timeout <= 1000),
+    'retries must share the original 1000ms analyzer budget'
+  );
   assert.equal(
     recoveredAfterLoadTimeout.ok,
     true,

@@ -2,7 +2,7 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert';
-import { sendAgentPhoneMessage } from '../../providers/agentPhone';
+import { listInboundMessagesForNumber, sendAgentPhoneMessage } from '../../providers/agentPhone';
 
 async function main() {
   const originalFetch = globalThis.fetch;
@@ -105,7 +105,65 @@ async function main() {
         }),
       /missing delivery receipt fields/
     );
-    console.log('agentphone-provider: 5 passed, 0 failed');
+    assert.ok(calls[0].init.signal instanceof AbortSignal, 'send must share one request deadline');
+
+    const inboundCalls: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = input.toString();
+      inboundCalls.push(url);
+      if (url.includes('/conversations?limit=100&offset=0')) {
+        return new Response(
+          JSON.stringify({
+            data: Array.from({ length: 100 }, (_, index) => ({
+              id: `old-${index}`,
+              phoneNumberId: 'other-number',
+            })),
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/conversations?limit=100&offset=100')) {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: 'conv-target', phoneNumberId: 'number-1', phoneNumber: '+19125550100' }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/conversations/conv-target/messages')) {
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: 'in-1',
+                direction: 'inbound',
+                body: 'hello',
+                receivedAt: new Date().toISOString(),
+                fromNumber: '+19729777432',
+                toNumber: '+19125550100',
+                channel: 'sms',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      throw new Error(`unexpected inbound fetch: ${url}`);
+    }) as typeof fetch;
+
+    const inbound = await listInboundMessagesForNumber({
+      numberId: 'number-1',
+      since: new Date(Date.now() - 60_000),
+      limit: 10,
+    });
+    assert.equal(inbound.length, 1);
+    assert.equal(inbound[0]?.body, 'hello');
+    assert.ok(
+      inboundCalls.some((url) => url.includes('offset=100')),
+      'inbound lookup must paginate past the first 100 conversations'
+    );
+
+    console.log('agentphone-provider: 7 passed, 0 failed');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalKey === undefined) delete process.env.AGENTPHONE_API_KEY;
