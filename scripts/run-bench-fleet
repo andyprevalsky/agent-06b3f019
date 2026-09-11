@@ -647,6 +647,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
         || ! cp "$ROOT_DIR/scripts/run-bench-fleet" \
        "$ROOT_DIR/scripts/run-bench-cloud" \
        "$ROOT_DIR/scripts/cloudbench-boot.sh" \
+       "$ROOT_DIR/scripts/cloudbench-boot-payload.py" \
        "$ROOT_DIR/scripts/cloudbench-run.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \

@@ -1,9 +1,11 @@
 import base64
+import gzip
 import hashlib
 import importlib.util
 import inspect
 import json
 import os
+import random
 import re
 import select
 import shlex
@@ -1508,8 +1510,10 @@ async def fake_main_async(_args):
         assert aid == "root-agent"
         return {{"tree_agent_ids": [aid], "browser_sessions": []}}
 
-    def close_sessions(_url, aid, _before):
+    def close_sessions(_url, aid, _before, *, evidence):
         assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"
+        assert evidence["root_agent_id"] == aid
+        assert evidence["before"] == _before
         return {{"root_agent_id": aid, "root_deleted": True}}
 
 
@@ -1923,6 +1927,136 @@ def test_boot_launch_stages_and_exports_complete_local_patch() -> None:
     assert '--env "LOCAL_PATCH_FILE=$_boot_patch_guest"' in cloud
     assert '_boot_file_args+=(--file-local "$_boot_patch_guest=$_boot_patch_local")' in cloud
     assert cloud.index('LOCAL_PATCH_FILE=""') < cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]')
+
+
+def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path: Path) -> None:
+    """Replay the canary's payload shape through the real controller assembly.
+
+    The patch already consumed 487588 encoded bytes. The remaining current
+    helpers pushed the request over 900000 before either guest could start.
+    Use deterministic incompressible bytes of that size so this assertion
+    cannot pass merely by double-compressing an already compressed patch.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    block = cloud[cloud.index('    _boot_file_args=('):cloud.index('    boot_config_payload_guard() {')]
+    guard = _extract_fleet_function(cloud, "boot_config_payload_guard() {")
+    patch = tmp_path / "workspace.patch"
+    patch.write_bytes(random.Random(1299).randbytes(365691))
+    provenance = tmp_path / "execution-provenance.json"
+    provenance.write_text(json.dumps({"version": 1, "fixture": "exact-source"}))
+    env = os.environ.copy()
+    for name, kind, path in re.findall(
+        r'^(CLOUDBENCH_GUEST_\w+)="\$CLOUDBENCH_RUNTIME_(SCRIPT|LIB)_ROOT/([^"\n]+)"',
+        cloud, re.MULTILINE,
+    ):
+        env[name] = str(ROOT / "scripts" / ("lib" if kind == "LIB" else "") / path)
+    env.update(
+        OUT_DIR=str(tmp_path), LOCAL_PATCH_FILE=str(patch),
+        LOCAL_PATCH_SHA256=hashlib.sha256(patch.read_bytes()).hexdigest(),
+        CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE="1", DASHBOARD="0",
+        CLOUDBENCH_EXECUTION_PROVENANCE_FILE=str(provenance),
+    )
+    result = subprocess.run(
+        ["bash", "-c", f'''set -euo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+_envargs=()
+{block}
+{guard}
+boot_config_payload_guard "${{_boot_file_args[@]}}"
+python3 - "$OUT_DIR/transport.json" "${{_boot_file_args[@]}}" <<'PY'
+import json,sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))
+PY
+'''], env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    pairs = [value.split("=", 1) for value in json.loads((tmp_path / "transport.json").read_text()) if value != "--file-local"]
+    encoded = sum((Path(local).stat().st_size + 2) // 3 * 4 for _, local in pairs)
+    assert encoded <= 900000
+    payload = dict(pairs)["/cloudbench-boot-payload.json.gz"]
+    helper = ROOT / "scripts/cloudbench-boot-payload.py"
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    unpack = subprocess.run(
+        [sys.executable, str(helper), "unpack", payload,
+         hashlib.sha256(Path(payload).read_bytes()).hexdigest(), str(guest)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert unpack.returncode == 0, unpack.stderr
+    for name, kind, path in re.findall(
+        r'^(CLOUDBENCH_GUEST_\w+)="\$CLOUDBENCH_RUNTIME_(SCRIPT|LIB)_ROOT/([^"\n]+)"',
+        cloud, re.MULTILINE,
+    ):
+        if name in {"CLOUDBENCH_GUEST_BOOT_SCRIPT", "CLOUDBENCH_GUEST_STATUS_SERVER", "CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT", "CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT"}:
+            continue
+        original = ROOT / "scripts" / ("lib" if kind == "LIB" else "") / path
+        assert (guest / Path(path).name).read_bytes() == original.read_bytes()
+    assert (guest / "cloudbench-local.patch").read_bytes() == patch.read_bytes()
+    assert (guest / "cloudbench-execution-provenance.py").read_bytes() == EXECUTION_PROVENANCE_SCRIPT.read_bytes()
+    assert (guest / "cloudbench-execution-provenance.json").read_bytes() == provenance.read_bytes()
+
+
+@pytest.mark.parametrize("mode", ["checksum", "truncated", "schema", "path", "entrypoint", "empty", "base64"])
+def test_boot_payload_rejects_corruption_before_replacing_helpers(tmp_path: Path, mode: str) -> None:
+    helper = ROOT / "scripts/cloudbench-boot-payload.py"
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    current = guest / "cloudbench-run.sh"
+    current.write_bytes(b"old driver")
+    payload = {"version": 1, "files": {"cloudbench-run.sh": base64.b64encode(b"new driver").decode()}}
+    if mode == "schema":
+        payload["version"] = 2
+    elif mode in {"path", "entrypoint", "empty", "base64"}:
+        name = {"path": "../escape", "entrypoint": "cloudbench-boot.sh"}.get(mode, "cloudbench-other.py")
+        payload["files"][name] = "" if mode == "empty" else ("%%%%" if mode == "base64" else "YQ==")
+    wire = gzip.compress(json.dumps(payload).encode(), mtime=0)
+    if mode == "truncated":
+        wire = wire[:-8]
+    source = tmp_path / "payload.gz"
+    source.write_bytes(wire)
+    digest = "0" * 64 if mode == "checksum" else hashlib.sha256(wire).hexdigest()
+    result = subprocess.run([sys.executable, str(helper), "unpack", str(source), digest, str(guest)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1
+    assert current.read_bytes() == b"old driver"
+    assert sorted(p.name for p in guest.iterdir()) == ["cloudbench-run.sh"]
+    assert not (tmp_path / "escape").exists()
+    assert "FATAL" in result.stderr
+
+
+def test_boot_payload_failure_seals_no_launch_and_uses_sealed_helper(tmp_path: Path) -> None:
+    boot = BOOT_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    start = boot.index('if [ -n "${CLOUDBENCH_BOOT_PAYLOAD_FILE:-}" ]; then')
+    end = boot.index("# Nothing from the requested checkout", start)
+    assert boot.index('setsid python3 "$STATUS_SERVER_SCRIPT"') < start
+    assert start < boot.index('if [ ! -s "$DRIVER" ]; then')
+    assert '"$ROOT_DIR/scripts/cloudbench-boot-payload.py"' in FLEET_SCRIPT.read_text()
+    assert 'CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/' in cloud
+    functions = "\n".join(_extract_fleet_function(boot, f"{name}() {{") for name in (
+        "publish_driver_state", "publish_cleanup_ack", "seal_missing_injected_helper",
+    ))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sleep = fake_bin / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    env = os.environ.copy()
+    env.update(PATH=str(fake_bin) + os.pathsep + env["PATH"],
+        CLOUDBENCH_BOOT_PAYLOAD_FILE=str(tmp_path / "missing.gz"),
+        CLOUDBENCH_BOOT_PAYLOAD_SHA256="0" * 64, CLOUDBENCH_RUN_TOKEN="current-token",
+        DRIVER_STATE_FILE=str(tmp_path / "state"), CLEANUP_ACK_FILE=str(tmp_path / "ack"),
+        LOG=str(tmp_path / "boot.log"))
+    result = subprocess.run(["bash", "-c", f'''set -uo pipefail
+{functions}
+python3() {{ {shlex.quote(sys.executable)} {shlex.quote(str(ROOT / 'scripts/cloudbench-boot-payload.py'))} "${{@:2}}"; }}
+{boot[start:end]}
+printf launched > {shlex.quote(str(tmp_path / 'launched'))}
+'''], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "state").read_text() == "exited\n"
+    assert (tmp_path / "ack").read_text() == "current-token\n"
+    assert not (tmp_path / "launched").exists()
 
 
 def test_cloud_patch_detection_and_payload_include_staged_only_changes(tmp_path: Path) -> None:
@@ -3624,7 +3758,7 @@ def test_machine_inventory_index_publication_is_linear(tmp_path: Path) -> None:
             super().__init__(values)
             self.yields = 0
 
-        def __iter__(self):  # type: ignore[no-untyped-def]
+        def __iter__(self):
             for item in super().__iter__():
                 self.yields += 1
                 yield item
@@ -3644,7 +3778,7 @@ def test_machine_inventory_index_publication_is_linear(tmp_path: Path) -> None:
     )
     volumes = CountingList([{"id": f"volume-{index}", "state": "created"} for index in range(width)])
 
-    def fake_load(_path: Path, label: str):  # type: ignore[no-untyped-def]
+    def fake_load(_path: Path, label: str):
         return machines if label == "machine" else volumes
 
     readiness_module._load_inventory_file = fake_load

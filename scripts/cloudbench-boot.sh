@@ -111,6 +111,17 @@ setsid python3 "$STATUS_SERVER_SCRIPT" \
     --run-token "${CLOUDBENCH_RUN_TOKEN:-}" \
     >/dev/null 2>&1 </dev/null &
 
+# Keep the status server outside the compressed envelope so a rejected payload
+# is observable and seals the no-launch cleanup contract. Older SSH launches
+# have no envelope; they retain their individually injected helper paths.
+if [ -n "${CLOUDBENCH_BOOT_PAYLOAD_FILE:-}" ]; then
+    if ! python3 /cloudbench-boot-payload.py unpack "$CLOUDBENCH_BOOT_PAYLOAD_FILE" \
+        "${CLOUDBENCH_BOOT_PAYLOAD_SHA256:-}" / >> "$LOG" 2>&1; then
+        seal_missing_injected_helper boot-payload "$CLOUDBENCH_BOOT_PAYLOAD_FILE" || exit 1
+        exec sleep infinity
+    fi
+fi
+
 # Nothing from the requested checkout may run until the complete bootstrap
 # control pair is present. Missing staged control code means no benchmark or
 # browser resource exists, so seal+ack the no-launch outcome for exact teardown.

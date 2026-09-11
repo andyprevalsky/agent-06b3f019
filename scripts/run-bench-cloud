@@ -106,6 +106,7 @@ CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}
     && CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/lib" \
     || CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT"
 CLOUDBENCH_GUEST_BOOT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot.sh"
+CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot-payload.py"
 CLOUDBENCH_GUEST_RUN_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-run.sh"
 CLOUDBENCH_GUEST_FETCH_REF_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-fetch-ref.sh"
 CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-deps.sh"
@@ -3388,6 +3389,29 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Report-card / RCA agent links must outlive the ephemeral dashboard mirror.
     # Always-on prod viewer rehydrates archived runs via findAgentAcrossRuns.
     [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=https://roselabs.ai" )
+    # The patch is only part of the request: uncompressed current bootstrap
+    # helpers plus a compressed patch exceeded the provider body ceiling. Pack
+    # every non-entrypoint file losslessly; preserve the original guest paths,
+    # patch digests, and execution provenance after checksum-verified unpacking.
+    _boot_payload_args=()
+    _boot_entrypoint_args=()
+    for _boot_pair in "${_boot_file_args[@]}"; do
+        [ "$_boot_pair" = "--file-local" ] && continue
+        case "${_boot_pair%%=*}" in
+            /cloudbench-boot.sh|/cloudbench-status-server.py)
+                _boot_entrypoint_args+=(--file-local "$_boot_pair") ;;
+            *) _boot_payload_args+=(--file-local "$_boot_pair") ;;
+        esac
+    done
+    _boot_payload_file="$OUT_DIR/cloudbench-boot-payload.json.gz"
+    _boot_payload_sha256="$(python3 "$CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT" pack \
+        "$_boot_payload_file" "${_boot_payload_args[@]}")" || exit 1
+    _boot_file_args=("${_boot_entrypoint_args[@]}"
+        --file-local "/cloudbench-boot-payload.py=$CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT"
+        --file-local "/cloudbench-boot-payload.json.gz=$_boot_payload_file")
+    _envargs+=(
+        --env CLOUDBENCH_BOOT_PAYLOAD_FILE=/cloudbench-boot-payload.json.gz
+        --env "CLOUDBENCH_BOOT_PAYLOAD_SHA256=$_boot_payload_sha256")
     boot_config_payload_guard() {  # <--file-local pairs...>
     # flyctl base64-encodes each --file-local payload into the machine-config
     # update body (4 bytes per 3 bytes of file). Fly rejects an oversized body

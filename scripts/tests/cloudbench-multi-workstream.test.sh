@@ -691,8 +691,29 @@ def run_fake_driver(mdir):
     token = rb_export(rb_text, "CLOUDBENCH_RUN_TOKEN")
     barrier = rb_export(rb_text, "CLOUDBENCH_START_BARRIER")
     ref = rb_export(rb_text, "REF")
-    patch_path = os.path.join(mdir, "cloudbench-local.patch")
-    patch_text = open(patch_path).read() if os.path.exists(patch_path) else ""
+    # Execute the staged decoder, matching the real boot supervisor before any
+    # driver work. The provider mock must consume the actual wire format, not
+    # assume helpers still arrive as individual --file-local entries.
+    payload_file = rb_export(rb_text, "CLOUDBENCH_BOOT_PAYLOAD_FILE")
+    if payload_file:
+        subprocess.run([
+            sys.executable, os.path.join(mdir, "cloudbench-boot-payload.py"),
+            "unpack", os.path.join(mdir, PurePosixPath(payload_file).name),
+            rb_export(rb_text, "CLOUDBENCH_BOOT_PAYLOAD_SHA256"), mdir,
+        ], check=True)
+    patch_file = rb_export(rb_text, "LOCAL_PATCH_FILE")
+    patch_text = ""
+    if patch_file:
+        import gzip
+        import hashlib
+        patch_path = os.path.join(mdir, PurePosixPath(patch_file).name)
+        with open(patch_path, "rb") as source:
+            patch_bytes = source.read()
+        assert hashlib.sha256(patch_bytes).hexdigest() == rb_export(rb_text, "LOCAL_PATCH_TRANSPORT_SHA256")
+        if rb_export(rb_text, "LOCAL_PATCH_COMPRESSION") == "gzip":
+            patch_bytes = gzip.decompress(patch_bytes)
+        assert hashlib.sha256(patch_bytes).hexdigest() == rb_export(rb_text, "LOCAL_PATCH_SHA256")
+        patch_text = patch_bytes.decode()
     workspace_marker = next(
         (marker for marker in ("workstream-a", "workstream-b") if f"+{marker}" in patch_text),
         "",

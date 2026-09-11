@@ -377,6 +377,18 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     assert "2 passed" in result.stdout
 
 
+def test_cloudbench_boot_payload_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
+         "-k", "boot_payload or boot_launch_compresses_complete_payload"],
+        cwd=repo_root, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "9 passed" in result.stdout
+
+
 def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
@@ -18054,6 +18066,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",
         test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "cloudbench_boot_payload_permanent_gate",
+        test_cloudbench_boot_payload_behavior_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_dependency_rebuild_permanent_gate",
