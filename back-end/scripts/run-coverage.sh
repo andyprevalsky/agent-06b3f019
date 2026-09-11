@@ -560,6 +560,14 @@ echo "Backend ready at $TEST_BASE_URL"
 # picks up module-level fetch-stubbed suites (e.g. rose.blackbox.ts) that
 # exercise provider code in the test process rather than via HTTP to the
 # instrumented backend. All per-process coverage files merge at report time.
+# captcha-solve-indicator launches Node Playwright Chromium. Cloud images can
+# have the npm package without the matching browser revision, which fails as
+# "Executable doesn't exist at .../chrome-headless-shell". Install before units.
+if command -v npx >/dev/null 2>&1; then
+  echo "Ensuring Playwright Chromium is installed for coverage unit tests..."
+  npx playwright install chromium
+fi
+
 echo "Running blackbox and unit tests in parallel..."
 TEST_EXIT=0
 UNIT_EXIT=0

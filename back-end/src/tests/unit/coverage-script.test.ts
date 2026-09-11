@@ -288,13 +288,18 @@ assert.match(
 );
 assert.match(
   unitRunner,
-  /spawn\(process\.execPath, \['--experimental-test-module-mocks', '--import', 'tsx', file\]/,
+  /spawn\(\s*process\.execPath,\s*\['--experimental-test-module-mocks', '--import', 'tsx', file\]/,
   'unit files must avoid npm and tsx wrapper processes under V8 coverage'
 );
 assert.match(
   unitRunner,
   /BACKEND_UNIT_CONCURRENCY/,
   'unit runner must expose its bounded process-pool size'
+);
+assert.match(
+  unitRunner,
+  /SERIAL_FIRST_FILES = new Set\(\['regex-safety\.test\.ts'\]\)/,
+  'regex-safety must run isolated before the parallel unit pool so recheck is not starved'
 );
 assert.match(
   unitRunner,
@@ -313,8 +318,13 @@ assert.match(
 );
 assert.match(
   unitRunner,
-  /NODE_V8_COVERAGE: coverageDir/,
-  'every isolated unit child must retain V8 coverage instrumentation'
+  /SERIAL_FIRST_FILES\.has\(basename\(file\)\)[\s\S]*delete childEnv\.NODE_V8_COVERAGE/,
+  'serial-first analyzer files must omit inherited NODE_V8_COVERAGE so recheck stays inside the 1s budget'
+);
+assert.match(
+  unitRunner,
+  /else if \(coverageDir !== undefined\) \{\s*childEnv\.NODE_V8_COVERAGE = coverageDir/,
+  'parallel unit children must retain V8 coverage instrumentation'
 );
 assert.ok(
   blackboxRunner.indexOf('runWithConcurrency(parallelDomains') <

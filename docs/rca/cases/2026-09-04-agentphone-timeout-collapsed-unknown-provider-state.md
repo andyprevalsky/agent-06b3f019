@@ -97,6 +97,14 @@ identities in production.
 The user insisted the isolation work be finished, cemented, and deployed after
 the prior review cycle found this blocker.
 
+## Follow-on
+
+2026-09-11: the 10k fail-closed scan bound held. Recovery that already had
+stored provider IDs still listed the shared account and threw at that bound.
+That remainder is a relative / guardrail-miss, not a recurrence of this
+timeout→email-only collapse. See
+`2026-09-11-agentphone-recovery-ignored-stored-provider-ids`.
+
 ## Reusable lesson
 
 Never hold a database transaction across provider I/O; commit a recoverable lease first, and never turn an ambiguous non-idempotent write into fallback success until exact reconciliation or compensating cleanup proves the external outcome.

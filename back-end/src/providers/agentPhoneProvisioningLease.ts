@@ -15,7 +15,13 @@ export type PersistedAgentPhoneNumber = {
 
 export type AgentPhoneProvisioningClaim =
   | { kind: 'complete'; number: PersistedAgentPhoneNumber }
-  | { kind: 'owner'; marker: string; recoveryRequired: boolean }
+  | {
+      kind: 'owner';
+      marker: string;
+      recoveryRequired: boolean;
+      existingAgentId: string | null;
+      existingNumberId: string | null;
+    }
   | { kind: 'wait'; marker: string };
 
 type ParsedMarker = { kind: 'active' | 'recovery'; startedAt: number };
@@ -88,6 +94,8 @@ export async function claimAgentPhoneProvisioning(
       kind: 'owner',
       marker,
       recoveryRequired: parsed !== null || identity.phoneProviderAgentId !== null,
+      existingAgentId: identity.phoneProviderAgentId,
+      existingNumberId: identity.phoneProviderNumberId,
     };
   });
 }
@@ -109,6 +117,20 @@ export async function waitForAgentPhoneProvisioning(
   if (now >= nextDeadlineAt) return null;
   await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_MS, nextDeadlineAt - now)));
   return waitForAgentPhoneProvisioning(userId, marker, requestDeadlineAt);
+}
+
+export async function progressAgentPhoneProvisioning(
+  userId: string,
+  marker: string,
+  agentId: string
+): Promise<void> {
+  await runTransactionWithRetry(async (transaction) => {
+    await lockUser(transaction, userId);
+    await transaction.agentIdentity.updateMany({
+      where: { userId, phoneProvider: marker },
+      data: { phoneProviderAgentId: agentId },
+    });
+  });
 }
 
 export async function completeAgentPhoneProvisioning(
