@@ -155,6 +155,7 @@ class FleetFailureCleanup(unittest.TestCase):
         unknown_body_probe=False,
         log_fault="",
         publication_failure=False,
+        partial_completion=False,
     ):
         env = dict(
             self.env,
@@ -165,6 +166,8 @@ class FleetFailureCleanup(unittest.TestCase):
             FIXTURE_DESCENDANT=str(int(descendant)),
             FIXTURE_ORPHAN_AUDIT=audit_fault,
         )
+        if partial_completion:
+            self.inject_partial_completion_read()
         if publication_failure:
             with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
                 handle.write(
@@ -301,6 +304,88 @@ exec "$FIXTURE_REAL_TEE" "$@"
         self.assertEqual(summary["benchmark_wall_clock_backstop_seconds"], 300)
         if not cancel:
             self.assertEqual(result, fleet_exit, output)
+
+    def inject_partial_completion_read(self):
+        # A timed read may consume bytes before returning a timeout/signal.
+        # Split the actual producer's frame at that syscall-result boundary.
+        helper = self.root / "scripts/lib/cloudbench-env.sh"
+        with helper.open("a") as handle:
+            handle.write(r"""
+read() {
+  if [[ "${!#}" == proof_completion_line ]] && [[ -n "${proof_completion_reader:-}" ]] \
+    && [[ -z "${fixture_partial_completion:-}" ]]; then
+    fixture_partial_completion=1
+    builtin read -r -N 1 -t 5 -u "$proof_completion_reader" proof_completion_line || return "$?"
+    printf 'fixture consumed completion byte: %s\n' "$proof_completion_line" >&2
+    return 142
+  fi
+  builtin read "$@"
+}
+""")
+
+    def test_interrupted_completion_read_preserves_original_failure(self):
+        self.run_case(fleet_exit=137, partial_completion=True)
+
+    def run_successful_completion_case(self, *, frame=None):
+        self.root = self.root.resolve()
+        source = (ROOT / "scripts/tests/fleet-infra-stability-proof.test.sh").read_text()
+        fake = source.split("cat >\"$tmp/fake-fleet\" <<'SH'\n", 1)[1].split("\nSH\n", 1)[0]
+        (self.root / "fake-fleet").write_text(fake)
+        if frame is None:
+            self.inject_partial_completion_read()
+        else:
+            self.env["FIXTURE_COMPLETION_FRAME"] = frame
+            with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
+                handle.write(r"""
+read() {
+  local fixture_read_result=0
+  builtin read "$@" || fixture_read_result=$?
+  if [[ "${!#}" == proof_completion_line ]] && [[ "${#proof_completion_line}" -gt 4 ]]; then
+    builtin printf 'fixture observed oversized completion read\n' >&2
+  fi
+  return "$fixture_read_result"
+}
+printf() {
+  if [[ "${BASHPID:-}" == "${body_self_pid:-missing}" ]] \
+    && [[ -n "${proof_completion_writer:-}" ]] && [[ "$#" == 2 ]] && [[ "$1" == '%s\n' ]]; then
+    builtin printf '%s' "$FIXTURE_COMPLETION_FRAME"
+  else
+    builtin printf "$@"
+  fi
+}
+""")
+        result = subprocess.run(
+            [BASH, str(self.root / "scripts/run-fleet-infra-stability-proof"),
+             "--capability", "--runs", "1", "--width", "1", "--timeout", "300"],
+            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=8,
+        )
+        output = result.stdout + result.stderr
+        summary = json.loads(next((self.root / "proofs").glob("*/summary.json")).read_text())
+        if frame is None:
+            self.assertIn("fixture consumed completion byte: 0", output)
+        self.assertEqual(summary["status"], "passed", output)
+        self.assertEqual(summary["passed_slices"], 1, output)
+        self.assertEqual(summary["cleanup_status"], "verified", output)
+        self.assertNotIn("fixture observed oversized completion read", output)
+        self.assertEqual(result.returncode, 0 if frame is None else 1, output)
+
+    def test_interrupted_completion_read_preserves_success(self):
+        self.run_successful_completion_case()
+
+    def test_completion_rejects_unterminated_frame(self):
+        self.run_successful_completion_case(frame="0")
+
+    def test_completion_rejects_duplicate_frames(self):
+        self.run_successful_completion_case(frame="0\n0\n")
+
+    def test_completion_rejects_oversize_frame(self):
+        self.run_successful_completion_case(frame="0" * 4096 + "\n")
+
+    def test_completion_rejects_non_numeric_frame(self):
+        self.run_successful_completion_case(frame="bad\n")
+
+    def test_completion_rejects_out_of_range_frame(self):
+        self.run_successful_completion_case(frame="256\n")
 
     def test_failed_local_status_publication_does_not_wait_forever(self):
         self.run_case(publication_failure=True)

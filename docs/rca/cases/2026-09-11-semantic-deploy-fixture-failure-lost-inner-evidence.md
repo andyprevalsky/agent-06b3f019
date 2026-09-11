@@ -66,6 +66,22 @@ and preserve the original failing exit status. The next committed enclosing
 parallel static gate is the outcome check. Classification behavior, SKIPPED
 rejection, task criteria and timeouts are unchanged.
 
+## Retained recurrence on September 11
+
+The new capture worked during the `eceab00833` full concurrent structural gate.
+The capability-pass fixture retained summary `passed`, two accepted simulated
+slices, verified cleanup and `controller.exit` zero; its outer supervisor
+returned one with a missing terminal-status error. See
+`.context/test-runs/fleet-proof-20260911T183311Z-4687/capability-pass/`.
+This locates the recurrence after successful slice classification and teardown.
+
+A deterministic partial-read defect at that completion boundary was reproduced
+and repaired in the related case
+`2026-09-11-failed-stability-proof-abandoned-retained-fleet`. Raw reads were not
+captured in the failed concurrent occurrence, and three traced natural replays
+passed. This case remains open for that unproven intermittent trigger; the
+partial-read fault injection is not misrepresented as its captured cause.
+
 ## Human feedback
 
 The deploy instructions require preserving the existing acceptance criteria.

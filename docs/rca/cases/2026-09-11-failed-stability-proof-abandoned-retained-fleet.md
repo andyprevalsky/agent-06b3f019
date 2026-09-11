@@ -165,6 +165,43 @@ implementation receipt. Normal execution remains 7200 seconds; this proof overri
 was increased. No global pruning or resource inference from shared-account
 inventory was added.
 
+### September 11 completion-reader recurrence
+
+The concurrent structural gate on `eceab00833` retained a simulated successful
+2/2 proof and `controller.exit` containing zero, followed by the outer
+supervisor returning one with `proof supervisor exited without a terminal
+status`. Evidence is in `.context/test-runs/fleet-proof-20260911T183311Z-4687/`
+and `.context/acceptance/recovered-final-static.log`. The terminal read bytes
+were not captured during that occurrence, so its precise trigger remains open.
+
+The owning completion protocol had a separately reproduced defect: Bash timed
+reads can consume partial bytes before returning timeout/signal status. The
+loop discarded those bytes. Two permanent actual-entrypoint tests consume the
+first byte from the actual producer frame using `builtin read -N 1`, then
+return 142 at the read-result boundary. They do not alter the producer frame.
+Before the repair, success zero became failure one, and failure 137 became 37.
+Both tests failed in `proof-completion-rca/permanent-before.log` and passed
+unchanged in `permanent-after.log`. Three independently traced natural
+full-entrypoint runs passed without partial reads; those results do not prove
+the intermittent occurrence's cause.
+
+The reader now consumes at most four characters per read, retains at most three
+completion characters across interrupted reads, and parses only a complete delimited
+frame. It rejects incomplete EOF,
+duplicate frames, invalid characters, oversized frames and values above 255.
+It continues through EOF and waits for the pipeline even after invalid input;
+a status frame never permits abandoning the body or logger. This repairs the
+protocol boundary without adding a timeout, changing task outcomes or relying
+on an optional disk marker. Memory and work remain bounded per proof, with no
+shared state or cross-agent contention at 10,000 agents. Independent review
+also reproduced a 4,096-character read before the per-read bound. The permanent
+oversized-frame test now observes actual read-result lengths: it failed against
+the saved pre-bound controller and passed unchanged after `read -n 4`, while
+still rejecting the frame (`read-bound-before.log`, `read-bound-after.log`).
+Deleting the pipe would
+restore the earlier unwritable-status-file hang; unifying partial reads into
+one bounded logical frame repairs both success and multi-digit failures.
+
 ## Verification limits
 
 The local owning-boundary before/after regression passes. The failed live
