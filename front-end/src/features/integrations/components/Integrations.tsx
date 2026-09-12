@@ -15,6 +15,9 @@
  *                              v
  *                         [IDLE/READY]
  *
+ * File System is a FE-only section: website is Download for Mac; Mac app
+ * plus click stays [IDLE/READY] (no hook).
+ *
  * This component is a thin orchestrator: it calls hooks, renders sections,
  * and wires up modals. All business logic lives in ../hooks/.
  */
@@ -106,6 +109,7 @@ export default function Integrations() {
               isWhatsAppAvailable={!!handlers.whatsApp?.isAvailable}
               isClaudeCodeAvailable={!!handlers.claudeCode?.isAvailable}
               isGptCodeAvailable={!!handlers.gptCode?.isAvailable}
+              isFileSystemAvailable={window.api?.isElectron === true}
               isFullySignedIn={isFullySignedIn}
               accordion={accordion}
               data={data}

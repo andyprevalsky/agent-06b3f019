@@ -48,6 +48,7 @@ describe('Integrations page', () => {
 
   afterEach(() => {
     localStorage.clear();
+    delete window.api;
   });
 
   // ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ describe('Integrations page', () => {
       expect(screen.getByText('Passwords')).toBeInTheDocument();
       expect(screen.getByText('Messages')).toBeInTheDocument();
       expect(screen.getByText('Socials')).toBeInTheDocument();
+      expect(screen.getByText('File System')).toBeInTheDocument();
     });
 
     it('shows "Desktop Only" badge for Browser Cookies on web (no handler)', async () => {
@@ -75,10 +77,11 @@ describe('Integrations page', () => {
         expect(screen.getByText('Browser Cookies')).toBeInTheDocument();
       });
 
-      // Without browserCookies handler, should show "Desktop Only"
-      expect(screen.getByText('Desktop Only')).toBeInTheDocument();
-      // And a "Download for Mac" link
-      expect(screen.getByRole('link', { name: /download for mac/i })).toBeInTheDocument();
+      const browserSection = screen.getByText('Browser Cookies').closest('.rounded-lg')!;
+      expect(within(browserSection).getByText('Desktop Only')).toBeInTheDocument();
+      expect(
+        within(browserSection).getByRole('link', { name: /download for mac/i }),
+      ).toBeInTheDocument();
     });
 
     it('shows Passwords section with subtitle', async () => {
@@ -124,6 +127,62 @@ describe('Integrations page', () => {
       });
 
       expect(screen.getByText('Connect social media accounts')).toBeInTheDocument();
+    });
+
+    it('shows File System as Desktop Only with Download for Mac on the website', async () => {
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('File System')).toBeInTheDocument();
+      });
+
+      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
+      expect(within(fileSystemSection).getByText('Desktop Only')).toBeInTheDocument();
+      expect(
+        within(fileSystemSection).getByRole('link', { name: /download for mac/i }),
+      ).toHaveAttribute('href', '/download');
+      expect(
+        within(fileSystemSection).queryByRole('button', { name: /connect file system/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('shows the File System connect plus in the Mac app', async () => {
+      window.api = { isElectron: true };
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('File System')).toBeInTheDocument();
+      });
+
+      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      expect(
+        within(fileSystemSection).getByRole('button', { name: /connect file system/i }),
+      ).toBeInTheDocument();
+      expect(within(fileSystemSection).queryByText('Desktop Only')).not.toBeInTheDocument();
+      expect(within(fileSystemSection).queryByText('Download for Mac')).not.toBeInTheDocument();
+    });
+
+    it('does nothing when File System connect is clicked in the Mac app', async () => {
+      window.api = { isElectron: true };
+      const user = userEvent.setup();
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('File System')).toBeInTheDocument();
+      });
+
+      clearCaptures();
+      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      const connectButton = within(fileSystemSection).getByRole('button', {
+        name: /connect file system/i,
+      });
+      await user.click(connectButton);
+
+      expect(screen.getByText('File System')).toBeInTheDocument();
+      expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
+      expect(within(fileSystemSection).queryByText('Connected')).not.toBeInTheDocument();
+      expect(capturedRequests).toHaveLength(0);
     });
 
     it('shows Compute section for fully signed-in users', async () => {
