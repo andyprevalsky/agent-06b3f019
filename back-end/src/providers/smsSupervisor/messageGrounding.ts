@@ -23,9 +23,53 @@ const AGENT_KILL_CLAIM =
  * Order/purchase progress that the SMS supervisor cannot know without agent
  * completion evidence in the state block — claiming it from chat alone is
  * always ungrounded in this surface.
+ *
+ * Closed incident phrases (2026-08-04: "placing now.", "order submitted") are
+ * not enough: the 2026-09-12 Blue Bottle turn shipped "is placed for pickup"
+ * and "I'm placing your usual … order now" — same claim class, different word
+ * order. Match the linguistic class (assertive placement / in-progress
+ * placement / submission), not one captured sentence.
  */
-const ORDER_PROGRESS_CLAIM =
+const ORDER_PROGRESS_PHRASES =
   /\b(?:placing\s+now|order\s+submitted|order\s+(?:is\s+)?confirmed|(?:placed|submitted)\s+(?:the\s+|your\s+)?(?:order|blue\s*bottle)|waiting\s+on\s+confirmation|confirmation\s*[#:]?\s*[a-z0-9-]{4,})\b/i;
+
+/** "is/has been/was/got/I've placed" — completion, any subject. */
+const ORDER_PLACED_COPULA =
+  /\b(?:is|has\s+been|have\s+been|was|got|i['']ve|we['']ve|it['']s|that['']s)\s+placed\b/i;
+
+/** "placed for pickup/delivery" — completion with a fulfillment mode. */
+const ORDER_PLACED_FOR_FULFILLMENT = /\bplaced\s+for\s+(?:pickup|delivery)\b/i;
+
+/** "placing … now" with modifiers between the verb and now. */
+const ORDER_PLACING_NOW = /\bplacing\b[\s\S]{0,80}\bnow\b/i;
+
+/** "placing your/the/my (usual) … order" — in-progress placement narration. */
+const ORDER_PLACING_THEIR_ORDER =
+  /\bplacing\s+(?:your|the|my|a)\s+(?:usual\s+)?[\s\S]{0,80}\border\b/i;
+
+/** Submission / confirmation paraphrases that skip the word "placed". */
+const ORDER_SUBMITTED_PARAPHRASE =
+  /\b(?:i\s+submitted\s+it|order\s+went\s+through|(?:submitted|confirmed)\s+(?:the\s+|your\s+|my\s+)?order)\b/i;
+
+export function normalizeSmsClaimText(text: string): string {
+  return text.replace(/[\u2018\u2019\u201B]/g, "'").replace(/[\u201C\u201D]/g, '"');
+}
+
+export function sameSmsBody(left: string, right: string): boolean {
+  return normalizeSmsClaimText(left).trim() === normalizeSmsClaimText(right).trim();
+}
+
+export function claimsOrderOrPlacementProgress(message: string): boolean {
+  const text = normalizeSmsClaimText(message);
+  return (
+    ORDER_PROGRESS_PHRASES.test(text) ||
+    ORDER_PLACED_COPULA.test(text) ||
+    ORDER_PLACED_FOR_FULFILLMENT.test(text) ||
+    ORDER_PLACING_NOW.test(text) ||
+    ORDER_PLACING_THEIR_ORDER.test(text) ||
+    ORDER_SUBMITTED_PARAPHRASE.test(text)
+  );
+}
 
 export function emptySmsRunSideEffectEvidence(): SmsRunSideEffectEvidence {
   return { startedAgent: false, killedAgent: false };
@@ -71,7 +115,7 @@ export function ungroundedSendUserMessageError(
     return null;
   }
 
-  if (ORDER_PROGRESS_CLAIM.test(text)) {
+  if (claimsOrderOrPlacementProgress(text)) {
     return (
       'Rejected: message claims order/placement progress that this SMS run has no ' +
       'evidence for. Only report confirmations, totals, or "placed/submitted" after ' +

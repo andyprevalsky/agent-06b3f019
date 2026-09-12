@@ -151,6 +151,10 @@ class TaskRef:
         return "local-only" in self.tags
 
     @property
+    def production_only(self) -> bool:
+        return self.raw.get("production_only") is True
+
+    @property
     def is_smoke(self) -> bool:
         return "smoke" in self.tags
 
@@ -300,6 +304,8 @@ def _eligible(task: TaskRef, surface: str) -> bool:
     if not task.eligible_status:
         return False
     if surface == "cloud" and task.local_only:
+        return False
+    if surface == "local" and task.production_only:
         return False
     return True
 
