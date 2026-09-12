@@ -35,6 +35,7 @@ import {
   emptySmsRunSideEffectEvidence,
   purchaseIntentCompletionError,
   resolveSendUserMessage,
+  sameSmsBody,
 } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
 
@@ -533,6 +534,14 @@ export async function handleSmsSupervisorMessage(config: {
               success: false,
               result: '',
               error: resolved.error,
+            };
+          } else if (sentMessages.some((sent) => sameSmsBody(sent, resolved.text))) {
+            sendResult = {
+              tool: 'send_user_message',
+              success: false,
+              result: '',
+              error:
+                'Rejected: this exact message was already delivered this run. Do not resend it.',
             };
           } else {
             sendResult = await deliverUserMessage(resolved.text);

@@ -39,6 +39,13 @@ loadDotenvWithCallerOverrides();
 const usd = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+function isTransientOrgMcpPollError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /temporarily unavailable|service unavailable|aborted due to timeout|operation was aborted|timed out/i.test(
+    message
+  );
+}
+
 /**
  * Poll a card's funding transfer until it reaches a terminal release state.
  *
@@ -54,12 +61,16 @@ async function waitForTransferReclaimed(
   const deadline = Date.now() + timeoutMs;
   let last = { status: 'not_found', releasedCents: 0 };
   for (;;) {
-    const mine = await readCardTransfer(cardId);
-    if (mine !== undefined) {
-      last = mine;
-      if (isFullyReclaimedTransfer(mine, minReleasedCents)) {
-        return last;
+    try {
+      const mine = await readCardTransfer(cardId);
+      if (mine !== undefined) {
+        last = mine;
+        if (isFullyReclaimedTransfer(mine, minReleasedCents)) {
+          return last;
+        }
       }
+    } catch (error) {
+      if (!isTransientOrgMcpPollError(error)) throw error;
     }
     if (Date.now() >= deadline) return last;
     await sleep(8_000);
@@ -150,25 +161,34 @@ async function waitForRecoverable(
   let attempt = 0;
   for (;;) {
     attempt += 1;
-    const sweep = await recoverAllCardholderResiduals(callOrgTool);
-    if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-      console.log(`  (recovery yielded on attempt ${attempt})`);
-      return { ...sweep, via: 'recover_funds' };
-    }
-    const transfer = await readCardTransfer(cardId);
-    if (isFullyReclaimedTransfer(transfer, minReleasedCents)) {
-      console.log(
-        `  (transfer already ${transfer.status} with ${usd(transfer.releasedCents)} on attempt ${attempt}; ` +
-          `recover_funds not needed)`
-      );
-      return { settledCents: transfer.releasedCents, pendingCents: 0, via: 'transfer' };
-    }
-    if (Date.now() >= deadline) {
-      console.error(
-        `  recovery never yielded after ${attempt} attempts; transfer for ${cardId}: ` +
-          (transfer === undefined ? '(not found)' : JSON.stringify(transfer))
-      );
-      return { ...sweep, via: 'recover_funds' };
+    try {
+      const sweep = await recoverAllCardholderResiduals(callOrgTool);
+      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
+        console.log(`  (recovery yielded on attempt ${attempt})`);
+        return { ...sweep, via: 'recover_funds' };
+      }
+      const transfer = await readCardTransfer(cardId);
+      if (isFullyReclaimedTransfer(transfer, minReleasedCents)) {
+        console.log(
+          `  (transfer already ${transfer.status} with ${usd(transfer.releasedCents)} on attempt ${attempt}; ` +
+            `recover_funds not needed)`
+        );
+        return { settledCents: transfer.releasedCents, pendingCents: 0, via: 'transfer' };
+      }
+      if (Date.now() >= deadline) {
+        console.error(
+          `  recovery never yielded after ${attempt} attempts; transfer for ${cardId}: ` +
+            (transfer === undefined ? '(not found)' : JSON.stringify(transfer))
+        );
+        return { ...sweep, via: 'recover_funds' };
+      }
+    } catch (error) {
+      if (!isTransientOrgMcpPollError(error)) throw error;
+      if (Date.now() >= deadline) throw error;
+      if (attempt % 3 === 0)
+        console.log(`  (MCP poll timed out, retrying settle wait, attempt ${attempt})`);
+      await sleep(8_000);
+      continue;
     }
     if (attempt % 3 === 0)
       console.log(`  (still waiting for release to settle, attempt ${attempt})`);
@@ -200,7 +220,8 @@ async function main(): Promise<void> {
       /invalid or expired organization token/i.test(message) ||
       /could not obtain an agentcard organization mcp access token/i.test(message) ||
       /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
-      /could not reach the agentcard organization mcp token endpoint/i.test(message)
+      /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
+      /aborted due to timeout|operation was aborted/i.test(message)
     ) {
       console.log(
         'SKIP treasury-rails: AgentCard org token unavailable from provider (credential-infra precondition)'
@@ -400,7 +421,8 @@ void main().catch((error: unknown) => {
     /invalid or expired organization token/i.test(message) ||
     /could not obtain an agentcard organization mcp access token/i.test(message) ||
     /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
-    /could not reach the agentcard organization mcp token endpoint/i.test(message)
+    /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
+    /aborted due to timeout|operation was aborted/i.test(message)
   ) {
     console.log(
       'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'

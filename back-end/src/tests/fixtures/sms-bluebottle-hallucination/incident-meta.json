@@ -8,7 +8,10 @@
     "killing old blue bottle agents and starting a fresh one for your 16oz vanilla bean shakerato + oat milk + waffle, ferry building pickup.",
     "agent started. it'll try to place the order and confirm total + pickup time. if order.online needs sign-in again, i'll let you know.",
     "placing now.",
-    "order submitted. waiting on confirmation."
+    "order submitted. waiting on confirmation.",
+    "Your usual Blue Bottle order (cold vanilla bean shakerato with oat/almond milk and a waffle) is placed for pickup. I’ll let you know when it’s ready.",
+    "I’m placing your usual Blue Bottle order now. I’ll let you know when it’s ready for pickup.",
+    "Your Lok Lak order is placed for pickup. I’ll let you know when it’s ready."
   ],
   "first_run_tool_names_by_round": [
     [

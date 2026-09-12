@@ -718,6 +718,80 @@ def test_cloud_surface_skips_local_only_even_with_pass_streak(tmp_path: Path) ->
     assert "cloud-payment" in cloud.selected
 
 
+def test_local_surface_skips_production_only_even_with_pass_streak(tmp_path: Path) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    catalog.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "prod-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                    "production_only": True,
+                },
+                {
+                    "name": "local-payment",
+                    "tags": ["payment"],
+                    "timeout_seconds": 90,
+                    "deploy_category": "payment",
+                    "deploy_canary": True,
+                },
+                {
+                    "name": "smoke-ok",
+                    "tags": ["smoke"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "harness",
+                },
+                {
+                    "name": "grep-ok",
+                    "tags": ["grep"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "grep",
+                    "deploy_canary": True,
+                },
+                {
+                    "name": "sms-ok",
+                    "tags": ["sms"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "sms",
+                    "deploy_canary": True,
+                },
+                {
+                    "name": "browser-toast-nopa-write-lock",
+                    "tags": ["browser"],
+                    "timeout_seconds": 60,
+                    "deploy_category": "browser_stateful",
+                    "deploy_canary": True,
+                },
+            ]
+        )
+    )
+    rows = []
+    for name in (
+        "prod-payment",
+        "local-payment",
+        "smoke-ok",
+        "grep-ok",
+        "sms-ok",
+        "browser-toast-nopa-write-lock",
+    ):
+        rows.extend([(name, True)] * 3)
+    _write_attempts(attempts, rows)
+    local = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=["back-end/src/providers/agentcard/org-runtime.ts"],
+        surface="local",
+        cap=20,
+        repo_root=ROOT,
+        attempts_file=attempts,
+    )
+    assert "prod-payment" not in local.selected
+    assert "local-payment" in local.selected
+
+
 def test_cli_report_prints_total_and_history_gate() -> None:
     result = subprocess.run(
         [
