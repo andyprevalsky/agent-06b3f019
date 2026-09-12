@@ -20,10 +20,12 @@ tags:
 sources:
   - PR #1299
   - commit 30deba8a4fdc0e45d8be50844a510795cf5c4a02
+  - commit 8c8e19bb65759ca0683d36177a19f77d7c42fd45
   - agent bf0e8691-4258-4725-8806-89be0552cdf0
   - agent 67b11906-333d-4cfb-bbd7-40c13ca671ba
+  - agent 67c299dc-62a9-4a0c-9eda-5e54a76c1fe4
 repro: agents/benchmarks/local_worlds_test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -127,9 +129,25 @@ result filename. `BenchmarkRun.save` now includes its stable run ID in the
 bounded filename. `results_identity_test.py` records actual fixed-clock RED to
 GREEN with history and Hub side effects disabled, including long and UTF-8 names.
 
-Status remains open until the complete unchanged local smoke group passes on
-the fixed source. The 10-by-10 cloud stability acceptance is separate and remains
-unfulfilled; no causal fixture pass counts toward it.
+The complete unchanged local predeploy invocation passed all nine tasks on
+`8c8e19bb65759ca0683d36177a19f77d7c42fd45`, with concurrency two and the original
+cohort settings. Run `20260912-063339-5919` finished at 07:02:47Z on September 12.
+Setup-resume passed in 224.7s:
+https://www.roselabs.ai/?agent-id=67c299dc-62a9-4a0c-9eda-5e54a76c1fe4.
+The separate AgentCard lane passed all four tasks, including setup-resume in
+198.4s. The mass-agent smoke passed with all 51 archived agents completed and
+sealed/deleted; its workload and evaluators were unchanged.
+
+All thirteen benchmark roots have verified durable FE/LLM bundles. Independent
+checks confirmed all ten owned benchmark stacks retired, 763 captured native
+process identities absent, and all nine exact Kernel sessions absent. One
+evidence publication encountered an SSL transport error; one canonical
+idempotent publication retry succeeded without rerunning a benchmark. The
+original failed publication receipt remains preserved. The full validation
+receipt is `.context/acceptance/local-worlds-group4-final-verification.json`.
+
+The separate 10-by-10 cloud stability acceptance remains unfulfilled; no local
+fixture or smoke pass counts toward it.
 
 ## Human feedback
 
