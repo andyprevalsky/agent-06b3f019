@@ -3,8 +3,8 @@
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
- * File System is a FE-only stub: it renders next to the live sections and
- * stays [MOUNTED] on plus click (no hook, no backend).
+ * File System is a FE-only stub: website shows Download for Mac; Mac app
+ * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
 
 import type { useAccordion } from '../hooks/useAccordion';
@@ -32,6 +32,7 @@ interface IntegrationSectionsProps {
   isWhatsAppAvailable: boolean;
   isClaudeCodeAvailable: boolean;
   isGptCodeAvailable: boolean;
+  isFileSystemAvailable: boolean;
   isFullySignedIn: boolean;
   accordion: ReturnType<typeof useAccordion>;
   data: ReturnType<typeof useIntegrationData>;
@@ -134,6 +135,7 @@ export default function IntegrationSections({
   isWhatsAppAvailable,
   isClaudeCodeAvailable,
   isGptCodeAvailable,
+  isFileSystemAvailable,
   isFullySignedIn,
   accordion,
   data,
@@ -204,7 +206,7 @@ export default function IntegrationSections({
         onLinkedInSync={() => void actions.onLinkedInSync()}
       />
 
-      <FileSystemSection />
+      <FileSystemSection isAvailable={isFileSystemAvailable} />
     </>
   );
 }

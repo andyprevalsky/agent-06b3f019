@@ -4,15 +4,22 @@
  * System context:
  *   Integrations page -> IntegrationSections -> FileSystemSection
  *
- *   [MOUNTED] --plus click--> [MOUNTED]
+ *   [WEB]     --> Desktop Only + Download for Mac
+ *   [MAC_APP] --plus click--> [MAC_APP]
  *
- * FE-only placeholder for cloud file sync. The plus matches other connect
- * actions but has no handler, so a click stays idle (no API, no modal).
+ * FE-only placeholder for cloud file sync. Website points users at the Mac
+ * download. The Mac app shows the same plus as other connect actions, but the
+ * click stays idle (no API, no modal).
  */
 
 import { Plus } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
+
+interface FileSystemSectionProps {
+  isAvailable: boolean;
+}
 
 function FileSystemIcon() {
   return (
@@ -35,7 +42,35 @@ function noopFileSystemConnect(): void {
   return undefined;
 }
 
-export default function FileSystemSection() {
+function FileSystemDesktopOnlyFallback() {
+  return (
+    <div className="flex items-center justify-between flex-wrap gap-2 p-4 border border-border rounded-lg bg-card/60">
+      <div className="flex items-center gap-3">
+        <DropdownIconFrame {...DropdownIconPreset.fileSystem}>
+          <FileSystemIcon />
+        </DropdownIconFrame>
+        <div className="flex flex-col">
+          <div className="flex items-center gap-2">
+            <h3 className="font-medium">File System</h3>
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              Desktop Only
+            </span>
+          </div>
+          <span className="text-xs text-muted-foreground">Sync your files to the cloud</span>
+        </div>
+      </div>
+      <Button size="sm" variant="outline" asChild>
+        <a href="/download">Download for Mac</a>
+      </Button>
+    </div>
+  );
+}
+
+export default function FileSystemSection({ isAvailable }: FileSystemSectionProps) {
+  if (!isAvailable) {
+    return <FileSystemDesktopOnlyFallback />;
+  }
+
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
