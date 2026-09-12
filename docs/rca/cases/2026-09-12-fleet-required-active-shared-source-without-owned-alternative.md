@@ -11,6 +11,8 @@ symptoms:
   - shared warm source remains started through all 60 stopped-state checks
   - fleet aborts before initial capacity reservation or task clone allocation
   - an existing snapshot override cannot select a different source machine and volume
+  - could not persist provider ID and volume; name ownership remains for teardown
+  - owned fleet machine has no durable exact volume attribution; retaining record
 tags:
   - cloudbench
   - immutable-source
@@ -129,12 +131,77 @@ fleet or source preparation was run by this RCA agent. The real private source,
 preallocation, full task outcomes, teardown and ten sequential ten-task slices
 remain to be verified; this case stays open until those gates are complete.
 
+### Proof 16: source metadata did not survive the ownership lifecycle
+
+The next real attempt, `capability-stability-20260912185727-5872`, selected the
+owned source correctly but failed its default two-clone infrastructure canary
+before starting any benchmark. Provider creation returned exact machine/volume
+pairs, while both durable clone records remained name-only. Cleanup retained
+the resources rather than claiming unproven volume ownership. This contributes
+zero accepted slices and zero benchmark outcomes.
+
+The first bad boundary was `fleet_audit_update_registry_clone`: its exact legacy
+metadata key set rejected the newly persisted `source_manifest_sha256` field.
+The earlier source-selection and recovery tests did not exercise promotion of
+an actual private-source clone through this consumer. A sibling terminal audit
+rewrite accepted the digest but omitted it from the rewritten metadata.
+
+Archive searches used `could not persist provider ID volume attribution` and
+`fleet clone ownership journal machine volume startup`. This is a regression
+in the source-binding lifecycle introduced by this case's source capability;
+the previous clone-source and migration ownership cases are relatives.
+
+The local reproduction invokes the actual ownership functions against copies
+of the failed run's registry and audit. Valid private-source metadata returns
+exit 1 without publishing an identity; removing only the optional digest in a
+legacy control returns exit 0 and publishes the same verified identity. A
+separate copied terminal audit reproduces loss of the digest during successful
+terminal publication. The latter fixture assumes completed cleanup only to
+reach that publication boundary; it is not evidence of live resource cleanup.
+Receipts are under `.context/acceptance/proof16-registry-source-rca/`.
+
+The repair accepts only the documented optional metadata field, verifies the
+original registry/audit digest and identical bounded regular manifest files
+through the canonical source schema, and preserves that digest when publishing
+terminal metadata. Nonblocking opens reject FIFOs without hanging ownership
+publication. Legacy owners remain supported; owned workers still derive from
+their own primary without falsely requiring every parent to be the base source.
+
+The unchanged permanent test command, `agents/venv/bin/python -m pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py -k
+'private_fleet_source_identity or private_fleet_source_terminal'`, records five
+failures and twenty passing controls against the original controller, then all
+25 passing in 8.63 seconds after the fix. The original controller is supplied
+using `CLOUDBENCH_FLEET_SCRIPT_UNDER_TEST`. The adjacent source, audit-WAL crash
+recovery and migrated-registry terminalization tests pass all 47 cases in
+15.33 seconds. The existing registered private-source blackbox gate includes
+the new cases. Independent review, Ruff, shell syntax and diff checks pass.
+
+Independent provider reads bound the exact reserved names, native machine
+instances, mounts and reciprocal volume attachments. Both machines were stopped
+with those guards. The exact recovery command correctly refused the old
+name-only records; no guard was relaxed. Fresh reads reconfirmed the stopped
+native instances, sole mounts and exact volume identities. The fixed ownership
+writer then durably promoted the verified pairs. The canonical
+`--recover-stale-owner` command completed with exit 0, retired both pairs and
+sealed the original audit. Receipts are under
+`.context/acceptance/proof16-canary-retirement/`. This repairs cleanup of the
+failed attempt; it does not change that attempt's outcome. The full Linux
+controller checks and ten-slice live proof remain pending, so this case stays
+open.
+
 ## Human feedback
 
 The user requires completion without repeated permission requests and ten
 sequential cloud slices of ten tasks with no infrastructure failures. This source
 repair changes none of the requested task or validation bounds and contributes
 no acceptance credit before the live proof.
+
+The user clarified that the proof is infrastructure only: benchmark failure is
+acceptable when startup, progress, evaluation and teardown function correctly.
+Do not alter task prompts, model routing, schemas or evaluator thresholds to
+make benchmark outcomes pass. Keep the normal 120-minute backstop and use the
+explicit five-minute override for this test sequence.
 
 ## Reusable lesson
 

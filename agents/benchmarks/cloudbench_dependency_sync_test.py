@@ -21314,3 +21314,165 @@ printf 'recovered-exact-source\\n'
         assert actual.returncode == (0 if state in {"valid", "unallocated"} else 1), actual.stdout + actual.stderr
         assert ("recovered-exact-source" in actual.stdout) == (state in {"valid", "unallocated"})
     assert (audit / "source-manifest.json").read_bytes() == payload
+
+
+def _private_source_identity_fixture(tmp_path: Path, *, private: bool = True):
+    """Use full v2 owner metadata, including the source captured by real admission."""
+    registry, audit, clone, machine = _migration_owner_fixture(tmp_path)
+    for path in (registry / "meta", audit / "meta", audit / "fresh" / clone):
+        path.write_text(path.read_text().replace("app=bench-app", "app=navi-whisper-lux-bench"))
+    (audit / "by-machine-id" / machine).unlink()
+    (registry / "clones" / clone).write_text(f"name={clone}\n")
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace(f"machine_id={machine}\n", "machine_id=\n").replace("volume_id=vol_old\n", "volume_id=\n").replace("disposition=owned", "disposition=ownership-pending"))
+    digest = ""
+    if private:
+        result, _ = _private_source_preflight_fixture(tmp_path / "capture")
+        assert result.returncode == 0, result.stderr
+        payload = (tmp_path / "capture/workspace/.context/run/source-manifest.json").read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        for directory in (registry, audit):
+            (directory / "source-manifest.json").write_bytes(payload)
+            with (directory / "meta").open("a") as handle:
+                handle.write(f"source_manifest_sha256={digest}\n")
+    return registry, audit, clone, machine, digest
+
+
+def _private_source_identity_command(registry: Path, audit: Path, body: str):
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
+        "registry_meta_value() {", "fleet_audit_update_registry_clone() {",
+        "registry_record_machine_identity() {", "fleet_registry_record_id() {",
+        "fleet_audit_finalize_provider_teardown() {",
+    ))
+    workspace = registry.parent.parent / "workspace"
+    script = f'''set -eu
+SOURCE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-source.py'))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+FLEET_TEARDOWN_OWNERSHIP_DIR={shlex.quote(str(audit))}
+FLEET_OWNER_TOKEN={registry.name}
+ROOT_DIR={shlex.quote(str(workspace))}
+RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
+RUN_ID=fixture-run
+FLEET_DIR="$RUNS_ROOT/$RUN_ID"
+APP=navi-whisper-lux-bench
+OWNED_CLONES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.ids"
+OWNED_CLONE_NAMES_FILE="$FLEET_TEARDOWN_OWNERSHIP_DIR/owned-clones.names"
+POOL_CLAIMS_DIR={shlex.quote(str(registry.parent.parent / 'claims'))}
+GIT_COMMON_DIR={shlex.quote(str(registry.parent.parent / 'common'))}
+PROVISION_POOL=1
+FLY() {{ printf unexpected-provider-call >&2; return 99; }}
+{functions}
+{body}
+'''
+    return subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10, check=False)
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("source_kind", ["base", "owned-primary"])
+def test_private_fleet_source_identity_promotion_preserves_original_owner(tmp_path: Path, private: bool, source_kind: str) -> None:
+    registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path, private=private)
+    if source_kind == "owned-primary":
+        parent_clone, parent_id = "cloudbench-primary", "feedface000002"
+        (audit / "expected-fresh" / parent_clone).write_text(f"clone_name={parent_clone}\nsource_machine_id=feedface000001\n")
+        child = audit / "fresh" / clone
+        (audit / "fresh" / parent_clone).write_text(child.read_text().replace(f"clone_name={clone}", f"clone_name={parent_clone}").replace("machine_id=\n", f"machine_id={parent_id}\n").replace("volume_id=\n", "volume_id=vol_parent\n").replace("disposition=ownership-pending", "disposition=owned"))
+        (audit / "by-machine-id" / parent_id).write_text(parent_clone + "\n")
+        (registry / "clones" / parent_clone).write_text(f"name={parent_clone}\nid={parent_id}\nvolume_id=vol_parent\n")
+        for path in (child, audit / "expected-fresh" / clone):
+            path.write_text(path.read_text().replace("source_machine_id=feedface000001", f"source_machine_id={parent_id}"))
+    before_meta = (audit / "meta").read_bytes()
+    result = _private_source_identity_command(registry, audit, f'''
+# Recovery must use the original owner records, never the successor's source.
+PRIVATE_SOURCE_SHA256={'e' * 64}
+PRIVATE_SOURCE_FILE=/does-not-exist
+FLEET_OWNER_TOKEN={'b' * 32}
+RUN_ID=successor-run
+fleet_registry_record_id {clone} {machine} vol_child
+''')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (registry / "clones" / clone).read_text() == f"name={clone}\nid={machine}\nvolume_id=vol_child\n"
+    assert (audit / "by-machine-id" / machine).read_text() == clone + "\n"
+    fresh = (audit / "fresh" / clone).read_text()
+    assert f"fleet_owner_token={registry.name}\n" in fresh and "run_id=fixture-run\n" in fresh
+    assert f"machine_id={machine}\nvolume_id=vol_child\ndisposition=owned\n" in fresh
+    assert (audit / "meta").read_bytes() == before_meta
+    if private:
+        assert hashlib.sha256((audit / "source-manifest.json").read_bytes()).hexdigest() == digest
+
+
+@pytest.mark.parametrize("corrupt", [
+    "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
+    "registry-digest-missing", "audit-digest-missing", "registry-file-missing", "audit-file-missing",
+    "registry-file-changed", "audit-file-changed", "registry-file-symlink", "audit-file-symlink",
+    "registry-file-fifo", "audit-file-fifo",
+    "invalid-schema", "invalid-app", "manifest-oversized",
+])
+def test_private_fleet_source_identity_rejects_unbound_metadata(tmp_path: Path, corrupt: str) -> None:
+    registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path)
+    target = registry if corrupt.startswith("registry-") else audit
+    if corrupt == "unknown-key":
+        with (registry / "meta").open("a") as handle:
+            handle.write("unrecognized_source_owner=anything\n")
+    elif corrupt == "duplicate-key":
+        with (registry / "meta").open("a") as handle:
+            handle.write(f"source_manifest_sha256={digest}\n")
+    elif corrupt in {"invalid-digest", "audit-digest-mismatch"}:
+        target = registry if corrupt == "invalid-digest" else audit
+        replacement = "invalid" if corrupt == "invalid-digest" else "e" * 64
+        (target / "meta").write_text((target / "meta").read_text().replace(digest, replacement))
+    elif corrupt.endswith("digest-missing"):
+        (target / "meta").write_text((target / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", ""))
+    elif corrupt.endswith("file-missing"):
+        (target / "source-manifest.json").unlink()
+    elif corrupt.endswith("file-changed"):
+        with (target / "source-manifest.json").open("ab") as handle:
+            handle.write(b" ")
+    elif corrupt.endswith("file-symlink"):
+        outside = tmp_path / "outside-manifest.json"
+        (target / "source-manifest.json").rename(outside)
+        (target / "source-manifest.json").symlink_to(outside)
+    elif corrupt.endswith("file-fifo"):
+        (target / "source-manifest.json").unlink()
+        os.mkfifo(target / "source-manifest.json")
+    else:
+        value = json.loads((registry / "source-manifest.json").read_bytes())
+        if corrupt == "invalid-schema":
+            value["unexpected"] = True
+        elif corrupt == "invalid-app":
+            value["app"] = "another-app"
+        payload = json.dumps(value).encode() + (b" " * 65536 if corrupt == "manifest-oversized" else b"")
+        new_digest = hashlib.sha256(payload).hexdigest()
+        for directory in (registry, audit):
+            (directory / "source-manifest.json").write_bytes(payload)
+            (directory / "meta").write_text((directory / "meta").read_text().replace(digest, new_digest))
+    def snapshot():
+        return {str(path): ("symlink", str(path.readlink())) if path.is_symlink() else ("file", path.read_bytes()) for directory in (registry, audit) for path in directory.rglob("*") if path.is_file() or path.is_symlink()}
+    before = snapshot()
+    result = _private_source_identity_command(registry, audit, f"fleet_registry_record_id {clone} {machine} vol_child")
+    assert result.returncode != 0, f"accepted {corrupt}"
+    assert "unexpected-provider-call" not in result.stderr
+    assert snapshot() == before, f"modified durable authority while rejecting {corrupt}"
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("successor_source", ["unset", "different"])
+def test_private_fleet_source_terminal_audit_preserves_digest(tmp_path: Path, private: bool, successor_source: str) -> None:
+    registry, audit, clone, _, digest = _private_source_identity_fixture(tmp_path, private=private)
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace("disposition=ownership-pending", "disposition=not-allocated-verified"))
+    original_manifest = (audit / "source-manifest.json").read_bytes() if private else None
+    setup = "unset PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE" if successor_source == "unset" else f"PRIVATE_SOURCE_SHA256={'e' * 64}\nPRIVATE_SOURCE_FILE=/does-not-exist"
+    result = _private_source_identity_command(registry, audit, setup + "\nfleet_audit_finalize_provider_teardown\n")
+    assert result.returncode == 0, result.stdout + result.stderr
+    published = tmp_path / "workspace/.context/fleet/runs/fixture-run/teardown-ownership"
+    assert "status=provider-teardown-verified\n" in (audit / "meta").read_text()
+    assert (published / "meta").read_bytes() == (audit / "meta").read_bytes()
+    if private:
+        assert f"source_manifest_sha256={digest}\n" in (audit / "meta").read_text(), "terminal audit lost original source identity"
+        assert (audit / "source-manifest.json").read_bytes() == original_manifest
+        assert (published / "source-manifest.json").read_bytes() == original_manifest
+    else:
+        assert "source_manifest_sha256=" not in (audit / "meta").read_text()

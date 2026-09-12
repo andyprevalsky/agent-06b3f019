@@ -2320,15 +2320,18 @@ fleet_audit_update_registry_clone() {  # <registry> <clone-name> <id-or-empty> <
     python3 - "$registry" "$meta" "$workspace_root" "$original_runs_root" \
         "$run_id" "$audit_dir" "$owned_ids_file" "$owned_names_file" \
         "$clone_name" "$FLEET_AUDIT_ROOT" "$owner" "$id" "$volume_id" \
-        "$disposition" "$app" <<'PY' || return 1
+        "$disposition" "$app" "${SOURCE_HELPER:-}" <<'PY' || return 1
+import hashlib
 import os
 import re
+import runpy
+import stat
 import sys
 from pathlib import Path
 
 (registry, meta, workspace, runs_root, run_id, audit, owned_ids,
  owned_names, clone_name, trusted_audit_root, owner) = map(Path, sys.argv[1:12])
-machine_id, volume_id, disposition, app = sys.argv[12:16]
+machine_id, volume_id, disposition, app, source_helper = sys.argv[12:17]
 expected_audit = trusted_audit_root / owner.name
 if (
     not workspace.is_absolute() or not runs_root.is_absolute() or not audit.is_absolute()
@@ -2370,11 +2373,12 @@ for raw in meta.read_text().splitlines():
     if not separator or key in fields:
         raise SystemExit(1)
     fields[key] = value
-if set(fields) != {
+required_meta = {
     "version", "app", "fleet_owner_token", "host", "pid", "pid_start",
     "run_id", "workspace_root", "runs_root", "audit_dir", "owned_ids_file",
     "owned_names_file", "cleanup_policy",
-}:
+}
+if set(fields) not in (required_meta, required_meta | {"source_manifest_sha256"}):
     raise SystemExit(1)
 for path in (trusted_audit_root, audit, audit / "meta",
              audit / "fresh", audit / "expected-fresh", audit / "by-machine-id"):
@@ -2418,6 +2422,36 @@ try:
                 or audit_meta.get("app") != app
             ):
                 raise SystemExit(1)
+
+            # Private source identity belongs to this original owner, not the
+            # recovery caller. Validate both captured copies before any WAL or
+            # registry write; legacy owners have neither optional digest.
+            if "source_manifest_sha256" in fields or "source_manifest_sha256" in audit_meta:
+                digest = fields.get("source_manifest_sha256", "")
+                if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or audit_meta.get("source_manifest_sha256") != digest
+                        or not source_helper):
+                    raise SystemExit(1)
+                try:
+                    payloads = []
+                    for parent in (registry, audit):
+                        fd = os.open(parent / "source-manifest.json", os.O_RDONLY | os.O_NONBLOCK | nofollow)
+                        try:
+                            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                                raise SystemExit(1)
+                            data = os.read(fd, 65537)
+                        finally:
+                            os.close(fd)
+                        if len(data) > 65536 or hashlib.sha256(data).hexdigest() != digest:
+                            raise SystemExit(1)
+                        payloads.append(data)
+                    if payloads[0] != payloads[1]:
+                        raise SystemExit(1)
+                    source = runpy.run_path(source_helper)["manifest"](payloads[0])
+                    if source["app"] != app:
+                        raise SystemExit(1)
+                except (OSError, ValueError, TypeError, KeyError):
+                    raise SystemExit(1)
 
             expected_fields = {}
             for raw in read_at(expected_fd, clone_name.name).splitlines():
@@ -2928,6 +2962,7 @@ fleet_audit_record_pool_handoff() {  # <transfer-claim> <clone-name> <machine-id
 fleet_audit_finalize_provider_teardown() {
     local hub_disposition hub_owner_file hub_owner_token
     local hub_pid hub_pid_start hub_argv_sha256 hub_port hub_birth_state
+    local source_manifest_sha256
     local shared_only="${FLEET_AUDIT_SHARED_ONLY:-0}"
     local shared_only_reason="${FLEET_AUDIT_SHARED_ONLY_REASON:-}"
     local tmp="$FLEET_TEARDOWN_OWNERSHIP_DIR/meta.tmp.$$"
@@ -3218,6 +3253,8 @@ PY
         "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_pid_start)"
     hub_argv_sha256="$(registry_meta_value \
         "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" hub_argv_sha256)"
+    source_manifest_sha256="$(registry_meta_value \
+        "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" source_manifest_sha256)"
     case "$hub_disposition" in
         not-applicable)
             [ -n "$PROVISION_POOL" ] || [ "$shared_only" = "1" ] || return 1
@@ -3266,6 +3303,9 @@ PY
         printf 'hub_pid=%s\n' "$hub_pid"
         printf 'hub_pid_start=%s\n' "$hub_pid_start"
         printf 'hub_argv_sha256=%s\n' "$hub_argv_sha256"
+        if [ -n "$source_manifest_sha256" ]; then
+            printf 'source_manifest_sha256=%s\n' "$source_manifest_sha256"
+        fi
     } > "$tmp" && mv "$tmp" "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" \
         || { rm -f "$tmp"; return 1; }
     if [ "$shared_only" = "1" ]; then

@@ -8,7 +8,7 @@ classification: our-bug
 problem_class: concurrency-inefficiency
 first_bad_boundary: benchmarkHubStore.readAgentRunIndexStrict read the compact index and durable revision floor outside the Postgres publication lock held by every writer
 symptoms:
-  - 'DELETE /:id — read-after-write: deleted agent → 404 on GET: Expected status 404, got 503'
+  - "DELETE /:id — read-after-write: deleted agent → 404 on GET: Expected status 404, got 503"
   - Benchmark Hub archive index is temporarily unavailable; retry shortly
   - Benchmark Hub agent-run index trails its durable revision floor
   - Persistent failure retried shared storage for every agent request
@@ -22,7 +22,7 @@ sources:
   - commit 5efdd5db0c3fbe00107ebcc7bc3c9993a7466387
   - agent 546f71d7-75e6-45aa-9673-031beb33cbfe
 repro: back-end/src/tests/blackbox/benchmark-hub-index-read.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -82,8 +82,14 @@ was `cd back-end && node --import tsx
 src/tests/blackbox/benchmark-hub-index-read.blackbox.ts`, with both Prisma URLs
 set to the owned workspace Postgres database. Logs are retained under
 `.context/acceptance/hub-index-read-race/permanent-before.log` (exit 1) and
-`permanent-after.log` (exit 0). The full backend HTTP outcome gate remains
-pending; this case stays open until it passes.
+`permanent-after.log` (exit 0). On runtime commit
+`c94b7d0661bb220ee96f055ce856a6443f53ba91`, the full unchanged backend
+coverage/blackbox gate then passed all 165 domains and 213 unit files. The
+original deleted-agent GET returned the required HTTP 404, and all five new
+controls passed inside the owning suite. The gate finished at
+`2026-09-12T07:39:52.695354Z`, with 89.22% line coverage. Immutable copies of the
+HTTP and control logs plus their hashes are retained in
+`.context/acceptance/hub-index-read-race/current-backend-pass/receipt.json`.
 
 The repair unifies the public compact snapshot read with the existing
 writer lock and preserves the strict floor/index checks. Cache only non-ready

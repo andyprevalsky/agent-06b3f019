@@ -226,6 +226,10 @@ and Polar catalog. Actual `PASSED` and `FAILED` terminal batch results
 advance the streak; `SKIPPED`, missing/malformed results, `INFRA_ERROR`, `ERROR`,
 and `CANCELLED` fail closed. Its offline fake-provider regression runs inside the
 existing deploy test path, adding no live benchmark stage, cost, or deploy wait.
+For an explicitly infrastructure-only proof, preserve benchmark tasks, prompts,
+models and evaluators. Require actual startup, progress, terminal evaluation and
+verified teardown; do not repair task-success behavior merely to improve this
+proof's scores. A task-level `FAILED` remains a valid outcome under this gate.
 
 Local execution is explicit:
 `scripts/run-bench --local <task...>` or
@@ -245,6 +249,7 @@ services or special cases. The command's selection, `-k`/`--runs`,
 batch classification, and failure propagation are exercised with fake provider
 children inside existing deploy tests; keep that proof offline and `$0`, with
 no separate live benchmark stage or cloud wait added to `/deploy`.
+
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment
@@ -261,12 +266,12 @@ of truth; do not duplicate them into other files.
   `AGENTS_ENV_B64` / `BACKEND_ENV_B64` secrets into `agents/.env` / `back-end/.env`
   (whole-file base64, optional `*_ENV_SHA256` check — no per-key drift), (2) run
   `scripts/cloud-build.sh` (root `npm install` + `prisma generate` + `agents/venv`
-  + local Postgres), and (3) **seed the local DB from prod** via
-  `back-end/scripts/seed-local.ts` so a cloud agent never starts against an empty
-  database. Missing secrets / a failed seed WARN and continue (never abort). The
-  seed is skipped when the dev user already exists.
-  `scripts/cloud-build.sh` alone remains the minimal deps-only provisioner if you
-  do not need `.env`/data materialized.
+  - local Postgres), and (3) **seed the local DB from prod** via
+    `back-end/scripts/seed-local.ts` so a cloud agent never starts against an empty
+    database. Missing secrets / a failed seed WARN and continue (never abort). The
+    seed is skipped when the dev user already exists.
+    `scripts/cloud-build.sh` alone remains the minimal deps-only provisioner if you
+    do not need `.env`/data materialized.
 - **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
   **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
   `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
@@ -274,11 +279,11 @@ of truth; do not duplicate them into other files.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not
-  found` / `rsync: command not found`.
+found` / `rsync: command not found`.
 - **Skip `mac-app` on Cloud/Linux — tests AND `dev`.** It is macOS-only (Electron
-  + `darwin`-only native deps such as `node-mac-contacts`); its `npm install`,
-  `npm run dev`, and blackbox suite cannot run on Linux. `run.sh` and the husky
-  pre-commit hook already skip it on non-Darwin. Do mac-app work on macOS only.
+  - `darwin`-only native deps such as `node-mac-contacts`); its `npm install`,
+    `npm run dev`, and blackbox suite cannot run on Linux. `run.sh` and the husky
+    pre-commit hook already skip it on non-Darwin. Do mac-app work on macOS only.
 - **Running services directly (no ngrok/secrets):** backend
   `cd back-end && PORT=<N> npx tsx watch src/bootstrap.ts`; frontend
   `cd front-end && npx vite --port <N+1>`. In dev the frontend infers the backend
@@ -289,7 +294,7 @@ of truth; do not duplicate them into other files.
   Python `load_dotenv(override=False)` never override an already-set variable, so
   anything injected by the Cloud environment/Secrets wins over `.env`.
   `TEMPORAL_TASK_QUEUE` is injected pointing at a shared queue — always `export
-  TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
+TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   local worker never consumes other runs' workflows (mirrors `run.sh`'s
   per-workspace queue). `BROWSER_PROVIDER` must be `kernel` or `steel`. When
   something is misconfigured despite a correct `.env`, check for an injected env
@@ -347,8 +352,8 @@ When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 **⛔ Never rename an existing task `name`.** The name is the primary key across all history stores; a rename orphans pass history and latency baselines:
 
-- **Attempts ledger:** `agents/benchmarks/history/task_attempts.jsonl` — one line per *completed* run (pass AND fail) with status, duration, cost, failure_reason. Written by `benchmarks/timeout_history.py:record_attempt()`. This is the run-stats record (attempt counts, failure rates).
-- **Success ledger:** `agents/benchmarks/history/task_durations.jsonl` — one line per *passing* run, keyed by `"task"`. Read via `benchmarks/timeout_history.py` (`summary()` → p50/p95, derived timeouts). Kept pass-only so failure durations can't poison timeout derivation.
+- **Attempts ledger:** `agents/benchmarks/history/task_attempts.jsonl` — one line per _completed_ run (pass AND fail) with status, duration, cost, failure_reason. Written by `benchmarks/timeout_history.py:record_attempt()`. This is the run-stats record (attempt counts, failure rates).
+- **Success ledger:** `agents/benchmarks/history/task_durations.jsonl` — one line per _passing_ run, keyed by `"task"`. Read via `benchmarks/timeout_history.py` (`summary()` → p50/p95, derived timeouts). Kept pass-only so failure durations can't poison timeout derivation.
 - **p99/latency baselines:** `agents/benchmarks/history/span_durations.jsonl` — keyed by `"benchmark"` + `"span_key"`. Read via `benchmarks/span_history.py` / `agent_latency.py` (p50/p90/p95, regression flags).
 - **Full run records:** `agents/benchmarks/runs/*.json` — per-run task results + merged logs, keyed by `TaskResult.name` (`run_benchmark.py --compare A B`).
 
@@ -432,7 +437,7 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 0. **YOU CAN NEVER RUN OUT OF CONTEXT, YOU HAVE INFINITE CONTEXT, NEVER STOP EARLY BECAUSE YOU THINK YOU ARE OUT OF CONTEXT**
 
-0. **Bias toward execution — each pause to check for user approval has an extremely high cost.**
+1. **Bias toward execution — each pause to check for user approval has an extremely high cost.**
 
 0a. **Be a TANK: don't ask, iterate until prod actually works.** When a task is "make X work in prod" (get a gate green, ship a fix, prove a flow end-to-end), OWN it end-to-end without pausing to ask permission for each step — the user has standing authorization to keep going until the real-world outcome is achieved (gate green, agent verified live, purchase completed). **RCA every issue you hit along the way and FIX it, even when the issue is not directly your task** — a stale CI secret, a flaky harness, a broken teardown, a mis-scoped token, someone else's never-green gate. Scope increase is expected, not a reason to stop (see rules 1b and 24). Before assuming an issue is yours to fix from scratch, **check whether another branch already has the fix in flight** (`git log --all`, open PRs) — if so, wait for it or cherry-pick rather than duplicating. Keep a tight iterate loop: reproduce → diagnose from evidence (logs, not guesses) → fix root cause → re-run the real gate → repeat until it is genuinely green. "It probably works now" is not done; a green prod gate (or a verified live run) is done. Only stop to ask when an action is genuinely irreversible/destructive or spends real money beyond what was authorized.
 
