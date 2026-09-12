@@ -10,6 +10,8 @@ first_bad_boundary: agents/tests/blackbox/benchmark.blackbox.py child fixture us
 symptoms:
   - "ValueError: invalid literal for int() with base 10: ''"
   - local_start_services_exact_process_group_cleanup failed
+  - "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+  - test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children failed
 tags:
   - benchmark-harness
   - process-groups
@@ -18,6 +20,8 @@ tags:
   - cleanup
 sources:
   - PR #924
+  - PR #1299
+  - commit 2b5c803e4b41f9869427d7c093c2abfb78b1f258
 repro: agents/tests/blackbox/benchmark.blackbox.py test_local_start_services_reaps_only_its_real_process_group
 status: fixed
 ---
@@ -44,6 +48,34 @@ file. The deepest owned cause was a two-state handoff (absent/present) being
 implemented as two non-atomic mutations (create/write), so path existence did
 not imply a complete payload.
 
+### September 11 recurrence in boot cleanup fixtures
+
+The agents coverage gate on `2b5c803e4` passed 99 domains and failed the
+benchmark domain when its boot cleanup fixture parsed `children.json` as an
+empty string at `cloudbench_dependency_sync_test.py:1506`. The neighboring
+reused-identity fixture had the same direct final-path write followed by
+existence polling and integer parsing. The original fix covered a different
+fixture; these newer producers repeated the same incomplete publication
+protocol. This is a recurrence of the contract, not a provider failure.
+
+Archive searches used `JSONDecodeError Expecting value children.json` and
+`fixture ready empty file atomic publication`; a literal search for atomic
+readiness and JSON errors found this case. The registry-retirement case is a
+relative with a different boundary: disappearance after complete publication.
+
+The critical path is child launch → final file opened → parent observes
+existence → parent parses incomplete PID payload → cleanup test fails before
+its intended assertion. The observed empty JSON establishes the first bad
+data boundary. An explicit 200 ms open/write interval makes the same window
+deterministic in both fixtures. The unchanged test command
+`agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py -k boot_payload_fixture_cleanup --tb=short`
+failed all three cases before atomic publication: two JSON decode errors and
+one empty-integer error. After the publication fix all three pass with the
+same delay, five-second readiness deadline, identity checks, detached-child
+assertions, and unrelated-process survival assertion. Logs are
+`.context/acceptance/fixture-ready-publication-rca/unified-before.log` and
+`unified-after.log`; the original full-gate traceback is `runtime-failure.log`.
+
 ## Solution
 
 The fixture now opens a sibling `.tmp` path, retains the adversarial 200 ms delay,
@@ -54,9 +86,31 @@ prevents every consumer of an existence-based fixture handoff from seeing a
 partial PID. It is test-only O(1) filesystem work and adds no runtime process,
 lock, scan, or per-agent cost at 10,000 agents.
 
+The boot fixtures now share `_boot_fixture_ready_program`, which retains the
+adversarial delay while writing a sibling temporary file, closes it, then
+renames it to the readiness path. One producer owns the absent-to-complete
+transition for both JSON and integer payloads; no parser retries or timeout
+relaxation are needed. Cleanup before successful payload parsing reuses the
+existing process-tree owner while its `Popen` root is still live. `ExitStack`
+ensures a tree-inspection error cannot skip captured native-identity cleanup
+or the remaining owned parent/sentinel joins. The intentional reused-identity
+case still refuses to signal the replacement; final test cleanup uses its
+separately captured actual native identity.
+
+Independent review identified the sibling producer and the cleanup-error
+join hazard before finalization. The three cases are already discovered by
+the benchmark blackbox in agents coverage and by the controller deploy gate.
+This fixture correction adds no production work or paid benchmark executions.
+The full fresh deployment loop and separate cloud outcome proof are still
+required; the local publication regression supplies no cloud acceptance credit.
+
 ## Human feedback
 
-None recorded.
+None recorded for the original incident. During the September recurrence the
+user required continued execution without repeated permission requests, ten
+sequential ten-task cloud slices with no infrastructure outcomes, and a
+temporary five-minute execution limit while preserving the normal 120-minute
+backstop. This fixture fix changes none of those bounds or acceptance rules.
 
 ## Reusable lesson
 

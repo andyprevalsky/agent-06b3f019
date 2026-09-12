@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1466,6 +1467,18 @@ def _terminate_boot_fixture_tree(process: subprocess.Popen) -> None:
     assert not any(same_birth_live(pid, birth) for pid, birth in targets), "fixture descendants survived cleanup"
 
 
+def _boot_fixture_ready_program(payload: str) -> str:
+    """Keep the readiness publication window observable in both child fixtures."""
+    return (
+        "ready=Path(sys.argv[1])\n"
+        "pending=ready.with_suffix('.tmp')\n"
+        "with pending.open('w') as handle:\n"
+        "    time.sleep(0.2)\n"
+        f"    handle.write({payload})\n"
+        "pending.replace(ready)\n"
+    )
+
+
 @pytest.mark.parametrize("fixture_failure", [False, True])
 def test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixture_failure: bool
@@ -1485,8 +1498,8 @@ def test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children(
         "import json,os,subprocess,sys,time\n"
         "from pathlib import Path\n"
         "grandchild=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], start_new_session=True)\n"
-        "Path(sys.argv[1]).write_text(json.dumps([os.getpid(),grandchild.pid]))\n"
-        "time.sleep(60)\n"
+        + _boot_fixture_ready_program("json.dumps([os.getpid(),grandchild.pid])")
+        + "time.sleep(60)\n"
     )
     ready = tmp_path / "children.json"
     launcher = tmp_path / "launcher.py"
@@ -1524,14 +1537,19 @@ def test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children(
             state = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
             assert not state.stdout.strip() or state.stdout.strip().startswith("Z"), "detached fixture child survived"
     finally:
-        # Exact fallback also keeps the intentional before-failure run bounded.
-        for pid, birth in captured.items():
-            identity.main(["process-identity.py", "--expect", birth, "--signal", "KILL", str(pid)])
-        if boot.poll() is None:
-            boot.kill()
-        boot.wait(timeout=2)
-        foreign.terminate()
-        foreign.wait(timeout=2)
+        # Run every owned fallback even if tree cleanup rejects an observation.
+        with ExitStack() as cleanup:
+            cleanup.callback(foreign.wait, timeout=2)
+            cleanup.callback(foreign.terminate)
+            cleanup.callback(boot.wait, timeout=2)
+            cleanup.callback(lambda: boot.kill() if boot.poll() is None else None)
+            for pid, birth in captured.items():
+                cleanup.callback(
+                    identity.main, ["process-identity.py", "--expect", birth, "--signal", "KILL", str(pid)]
+                )
+            # JSON parsing can fail before descendant identities are captured.
+            if boot.poll() is None:
+                _terminate_boot_fixture_tree(boot)
 
 
 def test_boot_payload_fixture_cleanup_rejects_reused_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1544,7 +1562,8 @@ def test_boot_payload_fixture_cleanup_rejects_reused_identity(tmp_path: Path, mo
     script.write_text(
         "import subprocess,sys,time\nfrom pathlib import Path\n"
         "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'], start_new_session=True)\n"
-        "Path(sys.argv[1]).write_text(str(child.pid))\ntime.sleep(60)\n"
+        + _boot_fixture_ready_program("str(child.pid)")
+        + "time.sleep(60)\n"
     )
     boot = subprocess.Popen([sys.executable, str(script), str(ready)])
     child_pid = None
@@ -1576,12 +1595,18 @@ def test_boot_payload_fixture_cleanup_rejects_reused_identity(tmp_path: Path, mo
         assert state.stdout.strip() and not state.stdout.strip().startswith("Z"), "stale identity killed replacement"
         assert identity_reads >= 2, "native identity was not captured and revalidated"
     finally:
-        if child_pid is not None and child_identity is not None:
-            # Use a fresh unpatched native module for the intentional-failure fallback.
-            load_identity().main(["process-identity.py", "--expect", child_identity, "--signal", "KILL", str(child_pid)])
-        if boot.poll() is None:
-            boot.kill()
-        boot.wait(timeout=2)
+        with ExitStack() as cleanup:
+            cleanup.callback(boot.wait, timeout=2)
+            cleanup.callback(lambda: boot.kill() if boot.poll() is None else None)
+            if child_pid is not None and child_identity is not None:
+                # A fresh native module keeps the intentional replacement safe.
+                cleanup.callback(
+                    load_identity().main,
+                    ["process-identity.py", "--expect", child_identity, "--signal", "KILL", str(child_pid)],
+                )
+            if boot.poll() is None:
+                monkeypatch.setattr(sys.modules[__name__], "_boot_fixture_process_identity", load_identity)
+                _terminate_boot_fixture_tree(boot)
 
 
 def test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack(
