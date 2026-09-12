@@ -17502,7 +17502,11 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert 'remote_log="$(read_bench_log' not in cloud
     read_log = _extract_fleet_function(cloud, "read_bench_log() {")
     assert "ssh_read" not in read_log
-    refresh_log = _extract_fleet_function(cloud, "refresh_bench_log() {")
+    refresh_wrapper = _extract_fleet_function(cloud, "refresh_bench_log() {")
+    assert 'refresh_bench_log_checked "${1:-1}"' in refresh_wrapper
+    assert "ssh_read" not in refresh_wrapper
+    refresh_log = _extract_fleet_function(cloud, "refresh_bench_log_checked() {")
+    assert "ssh_read" not in refresh_log
     assert 'cat "$BENCH_LOG_CHUNK_FILE" >> "$SSH_LOG"' in refresh_log
     assert refresh_log.index('read_bench_log "$offset" "$limit"') < refresh_log.index(
         'cat "$BENCH_LOG_CHUNK_FILE" >> "$SSH_LOG"'
@@ -18199,20 +18203,20 @@ if cloudbench_collect_terminal_log; then exit 84; else missing_rc=$?; fi
 def test_incremental_log_bounds_ignore_hostile_overrides() -> None:
     """Inherited environment values cannot remove transport/backlog bounds."""
     cloud = CLOUD_SCRIPT.read_text()
-    refresh = _extract_fleet_function(cloud, "refresh_bench_log() {")
-    terminal = _extract_fleet_function(cloud, "refresh_bench_log_to_eof() {")
+    # Load the wrapper and its checked implementation from the shared fixture;
+    # a missing dependency must not be hidden by a later successful assertion.
+    refresh = _cloudbench_incremental_log_functions()
     result = subprocess.run(
         [
             "bash",
             "-c",
-            f"""set -u
+            f"""set -euo pipefail
 {refresh}
 if refresh_bench_log 129; then exit 85; else [ "$?" = 2 ]; fi
 CLOUDBENCH_LOG_CHUNK_BYTES=262145
 if refresh_bench_log 1; then exit 86; else [ "$?" = 2 ]; fi
 unset CLOUDBENCH_LOG_CHUNK_BYTES
-refresh_bench_log() {{ [ "$1" = 128 ]; BENCH_LOG_HAS_MORE=0; }}
-{terminal}
+refresh_bench_log() {{ [ "$1" = 128 ] || return 87; BENCH_LOG_HAS_MORE=0; }}
 CLOUDBENCH_TERMINAL_LOG_MAX_CHUNKS=999999 refresh_bench_log_to_eof
 """,
         ],
