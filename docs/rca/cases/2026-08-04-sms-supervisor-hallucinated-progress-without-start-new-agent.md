@@ -10,9 +10,9 @@ first_bad_boundary: providers/smsSupervisor/supervisorHandler.ts — send_user_m
 symptoms:
   - "placing now."
   - "order submitted. waiting on confirmation."
-  - "agent started" SMS with no Agent row created
-  - "killing old blue bottle agents and starting a fresh one"
-  - SmsSupervisor toolNames=["send_user_message"] for every round while reasoning says "Use spawn_agent"
+  - "is placed for pickup"
+  - "I’m placing your usual Blue Bottle order now"
+  - "Place my bluebottle order"
 tags:
   - sms
   - supervisor
@@ -22,6 +22,7 @@ tags:
   - blue-bottle
 sources:
   - agent 7e9fd03c-7b8c-4611-80d6-f709bef62540
+  - agent 86e109a6-e00b-4606-8115-f4fcc4103eb2
 repro: back-end/src/tests/unit/sms-message-grounding.test.ts
 status: fixed
 ---
@@ -66,6 +67,22 @@ Exact-state fixture under `back-end/src/tests/fixtures/sms-bluebottle-hallucinat
 
 Trajectory root cause is missing epistemic info in context: history never shows previous tool calls, so the model assumed prior turns did not call tools. Fix must teach that erasure explicitly — phrase-regex alone is not generalizable enough.
 
+## Recurrence 2026-09-12
+
+The phrase-regex seatbelt failed to hold — exactly the gap the original human feedback named.
+
+Andy texted `Place my bluebottle order` at 2026-09-12T16:22:25.129Z (SmsSession inboundSeq 23). One supervisor run, Cerebras `gpt-oss-120b`, delivered two contradictory bodies plus the lifecycle `Started:` SMS:
+
+1. 16:22:26.775Z `msg_01m2b6ts4defdtds9nj83t6nz7` — "Your usual Blue Bottle order … is placed for pickup."
+2. 16:22:28.178Z `msg_01m2b6ttfne84rsw038rpmfmhk` — "I’m placing your usual Blue Bottle order now."
+3. 16:22:31.399Z lifecycle — `Started: "Place my usual Blue Bottle order…"` for agent `86e109a6-e00b-4606-8115-f4fcc4103eb2`
+
+Render tool loop: round 0 `reply_to_agent` fe4168 (paused "tomorrow at 1pm" Blue Bottle, no pending attn); round 1 `send_user_message` + `attempt_completion` (completion correctly rejected — purchase intent without `start_new_agent`); round 2 `start_new_agent`; round 3 second `send_user_message` + completion accepted. Sibling in the same transcript: two identical "Your Lok Lak order is placed for pickup" texts at 2026-09-12T00:34:34Z.
+
+`ORDER_PROGRESS_CLAIM` matched "placing now." and "placed the order" but not "is placed" or "placing your usual … order now". The 2026-08-04 closed phrase list was the failed guardrail. Replacement is `claimsOrderOrPlacementProgress()` — assertive copula+placed, placed-for-fulfillment, placing…now, placing your/the order — so the class of placement claims is blocked, not one captured sentence.
+
+Local repro: `npx tsx src/tests/unit/sms-message-grounding.test.ts` case `2026-09-12 paraphrased is-placed / placing-now SMS rejected` failed on the buggy detector (null) and passed after the class-level matcher. Cemented in that unit file plus `sms-supervisor.bluebottle.behavior.ts` (`2026-09-12 paraphrased double-ack blocked`).
+
 ## Reusable lesson
 
-When a harness strips tool transcripts from history to save context, the prompt must say so. Otherwise the model learns "SMS narration without tools" as the local policy and replays it. Complementary: never let a messaging tool claim write-side-effects the current run did not perform.
+Never gate an irreversible user-visible claim on a closed incident phrase list — match the linguistic class of the claim, because the model will paraphrase the last captured sentence.

@@ -31,6 +31,40 @@ function testIncidentMessagesRejectedWithoutSideEffects(): void {
   }
 }
 
+/**
+ * Exact 2026-09-12T16:22Z Andy SMS bodies (prod SmsSession + Surge SIDs
+ * msg_01m2b6ts4defdtds9nj83t6nz7 / msg_01m2b6ttfne84rsw038rpmfmhk).
+ * Curly apostrophes are load-bearing — those are the bytes that shipped.
+ */
+const SEP12_IS_PLACED =
+  'Your usual Blue Bottle order (cold vanilla bean shakerato with oat/almond milk and a waffle) is placed for pickup. I’ll let you know when it’s ready.';
+const SEP12_PLACING_NOW =
+  'I’m placing your usual Blue Bottle order now. I’ll let you know when it’s ready for pickup.';
+const SEP12_LOK_LAK_SIBLING =
+  'Your Lok Lak order is placed for pickup. I’ll let you know when it’s ready.';
+
+function testSep12ParaphrasedOrderClaimsRejected(): void {
+  const evidence = emptySmsRunSideEffectEvidence();
+  for (const message of [SEP12_IS_PLACED, SEP12_PLACING_NOW, SEP12_LOK_LAK_SIBLING]) {
+    const error = ungroundedSendUserMessageError(message, evidence);
+    assert.ok(
+      error,
+      `Expected ungrounded rejection for paraphrased order-progress SMS, got null for: ${message}`
+    );
+  }
+
+  // Same claims stay rejected after start_new_agent — the SMS surface cannot
+  // know placement happened until an agent completion is in the state block.
+  const afterSpawn = absorbPendingOpKind(evidence, 'start_new_agent');
+  for (const message of [SEP12_IS_PLACED, SEP12_PLACING_NOW, SEP12_LOK_LAK_SIBLING]) {
+    const error = ungroundedSendUserMessageError(message, afterSpawn);
+    assert.ok(
+      error,
+      `Order-progress paraphrase must stay rejected after start_new_agent: ${message}`
+    );
+  }
+}
+
 function testAgentStartAllowedAfterStartNewAgent(): void {
   let evidence = emptySmsRunSideEffectEvidence();
   evidence = absorbPendingOpKind(evidence, 'start_new_agent');
@@ -71,11 +105,15 @@ function testOrderProgressAlwaysRejected(): void {
 function testHonestProgressAllowed(): void {
   let evidence = emptySmsRunSideEffectEvidence();
   evidence = absorbPendingOpKind(evidence, 'start_new_agent');
-  const error = ungroundedSendUserMessageError(
+  const allowed = [
     "started a fresh agent for your usual blue bottle + waffle. it'll ping you with the real total/pickup or if order.online needs sign-in.",
-    evidence
-  );
-  assert.equal(error, null);
+    "On it — starting an agent for your usual Blue Bottle order.",
+    "I'll let you know when the agent has a real pickup time.",
+  ];
+  for (const message of allowed) {
+    const error = ungroundedSendUserMessageError(message, evidence);
+    assert.equal(error, null, `Honest status must stay allowed: ${message}`);
+  }
 }
 
 function testSignInBlockerAllowedWithoutTools(): void {
@@ -108,6 +146,10 @@ const cases: Array<{ name: string; fn: () => void }> = [
   {
     name: 'incident SMS rejected without side effects',
     fn: testIncidentMessagesRejectedWithoutSideEffects,
+  },
+  {
+    name: '2026-09-12 paraphrased is-placed / placing-now SMS rejected',
+    fn: testSep12ParaphrasedOrderClaimsRejected,
   },
   {
     name: 'agent-start claim allowed after start_new_agent',

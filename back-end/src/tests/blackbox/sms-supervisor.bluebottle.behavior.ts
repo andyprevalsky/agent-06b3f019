@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import type { PrismaClient } from '@prisma/client';
 
+import { claimsOrderOrPlacementProgress } from '../../providers/smsSupervisor/messageGrounding';
 import { parseSmsSessionMessages } from '../../providers/smsSupervisor/sessionStore';
 import {
   BASE_URL,
@@ -269,11 +270,115 @@ export async function testBluebottle_groundedSpawnAllowed(prisma: PrismaClient) 
   }
 }
 
+/**
+ * Exact 2026-09-12T16:22Z tool loop (prod Render + SmsSession):
+ *   inbound "Place my bluebottle order"
+ *   send "is placed for pickup" + attempt_completion (rejected: no start_new_agent)
+ *   start_new_agent
+ *   send "I'm placing your usual … order now" + attempt_completion (accepted)
+ * Both bodies reached Surge. After the class-level grounding fix, neither may.
+ */
+export async function testBluebottle_sep12ParaphrasedDoubleAckBlocked(prisma: PrismaClient) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  if (probe.status !== 200) {
+    console.warn('  ⚠ capture harness not active — skipping sep12 double-ack test');
+    return;
+  }
+  const cursor = (probe.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-bluebottle-sep12-double-ack');
+  const inbound = 'Place my bluebottle order';
+  const isPlaced =
+    'Your usual Blue Bottle order (cold vanilla bean shakerato with oat/almond milk and a waffle) is placed for pickup. I’ll let you know when it’s ready.';
+  const placingNow =
+    'I’m placing your usual Blue Bottle order now. I’ll let you know when it’s ready for pickup.';
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify([
+        {
+          reasoning:
+            'User confirmed they want their usual Blue Bottle order. Approved the pending order agent and will confirm placement.',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: isPlaced } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+        {
+          reasoning: 'User wants the order placed. Start a new agent to handle the purchase.',
+          tool_calls: [
+            {
+              tool: 'start_new_agent',
+              arguments: {
+                goal: 'Place my usual Blue Bottle order (cold vanilla bean shakerato with oat or almond milk and a waffle) for pickup at Blue Bottle Coffee, Ferry Building. Use saved payment method and confirm when ready for pickup.',
+                budget_dollars: 1,
+              },
+            },
+          ],
+        },
+        {
+          reasoning:
+            'Started a new agent to complete the purchase. Confirmed the order is being processed.',
+          tool_calls: [
+            { tool: 'send_user_message', arguments: { message: placingNow } },
+            { tool: 'attempt_completion', arguments: {} },
+          ],
+        },
+      ])
+    );
+
+    const response = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: inbound,
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+
+    await waitFor(
+      async () => {
+        const session = await prisma.smsSession.findUnique({ where: { userId } });
+        if (!session) return null;
+        const parsed = parseSmsSessionMessages(session.messages);
+        return parsed.some((message) => message.role === 'user' && message.content === inbound)
+          ? parsed
+          : null;
+      },
+      20000,
+      200
+    );
+
+    for (const message of [isPlaced, placingNow]) {
+      const hit = await findSurgeCallForReply(token, cursor, phone, message);
+      if (hit) {
+        throw new Error(
+          `2026-09-12 paraphrased order-progress SMS must not be delivered to Surge, but was: ${message}`
+        );
+      }
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 export function smsBluebottleBehaviorCases(prisma: PrismaClient) {
   return [
     {
       name: 'bluebottle -- ungrounded progress SMS blocked (exact incident fixture)',
       fn: () => testBluebottle_ungroundedProgressBlocked(prisma),
+    },
+    {
+      name: 'bluebottle -- 2026-09-12 paraphrased double-ack blocked (exact prod loop)',
+      fn: () => testBluebottle_sep12ParaphrasedDoubleAckBlocked(prisma),
     },
     {
       name: 'bluebottle -- grounded start_new_agent + status allowed',
@@ -371,9 +476,7 @@ export async function testRealLlm_bluebottleExactStateSpawnsNotHallucinates(pris
       try {
         const body = JSON.parse(call.requestBody) as { body?: string };
         const text = body.body ?? '';
-        if (
-          /\b(placing now|order submitted|order confirmed|waiting on confirmation)\b/i.test(text)
-        ) {
+        if (claimsOrderOrPlacementProgress(text)) {
           throw new Error(`Real-LLM delivered ungrounded order progress SMS: ${text}`);
         }
       } catch (error) {
