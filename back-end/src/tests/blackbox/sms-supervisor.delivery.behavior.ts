@@ -16,8 +16,10 @@ import {
   captureToken,
   cleanupAgentScopedUser,
   cleanupSessionScopedUser,
+  capturedSmsBody,
   findSurgeCallForReply,
   provisionUserWithPhone,
+  readCapturesAfter,
   request,
   setFixtureOverride,
   uniqueSmsPhone,
@@ -139,6 +141,61 @@ export async function testSendUserMessage_continuesUntilSubstantiveResult(prisma
     if (assistantMessages[0] !== progress || assistantMessages[1] !== result) {
       throw new Error(
         `Expected progress then substantive result in one run, got ${JSON.stringify(assistantMessages)}`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+export async function testSendUserMessage_identicalBodyNotResent(prisma: PrismaClient) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  if (probe.status !== 200) return;
+  const cursor = (probe.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-identical-body-dedup');
+  const reply = 'I could not find that file. Send the exact Drive folder name.';
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify({
+        reasoning: 'Repeat the same SMS four times in one response.',
+        tool_calls: [
+          { tool: 'send_user_message', arguments: { message: reply } },
+          { tool: 'send_user_message', arguments: { message: reply } },
+          { tool: 'send_user_message', arguments: { message: reply } },
+          { tool: 'send_user_message', arguments: { message: reply } },
+          { tool: 'attempt_completion', arguments: {} },
+        ],
+      })
+    );
+    const response = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'In gdrive',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+    await waitFor(() => findSurgeCallForReply(token, cursor, phone, reply));
+    const delivered = (await readCapturesAfter(cursor)).filter((call) => {
+      if (!call.url.includes('surge.app') || !call.url.endsWith('/messages')) {
+        return false;
+      }
+      const body = capturedSmsBody(call);
+      return body?.to === phone && body?.body === reply;
+    });
+    if (delivered.length !== 1) {
+      throw new Error(
+        `Identical send_user_message bodies must deliver once, got ${String(delivered.length)}`
       );
     }
   } finally {
@@ -355,6 +412,10 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'send -- progress SMS continues to a later substantive result',
       fn: () => testSendUserMessage_continuesUntilSubstantiveResult(prisma),
+    },
+    {
+      name: 'send -- identical send_user_message body is delivered once',
+      fn: () => testSendUserMessage_identicalBodyNotResent(prisma),
     },
     {
       name: 'lifecycle -- agent-sent SMS lands on the supervisor transcript',

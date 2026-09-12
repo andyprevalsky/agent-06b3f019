@@ -45,7 +45,17 @@ const SEP12_LOK_LAK_SIBLING =
 
 function testSep12ParaphrasedOrderClaimsRejected(): void {
   const evidence = emptySmsRunSideEffectEvidence();
-  for (const message of [SEP12_IS_PLACED, SEP12_PLACING_NOW, SEP12_LOK_LAK_SIBLING]) {
+  const paraphrases = [
+    SEP12_IS_PLACED,
+    SEP12_PLACING_NOW,
+    SEP12_LOK_LAK_SIBLING,
+    "It's placed — I'll text when it's ready.",
+    "I've placed your usual Blue Bottle order.",
+    'I submitted it.',
+    'The order went through.',
+    'Confirmed the order at the Ferry Building.',
+  ];
+  for (const message of paraphrases) {
     const error = ungroundedSendUserMessageError(message, evidence);
     assert.ok(
       error,
@@ -56,7 +66,7 @@ function testSep12ParaphrasedOrderClaimsRejected(): void {
   // Same claims stay rejected after start_new_agent — the SMS surface cannot
   // know placement happened until an agent completion is in the state block.
   const afterSpawn = absorbPendingOpKind(evidence, 'start_new_agent');
-  for (const message of [SEP12_IS_PLACED, SEP12_PLACING_NOW, SEP12_LOK_LAK_SIBLING]) {
+  for (const message of paraphrases) {
     const error = ungroundedSendUserMessageError(message, afterSpawn);
     assert.ok(
       error,

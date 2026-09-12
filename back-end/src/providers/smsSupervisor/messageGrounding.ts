@@ -33,8 +33,9 @@ const AGENT_KILL_CLAIM =
 const ORDER_PROGRESS_PHRASES =
   /\b(?:placing\s+now|order\s+submitted|order\s+(?:is\s+)?confirmed|(?:placed|submitted)\s+(?:the\s+|your\s+)?(?:order|blue\s*bottle)|waiting\s+on\s+confirmation|confirmation\s*[#:]?\s*[a-z0-9-]{4,})\b/i;
 
-/** "is/has been/was/got placed" — completion, any subject. */
-const ORDER_PLACED_COPULA = /\b(?:is|has\s+been|have\s+been|was|got)\s+placed\b/i;
+/** "is/has been/was/got/I've placed" — completion, any subject. */
+const ORDER_PLACED_COPULA =
+  /\b(?:is|has\s+been|have\s+been|was|got|i['']ve|we['']ve|it['']s|that['']s)\s+placed\b/i;
 
 /** "placed for pickup/delivery" — completion with a fulfillment mode. */
 const ORDER_PLACED_FOR_FULFILLMENT = /\bplaced\s+for\s+(?:pickup|delivery)\b/i;
@@ -46,8 +47,16 @@ const ORDER_PLACING_NOW = /\bplacing\b[\s\S]{0,80}\bnow\b/i;
 const ORDER_PLACING_THEIR_ORDER =
   /\bplacing\s+(?:your|the|my|a)\s+(?:usual\s+)?[\s\S]{0,80}\border\b/i;
 
-function normalizeSmsClaimText(text: string): string {
+/** Submission / confirmation paraphrases that skip the word "placed". */
+const ORDER_SUBMITTED_PARAPHRASE =
+  /\b(?:i\s+submitted\s+it|order\s+went\s+through|(?:submitted|confirmed)\s+(?:the\s+|your\s+|my\s+)?order)\b/i;
+
+export function normalizeSmsClaimText(text: string): string {
   return text.replace(/[\u2018\u2019\u201B]/g, "'").replace(/[\u201C\u201D]/g, '"');
+}
+
+export function sameSmsBody(left: string, right: string): boolean {
+  return normalizeSmsClaimText(left).trim() === normalizeSmsClaimText(right).trim();
 }
 
 export function claimsOrderOrPlacementProgress(message: string): boolean {
@@ -57,7 +66,8 @@ export function claimsOrderOrPlacementProgress(message: string): boolean {
     ORDER_PLACED_COPULA.test(text) ||
     ORDER_PLACED_FOR_FULFILLMENT.test(text) ||
     ORDER_PLACING_NOW.test(text) ||
-    ORDER_PLACING_THEIR_ORDER.test(text)
+    ORDER_PLACING_THEIR_ORDER.test(text) ||
+    ORDER_SUBMITTED_PARAPHRASE.test(text)
   );
 }
 

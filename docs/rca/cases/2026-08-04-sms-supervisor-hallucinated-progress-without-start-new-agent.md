@@ -81,7 +81,7 @@ Render tool loop: round 0 `reply_to_agent` fe4168 (paused "tomorrow at 1pm" Blue
 
 `ORDER_PROGRESS_CLAIM` matched "placing now." and "placed the order" but not "is placed" or "placing your usual … order now". The 2026-08-04 closed phrase list was the failed guardrail. Replacement is `claimsOrderOrPlacementProgress()` — assertive copula+placed, placed-for-fulfillment, placing…now, placing your/the order — so the class of placement claims is blocked, not one captured sentence.
 
-Local repro: `npx tsx src/tests/unit/sms-message-grounding.test.ts` case `2026-09-12 paraphrased is-placed / placing-now SMS rejected` failed on the buggy detector (null) and passed after the class-level matcher. Cemented in that unit file plus `sms-supervisor.bluebottle.behavior.ts` (`2026-09-12 paraphrased double-ack blocked`).
+Local repro: `npx tsx src/tests/unit/sms-message-grounding.test.ts` case `2026-09-12 paraphrased is-placed / placing-now SMS rejected` failed on the buggy detector (null) and passed after the class-level matcher. Cemented in that unit file plus `sms-supervisor.bluebottle.behavior.ts` (`2026-09-12 paraphrased double-ack blocked`). Same-run identical `send_user_message` bodies are also rejected (`send -- identical send_user_message body is delivered once`) so the Lok Lak / legal-docs copy-paste fan-out cannot reach Surge.
 
 ## Reusable lesson
 
