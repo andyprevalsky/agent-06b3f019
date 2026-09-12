@@ -81,6 +81,15 @@ python benchmarks/run_benchmark.py --suite smoke --no-retry
 python benchmarks/run_benchmark.py --compare runs/A.json runs/B.json
 ```
 
+Concurrent local selections that mix an AgentCard setup reset with another
+payment setup writer receive one owned stack per task. The existing concurrency,
+exclusive-first phase, SMS ordering, user identity, and cohort configuration are
+preserved. `.context/benchmarks/<run-id>-worlds/local-worlds.json` records each
+child's identity, private log, result paths, and cleanup status. The coordinator
+confirms ownership before any child allocates services and waits for canonical
+agent and stack cleanup before accepting its result. Separate local databases
+do not isolate externally shared AgentCard cardholders.
+
 `scripts/run-bench <task> --checkpoint <turn_n>` uses the normal local benchmark
 orchestrator: it starts an isolated stack, runs the selected benchmark with its
 usual fixtures/attachments until the root transcript contains that message index,

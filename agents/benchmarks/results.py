@@ -156,7 +156,9 @@ class BenchmarkRun:
         os.makedirs(directory, exist_ok=True)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = run_record_basename(ts, self.suite)
+        # Concurrent occurrences of the same task can finish in one second.
+        # Bind the record to this run before applying the existing name bound.
+        filename = run_record_basename(f"{ts}_{self.run_id}", self.suite)
         path = os.path.join(directory, filename)
 
         with open(path, "w") as f:

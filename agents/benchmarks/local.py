@@ -2415,6 +2415,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Use the default .context/services.json stack instead of a per-run isolated stack",
     )
     parser.add_argument("--run-id", help="Stable id for the isolated benchmark stack")
+    parser.add_argument("--cohort-task", action="append", dest="cohort_tasks", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--world-ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--base-port", type=int, help="Preferred base port for an isolated benchmark stack")
     parser.add_argument("--no-clean", action="store_true", help="Do not call scripts/kill-services.sh before startup")
     parser.add_argument(
@@ -2547,18 +2549,43 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
+    world_ready_fd = getattr(args, "world_ready_fd", None)
+    if bool(getattr(args, "cohort_tasks", [])) != (world_ready_fd is not None):
+        raise ValueError("a child world requires its coordinator ownership handshake")
+    if world_ready_fd is not None:
+        # Never allocate services before the coordinator has captured this
+        # process's native identity and durably journaled its ownership. EOF
+        # (including a parent crash) fails before any stack is created.
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(world_ready_fd, selectors.EVENT_READ)
+                if not selector.select(30) or os.read(world_ready_fd, 2) != b"1":
+                    raise RuntimeError("coordinator did not confirm local child ownership")
+        finally:
+            os.close(world_ready_fd)
     selected_tasks = tasks_from_args(args)
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    cohort_tasks = getattr(args, "cohort_tasks", []) or selected_tasks
+    if getattr(args, "cohort_tasks", []):
+        validate_task_names(cohort_tasks)
+        if len(selected_tasks) != 1 or selected_tasks[0] not in cohort_tasks:
+            raise ValueError("a child world must select one task from its original cohort")
+    elif len(selected_tasks) > 1 and not args.eval_suite:
+        from benchmarks.local_worlds import needs_independent_worlds, run_task_worlds
+        if needs_independent_worlds(selected_tasks, args.max_concurrency):
+            return run_task_worlds(sys.modules[__name__], args, selected_tasks)
     stack = build_service_stack(args)
-    configure_task_environment(selected_tasks, isolated=stack.isolated)
+    configure_task_environment(cohort_tasks, isolated=stack.isolated)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     benchmark_owner = LocalBenchmarkOwner(stack)
+    if stack.isolated:
+        benchmark_owner.record("not_started")
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider
     # profiles per agent. Without this flag, run_benchmark serializes every
@@ -2616,7 +2643,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     anon_steel_profile=args.anon,
                     simulate=args.simulate,
                     world_model_name=args.world_model_name,
-                    tasks=selected_tasks,
+                    tasks=cohort_tasks,
                     on_process=remember_stack_process,
                     on_owner_ready=stack_owner_ready,
                 )
@@ -2666,7 +2693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a browser. run_benchmark.py resolves the same dir via BENCHMARK_CONTEXT_DIR.
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
-        if needs_payment_fixture(selected_tasks):
+        if needs_payment_fixture(cohort_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
             # Prefer the stable public URL run.sh assigned at startup (reserved ngrok domain →
@@ -2712,6 +2739,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 benchmark_owner.starting = False
             result_paths.append(result_path)
+            _write_owner_record(stack.context_dir / "local-benchmark-results.json", {
+                "version": 1, "run_id": stack.run_id,
+                "results": [{"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                            for path in result_paths],
+            })
             failures = failed_tasks_from_run(result_path)
             if failures:
                 diag_dir = run_diagnostics(

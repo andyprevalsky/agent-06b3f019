@@ -18071,6 +18071,13 @@ def test_predeploy_selector_rejects_production_only_tasks():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    from benchmarks.local_worlds_test import test_local_parallel_fixture_worlds
+    from benchmarks.local_worlds_controls_test import test_local_worlds_controls
+    from benchmarks.results_identity_test import test_independent_runs_keep_distinct_records
+
+    r.record("local_parallel_fixture_worlds", test_local_parallel_fixture_worlds)
+    r.record("local_worlds_controls", test_local_worlds_controls)
+    r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("local_cleanup_preserves_run_id_observers", test_local_cleanup_does_not_signal_processes_that_only_mention_run_id)
     r.record("local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients)
