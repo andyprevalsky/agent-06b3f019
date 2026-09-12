@@ -117,7 +117,7 @@ function testHonestProgressAllowed(): void {
   evidence = absorbPendingOpKind(evidence, 'start_new_agent');
   const allowed = [
     "started a fresh agent for your usual blue bottle + waffle. it'll ping you with the real total/pickup or if order.online needs sign-in.",
-    "On it — starting an agent for your usual Blue Bottle order.",
+    'On it — starting an agent for your usual Blue Bottle order.',
     "I'll let you know when the agent has a real pickup time.",
   ];
   for (const message of allowed) {
