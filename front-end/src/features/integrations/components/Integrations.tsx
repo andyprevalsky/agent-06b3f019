@@ -15,6 +15,8 @@
  *                              v
  *                         [IDLE/READY]
  *
+ * File System is a FE-only section: plus click stays [IDLE/READY] (no hook).
+ *
  * This component is a thin orchestrator: it calls hooks, renders sections,
  * and wires up modals. All business logic lives in ../hooks/.
  */

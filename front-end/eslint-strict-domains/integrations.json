@@ -24,6 +24,7 @@
   "src/features/integrations/components/MessagesSyncSection.tsx",
   "src/features/integrations/components/ComputeSection.tsx",
   "src/features/integrations/components/SocialsSection.tsx",
+  "src/features/integrations/components/FileSystemSection.tsx",
   "src/features/integrations/components/Integrations.tsx",
   "src/features/integrations/components/IntegrationSections.tsx",
   "src/features/integrations/components/IntegrationModals.tsx",

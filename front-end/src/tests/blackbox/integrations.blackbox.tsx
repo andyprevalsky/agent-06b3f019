@@ -66,6 +66,7 @@ describe('Integrations page', () => {
       expect(screen.getByText('Passwords')).toBeInTheDocument();
       expect(screen.getByText('Messages')).toBeInTheDocument();
       expect(screen.getByText('Socials')).toBeInTheDocument();
+      expect(screen.getByText('File System')).toBeInTheDocument();
     });
 
     it('shows "Desktop Only" badge for Browser Cookies on web (no handler)', async () => {
@@ -124,6 +125,40 @@ describe('Integrations page', () => {
       });
 
       expect(screen.getByText('Connect social media accounts')).toBeInTheDocument();
+    });
+
+    it('shows File System section with subtitle', async () => {
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('File System')).toBeInTheDocument();
+      });
+
+      expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /connect file system/i }),
+      ).toBeInTheDocument();
+    });
+
+    it('does nothing when File System connect is clicked', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('File System')).toBeInTheDocument();
+      });
+
+      clearCaptures();
+      const fileSystemSection = screen.getByText('File System').closest('.rounded-lg')!;
+      const connectButton = within(fileSystemSection).getByRole('button', {
+        name: /connect file system/i,
+      });
+      await user.click(connectButton);
+
+      expect(screen.getByText('File System')).toBeInTheDocument();
+      expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
+      expect(within(fileSystemSection).queryByText('Connected')).not.toBeInTheDocument();
+      expect(capturedRequests).toHaveLength(0);
     });
 
     it('shows Compute section for fully signed-in users', async () => {

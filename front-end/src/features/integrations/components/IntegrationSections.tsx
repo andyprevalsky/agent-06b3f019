@@ -2,6 +2,9 @@
  * STATE MACHINE: IntegrationSections
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
+ *
+ * File System is a FE-only stub: it renders next to the live sections and
+ * stays [MOUNTED] on plus click (no hook, no backend).
  */
 
 import type { useAccordion } from '../hooks/useAccordion';
@@ -20,6 +23,7 @@ import MessagesSyncSection from './MessagesSyncSection';
 import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
+import FileSystemSection from './FileSystemSection';
 
 interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
@@ -199,6 +203,8 @@ export default function IntegrationSections({
         linkedinSyncStarted={messages.linkedinSyncStarted}
         onLinkedInSync={() => void actions.onLinkedInSync()}
       />
+
+      <FileSystemSection />
     </>
   );
 }
