@@ -133,8 +133,29 @@ computed against that admitted SHA. The private
 rejects a mismatched provenance/patch binding; it makes no network or provider
 calls and does not itself prove remote availability.
 
-Full candidate gates and the ten consecutive ten-task infrastructure proof
-remain pending. Ordinary task PASSED and FAILED outcomes count only when the
+The committed candidate `e706019a625e0009d9758446f107762f29a7a234` was
+published on an exact diagnostic source ref in the same private repository.
+Authenticated admission verified the exact SHA with patches disabled. Local
+assembly measured 204,176 encoded bytes under the unchanged 900,000-byte guard.
+The current controller gate passed, preserving the earlier thirteen-gate core
+baseline rather than relabeling those earlier executions as current-head tests.
+
+Proof `capability-stability-20260912201842-35760` then fetched this exact
+commit successfully in both canary guests and all ten actual benchmark guests.
+All ten benchmarks started and produced real model output and tool activity.
+This confirms the repaired source-delivery boundary. The attempt nevertheless
+failed infrastructure acceptance: three autoscalers exhausted their metrics
+polls during collection after guest shutdown. Its failed verdict and zero
+accepted slices remain unchanged. Exact cleanup of all twelve machines and
+volumes was independently verified, all ten durable evidence bundles published,
+and its exact Hub retired. The separate cleanup recovery did not rewrite the
+historical failed lifecycle or summary. Receipts are under
+`.context/acceptance/proof18-cleanup-independent/`,
+`.context/acceptance/proof18-evidence-recovery/`, and
+`.context/acceptance/proof18-hub-retirement.json`.
+
+The ten consecutive ten-task infrastructure proof remains pending.
+Ordinary task PASSED and FAILED outcomes count only when the
 required startup, progress, evaluation, teardown and durable evidence contracts
 pass. This case makes no benchmark-quality or all-business-pass claim.
 

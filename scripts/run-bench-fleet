@@ -10665,8 +10665,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     return 0
 }
 
-bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base>
+bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base> [exact-run-token]
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
+    local runtime_run_token="${7:-}"
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
     local ready_reconcile_rc=0
@@ -10679,7 +10680,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     : > "$out/worker-clones.ids"
     : > "$out/worker-ready.ids"
     rm -f "$out/autoscaler.ready" "$out/autoscaler.failed" \
-        "$out/autoscaler.completed-after-child"
+        "$out/autoscaler.completed-after-child" "$out/autoscaler.runtime-completed"
     fail_autoscaler() {  # fail_autoscaler <reason>
         local reason="$1"
         if [ ! -s "$out/autoscaler.failed" ]; then
@@ -10690,10 +10691,28 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         echo "  ❌ [$bench] mandatory autoscaler: $reason" >&2
         return 1
     }
+    guest_runtime_completed() {
+        local port code marker_tmp
+        case "$runtime_run_token" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
+        [ -n "${CLOUDBENCH_BARRIER_TOKEN:-}" ] || return 1
+        [ ! -s "$out/autoscaler.failed" ] || return 1
+        port="$(cat "$out/status-proxy.port" 2>/dev/null)" || return 1
+        case "$port" in ''|*[!0-9]*|??????*) return 1 ;; esac
+        [ "$((10#$port))" -gt 0 ] && [ "$((10#$port))" -le 65535 ] || return 1
+        code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+            -H "X-Cloudbench-Run-Token: $runtime_run_token" \
+            -H "X-Cloudbench-Machine-Id: $cid" \
+            "http://127.0.0.1:$port/shutdown-health" 2>/dev/null || true)"
+        [ "$code" = "204" ] && [ ! -s "$out/autoscaler.failed" ] || return 1
+        marker_tmp="$out/autoscaler.runtime-completed.tmp.$$"
+        printf '%s|%s\n' "$runtime_run_token" "$cid" > "$marker_tmp" \
+            && mv "$marker_tmp" "$out/autoscaler.runtime-completed" || return 1
+    }
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
         local desired_workers tracked_workers ready_workers terminal_deadline ready_reconcile_rc
-        [ -e "$out/benchmark-child.finished" ] || return 1
+        [ -e "$out/benchmark-child.finished" ] || [ "${1:-}" = "verified-runtime" ] || return 1
         # Child completion stops new metrics decisions; it does not revoke
         # capacity already committed by a prior desired-count observation. Keep
         # provisioners alive and reconcile their durable outcomes until the same
@@ -10737,7 +10756,10 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 && [ "$tracked_workers" = "$ready_workers" ] \
                 && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
                     -print -quit 2>/dev/null | grep -q .; then
-                break
+                # A verified guest can be stopped while run-bench-cloud still
+                # collects its complete artifacts. Settle admitted workers,
+                # but never forge the collector's independent finish marker.
+                [ -e "$out/benchmark-child.finished" ] && break
             fi
             if [ "$SECONDS" -ge "$terminal_deadline" ]; then
                 if [ "$ready_workers" -lt "$desired_workers" ]; then
@@ -10752,6 +10774,9 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                         "worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready" \
                         > "$out/autoscaler.failed"
                     echo "  ❌ [$bench] mandatory autoscaler: worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready" >&2
+                elif [ ! -e "$out/benchmark-child.finished" ]; then
+                    fail_autoscaler "artifact collector did not finish after verified guest runtime completion"
+                    return 1
                 else
                     printf '%s\n' \
                         "autoscaler did not settle committed capacity after child completion" \
@@ -10955,6 +10980,13 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 return $?
             fi
             if [ -e "$out/autoscaler.ready" ]; then
+                # Metrics belong to the guest runtime, not the longer-lived
+                # artifact collector. Only an authenticated exact run+machine
+                # cleanup seal may end decisions before the child exits.
+                if guest_runtime_completed; then
+                    complete_autoscaler_after_child verified-runtime
+                    return $?
+                fi
                 scrape_failures=$((scrape_failures + 1))
                 if [ "$scrape_failures" -ge 6 ]; then
                     printf '%s\n' "metrics returned no valid desired_machine_count for 6 consecutive polls" > "$out/autoscaler.failed"
@@ -11234,12 +11266,11 @@ for bench in "${BENCHES[@]}"; do
         echo "❌ [$bench] could not derive an isolated Temporal workspace" >&2
         exit 1
     fi
-    # The guest intentionally tears down /metrics when its benchmark driver
-    # finishes. Publish that child lifecycle atomically so the autoscaler can
-    # stop cleanly instead of turning expected post-run teardown into six
-    # consecutive scrape failures. The supervisor also forwards controller
-    # teardown and awaits the runner, preventing local PID-1 orphans.
+    # Bind the guest runtime and its autoscaler to one owner-derived token.
+    # The supervisor's separate finish marker still means the entire collector
+    # and its descendants have exited, including on controller cancellation.
     CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
+    CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i" \
     CLOUDBENCH_ENV_VERIFIED=1 \
     CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
     CLOUDBENCH_MACHINE_RECORD="$INVENTORY_INDEX/current/machines/$cid" \
@@ -11310,7 +11341,7 @@ for bench in "${BENCHES[@]}"; do
     else
         echo "   ⚖️  [$bench] per-bench autoscaler ON (mandatory prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
         rm -f "$out/autoscaler.pid" "$out/autoscaler.acceptance-failed"
-        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
+        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" "$FLEET_OWNER_TOKEN-$i" ) >> "$out/autoscaler.log" 2>&1 &
         autoscaler_pid="$!"
         AUTOSCALER_PIDS+=("$autoscaler_pid")
         autoscaler_pid_tmp="$out/autoscaler.pid.tmp.$$"

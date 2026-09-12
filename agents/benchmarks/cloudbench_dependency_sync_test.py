@@ -21651,3 +21651,351 @@ def test_private_fleet_source_terminal_audit_preserves_digest(tmp_path: Path, pr
         assert (published / "source-manifest.json").read_bytes() == original_manifest
     else:
         assert "source_manifest_sha256=" not in (audit / "meta").read_text()
+
+
+@pytest.fixture
+def autoscaler_runtime_handoff_fixture(tmp_path):
+    """Actual status service, with only loopback clients and synthetic credentials."""
+    import urllib.error
+    import urllib.request
+
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    ready = tmp_path / "status.ready"
+    token = "0123456789abcdef0123456789abcdef-0"
+    machine = "feedface000001"
+    auth = "fixture-shared-barrier"
+    env = {key: os.environ[key] for key in ("PATH", "LANG") if key in os.environ}
+    env.update(CLOUDBENCH_BARRIER_TOKEN=auth, FLY_MACHINE_ID=machine)
+    (guest / "cloudbench-driver.state").write_text("booting\n")
+    with (tmp_path / "status.log").open("w") as log:
+        server = subprocess.Popen(
+            [sys.executable, str(STATUS_SERVER_SCRIPT), "--directory", str(guest),
+             "--port", "0", "--bind", "127.0.0.1", "--run-token", token,
+             "--ready-file", str(ready)],
+            env=env, stdout=log, stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                assert server.poll() is None, "status fixture exited before readiness"
+                assert time.monotonic() < deadline, "status fixture readiness deadline"
+                time.sleep(0.01)
+            port = int(ready.read_text())
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+            def query(headers):
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/shutdown-health", headers=headers,
+                )
+                try:
+                    with opener.open(request, timeout=2) as response:
+                        return response.status
+                except urllib.error.HTTPError as error:
+                    return error.code
+
+            yield dict(guest=guest, token=token, machine=machine, auth=auth, port=port,
+                       query=query, env=env)
+        finally:
+            if server.poll() is None:
+                server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+
+
+@pytest.mark.parametrize("variant", [
+    "matched", "legacy", "missing_run", "missing_machine", "wrong_run",
+    "wrong_owner", "same_bearer_sibling", "malformed_run", "malformed_machine",
+    "wrong_auth", "missing_ack", "wrong_ack", "running", "unknown_state",
+])
+def test_autoscaler_runtime_handoff_status_identity(autoscaler_runtime_handoff_fixture, variant):
+    f = autoscaler_runtime_handoff_fixture
+    guest = f["guest"]
+    (guest / "cloudbench-driver.state").write_text("exited\n")
+    ack = guest / f"cloudbench-driver-clean-{f['token']}.ack"
+    ack.write_text(f["token"] + "\n")
+    headers = {"Authorization": "Bearer " + f["auth"],
+               "X-Cloudbench-Run-Token": f["token"],
+               "X-Cloudbench-Machine-Id": f["machine"]}
+    if variant == "legacy":
+        del headers["X-Cloudbench-Run-Token"]
+        del headers["X-Cloudbench-Machine-Id"]
+    elif variant == "missing_run":
+        del headers["X-Cloudbench-Run-Token"]
+    elif variant == "missing_machine":
+        del headers["X-Cloudbench-Machine-Id"]
+    elif variant in {"wrong_run", "wrong_owner", "malformed_run"}:
+        headers["X-Cloudbench-Run-Token"] = {
+            "wrong_run": f["token"][:-1] + "1",
+            "wrong_owner": "fedcba9876543210fedcba9876543210-0",
+            "malformed_run": "../../wrong",
+        }[variant]
+    elif variant in {"same_bearer_sibling", "malformed_machine"}:
+        headers["X-Cloudbench-Machine-Id"] = "feedface000002" if variant == "same_bearer_sibling" else "../primary"
+    elif variant == "wrong_auth":
+        headers["Authorization"] = "Bearer wrong"
+    elif variant == "missing_ack":
+        ack.unlink()
+    elif variant == "wrong_ack":
+        ack.write_text("another-run\n")
+    elif variant in {"running", "unknown_state"}:
+        (guest / "cloudbench-driver.state").write_text("running\n" if variant == "running" else "unknown\n")
+    status = f["query"](headers)
+    assert (status == 204) is (variant in {"matched", "legacy"}), (variant, status)
+
+
+@pytest.mark.parametrize("variant,child_exit", [
+    ("terminal", 0), ("terminal", 1), ("pending_ready", 1),
+    ("pending_failed", 1), ("pending_stuck", 1), ("missing_child", 1),
+    ("missing_ack", 1), ("wrong_ack", 1), ("running", 1),
+    ("wrong_run", 1), ("wrong_owner", 1), ("same_bearer_sibling", 1),
+    ("wrong_auth", 1), ("prior_failure", 1),
+])
+def test_autoscaler_runtime_handoff_preserves_collection_and_capacity(
+    tmp_path, autoscaler_runtime_handoff_fixture, variant, child_exit,
+):
+    f = autoscaler_runtime_handoff_fixture
+    out = tmp_path / "bench"
+    out.mkdir()
+    (out / "status-proxy.port").write_text(str(f["port"]) + "\n")
+    release = tmp_path / "release-collector"
+    sealed = tmp_path / "guest-sealed"
+    source = FLEET_SCRIPT.read_text()
+    q = shlex.quote
+    expected_token = f["token"]
+    expected_machine = f["machine"]
+    if variant == "wrong_run":
+        expected_token = expected_token[:-1] + "1"
+    elif variant == "wrong_owner":
+        expected_token = "fedcba9876543210fedcba9876543210-0"
+    elif variant == "same_bearer_sibling":
+        expected_machine = "feedface000002"
+    ack_content = "other-run" if variant == "wrong_ack" else f["token"]
+    ack_path = f["guest"] / f"cloudbench-driver-clean-{f['token']}.ack"
+    if variant == "missing_ack":
+        ack_path = f["guest"] / "unrelated-file"
+    child_script = tmp_path / "collector.sh"
+    child_script.write_text(f'''set -eu
+while [ ! -f {q(str(out / 'autoscaler.ready'))} ]; do sleep .01; done
+printf '%s\\n' {q(ack_content)} > {q(str(ack_path))}
+printf '%s\\n' {'running' if variant == 'running' else 'exited'} > {q(str(f['guest'] / 'cloudbench-driver.state'))}
+{('printf prior-failure > ' + q(str(out / 'autoscaler.failed'))) if variant == 'prior_failure' else ':'}
+: > {q(str(sealed))}
+while [ ! -f {q(str(release))} ]; do sleep .01; done
+exit {child_exit}
+''')
+    funcs = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
+        "fleet_job_running", "_box_desired", "_pool_ids", "_ready_pool_ids", "bench_autoscaler",
+    ])
+    supervisor = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
+        "terminate_fleet_runner_group", "run_fleet_child_supervised",
+    ])
+    desired = 2 if variant.startswith("pending_") else 1
+    script = f'''set -uo pipefail
+APP=fixture-app
+RUN_ID=fixture-fleet
+AUTOSCALE_POLL=.05
+AUTOSCALE_MAX=2
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=2
+BOX_HEALTH_PORT=3003
+CLOUDBENCH_BOOT_LAUNCH=0
+CLOUDBENCH_BARRIER_TOKEN={q('wrong' if variant == 'wrong_auth' else f['auth'])}
+_machine_priv_ip() {{ printf 'fdaa::1'; }}
+inventory_machine_exists() {{ return 0; }}
+release_autoscaler_metrics_owner() {{ return 0; }}
+claim_autoscaler_metrics_port() {{ printf -v "$1" 62345; }}
+cloudbench_terminate_and_wait() {{
+    shift
+    for pid in "$@"; do
+        [ -n "$pid" ] || continue
+        if jobs -pr | grep -qx "$pid"; then kill -TERM "$pid"; fi
+        wait "$pid" 2>/dev/null || true
+    done
+}}
+flyctl() {{ exec sleep 120; }}
+curl() {{
+    case "$*" in *'/shutdown-health'*) command curl "$@"; return $? ;; esac
+    case " $* " in *' -o /dev/null '*) return 0 ;; esac
+    if [ -f {q(str(sealed))} ]; then
+        printf 'missing\\n' >> {q(str(tmp_path / 'metrics-polls'))}
+        return 7
+    fi
+    printf 'valid\\n' >> {q(str(tmp_path / 'metrics-polls'))}
+    printf 'desired_machine_count {desired}\\n'
+}}
+provision_worker() {{
+    printf 'worker-fixture\\n' > "$6/worker-clones.ids"
+    : > "$6/worker-fixture.pending"
+}}
+reconcile_worker_ready_outcomes() {{
+    if [ -e "$1/worker-fixture.ready" ]; then
+        printf 'worker-fixture\\n' > "$1/worker-ready.ids"
+        rm -f "$1/worker-fixture.pending"
+    fi
+}}
+reconcile_worker_failure_outcomes() {{
+    if [ -e "$2/worker-fixture.failed" ]; then
+        printf 'committed-worker-failed\\n' > "$2/autoscaler.failed"
+        return 1
+    fi
+    return 0
+}}
+{funcs}
+bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(out))} 61000 {q(expected_token)}
+'''
+    env = dict(f["env"])
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+    with (tmp_path / "collector.log").open("w") as child_log, (tmp_path / "autoscaler.log").open("w") as scaler_log:
+        processes = []
+        try:
+            child = subprocess.Popen(
+                ["bash", "-c", supervisor + '\nrun_fleet_child_supervised "$1" bash "$2"',
+                 "fixture-supervisor", str(out / "benchmark-child.finished"), str(child_script)],
+                env=env, stdout=child_log, stderr=subprocess.STDOUT,
+            )
+            processes.append(child)
+            scaler = subprocess.Popen(["bash", "-c", script], env=env, stdout=scaler_log, stderr=subprocess.STDOUT)
+            processes.append(scaler)
+            runtime = out / "autoscaler.runtime-completed"
+            failed = out / "autoscaler.failed"
+            deadline = time.monotonic() + 8
+            while not runtime.exists() and not failed.exists():
+                assert scaler.poll() is None, (tmp_path / "autoscaler.log").read_text()
+                assert time.monotonic() < deadline, "autoscaler handoff did not resolve"
+                time.sleep(0.01)
+            assert child.poll() is None
+            assert not (out / "benchmark-child.finished").exists()
+            assert not (out / "autoscaler.completed-after-child").exists()
+            if variant.startswith("pending_"):
+                assert (out / "desired-worker-count").read_text().strip() == "1"
+                assert (out / "worker-fixture.pending").exists()
+                if variant == "pending_ready":
+                    (out / "worker-fixture.ready").touch()
+                elif variant == "pending_failed":
+                    (out / "worker-fixture.failed").touch()
+            if variant != "missing_child":
+                release.touch()
+            scaler_rc = scaler.wait(timeout=8)
+            release.touch(exist_ok=True)
+            assert child.wait(timeout=5) == child_exit
+            assert (out / "benchmark-child.finished").read_text().strip() == str(child_exit)
+            expected_success = variant in {"terminal", "pending_ready"}
+            assert (scaler_rc == 0) is expected_success, (variant, (tmp_path / "autoscaler.log").read_text())
+            if expected_success:
+                assert not failed.exists()
+                assert runtime.read_text().strip() == f"{expected_token}|{expected_machine}"
+                assert (out / "autoscaler.completed-after-child").read_text().strip() == str(child_exit)
+            else:
+                assert failed.exists()
+                assert not (out / "autoscaler.completed-after-child").exists()
+                if variant == "prior_failure":
+                    assert failed.read_text() == "prior-failure"
+                elif variant not in {"pending_failed", "pending_stuck", "missing_child"}:
+                    assert (tmp_path / "metrics-polls").read_text().splitlines().count("missing") == 6
+        finally:
+            # Retain the assertion/spawn failure while independently joining
+            # every Popen already admitted, even if releasing the fixture fails.
+            primary_error = sys.exc_info()[1]
+            errors = []
+            try:
+                release.touch(exist_ok=True)
+            except OSError as error:
+                errors.append(error)
+            for process in processes:
+                try:
+                    process.terminate()
+                except OSError as error:
+                    errors.append(error)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError as error:
+                        errors.append(error)
+                    try:
+                        process.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        errors.append(error)
+                except OSError as error:
+                    errors.append(error)
+            if errors:
+                if primary_error is not None:
+                    primary_error.add_note(f"Fixture cleanup also reported {len(errors)} error(s)")
+                else:
+                    raise RuntimeError("autoscaler fixture cleanup failed") from errors[0]
+
+
+def test_autoscaler_runtime_handoff_uses_one_owner_bound_token():
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    launch = fleet.split("# ── Phase 2: launch each provisioned bench", 1)[1].split("CHILD_PIDS+=(", 1)[0]
+    assert 'CLOUDBENCH_FLEET_RUN_TOKEN="$FLEET_OWNER_TOKEN-$i"' in launch
+    assert '"$out" "$port" "$FLEET_OWNER_TOKEN-$i"' in fleet
+    token_line = next(line for line in cloud.splitlines() if line.startswith("RUN_LOG_TOKEN="))
+    shell = token_line + '\nprintf "%s" "$RUN_LOG_TOKEN"'
+    result = subprocess.run(["bash", "-c", shell], text=True, capture_output=True, check=False,
+                            env={"PATH": os.environ["PATH"], "CLOUDBENCH_FLEET_RUN_TOKEN": "exact-owner-1"})
+    assert result.returncode == 0 and result.stdout == "exact-owner-1"
+
+
+@pytest.mark.parametrize("fault", ["second_spawn", "release_write", "first_join"])
+def test_autoscaler_runtime_handoff_fixture_cleanup_survives_faults(tmp_path, monkeypatch, fault):
+    class Process:
+        def __init__(self, *, scaler=False):
+            self.scaler = scaler
+            self.terminated = 0
+            self.joined = 0
+            self.alive = True
+
+        def poll(self):
+            if self.scaler and self.alive:
+                raise AssertionError("original fixture failure")
+            return None if self.alive else 143
+
+        def terminate(self):
+            self.terminated += 1
+            self.alive = False
+
+        def wait(self, timeout=None):
+            self.joined += 1
+            if fault == "first_join" and not self.scaler:
+                raise OSError("injected join failure")
+            return 143
+
+        def kill(self):
+            self.alive = False
+
+    child, scaler = Process(), Process(scaler=True)
+    processes = iter([child, scaler])
+
+    def spawn(*args, **kwargs):
+        process = next(processes)
+        if fault == "second_spawn" and process is scaler:
+            raise OSError("injected second spawn")
+        return process
+
+    original_touch = Path.touch
+
+    def touch(path, *args, **kwargs):
+        if fault == "release_write" and path.name == "release-collector":
+            raise OSError("injected release write")
+        return original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(Path, "touch", touch)
+    guest = tmp_path / "guest"
+    guest.mkdir()
+    fixture = dict(guest=guest, token="0123456789abcdef0123456789abcdef-0",
+                   machine="feedface000001", auth="fixture", port=12345,
+                   env={"PATH": os.environ["PATH"]})
+    error = OSError if fault == "second_spawn" else AssertionError
+    message = "injected second spawn" if fault == "second_spawn" else "original fixture failure"
+    with pytest.raises(error, match=message):
+        test_autoscaler_runtime_handoff_preserves_collection_and_capacity(tmp_path, fixture, "terminal", 1)
+    assert child.terminated == 1 and child.joined == 1
+    if fault != "second_spawn":
+        assert scaler.terminated == 1 and scaler.joined == 1

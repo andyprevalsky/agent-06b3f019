@@ -231,6 +231,18 @@ models and evaluators. Require actual startup, progress, terminal evaluation and
 verified teardown; do not repair task-success behavior merely to improve this
 proof's scores. A task-level `FAILED` remains a valid outcome under this gate.
 
+PR #1299's infrastructure acceptance requires **ten consecutive slices of ten
+benchmarks**, with **at least three successful LLM queries per benchmark's own
+agent tree**. Verify completed provider responses with correlated, nonduplicated
+trace evidence; input dumps, attempts, and aggregate counters alone do not prove
+success. Do not add calls or alter tasks to reach the minimum. Infrastructure
+failures during execution, evaluation, artifact collection, or teardown prevent
+credit even when a task verdict exists. Verify each slice's exact resource
+cleanup and ten durable FE/LLM evidence bundles before advancing. Keep the normal
+7,200-second execution backstop; this explicitly bounded proof uses **300 seconds
+in both the environment and CLI**. These are proof acceptance requirements, not
+changes to benchmark pass criteria or deploy-selection qualification.
+
 Local execution is explicit:
 `scripts/run-bench --local <task...>` or
 `scripts/run-bench --local --rerun-failed latest`. The local wrapper starts an

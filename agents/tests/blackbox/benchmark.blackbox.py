@@ -372,6 +372,17 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_autoscaler_runtime_handoff_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
+         "-k", "autoscaler_runtime_handoff"],
+        cwd=repo_root, text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
@@ -18152,6 +18163,10 @@ async def run_all_tests():
     r.record(
         "private_fleet_source_permanent_gate",
         test_private_fleet_source_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "autoscaler_runtime_handoff_permanent_gate",
+        test_autoscaler_runtime_handoff_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_patch_includes_untracked_files",

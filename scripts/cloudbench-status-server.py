@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
-import json
 import os
 import re
 import secrets
@@ -14,7 +13,6 @@ import signal
 import socket
 import stat
 import tempfile
-import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -243,6 +241,24 @@ def main() -> int:
                 if not hmac.compare_digest(supplied, expected):
                     self.send_error(403)
                     return
+                # A fleet shares its barrier credential across siblings. The
+                # autoscaler additionally names the exact workload and primary
+                # before treating this endpoint as a runtime-completion seal.
+                # Existing cleanup callers without either header are unchanged.
+                expected_run = self.headers.get("X-Cloudbench-Run-Token")
+                expected_machine = self.headers.get("X-Cloudbench-Machine-Id")
+                if expected_run is not None or expected_machine is not None:
+                    machine = os.environ.get("FLY_MACHINE_ID", "")
+                    if (
+                        not expected_run
+                        or SAFE_BARRIER.fullmatch(expected_run) is None
+                        or not expected_machine
+                        or re.fullmatch(r"[0-9a-f]{14}", expected_machine) is None
+                        or not hmac.compare_digest(expected_run, run_token)
+                        or not hmac.compare_digest(expected_machine, machine)
+                    ):
+                        self.send_error(409, "runtime identity does not match this guest")
+                        return
                 if cleanup_acknowledged():
                     observed_state = read_driver_state()
                     if observed_state == "exited":

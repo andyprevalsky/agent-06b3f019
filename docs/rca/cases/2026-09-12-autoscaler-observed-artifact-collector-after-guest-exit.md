@@ -1,0 +1,170 @@
+---
+id: 2026-09-12-autoscaler-observed-artifact-collector-after-guest-exit
+date: 2026-09-12
+title: Autoscaler metrics observation continued through artifact collection after guest shutdown
+surface: infra
+component: cloudbench-autoscaler-lifecycle
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: bench_autoscaler used full collector exit as its only terminal boundary after the guest had acknowledged cleanup and exited
+symptoms:
+  - "metrics returned no valid desired_machine_count for 6 consecutive polls"
+  - "guest cleanup ACK precedes autoscaler failure and benchmark-child.finished"
+tags:
+  - cloudbench
+  - autoscaler
+  - metrics
+  - artifact-collection
+  - shutdown
+  - ownership
+sources:
+  - PR #1299
+  - commit e706019a625e0009d9758446f107762f29a7a234
+  - fleet run capability-stability-20260912201842-35760
+  - fleet run 20260912-131843-36480
+  - plan: docs/plans/completed/cloud-bench-per-bench-isolation.md
+repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_autoscaler_runtime_handoff_preserves_collection_and_capacity
+status: open
+---
+
+## Problem
+
+Proof18 completed its mandatory two-task canary and started all ten actual
+benchmark roots with the unchanged 300-second backstop. All ten made real model
+and tool progress and produced native benchmark FAILED outcomes, which are
+allowed by the user's infrastructure-only acceptance contract. Three mandatory
+autoscalers nevertheless exhausted six missing desired-capacity polls. The
+attempt remains failed with zero accepted slices.
+
+The affected tasks were `parallel-tool-calls`,
+`polar-odysseys-2dab64ba576a`, and `polar-odysseys-4246dec196c9`.
+Their guest drivers had already acknowledged stack cleanup and exited; the local
+controllers were still collecting complete artifacts. The autoscaler required
+metrics until that longer-lived collector exited.
+
+## Diagnosis
+
+The critical path is task/root cleanup → guest result emission → stack shutdown
+→ boot supervisor cleanup ACK and exited state → complete local artifact
+collection → actual `benchmark-child.finished` → autoscaler finalization.
+
+| Task                        | Guest ACK/exited (UTC) | Autoscaler failure file (UTC) | Actual child marker (UTC) |
+| --------------------------- | ---------------------- | ----------------------------- | ------------------------- |
+| parallel-tool-calls         | 20:42:56               | 20:43:56.494                  | 20:44:05.997              |
+| polar-odysseys-2dab64ba576a | 20:42:27               | 20:43:24.446                  | 20:43:31.778              |
+| polar-odysseys-4246dec196c9 | 20:42:57               | 20:43:56.472                  | 20:43:59.664              |
+
+The three guest-seal-to-child tails were approximately 70, 65 and 63 seconds;
+the seven healthy siblings took approximately 6–35 seconds. Guest logs have
+whole-second UTC precision and the local files use the controller clock. These
+observations establish ordering, not precise cross-host elapsed milliseconds.
+Individual scrape responses and timestamps were not captured, so the first
+missing poll cannot be placed exactly. Temporal namespace warnings are not
+established as the cause. Native task quality is outside this investigation.
+
+Archive searches were `metrics returned no valid desired_machine_count` and
+`autoscaler after child completed metrics shutdown`. The
+[serial recording publication case](2026-09-11-recording-archive-serial-publication-outlived-worker-drain.md)
+is a relative: publication there delayed guest driver exit itself. Here the
+retained driver exits before the long collection tail. The
+[post-child worker ledger case](2026-08-03-post-child-worker-ledger-contention-treated-terminal.md)
+is another relative; its bounded readiness reconciliation remains necessary.
+This evidence does not establish a regression in recording batching or worker
+ledger locking.
+
+The first local replay runs the actual unchanged autoscaler, child supervisor
+and canonical status server with controlled metrics, inventory and Fly proxy
+boundaries. An authenticated current-run cleanup ACK and exited state produce
+HTTP204. Immediate collector exits 0 and 1 pass; holding either collector alive
+causes the exact six-poll failure. Releasing it then produces its correct exit
+marker. This four-case causal RED took 19.011 seconds and made no provider or
+model calls. It is retained as `replay-before.json` and `replay-before.log` under
+`.context/acceptance/proof18-autoscaler-rca/`.
+
+The deeper owning mismatch is that runtime observation and artifact collection
+shared one completion authority. `run_fleet_child_supervised` correctly waits
+for its child and descendants before publishing their exit. Moving that marker
+earlier would discard a real completion obligation. A fleet-wide barrier token
+alone also cannot distinguish a valid terminal sibling from the intended
+primary, so merely probing any authenticated status port would be insufficient.
+
+## Solution
+
+Pass one owner-derived, per-child run token to both the existing guest launch
+and its autoscaler. Extend the existing authenticated GET `/shutdown-health`
+with optional paired expected-run and expected-primary headers. When supplied,
+both must be canonical and match the status server's actual run token and
+provider-injected `FLY_MACHINE_ID`. A shared bearer credential with a different
+run, owner or machine cannot return the terminal seal. Legacy cleanup callers
+that omit both headers keep their existing contract.
+
+After a valid desired-capacity observation, missing metrics may trigger this
+bounded read through the existing status proxy. Only a matching HTTP204 can end
+runtime metrics decisions. It does not request shutdown, infer completion from
+HTTP410, or trust a cached local marker. The new
+`autoscaler.runtime-completed` file records the exact observed token and
+machine; it is never read to authorize a later handoff.
+
+Reuse the existing bounded finalizer to reconcile every committed worker and
+wait for the actual collector's finish marker. Pending, failed or insufficient
+capacity still fails. An absent collector marker at the existing finalization
+deadline also fails. `autoscaler.completed-after-child` remains a copy of the
+real child exit only, and an earlier autoscaler failure remains fatal. Final
+result/provenance, native outcome, evidence, resource and registry checks are
+unchanged. The six-poll threshold, task cap, capacity/concurrency settings and
+all existing finalization deadlines are unchanged.
+
+This reuses the existing status service, status proxy and capacity finalizer;
+it adds no observer process, provider inventory scan or resource. At larger
+fleet sizes, the extra work is a single bounded status GET per missing metrics
+observation until terminal handoff or the existing failure threshold. It is not
+an additional fleet-wide polling loop.
+
+Before the runtime edit, the permanent 29-case selection reported 11 failures
+and 18 passing controls. The unchanged selection then passed all 29 in 24.78
+seconds. It covers both native exit codes, same-bearer sibling rejection,
+missing/partial/malformed identity, stale ACK, missing ACK, active/unknown guest
+state, wrong authentication, prior failure, pending capacity, failed/stuck
+capacity and an uncompleted collector. The adjacent lifecycle selection passed
+56 cases in 28.80 seconds. Commands and logs are retained privately:
+
+```bash
+agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py -k autoscaler_runtime_handoff
+```
+
+`permanent-before.log` and `permanent-after.log` contain the paired result.
+`adjacent.log` covers existing autoscaler, driver cleanup and status contracts.
+The tests are registered in `benchmark.blackbox.py` and the recurring Linux
+controller selector in `.claude/commands/deploy.md`.
+
+Independent review additionally reproduced a test-fixture ownership defect:
+failure to spawn the second process left the first outside cleanup. Three
+permanent no-process fault controls fail before the fixture repair and pass
+afterward. They verify second-spawn failure, release-file write failure and a
+failed first join; each preserves the original exception and still attempts
+cleanup of every admitted process. This is a fixture repair, not the live
+incident's cause. The final selection includes these three controls.
+
+Independent final execution passed all 32 cases in 24.60 seconds, and the
+unchanged private second-spawn control now confirms one termination and one
+join. The final reviewer found no runtime blocker; its receipt is
+`handoff-final-independent-review.json` in the same private RCA directory. The next
+cloud infrastructure proof remains pending. The case remains OPEN until the
+repaired boundary is validated in the live
+campaign; local causal verification does not turn proof18 into a successful
+slice. Exact proof18 cleanup was separately verified for all twelve machines
+and volumes, both registries, ten durable bundles and its Hub. Those receipts
+are `.context/acceptance/proof18-cleanup-independent/verification.json` and
+`.context/acceptance/proof18-hub-retirement.json`; historical lifecycle and
+native outcomes remain unchanged.
+
+## Human feedback
+
+The user requires ten sequential cloud slices of ten actual tasks without
+infrastructure issues. Ordinary task failures are allowed. The user explicitly
+limited this work to infrastructure and prohibited changing benchmark behavior
+to make tasks pass; the five-minute cap and validation criteria remain intact.
+
+## Reusable lesson
+
+Bind metrics observation to the authenticated workload lifecycle while preserving independent artifact-collection and resource-cleanup completion obligations.

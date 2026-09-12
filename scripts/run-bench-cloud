@@ -325,7 +325,10 @@ fi
 # Persistent pool volumes can still have a previous detached driver unwinding
 # while the next run starts. Scope every terminal marker to this controller so
 # stale output can never complete or populate the new run.
-RUN_LOG_TOKEN="$$-$(date +%s)-$RANDOM"
+RUN_LOG_TOKEN="${CLOUDBENCH_FLEET_RUN_TOKEN:-$$-$(date +%s)-$RANDOM}"
+case "$RUN_LOG_TOKEN" in
+    ''|*[!a-zA-Z0-9._-]*) echo "❌ invalid cloud benchmark run token" >&2; exit 2 ;;
+esac
 DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"
 REPORT_BEGIN="::CLOUDBENCH-REPORT-CARD-BEGIN:: token=$RUN_LOG_TOKEN"
 REPORT_END="::CLOUDBENCH-REPORT-CARD-END:: token=$RUN_LOG_TOKEN"
