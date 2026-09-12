@@ -38,7 +38,13 @@ async def main():
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stopped.set)
     assert recorder.archive_recording_artifacts_in_background(cleanup_after=False)
     await stopped.wait()
-    Path("main-returned").write_text(json.dumps({"at": time.monotonic()}))
+    returned = Path("main-returned")
+    pending = returned.with_suffix(".tmp")
+    with pending.open("w") as handle:
+        # Make premature existence-based readiness fail deterministically.
+        time.sleep(0.2)
+        handle.write(json.dumps({"at": time.monotonic()}))
+    pending.replace(returned)
 
 asyncio.run(main())
 Path("asyncio-run-returned").touch()

@@ -401,7 +401,13 @@ if os.fork():
     while True:
         time.sleep(0.1)
 
-Path("$DETACHED_PID_FILE").write_text(str(os.getpid()))
+pid_file = Path("$DETACHED_PID_FILE")
+pending = pid_file.with_suffix(".tmp")
+with pending.open("w") as handle:
+    # Existence must imply a complete PID, even with a delayed write.
+    time.sleep(0.2)
+    handle.write(str(os.getpid()))
+pending.replace(pid_file)
 while not trigger.exists():
     time.sleep(0.02)
 os.setsid()

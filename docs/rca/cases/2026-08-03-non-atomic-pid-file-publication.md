@@ -76,6 +76,31 @@ assertions, and unrelated-process survival assertion. Logs are
 `.context/acceptance/fixture-ready-publication-rca/unified-before.log` and
 `unified-after.log`; the original full-gate traceback is `runtime-failure.log`.
 
+### September 12 recurrence in recording and setup fixtures
+
+The next native coverage gate on `9297fc6d3` passed 99 domains and failed
+`recording-archive`: the parent parsed `main-returned` as empty JSON. The worker
+opened the final readiness path before writing its timestamp. The actual
+unchanged blackbox, with a 200 ms publication window made explicit, failed
+one of five checks before the fix and passed all five after writing a sibling
+temporary file and renaming it. Recording encryption, HTTP archive, supervisor
+shutdown assertions and all original deadlines remain unchanged. Evidence is
+`.context/acceptance/fixture-ready-publication-rca/recording-runtime-failure.log`,
+`recording-before.log`, `recording-after.log`, and `recording-current-after.log`.
+
+An audit found the same protocol in case 10 of
+`scripts/tests/setup-db-concurrency.test.sh`: the parent polls `child.pid`
+existence then immediately parses its contents. Running the actual generated
+child program with the same 200 ms open/write interval failed with an empty
+integer. The identical producer replay passed after atomic publication, and
+the full unchanged ten-case shell suite passed. The delay remains in that
+existing deploy-owned case to expose future direct-write regressions. Its
+artifacts are `setup-db-producer-repro.py`, `setup-db-before.log`,
+`setup-db-after.log`, and `setup-db-full-after.log` in the same evidence folder.
+The earlier fix held for its producers but did not cover these independently
+implemented handoffs; these are fixture contract recurrences, not evidence of
+provider or database cleanup failure. No production behavior or timeout changed.
+
 ## Solution
 
 The fixture now opens a sibling `.tmp` path, retains the adversarial 200 ms delay,

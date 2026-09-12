@@ -82,6 +82,39 @@ captured in the failed concurrent occurrence, and three traced natural replays
 passed. This case remains open for that unproven intermittent trigger; the
 partial-read fault injection is not misrepresented as its captured cause.
 
+## September 12 nested unittest recurrence
+
+The concurrent gate on `9297fc6d3` failed
+`FleetFailureCleanup.test_interrupted_completion_read_preserves_success` at
+`subprocess.run(..., timeout=8)`. The enclosing shell fixture was retained, but
+the nested unittest registered unconditional `TemporaryDirectory.cleanup` and
+removed its command output and lifecycle state. The original execution phase
+therefore remains unknown. An unchanged isolated replay passed in 0.725 seconds;
+high host load was observed but does not prove the trigger. Archive searches
+used `interrupted_completion_read_preserves_success timeout` and
+`fleet fixture timeout host load evidence deleted`. The July 13 host-load case
+is a lead, not a diagnosis of this occurrence.
+
+Two permanent controls reproduce the newly confirmed boundaries: a failed inner
+unittest loses its evidence, and a timed-out process leaves its detached child
+live after `subprocess.run` kills only the direct child. Both failed before the
+fixture correction (`containment-before.log`). The runner now streams combined
+output to `output.log`, records command/exit metadata, retains failed scratch
+under `BLACKBOX_TEST_ARTIFACT_DIR` or `.context/test-runs`, and uses native birth
+identity plus captured ancestry for bounded local fixture cleanup. Its execution
+deadline remains eight seconds. A failure to inspect ancestry is retained as a
+cleanup failure; an already-exited root is explicitly unverified, never a
+positive descendant-cleanup receipt. The still-owned `Popen` root is joined even
+when inspection fails. Metadata capture cannot replace the original timeout.
+
+The native cleanup implementation is shared with the existing boot fixtures,
+whose detached-child and reused-identity negative controls remain in the owning
+benchmark suite. This is test-only work with no runtime or 10,000-agent hot-path
+cost. Evidence and independent review are under
+`.context/acceptance/static-completion-timeout-rca/`. The original intermittent
+completion timeout remains open until captured evidence locates its first bad
+boundary; containment and retention tests supply no cloud acceptance credit.
+
 ## Human feedback
 
 The deploy instructions require preserving the existing acceptance criteria.

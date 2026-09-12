@@ -3,17 +3,22 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import runpy
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+FIXTURE_PROCESS = runpy.run_path(str(ROOT / "scripts/tests/fixture_process.py"))
 BASH = shutil.which("bash") or "bash"
 if Path("/opt/homebrew/bin/bash").exists():
     BASH = "/opt/homebrew/bin/bash"
@@ -111,9 +116,8 @@ PYCLI
 
 class FleetFailureCleanup(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="fleet-proof-cleanup-")
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(tempfile.mkdtemp(prefix="fleet-proof-cleanup-"))
+        self.addCleanup(self.finish_fixture)
         for relative in (
             "scripts/run-fleet-infra-stability-proof",
             "scripts/fleet_infra_sample.py",
@@ -141,6 +145,188 @@ class FleetFailureCleanup(unittest.TestCase):
             FLEET_INFRA_PROOF_ARTIFACT_DIR=str(self.root / "artifacts"),
             BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="300",
         )
+
+    def finish_fixture(self):
+        result = self._outcome.result if self._outcome is not None else None
+        failed = result is None or any(
+            test is self or getattr(test, "test_case", None) is self
+            for test, _ in list(result.errors) + list(result.failures)
+        )
+        if not failed:
+            shutil.rmtree(self.root)
+            return
+        # mkdtemp deliberately has no destructor: a failed archival operation
+        # must leave the original evidence available for diagnosis.
+        artifact_root = Path(os.environ.get("BLACKBOX_TEST_ARTIFACT_DIR", str(ROOT / ".context/test-runs")))
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        retained = Path(tempfile.mkdtemp(prefix=f"fleet-proof-{self._testMethodName}-", dir=artifact_root))
+        shutil.move(str(self.root), str(retained / "fixture"))
+        print(f"Retained failed fleet fixture: {retained}", file=sys.stderr)
+
+    def run_completion_proof(self, command):
+        log_path = self.root / "output.log"
+        metadata_path = self.root / "command.json"
+        metadata = {"command": command, "timeout_seconds": 8, "status": "starting"}
+        metadata_path.write_text(json.dumps(metadata))
+        with log_path.open("w") as log:
+            process = subprocess.Popen(
+                command, cwd=self.root, env=self.env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+            )
+            primary_error = None
+            try:
+                metadata.update(pid=process.pid, status="running")
+                metadata_path.write_text(json.dumps(metadata))
+                result = process.wait(timeout=8)
+            except BaseException as error:
+                primary_error = error
+                metadata["status"] = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "error"
+                try:
+                    with ExitStack() as cleanup:
+                        cleanup.callback(process.wait, timeout=2)
+                        cleanup.callback(lambda: process.kill() if process.poll() is None else None)
+                        drained = FIXTURE_PROCESS["terminate_fixture_tree"](process)
+                        metadata["cleanup"] = "captured-tree-drained" if drained else "unverified-root-exited"
+                except BaseException as cleanup_error:
+                    metadata["cleanup"] = repr(cleanup_error)
+                    error.add_note(f"Fixture cleanup failed: {cleanup_error!r}")
+                    raise error from cleanup_error
+                raise
+            finally:
+                metadata["returncode"] = process.poll()
+                if metadata["status"] == "running":
+                    metadata["status"] = "exited"
+                try:
+                    metadata_path.write_text(json.dumps(metadata))
+                except OSError as metadata_error:
+                    if primary_error is None:
+                        raise
+                    primary_error.add_note(f"Fixture metadata capture failed: {metadata_error!r}")
+        return subprocess.CompletedProcess(command, result, log_path.read_text(), "")
+
+    def test_timeout_reaps_detached_child_and_retains_output(self):
+        identity = FIXTURE_PROCESS["load_process_identity"]()
+        ready = self.root / "detached-ready.json"
+        script = r"""
+import json, pathlib, runpy, subprocess, sys, time
+identity = runpy.run_path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+ready = pathlib.Path(sys.argv[2])
+pending = ready.with_suffix('.tmp')
+pending.write_text(json.dumps({'pid': child.pid, 'identity': identity['current_identity'](child.pid)}))
+pending.replace(ready)
+print('fixture output before timeout', flush=True)
+time.sleep(60)
+"""
+        foreign = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.run_completion_proof(
+                    [sys.executable, "-c", script, str(ROOT / "scripts/process-identity.py"), str(ready)]
+                )
+            captured = json.loads(ready.read_text())
+            state = subprocess.run(
+                ["ps", "-p", str(captured["pid"]), "-o", "stat="], capture_output=True, text=True
+            )
+            self.assertTrue(
+                not state.stdout.strip() or state.stdout.strip().startswith("Z"),
+                "timed-out fixture left its detached child alive",
+            )
+            self.assertIsNone(foreign.poll(), "unrelated process was signalled")
+            self.assertIn("fixture output before timeout", (self.root / "output.log").read_text())
+        finally:
+            with ExitStack() as cleanup:
+                cleanup.callback(foreign.wait, timeout=2)
+                cleanup.callback(foreign.terminate)
+                if ready.exists():
+                    captured = json.loads(ready.read_text())
+                    identity.main(
+                        ["process-identity.py", "--expect", captured["identity"], "--signal", "KILL", str(captured["pid"])]
+                    )
+
+    def test_failed_case_retains_its_inner_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="fleet-fixture-retention-control-") as directory:
+            inner = FleetFailureCleanup("runTest")
+
+            def fail_with_evidence():
+                (inner.root / "inner-output.log").write_text("original failure evidence\n")
+                inner.fail("injected fixture failure")
+
+            inner.runTest = fail_with_evidence
+            result = unittest.TestResult()
+            with patch.dict(os.environ, {"BLACKBOX_TEST_ARTIFACT_DIR": directory}):
+                inner.run(result)
+            self.assertEqual(len(result.failures), 1)
+            retained = list(Path(directory).rglob("inner-output.log"))
+            self.assertEqual(len(retained), 1, "failed unittest deleted its inner evidence")
+            self.assertEqual(retained[0].read_text(), "original failure evidence\n")
+
+    def test_completion_runner_preserves_failure_and_joins_owned_root(self):
+        for scenario in ("post_spawn_metadata", "rejected_ancestry", "exited_root", "final_metadata"):
+            with self.subTest(scenario=scenario):
+                writes = []
+                calls = []
+
+                class Process:
+                    pid = 999991
+                    returncode = None
+
+                    def poll(self):
+                        return self.returncode
+
+                    def wait(self, timeout):
+                        calls.append(("wait", timeout))
+                        if self.returncode is not None:
+                            return self.returncode
+                        if scenario == "exited_root":
+                            self.returncode = 0
+                        raise subprocess.TimeoutExpired(["synthetic-fixture"], timeout)
+
+                    def kill(self):
+                        calls.append(("kill",))
+                        self.returncode = -9
+
+                process = Process()
+                real_write = Path.write_text
+                real_cleanup = FIXTURE_PROCESS["terminate_fixture_tree"]
+
+                def write_metadata(path, value, *args, **kwargs):
+                    if path == self.root / "command.json":
+                        writes.append(json.loads(value))
+                        if (scenario == "post_spawn_metadata" and len(writes) == 2) or (
+                            scenario == "final_metadata" and len(writes) == 3
+                        ):
+                            raise OSError("injected metadata write failure")
+                    return real_write(path, value, *args, **kwargs)
+
+                def cleanup(value):
+                    self.assertIs(value, process)
+                    calls.append(("cleanup",))
+                    if scenario == "rejected_ancestry":
+                        raise AssertionError("injected uncertain ancestry")
+                    if scenario == "exited_root":
+                        return real_cleanup(value)
+                    value.kill()
+                    return True
+
+                error_type = OSError if scenario == "post_spawn_metadata" else subprocess.TimeoutExpired
+                with (
+                    patch.object(subprocess, "Popen", return_value=process),
+                    patch.object(Path, "write_text", write_metadata),
+                    patch.dict(FIXTURE_PROCESS, {"terminate_fixture_tree": cleanup}),
+                    self.assertRaises(error_type) as raised,
+                ):
+                    self.run_completion_proof(["synthetic-fixture"])
+                self.assertIsNotNone(process.poll(), "failure abandoned the owned root")
+                self.assertIn(("wait", 2), calls, "failure did not join the owned root")
+                self.assertIn(("cleanup",), calls)
+                if scenario == "exited_root":
+                    self.assertEqual(writes[-1]["cleanup"], "unverified-root-exited")
+                    self.assertNotIn(("kill",), calls)
+                elif scenario == "rejected_ancestry":
+                    self.assertIn("uncertain ancestry", writes[-1]["cleanup"])
+                    self.assertIn("Fixture cleanup failed", " ".join(raised.exception.__notes__))
+                elif scenario == "final_metadata":
+                    self.assertIn("metadata capture failed", " ".join(raised.exception.__notes__))
 
     def run_case(
         self,
@@ -354,10 +540,9 @@ printf() {
   fi
 }
 """)
-        result = subprocess.run(
+        result = self.run_completion_proof(
             [BASH, str(self.root / "scripts/run-fleet-infra-stability-proof"),
              "--capability", "--runs", "1", "--width", "1", "--timeout", "300"],
-            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=8,
         )
         output = result.stdout + result.stderr
         summary = json.loads(next((self.root / "proofs").glob("*/summary.json")).read_text())
@@ -400,7 +585,7 @@ printf() {
             .replace("passed = True", "passed = False")
         )
         (self.root / "fake-fleet").write_text(fake)
-        result = subprocess.run(
+        result = self.run_completion_proof(
             [
                 BASH,
                 str(self.root / "scripts/run-fleet-infra-stability-proof"),
@@ -412,11 +597,6 @@ printf() {
                 "--timeout",
                 "300",
             ],
-            cwd=self.root,
-            env=self.env,
-            capture_output=True,
-            text=True,
-            timeout=8,
         )
         summary = json.loads(next((self.root / "proofs").glob("*/summary.json")).read_text())
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
