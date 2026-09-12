@@ -189,6 +189,9 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
         for machine in machines:
             machine_id = _safe_index_value(machine.get("id"), "machine id")
             state = _safe_index_value(machine.get("state"), "machine state")
+            instance_id = machine.get("instance_id") or ""
+            if instance_id:
+                instance_id = _safe_index_value(instance_id, "machine instance")
             private_ip = machine.get("private_ip") or ""
             if not isinstance(private_ip, str) or "\n" in private_ip:
                 raise ValueError(f"unsafe private IP for {machine_id}")
@@ -204,6 +207,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
             )
             (machine_dir / machine_id).write_text(
                 f"state={state}\n"
+                f"instance_id={instance_id}\n"
                 f"private_ip={private_ip}\n"
                 f"storage_ready={int(storage_ready)}\n"
                 f"storage_failed={int(storage_failed)}\n"

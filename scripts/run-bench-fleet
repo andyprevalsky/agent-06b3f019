@@ -671,6 +671,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" \
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
+       "$ROOT_DIR/scripts/cloudbench-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
@@ -722,6 +723,7 @@ INFRA_CANARY_PREFLIGHT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-infra-cana
 AUTOSCALER_PORT_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-port-lease.py"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readiness.py"
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
+SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
@@ -876,11 +878,34 @@ GIT_COMMON_DIR="$(cd "$GIT_COMMON_DIR" 2>/dev/null && pwd -P)" || {
     echo "❌ could not canonicalize the shared git ownership root" >&2
     exit 1
 }
+# ── Capture an explicit immutable fleet source ─────────────────────────────
+PRIVATE_SOURCE_FILE=""
+PRIVATE_SOURCE_SHA256="none"
+PRIVATE_SOURCE_ID=""
+PRIVATE_SOURCE_VOLUME_ID=""
+SHARED_WARM_ID=""
+SHARED_WARM_VOLUME_ID=""
+if [ -n "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
+    PRIVATE_SOURCE_FILE="$FLEET_DIR/source-manifest.json"
+    PRIVATE_SOURCE_SHA256="$(python3 "$SOURCE_HELPER" capture \
+        "$CLOUDBENCH_SOURCE_MANIFEST" --output "$PRIVATE_SOURCE_FILE" --workspace "$ROOT_DIR")" || exit 1
+    read -r PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID PRIVATE_SOURCE_SNAPSHOT \
+        PRIVATE_SOURCE_REGION PRIVATE_SOURCE_NODE_FP PRIVATE_SOURCE_PY_FP \
+        SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID < <(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE")
+    [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
+    # Re-exec children consume the same captured bytes, never the caller's path.
+    export CLOUDBENCH_SOURCE_MANIFEST="$PRIVATE_SOURCE_FILE"
+fi
+# ── End immutable source capture ───────────────────────────────────────────
 POOL_WORKSPACE_KEY="$(printf '%s' "$(basename "$ROOT_DIR")" | tr -c 'a-zA-Z0-9._-' '-')"
+if [ -n "$PRIVATE_SOURCE_FILE" ]; then
+    POOL_WORKSPACE_KEY="$POOL_WORKSPACE_KEY-$PRIVATE_SOURCE_SHA256"
+fi
 POOL_IDS_FILE="$GIT_COMMON_DIR/cloudbench-pools/$POOL_WORKSPACE_KEY.ids"
 POOL_META_FILE="$POOL_IDS_FILE.deps"
 POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
 LEGACY_POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
+[ -z "$PRIVATE_SOURCE_FILE" ] || LEGACY_POOL_IDS_FILE="$POOL_IDS_FILE"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
 ORIG_ARGS=("$@")
 # Paid fleet ownership must outlive the shell/tool session that launched it.
@@ -1304,7 +1329,21 @@ resolve_fly_token() {
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
-FLY() { flyctl "$@"; }
+private_source_allows_provider_call() {
+    [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
+    local verb="${1:-} ${2:-}" arg
+    case "$verb" in
+        "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"ssh console"|"ssh sftp")
+            for arg in "$@"; do
+                case "$arg" in
+                    "$PRIVATE_SOURCE_ID"|"$PRIVATE_SOURCE_VOLUME_ID"|"$SHARED_WARM_ID"|"$SHARED_WARM_VOLUME_ID")
+                        echo "❌ refusing provider mutation of a protected fleet base" >&2
+                        return 1 ;;
+                esac
+            done ;;
+    esac
+}
+FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
 
 # ── ONE shared inventory stream for every read-only poller ──────────────────
 # A single controller-owned loop reads Fly's Machines/Volumes APIs and publishes
@@ -1785,7 +1824,8 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0
     [ -n "$vol" ] || return 0
-    if [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; then
+    if { [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; } \
+        || { [ -n "${SHARED_WARM_VOLUME_ID:-}" ] && [ "$vol" = "$SHARED_WARM_VOLUME_ID" ]; }; then
         echo "  ❌ refusing to destroy warm source volume $vol" >&2
         return 1
     fi
@@ -1878,7 +1918,8 @@ reap_machine() {  # reap_machine <id> [diagnostic-log] [exact-volume-id]
     local id="$1" diagnostic_log="${2:-}" vol="${3:-}" i details="" detail_status=2
     local state="" command_rc=0
     [ -n "$id" ] || return 0
-    if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
+    if { [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; } \
+        || { [ -n "${SHARED_WARM_ID:-}" ] && [ "$id" = "$SHARED_WARM_ID" ]; }; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
         return 1
     fi
@@ -2059,6 +2100,9 @@ fleet_registry_init() {
         # later allocation/guest-start boundary must leave a successor without
         # authority to stop or destroy the exact machine.
         printf 'cleanup_policy=retain\n'
+        if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+            printf 'source_manifest_sha256=%s\n' "$PRIVATE_SOURCE_SHA256"
+        fi
     } > "$tmp_meta" || { rm -rf "$staging"; return 1; }
     mv "$tmp_meta" "$meta" || { rm -rf "$staging"; return 1; }
     : > "$staging/guest-cleanup-unconfirmed" \
@@ -2073,6 +2117,10 @@ fleet_registry_init() {
         && [ "$(registry_meta_value "$meta" runs_root)" = "$RUNS_ROOT" ] \
         && [ "$(registry_meta_value "$meta" audit_dir)" = "$FLEET_TEARDOWN_OWNERSHIP_DIR" ] \
         || { rm -rf "$staging"; return 1; }
+    if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+        python3 "$SOURCE_HELPER" capture "$PRIVATE_SOURCE_FILE" \
+            --output "$staging/source-manifest.json" >/dev/null || return 1
+    fi
     # Hidden staging directories are ignored by recovery scans. Publish the
     # complete registry in one rename so concurrent controllers never observe
     # a clones directory without its owner metadata.
@@ -2930,7 +2978,16 @@ def record(path: Path, required):
         if not separator or key in fields:
             raise SystemExit(1)
         fields[key] = value
-    if set(fields) != set(required):
+    allowed = set(required)
+    if "source_manifest_sha256" in fields and path.name == "meta":
+        allowed.add("source_manifest_sha256")
+        digest = fields["source_manifest_sha256"]
+        source_manifest = path.parent / "source-manifest.json"
+        if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or not source_manifest.is_file() or source_manifest.is_symlink()
+                or hashlib.sha256(source_manifest.read_bytes()).hexdigest() != digest):
+            raise SystemExit(1)
+    if set(fields) != allowed:
         raise SystemExit(1)
     return fields
 
@@ -6904,6 +6961,21 @@ if (
 ):
     raise ValueError("unsafe exact recovery source identity")
 
+source_manifest = None
+source_digest = meta.get("source_manifest_sha256", "")
+if source_digest or audit_meta.get("source_manifest_sha256"):
+    import hashlib
+    if (not re.fullmatch(r"[0-9a-f]{64}", source_digest)
+            or audit_meta.get("source_manifest_sha256") != source_digest):
+        raise ValueError("private source digest is not bound to owner audit")
+    files = (registry / "source-manifest.json", audit / "source-manifest.json")
+    if any(not regular_file(path) or path.stat().st_size > 65536 for path in files):
+        raise ValueError("private source manifest missing")
+    data = files[0].read_bytes()
+    if data != files[1].read_bytes() or hashlib.sha256(data).hexdigest() != source_digest:
+        raise ValueError("private source manifest changed")
+    source_manifest = json.loads(data)
+
 expected: dict[str, str] = {}
 for record in (audit / "expected-fresh").iterdir():
     value = fields(record)
@@ -6977,9 +7049,16 @@ if set(index) != set(parents):
     raise ValueError("incomplete exact recovery Machine index")
 
 roots = sources - set(parents)
+if source_manifest is not None and not expected and not parents and not index:
+    # A crash after durable registry publication but before first allocation
+    # has no clone topology. Its byte-bound source proof still names the sole
+    # external root; no resource ownership is inferred from that source.
+    roots = {source_manifest.get("machine_id")}
 if len(roots) != 1:
     raise ValueError("exact owner does not identify one external source root")
 root = next(iter(roots))
+if source_manifest is not None and source_manifest.get("machine_id") != root:
+    raise ValueError("private source differs from exact recovery topology")
 for machine_id in parents:
     current = machine_id
     visited: set[str] = set()
@@ -7233,6 +7312,9 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
     diagnostic_log="${ledger%.ids}.log"
     attempt=1
     while :; do
+        if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+            private_fleet_source_admission || return 1
+        fi
         target_volume=""
         target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
         # Record the provider target name durably BEFORE asking Fly to allocate,
@@ -7913,6 +7995,9 @@ reconcile_pool() {
       [ -f "$pool_file" ] || continue
       while read -r id; do
         [ -n "$id" ] || continue
+        if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
+            private_source_allows_provider_call machine stop "$id" || return 1
+        fi
         st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id")"
         presence=$?
         [ "$presence" -eq 1 ] && continue
@@ -8082,6 +8167,9 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
+        if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
+            private_source_allows_provider_call machine start "$id" || return 1
+        fi
         case "$id" in *[!0-9a-f]*) continue ;; esac
         case " ${UNAVAILABLE_POOL_IDS[*]:-} " in *" $id "*) continue ;; esac
         grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
@@ -8162,6 +8250,9 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
         # machine — the loser just moves on to the next candidate.
         volume_id="$(printf '%s' "$POOL_INVENTORY_JSON" \
             | machine_volume_id_from_json "$id" 2>/dev/null)" || volume_id=""
+        if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
+            private_source_allows_provider_call volumes destroy "$volume_id" || return 1
+        fi
         if [ -z "$volume_id" ] || ! write_pool_claim "$claim_path" "$id" "$volume_id"; then
             echo "  ⚠️  pool machine $id has no durable exact teardown-manifest record; leaving it unclaimed" >&2
             continue
@@ -8198,12 +8289,26 @@ fi
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     recovery_status=0
     recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"
+    private_recovery_digest="$(registry_meta_value "$recovery_registry/meta" source_manifest_sha256)"
+    if [ -n "$private_recovery_digest" ] || [ -e "$recovery_registry/source-manifest.json" ] || [ -L "$recovery_registry/source-manifest.json" ]; then
+        [ -n "$private_recovery_digest" ] || exit 1
+        PRIVATE_SOURCE_FILE="$recovery_registry/source-manifest.json"
+        PRIVATE_SOURCE_SHA256="$private_recovery_digest"
+        private_recovery_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$private_recovery_digest")" || exit 1
+        read -r PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID PRIVATE_SOURCE_SNAPSHOT \
+            PRIVATE_SOURCE_REGION PRIVATE_SOURCE_NODE_FP PRIVATE_SOURCE_PY_FP \
+            SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID <<< "$private_recovery_fields"
+        [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
+    fi
     warm_pair="$(resolve_exact_recovery_warm_identity "$recovery_registry")" \
         || recovery_status=1
     if [ "$recovery_status" = "0" ]; then
         WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
         WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $2}')"
         [ -n "$WARM_ID" ] && [ -n "$WARM_VOLUME_ID" ] || recovery_status=1
+        if [ -n "${PRIVATE_SOURCE_ID:-}" ] && { [ "$WARM_ID" != "$PRIVATE_SOURCE_ID" ] || [ "$WARM_VOLUME_ID" != "$PRIVATE_SOURCE_VOLUME_ID" ]; }; then
+            recovery_status=1
+        fi
     fi
     if [ "$recovery_status" = "0" ] \
         && ! recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN"; then
@@ -8493,12 +8598,19 @@ OWNED_CLONE_NAMES_FILE="$audit_staging/owned-clones.names"
         printf 'hub_pid_start=\n'
         printf 'hub_argv_sha256=\n'
     fi
+    if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+        printf 'source_manifest_sha256=%s\n' "$PRIVATE_SOURCE_SHA256"
+    fi
 } > "$audit_staging/meta" \
     || {
         rm -rf -- "$audit_staging"
         echo "❌ could not publish durable fleet teardown manifest identity" >&2
         exit 1
     }
+if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+    python3 "$SOURCE_HELPER" capture "$PRIVATE_SOURCE_FILE" \
+        --output "$audit_staging/source-manifest.json" >/dev/null || exit 1
+fi
 python3 - "$FLEET_AUDIT_ROOT" "${audit_staging##*/}" "$FLEET_OWNER_TOKEN" <<'PY' || {
 import os
 import re
@@ -9084,6 +9196,37 @@ rm -f "$_SEED_GUEST_PROBE"
 echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: $_SEED_GUEST_TOKEN"
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
+private_fleet_source_admission() {
+    # The existing publisher reads provider inventory once per poll. Clone
+    # admission checks only the selected immutable base's fresh native record.
+    [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" instance_id)" = "$PRIVATE_SOURCE_INSTANCE_ID" ] \
+        && [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" state)" = stopped ] \
+        && [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" storage_ready)" = 1 ] || {
+        echo "❌ private fleet source native readiness changed before clone admission" >&2
+        return 1
+    }
+}
+validate_private_fleet_source() {
+    local machines volumes snapshots
+    machines="$(FLY machines list -a "$APP" --json)" || return 1
+    volumes="$(FLY volumes list -a "$APP" --json)" || return 1
+    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
+        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
+}
+if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+    validate_private_fleet_source || exit 1
+    WARM_ID="$PRIVATE_SOURCE_ID"
+    WARM_VOLUME_ID="$PRIVATE_SOURCE_VOLUME_ID"
+    VOL_ID="$PRIVATE_SOURCE_VOLUME_ID"
+    REGION="$PRIVATE_SOURCE_REGION"
+    SNAP_ID="$PRIVATE_SOURCE_SNAPSHOT"
+    if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ] && [ "$CLOUDBENCH_SNAPSHOT_ID" != "$SNAP_ID" ]; then
+        echo "❌ private source snapshot pin differs from its captured manifest" >&2
+        exit 1
+    fi
+    echo "🧊 independently owned immutable source: $WARM_ID (region $REGION)"
+else
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '
 import json,os,sys
@@ -9241,6 +9384,7 @@ if [ -z "$SNAP_ID" ]; then
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
     exit 1
 fi
+fi
 # Freeze one workspace patch before maintenance and reuse it for every guest.
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
@@ -9308,6 +9452,15 @@ raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
 CURRENT_NODE_FP=""
 CURRENT_PY_FP=""
 warm_deps_preflight() {
+    if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+        CURRENT_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+        CURRENT_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+        if [ "$CURRENT_NODE_FP" != "$PRIVATE_SOURCE_NODE_FP" ] || [ "$CURRENT_PY_FP" != "$PRIVATE_SOURCE_PY_FP" ]; then
+            echo "❌ private fleet source dependencies differ from current manifests; maintenance is not permitted" >&2
+            return 1
+        fi
+        return 0
+    fi
     local state="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
     local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
@@ -9758,6 +9911,7 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "guest_pg_major=$CLOUDBENCH_GUEST_PG_MAJOR"
     --config-value "seed_cache_identity=$_SEED_GUEST_TOKEN"
     --config-value "volume_snapshot_id=$SNAP_ID"
+    --config-value "base_source_manifest_sha256=${PRIVATE_SOURCE_SHA256:-none}"
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"

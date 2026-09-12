@@ -334,32 +334,123 @@ def test_stack_reaps_other_services_and_preserves_failed_worker_receipt():
     _check_stack_worker_cleanup(7)
 
 
+def _cleanup_worker_port_fixture(root, process, identity, sockets, stop_handoff, handoff,
+                                 channel_path, channel_root, primary_error):
+    """Keep independent fixture retirement failures from hiding the startup error."""
+    import runpy
+    errors = []
+
+    def attempt(label, operation):
+        try:
+            return operation()
+        except BaseException as error:
+            errors.append(f"{label}: {type(error).__name__}: {error}")
+            return None
+
+    def live(pid, native):
+        observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=False)
+        if observed.returncode == 1 and not observed.stdout.strip():
+            return False
+        assert observed.returncode == 0 and observed.stdout.strip(), "fixture identity inspection failed"
+        if observed.stdout.strip().startswith("Z"):
+            return False
+        try:
+            return identity["current_identity"](pid) == native
+        except (OSError, ValueError, IndexError):
+            again = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=False)
+            assert (again.returncode == 1 and not again.stdout.strip()) or again.stdout.strip().startswith("Z")
+            return False
+
+    def stop_supervisor():
+        if process is None:
+            return
+        if process.poll() is None:
+            # An unreaped Popen owns its exact child; no process-group discovery.
+            process.terminate()
+        process.wait(timeout=5)
+
+    attempt("supervisor drain", stop_supervisor)
+    if process is not None and process.poll() is None:
+        fixture = runpy.run_path(str(WORKER_PATH.parent.parent / "scripts/tests/fixture_process.py"))
+        attempt("supervisor tree containment", lambda: fixture["terminate_fixture_tree"](process))
+        if process.poll() is None:
+            attempt("owned supervisor kill", process.kill)
+        attempt("owned supervisor join", lambda: process.wait(timeout=5))
+
+    def check_child(path):
+        child = json.loads(path.read_text())
+        if live(child["pid"], child["native"]):
+            errors.append(f"worker survived supervisor join: {path.name}")
+            result = identity["main"](["identity", "--expect", child["native"], "--signal", "KILL", str(child["pid"])])
+            assert result == 0 or not live(child["pid"], child["native"]), "exact child containment failed"
+            deadline = time.monotonic() + 2
+            while live(child["pid"], child["native"]) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert not live(child["pid"], child["native"]), "captured child survived containment"
+
+    for path in root.glob("identity-*.json"):
+        attempt(path.name, lambda path=path: check_child(path))
+    stop_handoff.set()
+    for sock in sockets:
+        attempt("socket close", sock.close)
+    if handoff is not None and handoff.ident is not None:
+        attempt("handoff join", lambda: handoff.join(timeout=2))
+        if handoff.is_alive():
+            errors.append("primary descriptor handoff thread did not stop")
+    attempt("channel unlink", lambda: channel_path.unlink(missing_ok=True))
+    attempt("channel directory", channel_root.rmdir)
+    status = {"state": "failed_retained" if errors else "verified",
+              "supervisor_joined": process is None or process.poll() is not None, "cleanup_errors":errors.copy()}
+
+    def publish():
+        pending = root / "fixture-cleanup.tmp"
+        pending.write_text(json.dumps(status))
+        pending.replace(root / "fixture-cleanup.json")
+
+    attempt("cleanup receipt", publish)
+    if errors:
+        detail = f"Worker fixture cleanup failed; retained evidence: {root}: {errors}"
+        if primary_error is not None:
+            primary_error.add_note(detail)
+        else:
+            raise AssertionError(detail)
+
+
 def test_local_workers_do_not_alias_an_occupied_secondary_port():
-    """A sibling's health listener cannot remove this run's worker capacity."""
-    launcher = WORKER_PATH.parent / "scripts" / "run_local_worker.sh"
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        (root / ".env").touch()
-        (root / "worker.py").write_text(
-            "import json, os, signal, socket\n"
-            "sockets = []\n"
-            "for key in ('SDK_METRICS_PORT', 'HEALTH_CHECK_PORT'):\n"
-            "    sock = socket.socket()\n"
-            "    sock.bind(('0.0.0.0', int(os.environ[key])))\n"
-            "    sock.listen()\n"
-            "    sockets.append(sock)\n"
-            "ready = 'ready-' + os.environ['WORKER_INDEX']\n"
-            "with open(ready + '.tmp', 'w') as output:\n"
-            "    json.dump([sock.getsockname()[1] for sock in sockets], output)\n"
-            "os.replace(ready + '.tmp', ready)\n"
-            "signal.pause()\n"
-        )
-        # Reserve a real sibling listener at the launcher's old modulo-derived
-        # metrics port. Keep it bound throughout startup; never kill its owner.
-        blocker = socket.socket()
-        primary = socket.socket()
-        primary.bind(("127.0.0.1", 0))
+    """Fixed primary sockets stay owned while real secondary binds avoid a sibling."""
+    import array
+    import runpy
+    import threading
+
+    repository = WORKER_PATH.parent.parent
+    identity = runpy.run_path(str(repository / "scripts/process-identity.py"))
+    launcher = WORKER_PATH.parent / "scripts/run_local_worker.sh"
+    artifact_root = repository / ".context/test-runs"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="worker-ports-", dir=artifact_root))
+    # Darwin UNIX socket paths are short; diagnostics remain in the retained run.
+    channel_root = Path(tempfile.mkdtemp(prefix="rw-"))
+    channel_path = channel_root / "ports.sock"
+    sockets = []
+    process = None
+    handoff = None
+    stop_handoff = threading.Event()
+    handoff_errors = []
+    primary_error = None
+
+    def listener(address):
+        sock = socket.socket()
+        sockets.append(sock)
+        sock.bind(address)
+        sock.listen()
+        return sock
+
+    try:
+        (root / ".env").touch(mode=0o600)
+        primary = listener(("0.0.0.0", 0))
         primary_port = primary.getsockname()[1]
+        blocker = socket.socket()
+        sockets.append(blocker)
         for _ in range(50):
             old_secondary = primary_port % 1000 + 19001
             try:
@@ -367,56 +458,250 @@ def test_local_workers_do_not_alias_an_occupied_secondary_port():
                 break
             except OSError:
                 primary.close()
-                primary = socket.socket()
-                primary.bind(("127.0.0.1", 0))
+                primary = listener(("0.0.0.0", 0))
                 primary_port = primary.getsockname()[1]
         else:
-            blocker.close()
-            primary.close()
             raise AssertionError("could not reserve an isolated collision fixture")
         blocker.listen()
-        health = socket.socket()
-        health.bind(("127.0.0.1", 0))
+        health = listener(("0.0.0.0", 0))
         health_port = health.getsockname()[1]
-        primary.close()
-        health.close()
+        channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sockets.append(channel)
+        channel.bind(str(channel_path))
+        channel.listen(1)
+        channel.settimeout(0.1)
+
+        def transfer_primary():
+            try:
+                deadline = time.monotonic() + 10
+                while not stop_handoff.is_set() and time.monotonic() < deadline:
+                    try:
+                        connection, _ = channel.accept()
+                    except socket.timeout:
+                        continue
+                    with connection:
+                        connection.settimeout(1)
+                        descriptors = array.array("i", [primary.fileno(), health.fileno()])
+                        connection.sendmsg([b"P"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, descriptors)])
+                    return
+            except OSError as error:
+                if not stop_handoff.is_set():
+                    handoff_errors.append(type(error).__name__ + ": " + str(error))
+
+        (root / "worker.py").write_text(
+            "import array, json, os, runpy, signal, socket\nfrom pathlib import Path\n"
+            f"identity = runpy.run_path({str(repository / 'scripts/process-identity.py')!r})\n"
+            "index = os.environ['WORKER_INDEX']\n"
+            "def stop(*args): raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "pending = Path('identity-' + index + '.tmp')\n"
+            "pending.write_text(json.dumps({'pid':os.getpid(),'native':identity['current_identity'](os.getpid())}))\n"
+            "pending.replace('identity-' + index + '.json')\n"
+            "sockets = []\n"
+            "requested = [int(os.environ[key]) for key in ('SDK_METRICS_PORT', 'HEALTH_CHECK_PORT')]\n"
+            "if index == '0':\n"
+            "    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:\n"
+            "        channel.settimeout(2)\n"
+            "        channel.connect(os.environ['WORKER_FIXTURE_PRIMARY_CHANNEL'])\n"
+            "        item = array.array('i')\n"
+            "        data, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(2 * item.itemsize))\n"
+            "        assert data == b'P' and not flags, 'primary descriptor transfer truncated'\n"
+            "        for level, kind, payload in ancillary:\n"
+            "            assert level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS\n"
+            "            item.frombytes(payload)\n"
+            "        assert len(item) == 2, 'primary descriptor count changed'\n"
+            "        sockets = [socket.socket(fileno=fd) for fd in item]\n"
+            "        assert [sock.getsockname()[1] for sock in sockets] == requested, 'fixed primary env changed'\n"
+            "else:\n"
+            "    assert requested == [0, 0], 'secondary ports must be assigned by actual binds'\n"
+            "    for port in requested:\n"
+            "        sock = socket.socket()\n"
+            "        sock.bind(('0.0.0.0', port))\n"
+            "        sock.listen()\n"
+            "        sockets.append(sock)\n"
+            "ready = 'ready-' + index\n"
+            "with open(ready + '.tmp', 'w') as output:\n"
+            "    json.dump([sock.getsockname()[1] for sock in sockets], output)\n"
+            "os.replace(ready + '.tmp', ready)\n"
+            "signal.pause()\n"
+        )
+        handoff = threading.Thread(target=transfer_primary, name="worker-fixture-primary-handoff")
+        handoff.start()
         env = {
             **os.environ,
             "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
-            "WORKER_PROCESSES": "2",
-            "SDK_METRICS_PORT": str(primary_port),
-            "HEALTH_CHECK_PORT": str(health_port),
-            "NAVI_WORKER_LOG_STREAM": "false",
+            "WORKER_PROCESSES": "2", "SDK_METRICS_PORT": str(primary_port),
+            "HEALTH_CHECK_PORT": str(health_port), "NAVI_WORKER_LOG_STREAM": "false",
             "NAVI_WORKER_LOG_FILE": str(root / "worker.log"),
+            "WORKER_FIXTURE_PRIMARY_CHANNEL": str(channel_path),
         }
-        process = subprocess.Popen(
-            ["bash", str(launcher)],
-            cwd=root,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+        with (root / "launcher.log").open("wb") as output:
+            process = subprocess.Popen(["bash", str(launcher)], cwd=root, env=env,
+                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True, umask=0o077)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if all((root / f"ready-{index}").exists() for index in range(2)):
+                break
+            if process.poll() is not None or handoff_errors:
+                break
+            time.sleep(0.02)
+        logs = "\n".join(f"{name}:\n" + ((root / name).read_text() if (root / name).exists() else "<missing>")
+                         for name in ("launcher.log", "worker.log", "worker.1.log"))
+        assert all((root / f"ready-{index}").exists() for index in range(2)), (
+            f"Local workers did not become ready; retained evidence: {root}\n{logs}\n{handoff_errors}"
         )
-        try:
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if (root / "ready-0").exists() and (root / "ready-1").exists():
-                    break
-                if (root / "worker.1.log").exists() and "Address already in use" in (root / "worker.1.log").read_text():
-                    break
-                time.sleep(0.02)
-            assert (root / "ready-1").exists(), (
-                "Secondary worker died on a sibling's occupied port: " + (root / "worker.1.log").read_text()
+        ports = [json.loads((root / f"ready-{index}").read_text()) for index in range(2)]
+        assert ports[0] == [primary_port, health_port]
+        assert len({port for pair in ports for port in pair}) == 4
+        assert old_secondary not in ports[1]
+        assert blocker.getsockname()[1] == old_secondary
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        _cleanup_worker_port_fixture(root, process, identity, sockets, stop_handoff, handoff,
+                                     channel_path, channel_root, primary_error)
+
+
+def _worker_port_regression_case(mode):
+    """Drive the real launcher fixture through a stolen-port or early-exit boundary."""
+    from unittest.mock import patch
+    real_popen = subprocess.Popen
+    captured = []
+    retained = []
+    blockers = []
+    taken = []
+    artifact_root = WORKER_PATH.parent.parent / ".context/test-runs"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+
+    class RetainedDirectory:
+        def __enter__(self):
+            path = Path(tempfile.mkdtemp(prefix="worker-port-control-", dir=artifact_root))
+            retained.append(path)
+            return str(path)
+        def __exit__(self, *_args):
+            return False
+
+    def launch(command, **kwargs):
+        if command == ["bash", str(WORKER_PATH.parent / "scripts/run_local_worker.sh")]:
+            root = Path(kwargs["cwd"])
+            retained.append(root)
+            if mode == "takeover":
+                for key in ("SDK_METRICS_PORT", "HEALTH_CHECK_PORT"):
+                    blocker = socket.socket()
+                    try:
+                        blocker.bind(("0.0.0.0", int(kwargs["env"][key])))
+                        blocker.listen()
+                    except OSError as error:
+                        import errno
+                        blocker.close()
+                        assert error.errno == errno.EADDRINUSE
+                        taken.append(False)
+                    else:
+                        blockers.append(blocker)
+                        taken.append(True)
+            else:
+                worker_path = root / "worker.py"
+                worker_path.write_text(
+                    "import os\n"
+                    "if os.environ['WORKER_INDEX'] == '0': raise RuntimeError('forced-primary-startup-failure')\n"
+                    + worker_path.read_text()
+                )
+            child = real_popen(command, **kwargs)
+            captured.append(child)
+            return child
+        return real_popen(command, **kwargs)
+
+    failure = None
+    try:
+        with patch.object(subprocess, "Popen", side_effect=launch), patch.object(tempfile, "TemporaryDirectory", RetainedDirectory):
+            try:
+                test_local_workers_do_not_alias_an_occupied_secondary_port()
+            except Exception as error:
+                failure = error
+        assert captured and all(child.poll() is not None for child in captured), "fixture supervisor was not joined"
+        if mode == "takeover":
+            assert failure is None, f"primary-port handoff failed: {failure}"
+            assert taken == [False, False], "fixture relinquished a primary socket before worker ownership"
+        else:
+            assert failure is not None and "forced-primary-startup-failure" in str(failure), (
+                f"cleanup hid the primary worker failure: {failure}"
             )
-            ports = [json.loads((root / f"ready-{index}").read_text()) for index in range(2)]
-            assert ports[0] == [primary_port, health_port]
-            assert len({port for pair in ports for port in pair}) == 4
-            assert old_secondary not in ports[1]
-            assert blocker.getsockname()[1] == old_secondary
-        finally:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
+            assert retained and all(path.exists() for path in retained), "failed fixture evidence was removed"
+            root = retained[-1]
+            assert "forced-primary-startup-failure" in (root / "worker.log").read_text()
+            assert (root / "worker.1.log").is_file() and (root / "launcher.log").is_file()
+            status = json.loads((root / "fixture-cleanup.json").read_text())
+            assert status["state"] == "verified" and status["supervisor_joined"] is True
+    finally:
+        for child in captured:
+            if child.poll() is None:
+                child.terminate()  # Exact unreaped Popen; supervisor owns worker forwarding.
+            child.wait(timeout=5)
+        for blocker in blockers:
             blocker.close()
+
+
+def test_local_worker_fixture_preserves_primary_socket_ownership():
+    _worker_port_regression_case("takeover")
+
+
+def test_local_worker_fixture_retains_primary_failure_and_joins_owner():
+    _worker_port_regression_case("primary-failure")
+
+
+def test_local_worker_fixture_cleanup_faults_preserve_primary_error():
+    """Execute the owning finally with no signals and independently failed resources."""
+    import inspect
+    import types
+    from unittest.mock import Mock, patch
+
+    tree = ast.parse(inspect.getsource(test_local_workers_do_not_alias_an_occupied_secondary_port))
+    final = next(node.finalbody for node in ast.walk(tree) if isinstance(node, ast.Try) and node.finalbody)
+    for disk_failure in (False, True):
+        root = Path(tempfile.mkdtemp(prefix="worker-cleanup-fault-", dir=WORKER_PATH.parent.parent / ".context/test-runs"))
+        (root / "identity-0.json").write_text("{invalid")
+        primary = RuntimeError("original worker startup error")
+        process = Mock(pid=12345)
+        process.poll.return_value = 1
+        process.wait.return_value = 1
+        bad_socket = Mock()
+        bad_socket.close.side_effect = OSError("socket close failed")
+        good_socket = Mock()
+        thread = Mock(ident=None)
+        thread.is_alive.return_value = False
+        channel_path = Mock()
+        channel_path.unlink.side_effect = OSError("socket unlink failed")
+        channel_root = Mock()
+        namespace = {
+            **globals(), "root":root, "process":process, "owner_identity":"fixture",
+            "primary_error":primary, "identity":{"main":Mock()}, "live":Mock(return_value=False),
+            "sockets":[bad_socket,good_socket], "stop_handoff":Mock(), "handoff":thread,
+            "channel_path":channel_path, "channel_root":channel_root,
+            "blocker":good_socket, "os":types.SimpleNamespace(killpg=Mock(side_effect=OSError("unverified group"))),
+        }
+        original_write = Path.write_text
+        def write(path, *args, **kwargs):
+            if disk_failure and path.name == "fixture-cleanup.tmp":
+                raise OSError("fixture disk write failed")
+            return original_write(path, *args, **kwargs)
+        raised = None
+        with patch.object(Path, "write_text", write):
+            try:
+                exec(compile(ast.Module(body=final, type_ignores=[]), "<actual-fixture-finally>", "exec"), namespace)
+            except BaseException as error:
+                raised = error
+        assert raised is None, f"cleanup replaced the original error: {raised}"
+        process.wait.assert_called()
+        good_socket.close.assert_called_once()
+        thread.join.assert_not_called()
+        channel_root.rmdir.assert_called_once()
+        assert getattr(primary, "__notes__", []), "cleanup failures were not attached to the original error"
+        if not disk_failure:
+            status = json.loads((root / "fixture-cleanup.json").read_text())
+            assert status["state"] == "failed_retained" and status["supervisor_joined"] is True
+        else:
+            assert "fixture disk write failed" in str(primary.__notes__)
 
 
 def test_dynamic_worker_metrics_are_discoverable_and_scrapable():
@@ -667,6 +952,9 @@ async def run_all_tests():
     r.record("worker_passes_sticky_queue_timeout_to_temporal", test_worker_passes_sticky_queue_timeout_to_temporal)
     r.record("activity_admission_closes_on_cpu_pressure", test_activity_admission_closes_on_cpu_pressure)
     r.record("local_workers_do_not_alias_occupied_ports", test_local_workers_do_not_alias_an_occupied_secondary_port)
+    r.record("local_worker_fixture_preserves_primary_socket_ownership", test_local_worker_fixture_preserves_primary_socket_ownership)
+    r.record("local_worker_fixture_retains_primary_failure", test_local_worker_fixture_retains_primary_failure_and_joins_owner)
+    r.record("local_worker_fixture_cleanup_faults", test_local_worker_fixture_cleanup_faults_preserve_primary_error)
     r.record("local_worker_single_cancellation_drains_cleanup", test_local_worker_supervisor_delivers_one_cancellation_and_waits_for_cleanup)
     r.record("stack_keeps_backend_alive_for_worker_cleanup", test_stack_keeps_backend_available_until_owned_worker_cleanup_finishes)
     r.record("stack_reaps_services_after_failed_worker", test_stack_reaps_other_services_and_preserves_failed_worker_receipt)

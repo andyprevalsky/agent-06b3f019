@@ -361,6 +361,17 @@ def test_cloud_fleet_controller_detaches_by_default():
     assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire")
 
 
+def test_private_fleet_source_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
+         "-k", "private_fleet_source"],
+        cwd=repo_root, text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
@@ -18130,6 +18141,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_dependency_rebuild_permanent_gate",
         test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "private_fleet_source_permanent_gate",
+        test_private_fleet_source_behavior_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_patch_includes_untracked_files",

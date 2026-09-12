@@ -16737,7 +16737,9 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     assert 'WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"' in fleet
     assert 'prepare_warm_source "$mid" || exit 1' in cloud
     assert 'park_warm_source "${mid:-${maintenance_mid:-}}" || true' in cloud
-    assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
+    refresh_cleanup = _extract_fleet_function(cloud, "    cleanup_refresh_deps() {")
+    assert '[ -n "${maintenance_mid:-}" ]' in refresh_cleanup
+    assert 'park_warm_source "${mid:-$maintenance_mid}" || true' in refresh_cleanup
 
 
 def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
@@ -20834,3 +20836,481 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
     assert record.exists() is registry_present
     if registry_present:
         assert record.read_bytes() == before_record
+
+
+def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, corrupt: str = ""):
+    """Replay real source/stop/snapshot/dependency admission without a provider."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    owner = "a" * 32
+    node, python = "1" * 64, "2" * 64
+    manifest = {
+        "version": 1,
+        "app": "navi-whisper-lux-bench",
+        "owner_token": owner,
+        "machine_id": "feedface000001",
+        "instance_id": "01PRIVATEINSTANCE",
+        "machine_name": f"cloudbench-source-{owner}",
+        "volume_id": "vol_private",
+        "region": "iad",
+        "image_digest": "sha256:" + "3" * 64,
+        "snapshot_id": "vs_private",
+        "node_fingerprint": node,
+        "python_fingerprint": python,
+        "verified_at": 1000,
+        "shared_machine_id": "683e47df5094d8",
+        "shared_volume_id": "vol_shared",
+    }
+    machine = {
+        "id": manifest["machine_id"],
+        "instance_id": manifest["instance_id"],
+        "name": manifest["machine_name"],
+        "state": "stopped",
+        "region": "iad",
+        "image_ref": {"digest": manifest["image_digest"]},
+        "config": {
+            "image": "registry.fly.io/bench@" + manifest["image_digest"],
+            "metadata": {"cloudbench_source_owner": owner},
+            "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048},
+            "mounts": [{"volume": "vol_private", "path": "/data"}],
+        },
+    }
+    shared = {
+        "id": manifest["shared_machine_id"],
+        "name": "cloudbench-warm",
+        "state": "started" if private else "stopped",
+        "region": "iad",
+        "config": {
+            "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048},
+            "mounts": [{"volume": "vol_shared", "path": "/data"}],
+        },
+    }
+    volumes = [
+        {
+            "id": "vol_private",
+            "name": "cloudbench_private",
+            "state": "created",
+            "region": "iad",
+            "attached_machine_id": machine["id"],
+        },
+        {
+            "id": "vol_shared",
+            "name": "cloudbench_data",
+            "state": "created",
+            "region": "iad",
+            "attached_machine_id": shared["id"],
+        },
+    ]
+    snapshots = [
+        {
+            "id": "vs_private" if private else "vs_shared",
+            "status": "created",
+            "size": 9,
+            "created_at": "1970-01-01T00:33:20Z",
+        }
+    ]
+    if corrupt == "instance":
+        machine["instance_id"] = "REPLACEDINSTANCE"
+    elif corrupt == "mount":
+        machine["config"]["mounts"].append({"volume": "vol_private", "path": "/data"})
+    elif corrupt == "snapshot":
+        snapshots[0]["status"] = "running"
+    elif corrupt == "dependencies":
+        manifest["python_fingerprint"] = "9" * 64
+    elif corrupt == "owner":
+        machine["config"]["metadata"]["cloudbench_source_owner"] = "b" * 32
+    elif corrupt == "shared-alias":
+        manifest["volume_id"] = "vol_shared"
+        machine["config"]["mounts"][0]["volume"] = "vol_shared"
+    elif corrupt == "started":
+        machine["state"] = "started"
+    elif corrupt == "image":
+        machine["image_ref"]["digest"] = "sha256:" + "4" * 64
+    elif corrupt == "missing-snapshot":
+        snapshots[0]["id"] = "vs_other"
+    elif corrupt == "volume-owner":
+        volumes[0]["attached_machine_id"] = "deadbeef000001"
+    elif corrupt == "region":
+        volumes[0]["region"] = "ord"
+    for name, value in [
+        ("manifest.json", manifest),
+        ("machines.json", [shared, machine]),
+        ("volumes.json", volumes),
+        ("snapshots.json", snapshots),
+    ]:
+        (tmp_path / name).write_text(json.dumps(value))
+    calls = tmp_path / "calls"
+    calls.touch()
+    common = tmp_path / "common"
+    common.mkdir()
+    fake_cloud = tmp_path / "run-bench-cloud"
+    fake_cloud.write_text('#!/bin/bash\nprintf "MAINTENANCE %s\\n" "$*" >> "$FIXTURE/calls"\nexit 88\n')
+    fake_cloud.chmod(0o700)
+    (common / "cloudbench-warm-deps.fp").write_text(f"{node} {python} 1000 vs_shared\n")
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("# ── Resolve the warm machine (clone source)")
+    end = fleet.index("# Freeze one workspace patch", start)
+    init = ""
+    if "# ── Capture an explicit immutable fleet source" in fleet:
+        at = fleet.index("# ── Capture an explicit immutable fleet source")
+        init = fleet[at : fleet.index("# ── End immutable source capture", at)]
+    funcs = "\n".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in (
+            "pool_machine_shape_from_json() {",
+            "snapshot_created_epoch() {",
+            "snapshot_is_complete_exact() {",
+            "warm_deps_preflight() {",
+        )
+    )
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+APP=navi-whisper-lux-bench
+MACHINE_NAME=cloudbench-warm
+VOLUME_NAME=cloudbench_data
+ROOT_DIR="$FIXTURE/workspace"
+GIT_COMMON_DIR="$FIXTURE/common"
+FLEET_DIR="$ROOT_DIR/.context/run"
+mkdir -p "$FLEET_DIR"
+SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
+SNAPSHOT_SELECTOR_SCRIPT={shlex.quote(str(SNAPSHOT_SCRIPT))}
+WARM_PARKED_VM_SIZE=shared-cpu-1x
+WARM_PARKED_VM_MEMORY=2048
+REGION=iad
+BENCH_REF=abc123
+BENCHES=(one)
+CURRENT_NODE_FP=""
+CURRENT_PY_FP=""
+RUN_BENCH_CLOUD_BIN="$FIXTURE/run-bench-cloud"
+FLY() {{
+  printf '%s\\n' "$*" >> "$FIXTURE/calls"
+  case "$1 $2" in
+    "machines list") cat "$FIXTURE/machines.json" ;;
+    "volumes list") cat "$FIXTURE/volumes.json" ;;
+    "volume snapshots") cat "$FIXTURE/snapshots.json" ;;
+    *) echo 'unexpected provider mutation' >&2; return 88 ;;
+  esac
+}}
+fly_with_timeout() {{ shift; FLY "$@"; }}
+pool_machine_state() {{ echo started; }}
+sleep() {{ :; }}
+cloudbench_node_dependency_fingerprint() {{ printf '%s\\n' {node}; }}
+cloudbench_manifest_fingerprint() {{ printf '%s\\n' {python}; }}
+{funcs}
+{init}
+{fleet[start:end]}
+warm_deps_preflight || exit $?
+printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
+"""
+    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)}
+    if private:
+        env["CLOUDBENCH_SOURCE_MANIFEST"] = str(tmp_path / "manifest.json")
+    result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20, check=False)
+    return result, calls.read_text()
+
+
+def test_private_fleet_source_avoids_active_shared_warm(tmp_path: Path) -> None:
+    result, calls = _private_source_preflight_fixture(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+    assert "machine update" not in calls and "machine stop" not in calls
+    assert "MAINTENANCE" not in calls
+    assert "vol_shared" not in calls, "private source looked up shared snapshots"
+
+
+def test_private_fleet_source_keeps_shared_default(tmp_path: Path) -> None:
+    result, calls = _private_source_preflight_fixture(tmp_path, private=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SELECTED=683e47df5094d8:vol_shared:vs_shared" in result.stdout
+    assert "volume snapshots list vol_shared" in calls
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "instance",
+        "mount",
+        "snapshot",
+        "dependencies",
+        "owner",
+        "shared-alias",
+        "started",
+        "image",
+        "missing-snapshot",
+        "volume-owner",
+        "region",
+    ],
+)
+def test_private_fleet_source_rejects_unproven_input(tmp_path: Path, corrupt: str) -> None:
+    result, calls = _private_source_preflight_fixture(tmp_path, corrupt=corrupt)
+    assert result.returncode != 0
+    assert "SELECTED=" not in result.stdout
+    assert "machine update" not in calls and "machine stop" not in calls
+    assert "MAINTENANCE" not in calls
+    if corrupt == "dependencies":
+        assert "private fleet source dependencies differ" in result.stderr
+    else:
+        assert "private fleet source validation failed" in result.stderr
+
+
+def test_private_fleet_source_cannot_be_claimed_from_contaminated_pool(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    claim = _extract_fleet_function(fleet, "claim_pool_machine() {")
+    guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
+    for source, volume in (
+        ("feedface000001", "vol_private"),
+        ("683e47df5094d8", "vol_shared"),
+        ("deadbeef000001", "vol_private"),
+        ("deadbeef000001", "vol_child"),
+    ):
+        root = tmp_path / (source + volume)
+        root.mkdir()
+        (root / "pool.ids").write_text(source + "\n")
+        script = f"""set -uo pipefail
+PRIVATE_SOURCE_ID=feedface000001
+PRIVATE_SOURCE_VOLUME_ID=vol_private
+SHARED_WARM_ID=683e47df5094d8
+SHARED_WARM_VOLUME_ID=vol_shared
+POOL_IDS_FILE="$FIXTURE/pool.ids"
+POOL_CLAIMS_DIR="$FIXTURE/claims"
+CLAIMED_POOL_FILE="$FIXTURE/claimed"
+POOL_INVENTORY_JSON='[]'
+UNAVAILABLE_POOL_IDS=()
+FLEET_OWNER_TOKEN=fixture
+FLEET_OWNER_HOST=host
+FLEET_OWNER_PID_START=start
+machine_volume_id_from_json() {{ cat >/dev/null; echo {volume}; }}
+write_pool_claim() {{ echo claimed > "$1"; }}
+cloudbench_env_sha256() {{ echo fixture; }}
+fleet_audit_record_pool_machine() {{ :; }}
+{guard}
+{claim}
+claim_pool_machine
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ["PATH"], "FIXTURE": str(root)},
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        if volume == "vol_child":
+            assert result.returncode == 0 and result.stdout == source, result.stderr
+            assert (root / "claimed").read_text().strip() == source
+            continue
+        assert result.stdout == "", "protected source escaped pool claim: " + result.stdout
+        assert not (root / "claimed").exists()
+        assert not list((root / "claims").iterdir())
+
+
+def test_private_fleet_source_native_identity_uses_existing_inventory(tmp_path: Path) -> None:
+    result, _ = _private_source_preflight_fixture(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "\n".join(
+        _extract_fleet_function(fleet, name)
+        for name in (
+            "inventory_index_healthy() {",
+            "inventory_machine_record_path() {",
+            "inventory_machine_field() {",
+            "private_fleet_source_admission() {",
+        )
+    )
+    for mode in ("stopped", "replaced", "started", "unmountable"):
+        machines = json.loads((tmp_path / "machines.json").read_text())
+        volumes = json.loads((tmp_path / "volumes.json").read_text())
+        if mode == "replaced":
+            machines[1]["instance_id"] = "OTHERINSTANCE"
+        elif mode == "started":
+            machines[1]["state"] = "started"
+        elif mode == "unmountable":
+            volumes[0]["state"] = "restoring"
+        (tmp_path / "current-machines.json").write_text(json.dumps(machines))
+        (tmp_path / "current-volumes.json").write_text(json.dumps(volumes))
+        published = subprocess.run(
+            [
+                sys.executable,
+                str(MACHINE_READINESS_SCRIPT),
+                "--publish-index",
+                str(tmp_path / "current-machines.json"),
+                str(tmp_path / "current-volumes.json"),
+                str(tmp_path / "index"),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert published.returncode == 0, published.stderr
+        script = f"""set -uo pipefail
+INVENTORY_INDEX="$FIXTURE/index"
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+SNAPSHOT_LOOP_PID=$$
+SNAPSHOT_LOOP_TOKEN=standalone
+PRIVATE_SOURCE_ID=feedface000001
+PRIVATE_SOURCE_INSTANCE_ID=01PRIVATEINSTANCE
+FLY() {{ echo 'provider called during indexed source admission' >&2; exit 99; }}
+{helpers}
+private_fleet_source_admission
+"""
+        actual = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert actual.returncode == (0 if mode == "stopped" else 1), actual.stdout + actual.stderr
+        if mode != "stopped":
+            assert "native readiness changed" in actual.stderr
+        assert "provider called" not in actual.stderr
+
+
+def test_private_fleet_source_provider_boundary_protects_both_bases(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
+    for command in (
+        "machine start",
+        "machine stop",
+        "machine update",
+        "machine destroy",
+        "machine restart",
+        "ssh console --machine",
+        "ssh sftp put --machine",
+        "volumes destroy",
+    ):
+        for identity in ("feedface000001", "683e47df5094d8", "vol_private", "vol_shared", "deadbeef000001"):
+            script = f"""set -uo pipefail
+PRIVATE_SOURCE_ID=feedface000001
+PRIVATE_SOURCE_VOLUME_ID=vol_private
+SHARED_WARM_ID=683e47df5094d8
+SHARED_WARM_VOLUME_ID=vol_shared
+{guard}
+private_source_allows_provider_call {command} {identity}
+"""
+            result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False, timeout=5)
+            assert result.returncode == (0 if identity == "deadbeef000001" else 1), result.stderr
+    assert 'private_source_allows_provider_call "$@" && flyctl "$@"' in fleet
+
+
+def test_private_fleet_source_capture_is_immutable_and_pool_scoped(tmp_path: Path) -> None:
+    first, _ = _private_source_preflight_fixture(tmp_path / "first")
+    assert first.returncode == 0, first.stderr
+    captured = tmp_path / "first/workspace/.context/run/source-manifest.json"
+    original = captured.read_bytes()
+    (tmp_path / "first/manifest.json").write_text('{"replaced":true}')
+    assert captured.read_bytes() == original
+    assert captured.stat().st_mode & 0o222 == 0
+    conflict = tmp_path / "other.json"
+    replacement = json.loads(original)
+    replacement["owner_token"] = "b" * 32
+    replacement["machine_name"] = "cloudbench-source-" + "b" * 32
+    conflict.write_text(json.dumps(replacement))
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/cloudbench-source.py"),
+            "capture",
+            str(conflict),
+            "--output",
+            str(captured),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert captured.read_bytes() == original
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index('POOL_WORKSPACE_KEY="$(printf')
+    end = fleet.index("POOL_CLAIMS_DIR=", start)
+    keys = []
+    for digest in (hashlib.sha256(original).hexdigest(), "e" * 64):
+        script = f"""set -uo pipefail
+ROOT_DIR="$FIXTURE/workspace"
+GIT_COMMON_DIR="$FIXTURE/git"
+PRIVATE_SOURCE_FILE=present
+PRIVATE_SOURCE_SHA256={digest}
+{fleet[start:end]}
+printf '%s\\n' "$POOL_IDS_FILE" "$POOL_META_FILE" "$LEGACY_POOL_IDS_FILE"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        values = result.stdout.splitlines()
+        assert values[0] == values[2] and values[1] == values[0] + ".deps"
+        keys.append(values[0])
+    assert keys[0] != keys[1]
+
+
+def test_private_fleet_source_recovery_requires_bound_manifest_without_env(tmp_path: Path) -> None:
+    result, _ = _private_source_preflight_fixture(tmp_path / "capture")
+    assert result.returncode == 0, result.stderr
+    payload = (tmp_path / "capture/workspace/.context/run/source-manifest.json").read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    owner = "c" * 32
+    registry = tmp_path / "registries" / owner
+    audit = tmp_path / "audits" / owner
+    (registry / "clones").mkdir(parents=True)
+    for name in ("expected-fresh", "fresh", "by-machine-id"):
+        (audit / name).mkdir(parents=True)
+    metadata = f"version=2\napp=navi-whisper-lux-bench\nfleet_owner_token={owner}\nrun_id=fixture\naudit_dir={audit}\nsource_manifest_sha256={digest}\n"
+    (registry / "meta").write_text(metadata)
+    (audit / "meta").write_text(metadata)
+    for root in (registry, audit):
+        (root / "source-manifest.json").write_bytes(payload)
+    clone, machine = "cloudbench-fixture", "deadbeef000001"
+    (audit / "expected-fresh" / clone).write_text(f"clone_name={clone}\nsource_machine_id=feedface000001\n")
+    (audit / "fresh" / clone).write_text(
+        f"version=1\nfleet_owner_token={owner}\nrun_id=fixture\napp=navi-whisper-lux-bench\nclone_name={clone}\nsource=fresh-clone\nsource_machine_id=feedface000001\nmachine_id={machine}\nvolume_id=vol_child\ndisposition=owned\n"
+    )
+    (audit / "by-machine-id" / machine).write_text(clone + "\n")
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "resolve_exact_recovery_warm_identity() {")
+    guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
+    meta = _extract_fleet_function(fleet, "registry_meta_value() {")
+    start = fleet.index('    recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"')
+    end = fleet.index('    warm_pair="$(resolve_exact_recovery_warm_identity', start)
+    script = f"""set -uo pipefail
+APP=navi-whisper-lux-bench
+FLEET_OWNERSHIP_ROOT="$FIXTURE/registries"
+FLEET_AUDIT_ROOT="$FIXTURE/audits"
+RECOVER_OWNER_TOKEN={owner}
+SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
+{meta}
+{guard}
+{resolver}
+{fleet[start:end]}
+identity="$(resolve_exact_recovery_warm_identity "$recovery_registry")" || exit 1
+[ "$identity" = 'feedface000001 vol_private' ] || exit 91
+private_source_allows_provider_call machine stop "$PRIVATE_SOURCE_ID" && exit 92
+private_source_allows_provider_call machine stop "$SHARED_WARM_ID" && exit 93
+printf 'recovered-exact-source\\n'
+"""
+    script = "machine_volume_id() { echo vol_private; }\n" + script
+    for state in ("valid", "unallocated", "missing", "changed"):
+        if state == "unallocated":
+            for directory in ("expected-fresh", "fresh", "by-machine-id"):
+                for record in (audit / directory).iterdir():
+                    record.unlink()
+        elif state == "missing":
+            (registry / "source-manifest.json").unlink()
+        elif state == "changed":
+            (registry / "source-manifest.json").write_bytes(payload + b" ")
+        actual = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)},
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert actual.returncode == (0 if state in {"valid", "unallocated"} else 1), actual.stdout + actual.stderr
+        assert ("recovered-exact-source" in actual.stdout) == (state in {"valid", "unallocated"})
+    assert (audit / "source-manifest.json").read_bytes() == payload
