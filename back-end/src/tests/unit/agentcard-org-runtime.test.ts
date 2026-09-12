@@ -271,6 +271,49 @@ async function main(): Promise<void> {
     );
     assert.equal(stuckUnavailableCalls, 3, 'transient-unavailable retries must stay bounded');
 
+    // AbortSignal.timeout on tools/call throws "The operation was aborted due to timeout" before
+    // any HTTP/RPC body exists. Under coverage concurrency that mid-poll stall used to escape as a
+    // hard fail (treasury-rails 2026-09-12: unused-card settle died on attempt 3). It is the same
+    // transient provider class as a structured 503 — retry, then surface temporarily unavailable.
+    let timedOutCalls = 0;
+    const timedOutThenOkRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      timedOutCalls += 1;
+      if (timedOutCalls === 1) {
+        const timeout = new Error('The operation was aborted due to timeout');
+        timeout.name = 'TimeoutError';
+        throw timeout;
+      }
+      return new Response(JSON.stringify({ result: { structuredContent: { transfers: [] } } }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    assert.deepEqual(await timedOutThenOkRuntime.callTool('list_transfers', { limit: 100 }), {
+      structuredContent: { transfers: [] },
+    });
+    assert.equal(
+      timedOutCalls,
+      2,
+      'an AbortSignal tools/call timeout must be retried instead of failing the caller'
+    );
+
+    let stuckTimeoutCalls = 0;
+    const stuckTimeoutRuntime = new AgentCardOrgRuntime(undefined, async () => {
+      stuckTimeoutCalls += 1;
+      const timeout = new Error('The operation was aborted due to timeout');
+      timeout.name = 'TimeoutError';
+      throw timeout;
+    });
+    await assert.rejects(
+      () => stuckTimeoutRuntime.callTool('list_transfers', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 503 &&
+        error.code === 'agentcard_org_mcp_unavailable' &&
+        /temporarily unavailable/.test(error.message)
+    );
+    assert.equal(stuckTimeoutCalls, 3, 'AbortSignal timeout retries must stay bounded');
+
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
     const hardFailureRuntime = new AgentCardOrgRuntime(async () => {

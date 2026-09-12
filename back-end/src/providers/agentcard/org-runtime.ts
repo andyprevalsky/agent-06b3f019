@@ -130,8 +130,18 @@ function looksLikeRateLimitError(error: unknown): boolean {
   );
 }
 
+function looksLikeMcpTimeoutError(error: unknown): boolean {
+  if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    return true;
+  }
+  return /aborted due to timeout|operation was aborted/i.test(errorMessage(error));
+}
+
 function looksLikeTransientUnavailableError(error: unknown): boolean {
-  return /temporarily unavailable|service unavailable/i.test(errorMessage(error));
+  return (
+    /temporarily unavailable|service unavailable/i.test(errorMessage(error)) ||
+    looksLikeMcpTimeoutError(error)
+  );
 }
 
 function shouldRetryOrgMcpError(error: unknown): boolean {
@@ -235,21 +245,36 @@ async function callOrgMcpTool(
 ): Promise<unknown> {
   let lastError: AgentCardOrgRuntimeError | undefined;
   for (let attempt = 1; attempt <= ORG_MCP_AUTH_RETRY_ATTEMPTS; attempt += 1) {
-    const response = await fetchImpl(AGENTCARD_MCP_RESOURCE, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        accept: 'application/json, text/event-stream',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: { name: toolName, arguments: args },
-      }),
-      signal: AbortSignal.timeout(ORG_MCP_TOOL_TIMEOUT_MS),
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(AGENTCARD_MCP_RESOURCE, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: toolName, arguments: args },
+        }),
+        signal: AbortSignal.timeout(ORG_MCP_TOOL_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (!looksLikeMcpTimeoutError(error)) throw error;
+      // Convert AbortSignal.timeout into the same transient-unavailable class as a
+      // structured 503 so callToolWithRateLimitRetry retries instead of failing the
+      // payment/settle poll. Do not retry here — the outer loop owns the budget.
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard Organization MCP ${toolName} is temporarily unavailable: ` +
+          `tools/call timed out after ${ORG_MCP_TOOL_TIMEOUT_MS}ms`,
+        503,
+        'agentcard_org_mcp_unavailable',
+        { tool: toolName, error: errorMessage(error) }
+      );
+    }
     const bodyText = await response.text();
     let parsed: Record<string, unknown>;
     try {
