@@ -2064,6 +2064,181 @@ def test_boot_launch_stages_and_exports_complete_local_patch() -> None:
     assert cloud.index('LOCAL_PATCH_FILE=""') < cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]')
 
 
+@pytest.mark.parametrize("mode", ["published", "published_no_patch", "unpublished", "stale_tracking", "denied", "missing_token", "read_failure", "wrong_origin", "main", "local_edit", "stalled_origin", "config_rewrite", "annotated_tag", "unicode_ref"])
+def test_boot_payload_fetchable_source_uses_authenticated_live_origin(tmp_path: Path, mode: str) -> None:
+    """Use actual auth-required HTTP Git and the unchanged exact guest fetcher."""
+    seed, remote, controller, guest = (tmp_path / name for name in ("seed", "rose.git", "controller", "guest"))
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+           "CLOUDBENCH_GITHUB_TOKEN_B64": base64.b64encode(b"fixture-only-token").decode(),
+           "GITHUB_TOKEN": "", "GH_TOKEN": "", "CLOUDBENCH_APP_USER": "", "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}
+    # No real credentials or external provider are used by this fixture.
+    for key in tuple(env):
+        if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_") or key == "GIT_CONFIG_COUNT":
+            del env[key]
+    def git(*args: str) -> str:
+        result = subprocess.run(["git", *args], env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+    git("init", "-q", "-b", "main", str(seed))
+    git("-C", str(seed), "config", "user.name", "Fixture")
+    git("-C", str(seed), "config", "user.email", "fixture@example.invalid")
+    (seed / "value").write_text("base\n")
+    git("-C", str(seed), "add", "value")
+    git("-C", str(seed), "commit", "-qm", "base")
+    base = git("-C", str(seed), "rev-parse", "HEAD")
+    git("-C", str(seed), "checkout", "-qb", "proof-source")
+    (seed / "value").write_text("candidate\n")
+    git("-C", str(seed), "commit", "-qam", "candidate")
+    candidate = git("-C", str(seed), "rev-parse", "HEAD")
+    if mode == "annotated_tag":
+        git("-C", str(seed), "tag", "-a", "proof-tag", "-m", "candidate tag")
+    if mode == "unicode_ref":
+        git("-C", str(seed), "branch", "autre-étiquette", base)
+    git("clone", "-q", "--bare", str(seed), str(remote))
+    git("clone", "-q", "--no-local", str(remote), str(controller))
+    git("clone", "-q", "--no-local", "--single-branch", "--branch", "main", str(remote), str(guest))
+    if mode in {"unpublished", "stale_tracking"}:
+        git("--git-dir", str(remote), "update-ref", "-d", "refs/heads/proof-source")
+        if mode == "unpublished":
+            git("-C", str(controller), "update-ref", "-d", "refs/remotes/origin/proof-source")
+    if mode == "annotated_tag":
+        git("--git-dir", str(remote), "update-ref", "-d", "refs/heads/proof-source")
+    git("--git-dir", str(remote), "update-server-info")
+    auth = "Basic " + base64.b64encode(b"x-access-token:fixture-only-token").decode()
+    observed_auth: list[bool] = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            accepted = self.headers.get("Authorization") == auth
+            observed_auth.append(accepted)
+            if mode == "stalled_origin":
+                time.sleep(10.25)
+                self.close_connection = True
+                return
+            if not accepted or mode in {"denied", "read_failure"}:
+                self.send_response(503 if mode == "read_failure" else 403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            target = (tmp_path / self.path.partition("?")[0].lstrip("/")).resolve()
+            if not target.is_relative_to(tmp_path.resolve()) or not target.is_file():
+                self.send_error(404)
+                return
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        def log_message(self, *_args) -> None:
+            return
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    canonical = "https://github.com/Rose-Ai-Labs/rose.git"
+    local_url = f"http://127.0.0.1:{server.server_address[1]}/rose.git"
+    try:
+        for repo in (controller, guest):
+            git("-C", str(repo), "remote", "set-url", "origin", canonical)
+            git("-C", str(repo), "config", f"url.{local_url}.insteadOf", canonical)
+        if mode == "wrong_origin":
+            git("-C", str(controller), "remote", "set-url", "origin", "https://github.com/other/repo.git")
+        # Explicit transport seam: verify the production query is isolated and
+        # URL scoped, then map only its destination/header scope to owned HTTP.
+        # Guest remote inspection is kept canonical while its actual Git fetch
+        # uses the fixture's local rewrite. No auth or Git outcome is mocked.
+        wrapper = tmp_path / "bin"
+        wrapper.mkdir()
+        real_git = shutil.which("git")
+        assert real_git
+        network_receipt = tmp_path / "isolated-query"
+        query_pid = tmp_path / "query-pid"
+        (wrapper / "git").write_text(
+            "#!/usr/bin/env bash\nset -eu\n"
+            'if [ "${1:-}" = ls-remote ]; then\n'
+            '  [ "$PWD" = / ]\n'
+            '  [ "${GIT_CONFIG_GLOBAL:-}" = /dev/null ]\n'
+            '  [ "${GIT_CONFIG_SYSTEM:-}" = /dev/null ]\n'
+            '  [ -z "${GIT_CONFIG_PARAMETERS:-}${GIT_DIR:-}${GIT_WORK_TREE:-}${GIT_TRACE_CURL:-}${GIT_TRACE:-}${GIT_CURL_VERBOSE:-}" ]\n'
+            '  [ "$GIT_CONFIG_KEY_0" = http.https://github.com/Rose-Ai-Labs/rose.git.extraheader ]\n'
+            '  [ "$GIT_CONFIG_KEY_2" = http.followRedirects ] && [ "$GIT_CONFIG_VALUE_2" = false ]\n'
+            f'  printf verified > {shlex.quote(str(network_receipt))}\n'
+            f'  printf "%s" "$$" > {shlex.quote(str(query_pid))}\n'
+            f'  export GIT_CONFIG_KEY_0={shlex.quote("http." + local_url + ".extraheader")}\n'
+            f'  exec {shlex.quote(real_git)} ls-remote --heads --tags {shlex.quote(local_url)}\n'
+            "fi\n"
+            'if [ "${3:-}" = remote ] && [ "${4:-}" = get-url ]; then\n'
+            f'  exec {shlex.quote(real_git)} "$1" "$2" config --get remote.origin.url\n'
+            "fi\n" + f'exec {shlex.quote(real_git)} "$@"\n'
+        )
+        (wrapper / "git").chmod(0o755)
+        env["PATH"] = str(wrapper) + os.pathsep + env["PATH"]
+        expected_published = mode in {"published", "published_no_patch", "local_edit", "config_rewrite", "annotated_tag", "unicode_ref"}
+        if expected_published:
+            # This unchanged guest helper must actually fetch the feature SHA
+            # using the supplied token before testing controller admission.
+            fetch_env = env
+            fetched = subprocess.run(["bash", str(FETCH_SCRIPT), str(guest), candidate], env=fetch_env,
+                                     text=True, capture_output=True, timeout=20)
+            assert fetched.returncode == 0, fetched.stdout + fetched.stderr
+            assert git("-C", str(guest), "rev-parse", "HEAD") == candidate
+            assert (guest / "value").read_text() == "candidate\n"
+            assert observed_auth and all(observed_auth)
+        if mode == "local_edit":
+            (controller / "value").write_text("candidate\nlocal\n")
+            (controller / "new-file").write_text("untracked\n")
+        trace = tmp_path / "must-not-leak-token.trace"
+        if mode == "config_rewrite":
+            # Poison both local and inherited config only after guest fetch.
+            git("-C", str(controller), "config", "--unset-all", f"url.{local_url}.insteadOf")
+            git("-C", str(controller), "config", f"url.{local_url}/trap.insteadOf", canonical)
+            env["GIT_CONFIG_PARAMETERS"] = f"'url.{local_url}/trap.insteadOf={canonical}'"
+            env["GIT_DIR"] = str(controller / ".git")
+            env["GIT_WORK_TREE"] = str(controller)
+            env["GIT_TRACE_CURL"] = str(trace)
+            env["GIT_CURL_VERBOSE"] = "1"
+        requested = base if mode == "main" else candidate
+        allow_patch = "0" if mode == "published_no_patch" else "1"
+        missing_override = "cloudbench_controller_github_token() { return 1; }" if mode == "missing_token" else ""
+        started = time.monotonic()
+        result = subprocess.run(["bash", "-c", f'''set -euo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+{missing_override}
+cloudbench_fetchable_ref "$1" "$2" "$3"
+''', "fixture", str(controller), requested, allow_patch], env=env, text=True, capture_output=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        if mode == "stalled_origin":
+            assert 9 <= time.monotonic() - started < 15
+            # Probe's actual exec'd Git PID has been joined, rather than just
+            # abandoning a stalled request and returning the patch fallback.
+            pid = int(query_pid.read_text())
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        if mode == "config_rewrite":
+            assert not trace.exists() or "fixture-only-token" not in trace.read_text()
+            assert not trace.exists() or auth not in trace.read_text()
+        expected = candidate if expected_published else base
+        assert result.stdout.strip() == expected, result.stderr
+        if expected_published:
+            assert network_receipt.read_text() == "verified"
+        patch = subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(controller), expected], env=env,
+                               text=True, capture_output=True, timeout=10)
+        assert patch.returncode == 0, patch.stderr
+        if expected_published and mode != "local_edit":
+            assert not patch.stdout
+        elif mode == "local_edit":
+            assert "+local" in patch.stdout and "+untracked" in patch.stdout
+        else:
+            assert "+candidate" in patch.stdout
+        if mode in {"wrong_origin", "missing_token", "main"}:
+            assert not observed_auth
+        if mode == "stale_tracking":
+            assert git("-C", str(controller), "rev-parse", "origin/proof-source") == candidate
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
 def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path: Path) -> None:
     """Replay the canary's payload shape through the real controller assembly.
 

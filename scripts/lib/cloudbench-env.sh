@@ -1004,14 +1004,89 @@ cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
   printf 'flt-%s%s' "$sanitized" "$suffix"
 }
 
+cloudbench_origin_advertises_commit() {  # <repo-root> <full-sha>
+  # Only admit an exact ref currently advertised by the same private repository
+  # the guest helper fetches. Local origin/* refs may be stale after deletion.
+  # An unreadable origin is uncertainty, so callers retain full patch delivery.
+  local root="$1" resolved="$2" origin token header
+  origin="$(git -C "$root" config --get remote.origin.url 2>/dev/null)" || return 1
+  case "$origin" in
+    https://github.com/Rose-Ai-Labs/rose.git|https://github.com/Rose-Ai-Labs/rose|git@github.com:Rose-Ai-Labs/rose.git|ssh://git@github.com/Rose-Ai-Labs/rose.git) ;;
+    *) return 1 ;;
+  esac
+  token="$(cloudbench_controller_github_token "$root" 2>/dev/null)" || return 1
+  [ -n "$token" ] || return 1
+  header="$(cloudbench_github_basic_auth_header "$token")" || return 1
+  CLOUDBENCH_FETCHABLE_AUTH_HEADER="$header" python3 - "$root" "$resolved" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+
+env = os.environ.copy()
+header = env.pop("CLOUDBENCH_FETCHABLE_AUTH_HEADER")
+# Discovery must not inherit repository-local URL rewrites, alternate Git dirs,
+# or ambient command-line config that could redirect credentials or advertise a
+# different repository. Auth is URL scoped and redirects are never followed.
+for key in tuple(env):
+    if key.startswith(("GIT_CONFIG", "GIT_TRACE")) or key in {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CURL_VERBOSE",
+    }:
+        del env[key]
+env.update(GIT_CONFIG_COUNT="3",
+           GIT_CONFIG_KEY_0="http.https://github.com/Rose-Ai-Labs/rose.git.extraheader",
+           GIT_CONFIG_VALUE_0=header, GIT_CONFIG_KEY_1="credential.helper",
+           GIT_CONFIG_VALUE_1="", GIT_CONFIG_KEY_2="http.followRedirects",
+           GIT_CONFIG_VALUE_2="false", GIT_TERMINAL_PROMPT="0",
+           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+           GIT_CONFIG_NOSYSTEM="1")
+
+def interrupted(_signum, _frame):
+    raise InterruptedError("source admission interrupted")
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
+child = None
+try:
+    # A file prevents a remote helper retaining stdout from holding communicate
+    # open after git has exited. Ref advertisements above 4 MiB stay unverified.
+    with tempfile.TemporaryFile() as output_file:
+        child = subprocess.Popen(
+            ["git", "ls-remote", "--heads", "--tags",
+             "https://github.com/Rose-Ai-Labs/rose.git"],
+            cwd="/", env=env, stdout=output_file, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        child.wait(timeout=10)
+        if child.returncode == 0:
+            output_file.seek(0)
+            output = output_file.read(4 * 1024 * 1024 + 1)
+            if len(output) <= 4 * 1024 * 1024:
+                for line in output.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] == sys.argv[2].encode("ascii") and fields[1].startswith((b"refs/heads/", b"refs/tags/")):
+                        raise SystemExit(0)
+except (OSError, ValueError, subprocess.TimeoutExpired):
+    pass
+finally:
+    if child is not None and child.returncode is None:
+        # This unreaped Popen owns the new session; never signal a discovered PID.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+raise SystemExit(1)
+PY
+}
+
 cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
-  # Fly guests can fetch only objects already reachable from origin/main.
-  # A SHA that exists only on a pushed feature branch is not guest-fetchable:
-  # warm-box git-sync has no interactive GitHub credentials, and treating any
-  # origin/* containment as fetchable made --refresh-deps fetch a feature SHA
-  # over unauthenticated HTTPS (`could not read Username for 'https://github.com'`).
-  # When the requested commit is not on origin/main, run from that ancestor and
-  # let create-worktree-patch carry the complete committed + uncommitted delta.
+  # Guest and warm-refresh fetches both use the controller-token exact-SHA
+  # helper. Preserve the main fast path; admit feature/tag tips only after a
+  # bounded authenticated live-origin advertisement, never local tracking refs.
+  # Otherwise carry the complete committed + uncommitted delta from main.
   local root="$1" requested="$2" allow_patch="$3" resolved base
   if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
     # Preserve remote-only branch/tag names that this checkout cannot resolve.
@@ -1020,6 +1095,10 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   fi
   if git -C "$root" rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1 \
       && git -C "$root" merge-base --is-ancestor "$resolved" origin/main 2>/dev/null; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  if cloudbench_origin_advertises_commit "$root" "$resolved"; then
     printf '%s' "$resolved"
     return 0
   fi

@@ -190,6 +190,34 @@ failed attempt; it does not change that attempt's outcome. The full Linux
 controller checks and ten-slice live proof remain pending, so this case stays
 open.
 
+### Proof 17: source ownership completed; boot payload rejected
+
+The full controller gate at commit
+`0e0709d8d21fcbf7974c57f7a40075b5cc818e4a` completed with exit 0. Its Linux
+controller scenarios and 183 Python checks passed, including the private-source
+regressions. Native process exit and the durable Linux command exit agreed;
+the source snapshot and final log hashes are recorded in
+`.context/acceptance/proof17-controller.json`. This is the current controller
+gate, not a claim that all thirteen earlier core gates reran at this commit.
+
+The next real attempt, `capability-stability-20260912193727-17967`, cloned both
+canary machines from the same private source, promoted their exact identities,
+and completed canonical provider teardown. Independent reads verified both
+native machine instances destroyed and absent from successful inventory, and
+both exact volumes unattached in provider-retained `pending_destroy` state.
+Local and shared terminal audits agree, retain the original source digest, and
+have no remaining ownership registry. The private source remains stopped and
+unchanged; the foreign shared source was only observed. The exact proof-owned
+Hub was subsequently retired through its canonical owner receipt.
+
+No benchmark started: the existing boot guard rejected a 1,053,180-byte payload
+against its unchanged 900,000-byte ceiling before guest launch. This separate
+transport failure leaves the attempt failed with zero accepted slices. Its
+failed lifecycle and summary were preserved. Independent cleanup and Hub
+retirement receipts are under `.context/acceptance/proof17-cleanup-independent/`
+and `.context/acceptance/proof17-hub-retirement.json`. The live ownership path is
+now confirmed, while the requested ten consecutive ten-task slices remain open.
+
 ## Human feedback
 
 The user requires completion without repeated permission requests and ten

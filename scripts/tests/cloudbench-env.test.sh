@@ -971,11 +971,11 @@ if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
   fail "the shippable patch must still exclude append-only history ledgers"
 fi
 
-# A commit that exists only on a pushed feature branch is NOT guest-fetchable.
-# Fly guests authenticate through the controller token helper; treating any
-# origin/* containment as "already fetchable" made --refresh-deps fetch a
-# feature SHA over unauthenticated HTTPS and abort the fleet
-# (could not read Username for 'https://github.com').
+# A local bare remote is not the canonical private repository fetched by guests.
+# Even a current origin/* tracking ref cannot alone establish delivery authority.
+# Authenticated live-origin admission and stale/deleted-ref controls are exercised
+# by test_boot_payload_fetchable_source_uses_authenticated_live_origin in the
+# owning dependency suite; this local-only fixture must retain complete patches.
 feature_repo="$TMP_ROOT/fetchable-ref"
 git init -q "$feature_repo"
 git -C "$feature_repo" config user.email cloudbench-test@example.com
@@ -996,7 +996,7 @@ feature_sha="$(git -C "$feature_repo" rev-parse HEAD)"
 git -C "$feature_repo" fetch -q origin
 resolved="$(cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1)"
 [ "$resolved" = "$main_sha" ] \
-  || fail "fetchable_ref must use origin/main for a feature-only SHA (got $resolved, want $main_sha)"
+  || fail "fetchable_ref must use origin/main for an unverified local-only remote (got $resolved, want $main_sha)"
 if ! cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1 >/dev/null 2>"$TMP_ROOT/fetchable.err"; then
   fail "allow-local-patch must succeed by falling back to origin/main"
 fi
