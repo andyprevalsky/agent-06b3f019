@@ -135,9 +135,7 @@ describe('Integrations page', () => {
       });
 
       expect(screen.getByText('Sync your files to the cloud')).toBeInTheDocument();
-      expect(
-        screen.getByRole('button', { name: /connect file system/i }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /connect file system/i })).toBeInTheDocument();
     });
 
     it('does nothing when File System connect is clicked', async () => {
