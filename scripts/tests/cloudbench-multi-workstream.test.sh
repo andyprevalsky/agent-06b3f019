@@ -32,6 +32,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
+python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
+
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
 fleet_bench_app() {
@@ -127,7 +129,7 @@ listener_probe_status_contract() (
     local function_name function_source allocation_source injected_probe_status status
     local ws record failures=0 expected_busy expected_status expected_record expected_untracks
     local untrack_calls="$TMP_ROOT/listener-status-untrack.calls"
-    for function_name in test_tcp_listener_absent terminate_test_pending_hubs terminate_test_owned_hubs; do
+    for function_name in test_tcp_listener_absent reap_test_terminal_hub terminate_test_pending_hubs terminate_test_owned_hubs; do
         function_source="$(awk -v name="$function_name" '
             $0 ~ "^" name "\\(\\)" { capture = 1 }
             capture { print }
@@ -2104,6 +2106,31 @@ untrack_test_hub_pid() {  # untrack_test_hub_pid <pid>
     fi
 }
 
+reap_test_terminal_hub() {  # <pid>; never join a live or unverified child
+    local pid="$1" process_state ps_status
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pid" -gt 1 ] || return 1
+    if process_state="$(ps -p "$pid" -o stat= 2>/dev/null)"; then
+        process_state="${process_state//[[:space:]]/}"
+        case "$process_state" in
+            Z*) ;;
+            *)
+                echo "❌ refusing to wait for nonterminal test Hub PID: $pid" >&2
+                return 1
+                ;;
+        esac
+    else
+        ps_status=$?
+        if [ "$ps_status" -ne 1 ] || kill -0 "$pid" 2>/dev/null; then
+            echo "❌ test Hub terminal PID probe inconclusive: $pid" >&2
+            return 1
+        fi
+    fi
+    # A different/unknown birth is insufficient: the numeric PID itself must
+    # be terminal before Bash wait can consume its completed child status.
+    wait "$pid" 2>/dev/null || true
+}
+
 validate_test_hub_owner_record() {  # <owner-file> <port> <runs-root> <workspace>
     python3 - "$1" "$2" "$3" "$4" <<'PY'
 import os
@@ -2284,7 +2311,7 @@ terminate_test_pending_hubs() {  # terminate_test_pending_hubs <workspace>
                 }
             fi
         fi
-        wait "$pid" 2>/dev/null || true
+        reap_test_terminal_hub "$pid" || return 1
         if cloudbench_pid_matches_start "$pid" "$pid_start"; then
             echo "❌ exact pending test Hub PID survived teardown: $pid" >&2
             return 1
@@ -2360,7 +2387,7 @@ terminate_test_owned_hubs() {  # terminate_test_owned_hubs <workspace>
         # Direct hub stubs are children of this test shell. Reap their exited
         # process records before checking birth identity so a zombie cannot be
         # mistaken for a still-live listener.
-        wait "$pid" 2>/dev/null || true
+        reap_test_terminal_hub "$pid" || return 1
         if cloudbench_pid_matches_start "$pid" "$pid_start"; then
             echo "❌ exact test Hub PID survived teardown: $pid" >&2
             return 1
