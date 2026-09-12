@@ -1022,7 +1022,23 @@ SELECT json_build_object(
         statement = statement.replace(
             "'root_exists', EXISTS(",
             f"'root_user_id', (SELECT \"userId\" FROM \"Agent\" WHERE id = '{root_agent_id}'), "
-            "'unsealed_tree_agent_ids', COALESCE((SELECT json_agg(id ORDER BY id) FROM tree WHERE \"deletedAt\" IS NULL), '[]'::json), 'root_exists', EXISTS(",
+            "'unsealed_tree_agent_ids', COALESCE((SELECT json_agg(id ORDER BY id) FROM tree WHERE \"deletedAt\" IS NULL), '[]'::json), "
+            """'purchase_cleanup', COALESCE((
+              SELECT json_agg(json_build_object(
+                'purchase_id', purchase.id,
+                'agent_id', purchase."agentId",
+                'status', purchase.status,
+                'card_id', purchase."cardId",
+                'stripe_payment_intent_id', purchase."stripePaymentIntentId",
+                'total_cents', purchase."totalCents",
+                'funding_status', funding.status,
+                'provider_transfer_id', funding."providerTransferId",
+                'reclaim_provider_transfer_id', funding."reclaimProviderTransferId"
+              ) ORDER BY purchase.id)
+              FROM "PurchaseSpend" purchase
+              LEFT JOIN "PurchaseWalletFunding" funding ON funding."purchaseId" = purchase.id
+              WHERE purchase."agentId" IN (SELECT id FROM tree)
+            ), '[]'::json), 'root_exists', EXISTS(""",
             1,
         )
     return " ".join(statement.split())

@@ -8,6 +8,7 @@ diagnostics. Benchmark definitions remain in tasks.json.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import fcntl
 import hashlib
@@ -15,6 +16,8 @@ import json
 import os
 import random
 import re
+import runpy
+import selectors
 import shutil
 import signal
 import socket
@@ -23,10 +26,11 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Mapping, Sequence, TextIO
+from typing import Callable, Mapping, Sequence, TextIO
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -162,6 +166,179 @@ class ServiceStack:
     isolated: bool
     workspace_name: str | None = None
     base_port: int | None = None
+
+
+def _write_owner_record(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as output:
+            os.chmod(temporary, 0o600)
+            json.dump(value, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _process_identity_tools() -> dict:
+    return runpy.run_path(str(REPO_ROOT / "scripts/process-identity.py"))
+
+
+def _signal_owned_process(process: subprocess.Popen, native_identity: str, signum: int) -> None:
+    if process.poll() is not None:
+        return
+    tools = _process_identity_tools()
+    code = tools["main"]([
+        "process-identity", "--expect", native_identity,
+        "--signal", signal.Signals(signum).name, str(process.pid),
+    ])
+    if code != 0 and process.poll() is None:
+        raise RuntimeError("owned process identity could not be verified before signalling")
+
+
+def _owned_shutdown_timeout() -> int:
+    """Use the stack owner's existing activity/recording deadline, not another grace."""
+    result = subprocess.run(
+        [_benchmark_python(), str(AGENTS_DIR / "scripts/local_worker_supervisor.py"), "--shutdown-timeout"],
+        capture_output=True, text=True, timeout=5, check=True,
+    )
+    seconds = int(result.stdout.strip())
+    if seconds <= 0:
+        raise RuntimeError("invalid owned worker shutdown deadline")
+    return seconds
+
+
+def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, token: str) -> None:
+    native_identity = _process_identity_tools()["current_identity"](process.pid)
+    birth = subprocess.run(
+        ["ps", "-p", str(process.pid), "-o", "lstart="],
+        capture_output=True, text=True, timeout=3, check=True,
+    ).stdout.strip()
+    if not birth:
+        raise RuntimeError("owned stack birth could not be captured")
+    _write_owner_record(stack.context_dir / "local-stack-owner.json", {
+        "version": 1, "run_id": stack.run_id, "token": token,
+        "pid": process.pid, "native_identity": native_identity, "birth": birth,
+    })
+
+
+def _read_cleanup_receipt(path: Path, token: str) -> dict[str, str]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"cleanup receipt is missing or unsafe: {path}")
+    values: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values:
+            raise RuntimeError(f"cleanup receipt is malformed: {path}")
+        values[key] = value
+    if values.get("version") != "1" or values.get("token") != token or values.get("state") != "clean":
+        raise RuntimeError(f"cleanup remains unverified; retaining its recovery authority: {path}")
+    return values
+
+
+class LocalBenchmarkOwner:
+    """Own child cancellation before allowing the dependent local stack to stop."""
+
+    def __init__(self, stack: ServiceStack):
+        self.stack = stack
+        self.process: subprocess.Popen | None = None
+        self.native_identity = ""
+        self.signum: int | None = None
+        self.signalled = False
+        self.starting = False
+        self.started = False
+        self.verified = True
+        self.token = ""
+        self.receipt = stack.context_dir / "benchmark-cleanup.status"
+        self.deadline: float | None = None
+        self.shutdown_timeout = _owned_shutdown_timeout()
+
+    def environment(self, env: dict[str, str]) -> dict[str, str]:
+        if self.signum is not None:
+            raise SystemExit(128 + self.signum)
+        self.token = uuid.uuid4().hex
+        self.receipt = self.stack.context_dir / f"benchmark-cleanup-{self.token}.status"
+        self.stack.context_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            **env,
+            "BENCHMARK_CONTEXT_DIR": str(self.stack.context_dir.resolve()),
+            "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(self.receipt.resolve()),
+            "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": self.token,
+            "BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT": "true",
+            **({"BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true"}
+               if self.stack.isolated else {}),
+        }
+
+    def bind(self, process: subprocess.Popen) -> None:
+        self.native_identity = ""
+        self.process = process
+        self.started = True
+        self.verified = False
+        self.signalled = False
+        self.native_identity = _process_identity_tools()["current_identity"](process.pid)
+        self.record("running")
+        if self.signum is not None:
+            self.interrupt(self.signum)
+
+    def record(self, state: str) -> None:
+        _write_owner_record(self.stack.context_dir / "local-benchmark-owner.json", {
+            "version": 1, "run_id": self.stack.run_id, "state": state,
+            "pid": self.process.pid if self.process else None,
+            "native_identity": self.native_identity, "token": self.token,
+            "receipt": str(self.receipt), "signal": self.signum,
+        })
+
+    def interrupt(self, signum: int) -> None:
+        if self.signum is None:
+            self.signum = signum
+            self.deadline = time.monotonic() + self.shutdown_timeout
+        if self.process is not None and self.native_identity and not self.signalled:
+            self.signalled = True
+            _signal_owned_process(self.process, self.native_identity, signal.SIGINT)
+
+    def drain(self, *, echo: bool = True) -> tuple[int, str]:
+        assert self.process is not None and self.process.stdout is not None
+        output: list[str] = []
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            while True:
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    self.record("failed_retained")
+                    raise RuntimeError("benchmark cleanup deadline expired; owned stack retained")
+                events = selector.select(0.1)
+                if not events:
+                    if self.process.poll() is not None:
+                        break
+                    continue
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                text = decoder.decode(chunk)
+                output.append(text)
+                if echo:
+                    print(text, end="", flush=True)
+        tail = decoder.decode(b"", final=True)
+        output.append(tail)
+        if echo and tail:
+            print(tail, end="", flush=True)
+        # EOF can precede process exit. Keep observing a deadline armed by a
+        # later signal instead of entering an unbounded wait at that boundary.
+        while self.process.poll() is None:
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self.record("failed_retained")
+                raise RuntimeError("benchmark cleanup deadline expired; owned stack retained")
+            time.sleep(0.1)
+        code = self.process.wait()
+        if self.stack.isolated or self.signum is not None:
+            _read_cleanup_receipt(self.receipt, self.token)
+        self.verified = True
+        self.record("cleanup_verified")
+        self.process.stdout.close()
+        self.process = None
+        return code, "".join(output)
 
 
 def slugify(value: str) -> str:
@@ -599,8 +776,8 @@ def _manifest_run_sh_pid(stack: ServiceStack) -> int | None:
 
 
 def _wait_for_pid_exit(pid: int, timeout_seconds: float) -> bool:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -1343,11 +1520,17 @@ def start_services(
     simulate: bool = False,
     world_model_name: str | None = None,
     tasks: Sequence[str] = (),
+    on_process: Callable[[subprocess.Popen], None] | None = None,
+    on_owner_ready: Callable[[], None] | None = None,
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    stack_cleanup_token = uuid.uuid4().hex
+    if stack.isolated:
+        env["RUN_STACK_CLEANUP_STATUS_FILE"] = str((stack.context_dir / "local-stack-cleanup.status").resolve())
+        env["RUN_STACK_CLEANUP_TOKEN"] = stack_cleanup_token
     skip_public_tunnel = apply_public_tunnel_env(env, tasks)
     # Guest-checkout benches (e.g. Blue Bottle) need the kill-switch on the
     # backend/worker process, not just in run_benchmark's harness os.environ —
@@ -1480,6 +1663,13 @@ def start_services(
                 start_new_session=True,
             )
         try:
+            # Publish the Popen handle before fallible identity/journal writes.
+            if on_process is not None:
+                on_process(process)
+            if stack.isolated:
+                _record_stack_cleanup_owner(stack, process, stack_cleanup_token)
+            if on_owner_ready is not None:
+                on_owner_ready()
             service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
             if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
                 service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
@@ -1491,7 +1681,7 @@ def start_services(
             )
         except BaseException:
             # Ownership transfers to the caller only after readiness succeeds.
-            # Reap the exact process group while its handle is still available.
+            # Drain the exact stack owner while its handle is still available.
             try:
                 stop_services(process, stack=stack)
             except Exception as cleanup_exc:
@@ -1511,46 +1701,46 @@ def start_services(
 def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStack | None = None) -> None:
     if stack is None or not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=False)
-    elif _manifest_status(stack) == "stopped":
-        _stop_owned_db_from_manifest(stack)
-        _kill_scoped_processes_by_run_id(stack)
         return
-    target_pid: int | None = None
-    if process is not None and process.poll() is None:
-        target_pid = process.pid
-    elif stack is not None and stack.isolated:
-        target_pid = _manifest_run_sh_pid(stack)
-
-    if target_pid is not None:
+    owner_path = stack.context_dir / "local-stack-owner.json"
+    if owner_path.is_symlink() or not owner_path.is_file():
+        if process is None:
+            return  # No stack was launched by this invocation.
+        raise RuntimeError(f"stack ownership is unverified; retaining recovery authority: {owner_path}")
+    owner = json.loads(owner_path.read_text())
+    if (
+        owner.get("version") != 1 or owner.get("run_id") != stack.run_id
+        or not isinstance(owner.get("pid"), int) or owner["pid"] <= 0
+        or not isinstance(owner.get("token"), str) or not owner["token"]
+        or not isinstance(owner.get("native_identity"), str) or not owner["native_identity"]
+        or not isinstance(owner.get("birth"), str) or not owner["birth"]
+        or (process is not None and process.pid != owner["pid"])
+    ):
+        raise RuntimeError("stack cleanup owner does not match this invocation")
+    timeout = _owned_shutdown_timeout()
+    if process is not None:
+        _signal_owned_process(process, owner["native_identity"], signal.SIGTERM)
+        process.wait(timeout=timeout)
+    else:
+        tools = _process_identity_tools()
         try:
-            os.killpg(target_pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        if process is not None and process.pid == target_pid:
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(target_pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
-        elif not _wait_for_pid_exit(target_pid, 20):
-            try:
-                os.killpg(target_pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            _wait_for_pid_exit(target_pid, 5)
-
-    if stack is not None and stack.isolated:
-        if _manifest_status(stack) != "stopped":
-            _stop_owned_db_from_manifest(stack)
-            if not stack.manifest_path.exists():
-                _stop_owned_db_from_stack_identity(stack)
-        _kill_scoped_processes_by_run_id(stack)
+            current = tools["current_identity"](owner["pid"])
+        except (OSError, ValueError, IndexError):
+            if _pid_is_alive(owner["pid"]):
+                raise RuntimeError("live stack identity is unreadable; retaining recovery authority")
+            current = None
+        if current is not None:
+            if current != owner["native_identity"]:
+                raise RuntimeError("stack PID was replaced; refusing cleanup")
+            code = tools["main"]([
+                "process-identity", "--expect", owner["native_identity"],
+                "--signal", "TERM", str(owner["pid"]),
+            ])
+            if code != 0 or not _wait_for_pid_exit(owner["pid"], timeout):
+                raise RuntimeError("owned stack shutdown remains unverified")
+    receipt = _read_cleanup_receipt(stack.context_dir / "local-stack-cleanup.status", owner["token"])
+    if receipt.get("stack_pid") != str(owner["pid"]) or receipt.get("stack_birth") != owner["birth"]:
+        raise RuntimeError("stack cleanup receipt does not match its original process")
 
 
 def apply_manifest_environment(manifest: dict) -> None:
@@ -2062,6 +2252,7 @@ def run_benchmark_invocation(
     max_concurrency: int,
     simulate: bool = False,
     world_model_name: str | None = None,
+    owner: LocalBenchmarkOwner | None = None,
 ) -> Path:
     started = time.time()
     command = build_benchmark_args(
@@ -2084,6 +2275,8 @@ def run_benchmark_invocation(
     # on the created agent. (Sim-scoped caching can be re-enabled once the worker-simulate
     # path is validated.)
     env.setdefault("BENCHMARK_FAST_MODE_CACHE", "false")
+    if owner is not None:
+        env = owner.environment(env)
     process = subprocess.Popen(
         command,
         cwd=AGENTS_DIR,
@@ -2091,14 +2284,30 @@ def run_benchmark_invocation(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=owner is not None,
     )
-    output_lines: list[str] = []
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(line, end="")
-        output_lines.append(line)
-    code = process.wait()
-    output = "".join(output_lines)
+    if owner is not None:
+        try:
+            owner.bind(process)
+            code, output = owner.drain()
+        except BaseException as error:
+            if process.poll() is None:
+                try:
+                    owner.interrupt(signal.SIGTERM)
+                    owner.drain(echo=False)
+                except BaseException as cleanup_error:
+                    error.add_note(f"Owned benchmark cleanup remains unverified: {cleanup_error}")
+            raise
+        if owner.signum is not None:
+            raise SystemExit(128 + owner.signum)
+    else:
+        output_lines: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="")
+            output_lines.append(line)
+        code = process.wait()
+        output = "".join(output_lines)
     result_path = extract_results_path(output)
     if result_path is None:
         latest = latest_result_file(started)
@@ -2349,6 +2558,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
+    benchmark_owner = LocalBenchmarkOwner(stack)
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider
     # profiles per agent. Without this flag, run_benchmark serializes every
@@ -2361,15 +2571,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
 
     def handle_shutdown(signum: int, _frame: object) -> None:
-        print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
-        stop_imessage_relay(imessage_relay)
-        stop_frontend_tunnel(frontend_tunnel)
-        # The dashboard URL stays valid until the server stops here.
-        if dashboard is not None:
-            dashboard.stop()
-        if not args.keep_services and not args.use_existing:
-            stop_services(process, stack=stack)
-        raise SystemExit(128 + signum)
+        print(f"\nReceived signal {signum}; draining owned benchmark before services...", file=sys.stderr)
+        benchmark_owner.interrupt(signum)
+        if benchmark_owner.process is None and not benchmark_owner.starting:
+            raise SystemExit(128 + signum)
+
+    def remember_stack_process(started_process: subprocess.Popen) -> None:
+        nonlocal process
+        process = started_process
+
+    def stack_owner_ready() -> None:
+        benchmark_owner.starting = False
+        if benchmark_owner.signum is not None:
+            raise SystemExit(128 + benchmark_owner.signum)
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     previous_sigint = signal.getsignal(signal.SIGINT)
@@ -2394,14 +2608,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "local.py can restart the stack with BENCHMARK_DISABLE_SAVED_BROWSER_AUTH."
                 )
         else:
-            process, manifest = start_services(
-                stack,
-                clean_first=not args.no_clean,
-                anon_steel_profile=args.anon,
-                simulate=args.simulate,
-                world_model_name=args.world_model_name,
-                tasks=selected_tasks,
-            )
+            benchmark_owner.starting = True
+            try:
+                process, manifest = start_services(
+                    stack,
+                    clean_first=not args.no_clean,
+                    anon_steel_profile=args.anon,
+                    simulate=args.simulate,
+                    world_model_name=args.world_model_name,
+                    tasks=selected_tasks,
+                    on_process=remember_stack_process,
+                    on_owner_ready=stack_owner_ready,
+                )
+            finally:
+                benchmark_owner.starting = False
+            if benchmark_owner.signum is not None:
+                raise SystemExit(128 + benchmark_owner.signum)
         apply_manifest_environment(manifest)
         if stack.isolated:
             # Child processes (run_benchmark.py, diagnostics, eval suite) inherit this
@@ -2410,7 +2632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # (a stale manifest from a prior run) and route DB fixtures to the wrong
             # database — e.g. the grep fixture's direct agent lookup hits system Postgres
             # instead of the isolated container and fails with "root agent not found".
-            os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+            os.environ["BENCHMARK_CONTEXT_DIR"] = str(stack.context_dir.resolve())
             # Point collect_logs / agent_latency / agent_cache at THIS stack's
             # worker*.log files for the whole run (not only post-fail diagnostics).
             # Without this, run JSON kept ClickHouse/Fly placeholders and dropped
@@ -2475,15 +2697,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.eval_suite:
             return run_eval_suite_invocation(port=port, args=args)
         for invocation in plan_invocations(selected_tasks):
-            result_path = run_benchmark_invocation(
-                invocation,
-                port=port,
-                bootstrap=args.bootstrap,
-                anon=args.anon,
-                max_concurrency=args.max_concurrency,
-                simulate=args.simulate,
-                world_model_name=args.world_model_name,
-            )
+            benchmark_owner.starting = True
+            try:
+                result_path = run_benchmark_invocation(
+                    invocation,
+                    port=port,
+                    bootstrap=args.bootstrap,
+                    anon=args.anon,
+                    max_concurrency=args.max_concurrency,
+                    simulate=args.simulate,
+                    world_model_name=args.world_model_name,
+                    owner=benchmark_owner,
+                )
+            finally:
+                benchmark_owner.starting = False
             result_paths.append(result_path)
             failures = failed_tasks_from_run(result_path)
             if failures:
@@ -2505,19 +2732,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             os.environ.pop("BENCHMARK_ISOLATED_BROWSER_PROFILES", None)
         else:
             os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = previous_isolated_browser_profiles
-        signal.signal(signal.SIGTERM, previous_sigterm)
-        signal.signal(signal.SIGINT, previous_sigint)
-        stop_imessage_relay(imessage_relay)
-        stop_frontend_tunnel(frontend_tunnel)
-        # Stop the dashboard HTTP server; anyone viewing the URL keeps the
-        # final report card remains visible after teardown.
-        if dashboard is not None:
-            dashboard.stop()
-        keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
-        if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
-            print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")
-        if not args.keep_services and not args.use_existing and not keep_paused_checkpoint_stack:
-            stop_services(process, stack=stack)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            if benchmark_owner.started and not benchmark_owner.verified:
+                benchmark_owner.record("failed_retained")
+                print(f"Owned cleanup is unverified; retaining services and database: {stack.context_dir}", file=sys.stderr)
+            else:
+                stop_imessage_relay(imessage_relay)
+                stop_frontend_tunnel(frontend_tunnel)
+                if dashboard is not None:
+                    dashboard.stop()
+                keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
+                if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
+                    print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")
+                if not args.keep_services and not args.use_existing and not keep_paused_checkpoint_stack:
+                    stop_services(process, stack=stack)
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+            signal.signal(signal.SIGINT, previous_sigint)
 
 
 if __name__ == "__main__":

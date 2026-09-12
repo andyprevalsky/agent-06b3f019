@@ -242,9 +242,7 @@ def categories_for_task(task: TaskRef) -> set[str]:
     return cats
 
 
-def discover_changed_files(
-    repo_root: Path, explicit: Sequence[str] | None = None
-) -> list[str]:
+def discover_changed_files(repo_root: Path, explicit: Sequence[str] | None = None) -> list[str]:
     if explicit is not None:
         return sorted({f.strip() for f in explicit if f and f.strip()})
 
@@ -252,9 +250,7 @@ def discover_changed_files(
     if env_file:
         path = Path(env_file)
         if path.is_file():
-            return sorted(
-                {line.strip() for line in path.read_text().splitlines() if line.strip()}
-            )
+            return sorted({line.strip() for line in path.read_text().splitlines() if line.strip()})
 
     env_list = os.environ.get("PREDEPLOY_CHANGED_FILE_LIST", "").strip()
     if env_list:
@@ -298,6 +294,10 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
 
 def _eligible(task: TaskRef, surface: str) -> bool:
     if not task.eligible_status:
+        return False
+    # Both local and cloud predeploy execute against isolated backends. The
+    # catalog's production-only lifecycles belong to explicit production runs.
+    if task.raw.get("production_only"):
         return False
     if surface == "cloud" and task.local_only:
         return False
@@ -410,9 +410,7 @@ def candidates_for_category(
             continue
         if require_deploy_canary and not task.deploy_canary:
             continue
-        if attempt_passes is not None and not has_pass_streak(
-            task.name, attempt_passes, streak=pass_streak
-        ):
+        if attempt_passes is not None and not has_pass_streak(task.name, attempt_passes, streak=pass_streak):
             if skipped_history is not None and task.name not in skipped_history:
                 skipped_history.append(task.name)
             continue
@@ -609,10 +607,7 @@ def format_report(selection: Selection) -> str:
             )
         )
     elif selection.total == selection.cap:
-        lines.append(
-            f"*** AT HARD CAP ({selection.cap}/{selection.cap}) — "
-            "no room for further extras ***"
-        )
+        lines.append(f"*** AT HARD CAP ({selection.cap}/{selection.cap}) — no room for further extras ***")
     if selection.dropped and not selection.cap_hit:
         lines.append(f"Dropped: {', '.join(selection.dropped)}")
     lines.append("==============================================")
@@ -623,10 +618,7 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
     stream = stream or sys.stderr
     if not selection.cap_hit:
         if selection.total == selection.cap:
-            msg = (
-                f"*** PREDEPLOY BENCH COUNT AT HARD CAP: "
-                f"{selection.total}/{selection.cap} ***"
-            )
+            msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
             print(msg, file=sys.stdout)
         return
@@ -700,11 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.cap = DEFAULT_CAP
     explicit: list[str] | None = None
     if args.changed_files_from is not None:
-        explicit = [
-            line.strip()
-            for line in args.changed_files_from.read_text().splitlines()
-            if line.strip()
-        ]
+        explicit = [line.strip() for line in args.changed_files_from.read_text().splitlines() if line.strip()]
     if args.changed_file:
         explicit = (explicit or []) + list(args.changed_file)
 

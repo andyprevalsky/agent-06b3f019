@@ -338,3 +338,117 @@ a fresh ten-by-ten cloud proof remain required. The prior thirteen passing prere
 to 140bb417c and do not certify these subsequent changes. Normal 7200-second
 root backstops, the temporary 300-second validation limit, recording readiness,
 provider ownership, and all cleanup/infra rejection criteria remain unchanged.
+
+## Recurrence: local controller bypassed the cleanup owner
+
+During the September 12 Group 4 validation on `99c3f978`, the parent monitor
+mistakenly treated metrics warnings and zero billed cost as a stalled run.
+The complete worker logs instead showed continuing LLM calls and browser work.
+The parent sent TERM to its two isolated local controllers. This interruption
+is not a model or benchmark capability failure, and neither run has an accepted
+terminal benchmark outcome.
+
+The interruption exposed a separate ownership defect: `local.py` immediately
+stopped the stack without signaling and joining its benchmark child. Its
+process-group shutdown also bypassed the existing worker-drain owner. In the
+payment run, an already admitted mint completed after the backend shutdown had
+started, leaving a held card and captured funding outside the removed database.
+The prior stack-order regression exercised `run.sh` directly; it did not
+exercise the outer local controller that could bypass that protection.
+
+The actual-process reproduction used a real child and HTTP compensation call.
+On the buggy source, TERM and INT left that child live with no DELETE request,
+while direct stack shutdown preserved cleanup ordering. Calling the old
+`local.stop_services` stopped the backend before the worker's HTTP cleanup and
+ignored a failed cleanup receipt. Exact fixture-owned processes were reaped
+after every case. These controls distinguish the broken owner from the already
+correct inner shutdown path. Permanent tests in `local_lifecycle_test.py` are
+registered in the existing benchmark blackbox domain.
+
+The standard isolated local runner now owns the benchmark child, forwards one
+cancellation signal, joins its finalization, and then signals the exact stack
+owner. Stack token, PID and native birth identity bind the cleanup receipt;
+missing, pending or failed evidence cannot be reported as verified. The local
+runner uses the same owned-batch finalizer as cloud execution. Explicit paused
+checkpoint and independent eval runner semantics are not claimed to be covered
+by this standard-runner repair.
+
+Independent review reproduced a second cancellation boundary after stdout EOF:
+the child closed its output, then the controller received TERM while an
+unbounded process wait was already active. With the shutdown budget injected
+as 0.2 seconds, the permanent control failed after 1.225 seconds on the first
+candidate. Polling the existing deadline after EOF makes the unchanged test
+pass; the independent original replay returned in 0.442 seconds. No production
+deadline changed. Another permanent actual-child control failed when a refused
+owner-journal write lost the child handle before the caller received it. The
+handle is now published before fallible identity/journal capture, while signal
+deferral ends only after that capture attempt. A capture-time interruption
+control also failed when it used a previous child's native identity; delivery
+now waits for the new identity and occurs once. Unverified journal/identity or
+receipt evidence retains authority rather than guessing a process or DB name.
+
+The seven local lifecycle tests pass in 4.63 seconds. They cover real TERM/INT
+forwarding, child joins, backend-dependent cleanup, an unrelated live sentinel,
+missing/wrong/pending root receipts, repeated interruption, startup rollback,
+EOF cancellation, publication failure, native-identity publication, and stack
+receipt identity/error controls. Ten adapted legacy setup tests also pass;
+mock setup tests stub only native capture, while the actual owner fixture proves
+retirement ordering and sibling survival. The former DB-name fallback assertion
+now requires refusal without any Docker command when stack authority is absent.
+The recurring benchmark blackbox discovers every new local control and keeps
+the real startup owner case registered through its existing startup entry.
+
+Remaining alternate-mode ownership is an explicit open follow-up:
+`run_eval_suite_invocation` still uses `subprocess.run`, and checkpoint creation
+and polling still use `run_streamed_command`, outside `LocalBenchmarkOwner`.
+Their interruption paths need their own exact-root capture, child join and
+cleanup-receipt regressions before they can claim this same guarantee. That
+contract must distinguish deliberately paused checkpoint roots, preserve
+`--checkpoint-no-start`, and leave `--use-existing` dependencies owned by their
+caller. The current repair does not silently delete those paused roots or
+claim that those alternate controllers are now cancellation-safe.
+
+Payment verification is now a separate obligation within that finalizer. Its
+exact sealed-tree query includes purchase and wallet-funding rows. Admitted
+mint work must become visible before external effects and remains pending until
+canonical compensation reaches confirmed terminal states. The permanent
+late-mint reproduction failed before the change because cleanup reported
+success with a HELD card; the unchanged test passes after compensation. A failed
+refund remains a failed cleanup. Malformed payment evidence fails payment
+verification without hiding independently valid browser-release authority.
+That independence test also failed before its correction and passes afterward.
+All 23 batch cleanup tests pass in 1.76 seconds.
+
+Stripe refund creation itself is only an acknowledgement: its status can be
+pending, requires_action, failed, canceled or null. The permanent
+`purchases.refund-completion` blackbox observed six failures and one positive
+control before the repair, then seven passes unchanged. Canonical compensation
+retains the same purchase-scoped idempotency key, retrieves the exact refund
+when a cached acknowledgement is not succeeded, and returns only after
+confirmed success. Otherwise existing retryable payment states retain the
+obligation. Purchase admission and stale reversal have additional backend
+owning-boundary regressions and a separate related RCA.
+
+Recovery of this interrupted run is independently verified: both exact Temporal
+runs were terminated, both native Kernel recordings were preserved before
+deletion, and both exact session reads then returned 404. The one owned payment
+card is closed with zero balance; its wallet funding was reclaimed and its
+4,396-cent test payment fully refunded. The exact newly created test payment
+method and customer were removed. The pre-existing shared cardholder was left
+unchanged. The owned local processes, database containers and volumes are
+absent. Private receipts are under
+`.context/acceptance/group4-temporal-rate-limit-rca/`; they contain no authority
+to alter another run's resources.
+
+At 10,000 agents, purchase admission uses the existing per-agent generation
+lock only during a short database transaction, never during provider I/O.
+Cleanup reads and actions are scoped to the owned tree, use the existing
+180-second payment boundary, and retain one purchase-ID set per finalizing
+batch. Refund verification adds at most one exact provider read per canonical
+attempt and no global scans, shared counters or new polling service.
+
+These causal regressions do not certify the live acceptance gate. The prior
+thirteen prerequisites apply only to `99c3f978`; this changed source requires
+fresh full validation. Zero slices are accepted. Proof fifteen allocated no
+task resources because the protected shared warm source remained busy; proof
+sixteen has not launched. This case stays open pending the required live proof.

@@ -2804,10 +2804,13 @@ async def _wait_for_expected_payment_lifecycle(
             )
 
 
+PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
+
+
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
     """Close/reclaim/refund a benchmark card after issuance but before merchant submission."""
     headers = await _api_headers()
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=PAYMENT_CLEANUP_TIMEOUT_SECONDS) as client:
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/abandon",
             headers=headers,
@@ -5509,6 +5512,40 @@ async def _refresh_browser_archive_snapshot(
                 raise RuntimeError("browser evidence did not become terminal with attached recordings before archive")
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
+async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: dict) -> dict:
+    """Drain admitted purchases through canonical compensation before DB teardown."""
+    attempted = set()
+    async with asyncio.timeout(PAYMENT_CLEANUP_TIMEOUT_SECONDS):
+        while True:
+            snapshot = await asyncio.to_thread(
+                cloud_batch_cleanup.exact_root_sessions, base_url, root_id, require_deleted=True,
+            )
+            evidence["payment_snapshot"] = snapshot
+            pending = cloud_batch_cleanup.pending_root_payments(snapshot)
+            if not pending:
+                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"]}
+            # An accepted mint remains visible before its remote side effects
+            # finish. Do not classify its early empty card/transfer as cleanup.
+            actionable = [row for row in pending if row["status"] not in {"PENDING_APPROVAL", "CHARGING"}]
+            new_attempts = [row for row in actionable if row["purchase_id"] not in attempted]
+            errors = []
+            for agent_id in sorted({row["agent_id"] for row in new_attempts}):
+                attempted.update(row["purchase_id"] for row in new_attempts if row["agent_id"] == agent_id)
+                # The endpoint closes every exact-agent purchase. Its response
+                # may be best effort, so only the next durable ledger read can
+                # complete this contract, including for non-abandonment tasks.
+                try:
+                    await _start_payment_abandonment_with_recovery(
+                        base_url, agent_id, abandon_payment=abandon_test_payment,
+                    )
+                except Exception as error:
+                    errors.append(f"{agent_id}: {str(error) or type(error).__name__}")
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            if not new_attempts:
+                await asyncio.sleep(2)
+
+
 async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
     """Finalize each owned root after all tasks, while workers can still persist cleanup."""
     by_id = {result.agent_id: result for result in results if result.agent_id}
@@ -5574,7 +5611,16 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 try:
                     if before is None:
                         raise RuntimeError("exact provider ownership was not established")
-                    await delete_agent(base_url, aid)
+                    try:
+                        await delete_agent(base_url, aid)
+                    except httpx.TransportError as error:
+                        # A disconnected DELETE can already have sealed the
+                        # exact tree. Require that proof before reconciling its
+                        # provider/payment effects under their existing bounds.
+                        await asyncio.to_thread(
+                            cloud_batch_cleanup.exact_root_sessions, base_url, aid, require_deleted=True,
+                        )
+                        evidence["delete_transport_error"] = str(error) or type(error).__name__
                     receipt = await asyncio.to_thread(
                         cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before, evidence=evidence,
                     )
@@ -5583,6 +5629,18 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     evidence["errors"].append(f"provider: {detail}")
+                    failures.append(f"{aid}: {detail}")
+                    if result is not None:
+                        result.passed = False
+                        result.benchmark_status = "ERROR"
+                        result.failure_reason = "Cloud cleanup failed: " + "; ".join(evidence["errors"])
+                try:
+                    if before is None:
+                        raise RuntimeError("exact payment ownership was not established")
+                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(base_url, aid, evidence)
+                except Exception as error:
+                    detail = str(error) or type(error).__name__
+                    evidence["errors"].append(f"payment: {detail}")
                     failures.append(f"{aid}: {detail}")
                     if result is not None:
                         result.passed = False

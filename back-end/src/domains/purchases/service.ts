@@ -266,6 +266,8 @@ export async function mintPurchaseCard(
   assertPositiveCents(input.totalCents, 'totalCents');
   normalizeCurrency(input.currency);
 
+  await repo.assertPurchaseAgentAdmitted(input);
+
   if (input.totalCents > MAX_PURCHASE_CENTS) {
     throw new PurchaseError(
       `Purchase exceeds max purchase limit of ${MAX_PURCHASE_CENTS} cents`,

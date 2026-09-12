@@ -10,13 +10,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-SELECTOR = ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py"
-CATALOG = ROOT / "agents" / "benchmarks" / "tasks.json"
-ATTEMPTS = ROOT / "agents" / "benchmarks" / "history" / "task_attempts.jsonl"
-
-sys.path.insert(0, str(ROOT / "agents"))
-from benchmarks.select_predeploy_benches import (  # noqa: E402
+from .select_predeploy_benches import (
     DEFAULT_CAP,
     DEFAULT_PASS_STREAK,
     FLOOR_CATEGORIES,
@@ -25,6 +19,11 @@ from benchmarks.select_predeploy_benches import (  # noqa: E402
     load_attempt_passes,
     select_predeploy_benches,
 )
+
+ROOT = Path(__file__).resolve().parents[2]
+SELECTOR = ROOT / "agents" / "benchmarks" / "select_predeploy_benches.py"
+CATALOG = ROOT / "agents" / "benchmarks" / "tasks.json"
+ATTEMPTS = ROOT / "agents" / "benchmarks" / "history" / "task_attempts.jsonl"
 
 
 def _write_attempts(
@@ -52,16 +51,49 @@ def _write_attempts(
 
 
 def _smoke_names(catalog: Path) -> set[str]:
-    return {
-        task["name"]
-        for task in json.loads(catalog.read_text())
-        if "smoke" in (task.get("tags") or [])
-    }
+    return {task["name"] for task in json.loads(catalog.read_text()) if "smoke" in (task.get("tags") or [])}
 
 
 def test_default_cap_and_pass_streak() -> None:
     assert DEFAULT_CAP == 20
     assert DEFAULT_PASS_STREAK == 3
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+def test_predeploy_excludes_production_only_even_with_pass_streak(tmp_path: Path, surface: str) -> None:
+    """Both predeploy surfaces use isolated backends, even when a prod task has earned its streak."""
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "normal-smoke", "tags": ["smoke"]},
+        {"name": "production-smoke", "tags": ["smoke"], "production_only": True},
+        {"name": "normal-payment", "tags": ["payment"], "deploy_canary": True, "timeout_seconds": 20},
+        {
+            "name": "production-payment",
+            "tags": ["payment"],
+            "deploy_canary": True,
+            "timeout_seconds": 10,
+            "production_only": True,
+        },
+        {"name": "normal-depth", "tags": ["payment"], "timeout_seconds": 30},
+        {"name": "production-depth", "tags": ["payment"], "timeout_seconds": 10, "production_only": True},
+    ]
+    catalog.write_text(json.dumps(tasks))
+    _write_attempts(attempts, [(task["name"], True) for task in tasks for _ in range(3)])
+    selection = select_predeploy_benches(
+        catalog=catalog,
+        changed_files=["back-end/src/domains/purchases/service.ts"],
+        surface=surface,
+        attempts_file=attempts,
+        repo_root=ROOT,
+    )
+    assert not set(selection.selected) & {task["name"] for task in tasks if task.get("production_only")}, (
+        selection.selected
+    )
+    assert selection.floor == ["normal-smoke", "normal-payment"]
+    assert selection.path_extras == ["normal-depth"]
+    assert selection.cap == 20 and selection.pass_streak_required == 3
+    assert not selection.cap_hit and not selection.dropped and not selection.skipped_history
 
 
 def test_smoke_always_selected_canaries_need_last_three_passes() -> None:
@@ -125,8 +157,7 @@ def test_path_triggers_only_add_history_qualified_depth() -> None:
         assert has_pass_streak(name, passes, streak=3), name
     # SMS has no 3-pass canary, so path trigger must not invent one.
     assert "sms" not in selection.categories_covered or all(
-        name in smoke or has_pass_streak(name, passes, streak=3)
-        for name in selection.selected
+        name in smoke or has_pass_streak(name, passes, streak=3) for name in selection.selected
     )
 
 
@@ -713,9 +744,7 @@ def test_cli_report_prints_total_and_history_gate() -> None:
     assert "Hard cap: 20" in result.stdout
     assert "Pass streak required" in result.stdout
     assert "---PREDEPLOY_BENCH_NAMES---" in result.stdout
-    assert result.stdout.index("TOTAL SELECTED:") < result.stdout.index(
-        "---PREDEPLOY_BENCH_NAMES---"
-    )
+    assert result.stdout.index("TOTAL SELECTED:") < result.stdout.index("---PREDEPLOY_BENCH_NAMES---")
 
 
 def test_known_deploy_categories_cover_floor() -> None:

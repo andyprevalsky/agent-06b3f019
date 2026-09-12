@@ -12575,6 +12575,8 @@ def test_canonical_base_cache_token_is_revisioned_not_daily():
     assert "20260803" not in token
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
     from benchmarks import local as local_bench
@@ -12655,6 +12657,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
     """test-mass-agent-run-0 must read the July cache without Andy write-through."""
     from unittest.mock import patch
@@ -12703,6 +12707,8 @@ def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_cold_seed_bootstrap_extends_service_start_timeout():
     """An explicitly allowed cold seed must not exhaust the warm-start watchdog."""
     from unittest.mock import patch
@@ -13123,6 +13129,8 @@ def test_local_seed_dump_rollover_rejects_invalid_candidates_and_replaces_invali
             assert not after_grace_current.exists()
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_start_services_reaps_process_when_readiness_fails():
     """A partially initialized isolated stack must not outlive its launcher."""
     from unittest.mock import patch
@@ -13163,6 +13171,8 @@ def test_local_start_services_reaps_process_when_readiness_fails():
         stop_services.assert_called_once_with(process, stack=stack)
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_start_services_preserves_readiness_failure_when_cleanup_fails():
     """Cleanup diagnostics must not mask the startup failure that triggered them."""
     from unittest.mock import patch
@@ -13207,102 +13217,11 @@ def test_local_start_services_preserves_readiness_failure_when_cleanup_fails():
         stop_services.assert_called_once_with(process, stack=stack)
 
 
-def test_local_start_services_reaps_only_its_real_process_group():
-    """Readiness rollback kills its process tree without touching a sibling."""
-    from unittest.mock import patch
+def test_local_start_services_drains_only_its_real_owner():
+    """Readiness rollback drains the real owner and preserves its unrelated sibling."""
+    from benchmarks.local_lifecycle_test import test_local_startup_failure_drains_owner_before_backend
 
-    from benchmarks import local as local_bench
-
-    real_popen = subprocess.Popen
-    owned_process = None
-    with tempfile.TemporaryDirectory() as process_tmp:
-        child_pid_path = Path(process_tmp) / "child.pid"
-
-        def launch_owned_process(_command, **kwargs):
-            nonlocal owned_process
-            owned_process = real_popen(
-                [
-                    sys.executable,
-                    "-c",
-                    (
-                        "import pathlib, subprocess, sys, time; "
-                        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "pid_path = pathlib.Path(sys.argv[1]); "
-                        "pending_path = pid_path.with_suffix('.tmp'); "
-                        "pid_file = pending_path.open('w'); "
-                        "time.sleep(0.2); "
-                        "pid_file.write(str(child.pid)); "
-                        "pid_file.close(); "
-                        "pending_path.replace(pid_path); "
-                        "time.sleep(60)"
-                    ),
-                    str(child_pid_path),
-                ],
-                **kwargs,
-            )
-            deadline = time.monotonic() + 5
-            while not child_pid_path.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert child_pid_path.exists(), "owned process did not launch its child"
-            return owned_process
-
-        class SubprocessFacade:
-            DEVNULL = subprocess.DEVNULL
-            STDOUT = subprocess.STDOUT
-            TimeoutExpired = subprocess.TimeoutExpired
-            Popen = staticmethod(launch_owned_process)
-            run = staticmethod(subprocess.run)
-
-        sibling_process = real_popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            cwd=local_bench.REPO_ROOT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                context_dir = Path(tmp) / "cleanup-owned-unique"
-                stack = local_bench.ServiceStack(
-                    run_id="cleanup-owned-unique",
-                    context_dir=context_dir,
-                    manifest_path=context_dir / "services.json",
-                    service_log=context_dir / "services.log",
-                    isolated=True,
-                    workspace_name="blackbox-bench-cleanup-owned-unique",
-                    base_port=55120,
-                )
-                with (
-                    patch.object(local_bench, "subprocess", SubprocessFacade),
-                    patch.object(local_bench, "_stop_owned_db_from_stack_identity"),
-                    patch.object(local_bench, "_release_port_range") as release_port_range,
-                    patch.object(
-                        local_bench,
-                        "wait_for_services",
-                        side_effect=TimeoutError("services never became ready"),
-                    ),
-                ):
-                    try:
-                        local_bench.start_services(stack, clean_first=False)
-                    except TimeoutError:
-                        pass
-                    else:
-                        raise AssertionError("start_services unexpectedly ignored the readiness failure")
-                release_port_range.assert_called_once_with(stack.base_port)
-
-            assert owned_process is not None
-            child_pid = int(child_pid_path.read_text())
-            assert owned_process.poll() is not None, "the partially started process group survived"
-            deadline = time.monotonic() + 5
-            while _pid_is_live(child_pid) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert not _pid_is_live(child_pid), "a child of the partially started group survived"
-            assert sibling_process.poll() is None, "cleanup terminated an unrelated sibling process"
-        finally:
-            for process in (owned_process, sibling_process):
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=5)
+    test_local_startup_failure_drains_owner_before_backend()
 
 
 def _pid_is_live(pid: int) -> bool:
@@ -13418,8 +13337,8 @@ time.sleep(60)
                     process.wait(timeout=5)
 
 
-def test_local_stop_services_removes_pre_manifest_owned_database():
-    """Pre-manifest rollback derives only the exact isolated DB resource names."""
+def test_local_stop_services_refuses_unverified_pre_manifest_database():
+    """A derived resource name cannot substitute for the exact stack owner receipt."""
     from unittest.mock import patch
 
     from benchmarks import local as local_bench
@@ -13434,33 +13353,18 @@ def test_local_stop_services_removes_pre_manifest_owned_database():
     with tempfile.TemporaryDirectory() as tmp:
         context_dir = Path(tmp) / "cleanup-owned-unique"
         stack = local_bench.ServiceStack(
-            run_id="cleanup-owned-unique",
-            context_dir=context_dir,
-            manifest_path=context_dir / "services.json",
-            service_log=context_dir / "services.log",
-            isolated=True,
-            workspace_name="blackbox-bench-cleanup-owned-unique",
-            base_port=55120,
+            run_id="cleanup-owned-unique", context_dir=context_dir,
+            manifest_path=context_dir / "services.json", service_log=context_dir / "services.log",
+            isolated=True, workspace_name="blackbox-bench-cleanup-owned-unique", base_port=55120,
         )
-        with (
-            patch.object(local_bench.subprocess, "run") as run,
-            patch.object(local_bench, "_kill_scoped_processes_by_run_id"),
-        ):
-            local_bench.stop_services(StoppedProcess(), stack=stack)
-
-    commands = [call.args[0] for call in run.call_args_list]
-    assert [
-        "docker",
-        "rm",
-        "-f",
-        "victoria-db-blackbox-bench-cleanup-owned-unique",
-    ] in commands
-    assert [
-        "docker",
-        "volume",
-        "rm",
-        "victoria-pgdata-blackbox-bench-cleanup-owned-unique",
-    ] in commands
+        with patch.object(local_bench.subprocess, "run") as run:
+            try:
+                local_bench.stop_services(StoppedProcess(), stack=stack)
+            except RuntimeError as error:
+                assert "ownership is unverified" in str(error)
+            else:
+                raise AssertionError("unverified pre-manifest cleanup was acknowledged")
+        run.assert_not_called()
 
 
 def test_local_port_range_allocation_is_reserved_across_processes():
@@ -13552,6 +13456,8 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
             local_bench._release_port_range(base)
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_start_services_limits_automatic_system_postgres_to_linux():
     """Darwin isolated runs retain Docker selection or an explicit system-PG opt-in."""
     from unittest.mock import Mock, patch
@@ -13601,6 +13507,8 @@ def test_local_start_services_limits_automatic_system_postgres_to_linux():
     assert observed == cases, f"isolated database platform selection changed: {observed}"
 
 
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_start_services_releases_port_reservation_after_readiness():
     """A ready isolated stack must release its startup-only port reservation."""
     from unittest.mock import Mock, patch
@@ -18141,12 +18049,24 @@ def _with_tmp_path(test_fn):
     return run
 
 
+def test_predeploy_selector_rejects_production_only_tasks():
+    from benchmarks.select_predeploy_benches_test import test_predeploy_excludes_production_only_even_with_pass_streak
+
+    for surface in ("local", "cloud"):
+        with tempfile.TemporaryDirectory() as folder:
+            test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("local_cleanup_preserves_run_id_observers", test_local_cleanup_does_not_signal_processes_that_only_mention_run_id)
     r.record("local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients)
-    from benchmarks import cloud_batch_cleanup_test
+    from benchmarks import cloud_batch_cleanup_test, local_lifecycle_test
+    for name in sorted(dir(local_lifecycle_test)):
+        if name.startswith("test_") and name != "test_local_startup_failure_drains_owner_before_backend":
+            r.record(name[5:], getattr(local_lifecycle_test, name))
     for name in sorted(dir(cloud_batch_cleanup_test)):
         if not name.startswith("test_"):
             continue
@@ -18599,11 +18519,11 @@ async def run_all_tests():
     )
     r.record(
         "local_start_services_exact_process_group_cleanup",
-        test_local_start_services_reaps_only_its_real_process_group,
+        test_local_start_services_drains_only_its_real_owner,
     )
     r.record(
         "local_stop_services_pre_manifest_database_cleanup",
-        test_local_stop_services_removes_pre_manifest_owned_database,
+        test_local_stop_services_refuses_unverified_pre_manifest_database,
     )
     r.record(
         "local_port_range_cross_process_reservation",

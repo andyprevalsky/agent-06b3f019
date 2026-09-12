@@ -85,6 +85,54 @@ def exact_root_sessions(base_url: str, root_id: str, *, require_deleted: bool = 
     return value
 
 
+def pending_root_payments(snapshot: dict) -> list[dict]:
+    """Validate the exact tree's payment ledger and return unsettled obligations.
+
+    Purchase admission shares the agent deletion fence. After sealing, every
+    admitted provider request has a row here, including an unfinished mint.
+    Terminal purchase/funding states are written by canonical compensation only
+    after its external release/refund succeeds; an HTTP acknowledgement is not
+    the payment retirement boundary.
+    """
+    rows = snapshot.get("purchase_cleanup")
+    if not isinstance(rows, list):
+        raise RuntimeError("exact tree payment evidence is missing")
+    pending = []
+    seen = set()
+    statuses = {
+        "PENDING_APPROVAL", "CHARGING", "FUNDING_PENDING", "FUNDING_ABANDONED", "HELD",
+        "CLEARED", "VOIDED", "REFUNDED", "FAILED", "CAPTURE_FAILED", "FUNDING_RECLAIM_FAILED", "REFUND_FAILED",
+    }
+    funding_statuses = {None, "PENDING", "FUNDED", "CONSUMED", "RECLAIMING", "RECLAIMED", "FAILED", "RECLAIM_FAILED"}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("purchase_id"), str)
+            or re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", row["purchase_id"]) is None
+            or row["purchase_id"] in seen
+            or row.get("agent_id") not in snapshot.get("tree_agent_ids", [])
+            or not isinstance(row.get("status"), str)
+            or row["status"] not in statuses
+            or "funding_status" not in row
+            or (row["funding_status"] is not None and not isinstance(row["funding_status"], str))
+            or row["funding_status"] not in funding_statuses
+            or type(row.get("total_cents")) is not int
+            or row["total_cents"] <= 0
+            or any(key not in row or (row[key] is not None and (not isinstance(row[key], str) or not row[key]))
+                   for key in ("card_id", "stripe_payment_intent_id", "provider_transfer_id", "reclaim_provider_transfer_id"))
+        ):
+            raise RuntimeError("exact tree payment evidence is malformed")
+        seen.add(row["purchase_id"])
+        terminal = (
+            row["status"] == "CLEARED" and row["funding_status"] in {None, "CONSUMED"}
+        ) or (
+            row["status"] in {"VOIDED", "REFUNDED", "FAILED"} and row["funding_status"] in {None, "RECLAIMED"}
+        )
+        if not terminal:
+            pending.append(row)
+    return pending
+
+
 def close_exact_root_sessions(base_url: str, root_id: str, before: dict, *, evidence: dict | None = None) -> dict:
     """Canonical DELETE must seal the root before any fallback release is allowed."""
     evidence = evidence if evidence is not None else {}
@@ -107,7 +155,12 @@ def close_exact_root_sessions(base_url: str, root_id: str, before: dict, *, evid
     try:
         final = exact_root_sessions(base_url, root_id, require_deleted=True)
         evidence["final"] = final
-        if final != after:
+        # Payment compensation may finish while browser releases are in flight.
+        # It has a separate terminal check; immutable tree/session drift still
+        # invalidates this provider receipt.
+        if {k: v for k, v in final.items() if k != "purchase_cleanup"} != {
+            k: v for k, v in after.items() if k != "purchase_cleanup"
+        }:
             failures.append("owned tree or provider sessions changed during terminal verification")
     except Exception as error:
         failures.append(f"terminal database verification failed: {error}")

@@ -307,6 +307,7 @@ export interface FakeStripeCalls {
   chargeResultIds: string[];
   refunds: string[];
   refundIdempotencyKeys: Array<string | undefined>;
+  refundRetrieves: string[];
   captures: string[];
   cancels: string[];
   retrieves: string[];
@@ -331,6 +332,8 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    refundStatus?: string | null;
+    refundRetrievedStatus?: string | null;
     captureError?: Error;
     cancelError?: Error;
     fixedPaymentIntentId?: string;
@@ -345,7 +348,11 @@ export async function withFakeStripe<T>(
     search: (params: { query: string; limit?: number }) => Promise<{ data: Array<{ id: string }> }>;
   };
   const refunds = stripe.refunds as unknown as {
-    create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
+    create: (
+      params: unknown,
+      options?: { idempotencyKey?: string }
+    ) => Promise<{ id: string; status: string | null }>;
+    retrieve: (id: string) => Promise<{ id: string; status: string | null }>;
   };
   const customers = stripe.customers as unknown as {
     retrieve: (customerId: string) => Promise<{
@@ -360,6 +367,7 @@ export async function withFakeStripe<T>(
   const originalPaymentIntentRetrieve = paymentIntents.retrieve;
   const originalPaymentIntentSearch = paymentIntents.search;
   const originalRefundCreate = refunds.create;
+  const originalRefundRetrieve = refunds.retrieve;
   const originalCustomerRetrieve = customers.retrieve;
   const calls: FakeStripeCalls = {
     charges: [],
@@ -367,6 +375,7 @@ export async function withFakeStripe<T>(
     chargeResultIds: [],
     refunds: [],
     refundIdempotencyKeys: [],
+    refundRetrieves: [],
     captures: [],
     cancels: [],
     retrieves: [],
@@ -440,7 +449,14 @@ export async function withFakeStripe<T>(
     const id = `re_${randomUUID()}`;
     calls.refunds.push(JSON.stringify(params));
     calls.refundIdempotencyKeys.push(options?.idempotencyKey);
-    return { id };
+    return { id, status: opts.refundStatus === undefined ? 'succeeded' : opts.refundStatus };
+  };
+  refunds.retrieve = async (id: string) => {
+    calls.refundRetrieves.push(id);
+    return {
+      id,
+      status: opts.refundRetrievedStatus === undefined ? 'succeeded' : opts.refundRetrievedStatus,
+    };
   };
 
   try {
@@ -452,6 +468,7 @@ export async function withFakeStripe<T>(
     paymentIntents.retrieve = originalPaymentIntentRetrieve;
     paymentIntents.search = originalPaymentIntentSearch;
     refunds.create = originalRefundCreate;
+    refunds.retrieve = originalRefundRetrieve;
     customers.retrieve = originalCustomerRetrieve;
   }
 }

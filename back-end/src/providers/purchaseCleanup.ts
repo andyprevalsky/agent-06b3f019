@@ -8,7 +8,8 @@ import {
 } from './card-provider';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { cancelAuthorizedHold, reversePurchasePaymentIntent, stripe } from './stripe';
+import { reversePurchasePaymentIntent, stripe } from './stripe';
+import { reverseStalePurchasePayment } from './purchaseStaleReversal';
 import {
   isWalletFundingConsumedDuringReclaimError,
   isWalletFundingReleasePendingError,
@@ -672,19 +673,10 @@ export async function reconcileStaleChargingPurchases(
       continue;
     }
 
-    if (purchase.stripePaymentIntentId !== null) {
-      await cancelAuthorizedHold(purchase.stripePaymentIntentId).catch((error) => {
-        log.warn('Failed to cancel Stripe hold for stale CHARGING purchase', {
-          purchase_id: purchase.id,
-          stripe_payment_intent_id: purchase.stripePaymentIntentId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    }
-
+    const terminalStatus = await reverseStalePurchasePayment(purchase);
     await prisma.purchaseSpend.update({
       where: { id: purchase.id },
-      data: { status: PurchaseSpendStatus.FAILED },
+      data: { status: terminalStatus },
     });
   }
 }

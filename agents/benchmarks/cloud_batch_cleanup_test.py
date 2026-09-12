@@ -159,6 +159,86 @@ def result(aid):
 
 
 @async_case
+async def test_owned_cleanup_compensates_a_mint_that_finishes_after_delete():
+    """A browser receipt cannot retire a late HELD purchase with its database."""
+    await _owned_payment_cleanup_case(refund_fails=False)
+
+
+@async_case
+async def test_owned_cleanup_rejects_unconfirmed_payment_compensation():
+    await _owned_payment_cleanup_case(refund_fails=True)
+
+
+async def _owned_payment_cleanup_case(*, refund_fails):
+    events = []
+    sealed = False
+    payment = {
+        "purchase_id": "00000000-0000-4000-8000-000000000003",
+        "agent_id": ROOT,
+        "status": "CHARGING",
+        "card_id": None,
+        "stripe_payment_intent_id": "pi_owned",
+        "total_cents": 4396,
+        "funding_status": "PENDING",
+        "provider_transfer_id": None,
+        "reclaim_provider_transfer_id": None,
+    }
+
+    def query(_url, aid, *, require_deleted=False):
+        assert aid == ROOT
+        if require_deleted:
+            assert sealed
+        return {
+            "root_exists": True, "root_user_id": ROOT, "root_deleted": sealed,
+            "unsealed_tree_agent_ids": [] if sealed else [ROOT],
+            "tree_agent_ids": [ROOT], "browser_sessions": [],
+            "purchase_cleanup": [copy.deepcopy(payment)],
+        }
+
+    async def delete(_url, aid):
+        nonlocal sealed
+        assert aid == ROOT
+        sealed = True
+        events.append("delete")
+        # The provider request already started before cancellation. Its result
+        # lands after the early ownership snapshot, just as in the live run.
+        payment.update(status="HELD", card_id="owned-card", funding_status="FUNDED",
+                       provider_transfer_id="owned-transfer")
+
+    async def abandon(_url, aid):
+        assert sealed and aid == ROOT
+        events.append("compensate")
+        if refund_fails:
+            raise RuntimeError("exact refund unavailable")
+        payment.update(status="VOIDED", funding_status="RECLAIMED",
+                       reclaim_provider_transfer_id="owned-transfer")
+        return {}
+
+    row = result(ROOT)
+    with (
+        patch.object(cleanup, "exact_root_sessions", query),
+        patch.object(cleanup.runpy, "run_path", return_value={"provider_request": lambda *_args: (204, "receipt")}),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={"messages": []})),
+        patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("archive", {}))),
+        patch.object(bench, "delete_agent", delete),
+        patch.object(bench, "abandon_test_payment", abandon),
+        patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+    ):
+        if refund_fails:
+            with pytest.raises(RuntimeError, match="refund unavailable"):
+                await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+            assert row.benchmark_status == "ERROR"
+            assert row.logs["cloud_cleanup_evidence"]["errors"]
+        else:
+            await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+            assert payment["status"] == "VOIDED"
+            assert payment["funding_status"] == "RECLAIMED"
+            assert row.logs["cloud_payment_cleanup"]["root_agent_id"] == ROOT
+        assert events == ["delete", "compensate"]
+
+
+@async_case
 async def test_batch_continues_exact_cleanup_after_recording_or_delete_failure():
     for failure in ("recording", "delete", "pause", "query"):
         events = []
@@ -171,7 +251,7 @@ async def test_batch_continues_exact_cleanup_after_recording_or_delete_failure()
             events.append(("query", aid))
             if failure == "query" and aid == ROOT:
                 raise RuntimeError("database unavailable")
-            return {"root_user_id": ROOT, "tree_agent_ids": [aid], "browser_sessions": []}
+            return {"root_user_id": ROOT, "tree_agent_ids": [aid], "browser_sessions": [], "purchase_cleanup": []}
 
         async def snapshot(_url, aid, _data, logs, **_kwargs):
             events.append(("snapshot", aid))
@@ -285,7 +365,7 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
             "root_deleted": True,
             "unsealed_tree_agent_ids": [CHILD],
             "tree_agent_ids": [ROOT, CHILD],
-            "browser_sessions": [],
+            "browser_sessions": [], "purchase_cleanup": [],
         }
 
         def query(_command, **kwargs):
@@ -314,6 +394,12 @@ def test_exact_database_proof_rejects_live_child_and_foreign_stack():
             payload["root_user_id"] = ROOT
             with pytest.raises(RuntimeError, match="owned local stack"):
                 cleanup.exact_root_sessions("https://production.example", ROOT)
+            payload["purchase_cleanup"] = None
+            # Broken payment evidence must fail its own retirement contract
+            # without hiding independently valid browser release authority.
+            assert cleanup.exact_root_sessions("http://localhost:31001", ROOT, require_deleted=True) == payload
+            with pytest.raises(RuntimeError, match="payment evidence"):
+                cleanup.pending_root_payments(payload)
 
 
 def test_provider_rejection_does_not_skip_other_sessions_in_same_root():
@@ -381,7 +467,7 @@ def test_exact_provider_cleanup_identifies_client_without_accepting_forbidden():
 
 @async_case
 async def test_failed_batch_retains_ownership_and_each_failure_cause():
-    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"agent_id": ROOT, "provider": "steel", "session_id": "owned-session"}]}
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [{"agent_id": ROOT, "provider": "steel", "session_id": "owned-session"}], "purchase_cleanup": []}
     row = result(ROOT)
     with (
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
@@ -401,7 +487,7 @@ async def test_failed_batch_retains_ownership_and_each_failure_cause():
 
 @async_case
 async def test_failed_batch_retains_worker_logs_through_provider_release():
-    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [], "purchase_cleanup": []}
     row = result(ROOT)
     row.logs = {"worker_logs": [f"{ROOT} before task result"]}
     with tempfile.TemporaryDirectory() as temporary:
@@ -432,7 +518,7 @@ async def test_failed_batch_retains_worker_logs_through_provider_release():
 @async_case
 async def test_failed_batch_keeps_late_logs_after_prefix_cap():
     """A busy earlier worker must not hide cleanup from any later capture."""
-    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [], "purchase_cleanup": []}
     for late_file in ("worker.0.log", "worker.3.log"):
         row = result(ROOT)
         prior = f"{ROOT} before task result"
@@ -596,7 +682,7 @@ async def test_deferred_cleanup_uses_exact_database_owner():
         '00000000-0000-4000-8000-000000000001': bench.GATE_FIXTURE_TASK_USER_IDS['gate-kyc-card-mint'],
         '00000000-0000-4000-8000-000000000002': '00000000-0000-4000-8000-000000000104',
     }
-    paused, requests = set(), []
+    paused, deleted, requests = set(), set(), []
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -618,6 +704,8 @@ async def test_deferred_cleanup_uses_exact_database_owner():
         def do_DELETE(self):
             aid = self.path.split('/')[-1]
             requests.append(('delete', aid, self.headers.get('X-User-Id')))
+            assert self.headers.get('X-User-Id') == owners[aid]
+            deleted.add(aid)
             self.send_response(204)
             self.end_headers()
 
@@ -626,8 +714,10 @@ async def test_deferred_cleanup_uses_exact_database_owner():
     thread.start()
     base = f'http://localhost:{server.server_port}'
 
-    def query(_url, aid):
-        return {'root_user_id': owners[aid], 'tree_agent_ids': [aid], 'browser_sessions': []}
+    def query(_url, aid, *, require_deleted=False):
+        if require_deleted:
+            assert aid in deleted
+        return {'root_user_id': owners[aid], 'tree_agent_ids': [aid], 'browser_sessions': [], 'purchase_cleanup': []}
 
     async def snapshot(_url, aid, _data, _logs, **_kwargs):
         assert aid in paused, 'Owner-restricted pause failed before the recording barrier'
@@ -674,7 +764,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
     import os
     ambient = bench.USER_ID
     fixture_owner = bench.GATE_FIXTURE_TASK_USER_IDS["gate-kyc-card-mint"]
-    before = {"root_user_id": fixture_owner, "tree_agent_ids": [ROOT], "browser_sessions": []}
+    before = {"root_user_id": fixture_owner, "tree_agent_ids": [ROOT], "browser_sessions": [], "purchase_cleanup": []}
     entered, observed = asyncio.Event(), asyncio.Event()
 
     async def sibling():
