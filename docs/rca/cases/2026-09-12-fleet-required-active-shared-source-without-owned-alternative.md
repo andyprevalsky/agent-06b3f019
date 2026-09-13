@@ -218,6 +218,105 @@ retirement receipts are under `.context/acceptance/proof17-cleanup-independent/`
 and `.context/acceptance/proof17-hub-retirement.json`. The live ownership path is
 now confirmed, while the requested ten consecutive ten-task slices remain open.
 
+### Proof 19: guest recovery retained a pre-source metadata parser
+
+Proof 19 reached two accepted ten-task slices at unchanged commit
+`891eadf921d6572ce9a4a821a67b139323549b0e`. Battery clamshell sleep interrupted
+the third slice's local controller; that attempt remains failed with eight
+`NORESULT` outcomes and no valid ten-slice streak. The independent native power,
+inventory and guest chronology is retained under
+`.context/acceptance/proof19-host-interruption/independent-review/`. This source
+parser repair does not repair or reclassify that host interruption.
+
+Canonical exact recovery then exposed another consumer of the private-source
+record. Owner `9d851b4e105e4253a952218994780080` had the captured source digest
+and both immutable source manifests, but `fleet_registry_build_guest_recovery_plan`
+rejected `source_manifest_sha256` as `noncanonical recovery metadata` before
+building any guest mapping. The runtime log is preserved at
+`.context/acceptance/proof19-recovery-source-rca/runtime-before.private.log`.
+
+Archive searches were `noncanonical recovery metadata source_manifest_sha256`
+and `private source registry allowlist recovery manifest`. The previous clone
+ownership case is a relative; this is a recurrence of this case's private-source
+lifecycle gap. Proof 16 updated clone identity promotion and terminal publication,
+but left the guest plan parser's independent legacy field allowlist unchanged.
+The earlier private-source recovery regression stopped after source resolution;
+it did not execute the downstream guest plan builder. Existing guest mapping
+fixtures exercised only legacy metadata. The actual writer and reader contract
+therefore never met in the permanent gate.
+
+The permanent command is `agents/venv/bin/python -m pytest -q
+agents/benchmarks/cloudbench_dependency_sync_test.py -k
+private_fleet_source_guest_recovery_plan`. Before the production edit, its
+unchanged 27 cases recorded four failures and 23 passing controls: two valid
+private-source plans were rejected, and removing the registry digest (alone or
+with the audit digest) incorrectly admitted legacy recovery despite retained
+private manifests. The same command passed all 27 cases in 4.54 seconds after
+the fix. A separate replay copied the actual owner's registry, source manifests,
+audits and ten output mappings, relocating only filesystem paths into a private
+fixture. The original parser returned 1; the repaired parser returned 0 with all
+ten exact guest rows. Neither replay contacted providers or changed the original
+owner. Commands, timestamps and exact source/test hashes are under
+`.context/acceptance/proof19-recovery-source-rca/`.
+
+The parser now permits only the documented optional source digest and verifies
+both original owner copies before writing a plan. It checks the canonical audit
+path and owner/run/app binding, equal SHA256-bound manifests, bounded regular
+no-follow/nonblocking reads, and the existing `cloudbench-source.py` manifest
+validator. Missing or partial private identity cannot silently become a legacy
+owner. The recovery caller's source environment cannot substitute for the
+original owner's capture. The preceding `resolve_exact_recovery_warm_identity`
+continues to prove that graph roots match the source machine; the plan parser's
+manifest validation alone does not establish that separate topology invariant.
+Legacy owners and primary-to-worker topology remain supported; unknown/duplicate keys, malformed digests, missing/changed files,
+symlinks, FIFOs, oversized/invalid schemas and wrong audit identities are rejected
+without modifying durable records or publishing a plan.
+
+Deleting the ownership allowlist would accept unknown authority, so deletion is
+not a valid simplification. The repair reuses the canonical source schema rather
+than adding a second schema; the added checks bind that schema to this consumer's
+existing immutable owner records. Work remains bounded to two local manifests
+and one owner's existing graph, with no provider call, new poller, global lock,
+shared query or per-agent runtime traffic. At 10,000 agents this adds no work to
+normal task execution.
+
+The registered private-source gate passes all 70 cases in 11.84 seconds, and
+four adjacent exact guest/worker mapping and quarantine recovery tests pass in
+0.97 seconds. Ruff, Bash syntax and diff checks pass. Independent review reran
+all 27 owning cases and 12 additional falsification controls successfully, with
+no blocking findings; its receipt is
+`.context/acceptance/proof19-recovery-source-review/review.json`. Full validation
+and the ten-slice infrastructure proof remain separate pending gates. No task,
+prompt, model, evaluator, timeout or proof threshold changed, and the case remains
+open.
+
+The parent then ran canonical exact recovery of the original owner against the
+reviewed parser. All ten guests authenticated their cleanup acknowledgements
+before machine teardown, and the native command exited 0 at 19:08:29 UTC on
+September 13. A transient exact-machine authentication error remains in the
+original recovery log; later successful reads establish the final state without
+assuming that error meant absence or changing credentials.
+
+The independent post-exit audit verified all ten exact Machines destroyed and
+all ten exact Volumes unattached in provider-terminal `pending_destroy` state,
+with both resource sets absent from successful inventories. The ownership
+registry is absent; local and shared terminal audits agree and retain the
+original source digest. All five exact archived Kernel sessions independently
+returned HTTP 404. Both protected source Machines remain stopped with unchanged
+native instances and full configurations, and their Volumes remain created and
+correctly attached. The receipt is
+`.context/acceptance/proof19-recovery-independent/verification.json`; Hub
+retirement is excluded and remains a separate parent-owned action.
+
+All ten preserved guest run JSONs were byte-matched to their hashed forensic tar
+members. Their saved cleanup records show twelve tree agents sealed, every root
+deleted, and the payment fixture's full 4,396-cent refund/reclaim. The unchanged
+successful-query verifier counted 5–34 correlated successes in each tree using
+those exact payloads. These are forensic and recovery facts only: the original
+third slice still has eight `NORESULT` outcomes, Proof 19 remains failed after
+two historical accepted slices, and no ten-slice streak or new acceptance credit
+is awarded.
+
 ## Human feedback
 
 The user requires completion without repeated permission requests and ten
@@ -233,6 +332,6 @@ explicit five-minute override for this test sequence.
 
 ## Reusable lesson
 
-Keep the shared-source readiness guard. Make an alternative source explicit,
-immutable and independently owned, and carry that same source identity through
-pool admission, provenance and recovery.
+Preserve the shared-source readiness guard and carry every explicit, immutable,
+independently owned alternative through pool admission, provenance and every
+recovery consumer.

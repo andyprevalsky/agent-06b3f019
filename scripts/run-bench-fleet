@@ -5695,11 +5695,13 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
-    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" <<'PY'
+    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" <<'PY'
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import runpy
 import stat
 import sys
 import time
@@ -5708,6 +5710,7 @@ registry = Path(sys.argv[1])
 plan = Path(sys.argv[2])
 expected_app = sys.argv[3]
 audit_root = Path(sys.argv[4]) if sys.argv[4] else None
+source_helper = sys.argv[5]
 safe_key = re.compile(r"[A-Za-z0-9._-]+")
 safe_machine = re.compile(r"[0-9a-f]+")
 safe_volume = re.compile(r"[A-Za-z0-9_-]+")
@@ -5763,6 +5766,7 @@ meta_allowed = {
     "owned_ids_file",
     "owned_names_file",
     "cleanup_policy",
+    "source_manifest_sha256",
 }
 meta = fields(registry / "meta", allowed=meta_allowed)
 owner = registry.name
@@ -5781,6 +5785,59 @@ run_id = meta.get("run_id", "")
 runs_root_value = meta.get("runs_root", "")
 if not safe_key.fullmatch(run_id) or not runs_root_value:
     raise ValueError("missing stale-owner run mapping")
+
+# The captured source belongs to the original owner, not the recovery caller.
+# Inspect both records so dropping one digest cannot select legacy recovery.
+audit_value = meta.get("audit_dir", "")
+audit = Path(audit_value) if audit_value else None
+audit_meta = {}
+if audit is not None:
+    if (
+        audit_root is None
+        or not audit_root.is_absolute()
+        or not plain_directory(audit_root)
+        or audit_root.resolve() != audit_root
+        or audit != audit_root / owner
+        or not plain_directory(audit)
+        or audit.resolve() != audit
+    ):
+        raise ValueError("unsafe stale-owner source audit mapping")
+    audit_meta = fields(audit / "meta", allowed=None)
+source_files = [registry / "source-manifest.json"]
+if audit is not None:
+    source_files.append(audit / "source-manifest.json")
+if (
+    "source_manifest_sha256" in meta
+    or "source_manifest_sha256" in audit_meta
+    or any(path.exists() or path.is_symlink() for path in source_files)
+):
+    digest = meta.get("source_manifest_sha256", "")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or audit_meta.get("source_manifest_sha256") != digest
+        or audit_meta.get("fleet_owner_token") != owner
+        or audit_meta.get("run_id") != run_id
+        or audit_meta.get("app") != expected_app
+        or len(source_files) != 2
+        or not source_helper
+    ):
+        raise ValueError("private recovery source is not bound to owner audit")
+    payloads = []
+    for path in source_files:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("non-regular private recovery source")
+            data = os.read(fd, 65_537)
+        finally:
+            os.close(fd)
+        if len(data) > 65_536 or hashlib.sha256(data).hexdigest() != digest:
+            raise ValueError("private recovery source digest mismatch")
+        payloads.append(data)
+    source = runpy.run_path(source_helper)["manifest"](payloads[0])
+    if payloads[0] != payloads[1] or source["app"] != expected_app:
+        raise ValueError("private recovery source mismatch")
+
 runs_root = Path(runs_root_value)
 if (
     not runs_root.is_absolute()

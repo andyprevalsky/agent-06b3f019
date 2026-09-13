@@ -21653,6 +21653,126 @@ def test_private_fleet_source_terminal_audit_preserves_digest(tmp_path: Path, pr
         assert "source_manifest_sha256=" not in (audit / "meta").read_text()
 
 
+def _private_source_guest_plan_fixture(tmp_path: Path, *, private: bool = True, worker: bool = False):
+    registry, audit, clone, machine, digest = _private_source_identity_fixture(tmp_path, private=private)
+    fresh = audit / "fresh" / clone
+    fresh.write_text(fresh.read_text().replace("machine_id=\n", f"machine_id={machine}\n").replace("volume_id=\n", "volume_id=vol_child\n").replace("disposition=ownership-pending", "disposition=owned"))
+    (registry / "clones" / clone).write_text(f"name={clone}\nid={machine}\nvolume_id=vol_child\n")
+    (audit / "by-machine-id" / machine).write_text(clone + "\n")
+    output = tmp_path / "workspace/.context/fleet/runs/fixture-run/bench-owned"
+    output.mkdir()
+    (output / ".cid").write_text(f"clone {machine}\n")
+    (output / "status-proxy.port").write_text("61001\n")
+    expected = [f"guest\tbench-owned\t{clone}\t{machine}\tvol_child\t{output}\t61001"]
+    if worker:
+        worker_name, worker_id = "cloudbench-worker", "deadbeef000002"
+        (registry / "clones" / worker_name).write_text(f"name={worker_name}\nid={worker_id}\nvolume_id=vol_worker\n")
+        (audit / "expected-fresh" / worker_name).write_text(f"clone_name={worker_name}\nsource_machine_id={machine}\n")
+        (audit / "fresh" / worker_name).write_text(fresh.read_text().replace(f"clone_name={clone}", f"clone_name={worker_name}").replace("source_machine_id=feedface000001", f"source_machine_id={machine}").replace(f"\nmachine_id={machine}\n", f"\nmachine_id={worker_id}\n").replace("vol_child", "vol_worker"))
+        (audit / "by-machine-id" / worker_id).write_text(worker_name + "\n")
+        (output / "worker-clones.ids").write_text(worker_id + "\n")
+        expected.append(f"worker\tbench-owned\t{worker_name}\t{worker_id}\tvol_worker\t{output}\t61001")
+    return registry, audit, digest, expected
+
+
+def _private_source_guest_plan_command(registry: Path, audit: Path, plan: Path):
+    build = _extract_fleet_function(FLEET_SCRIPT.read_text(), "fleet_registry_build_guest_recovery_plan() {")
+    return subprocess.run(
+        ["bash", "-c", f'''set -eu
+APP=navi-whisper-lux-bench
+FLEET_AUDIT_ROOT={shlex.quote(str(audit.parent))}
+SOURCE_HELPER={shlex.quote(str(ROOT / 'scripts/cloudbench-source.py'))}
+# A successor's environment cannot replace the original owner's captured source.
+PRIVATE_SOURCE_SHA256={'e' * 64}
+PRIVATE_SOURCE_FILE=/does-not-exist
+FLY() {{ printf unexpected-provider-call >&2; return 99; }}
+{build}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+''', "private-source-recovery-plan", str(registry), str(plan)],
+        text=True, capture_output=True, check=False, timeout=10,
+    )
+
+
+@pytest.mark.parametrize("private", [False, True])
+@pytest.mark.parametrize("worker", [False, True])
+def test_private_fleet_source_guest_recovery_plan_keeps_exact_mapping(tmp_path: Path, private: bool, worker: bool) -> None:
+    registry, audit, _, expected = _private_source_guest_plan_fixture(tmp_path, private=private, worker=worker)
+    before = {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()}
+    plan = tmp_path / "plan"
+    result = _private_source_guest_plan_command(registry, audit, plan)
+    assert result.returncode == 0, result.stderr
+    assert plan.read_text().splitlines() == expected
+    assert {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("corrupt", [
+    "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
+    "registry-digest-missing", "audit-digest-missing", "both-digests-missing",
+    "registry-file-missing", "audit-file-missing", "registry-file-changed", "audit-file-changed",
+    "registry-file-symlink", "audit-file-symlink", "registry-file-fifo", "audit-file-fifo",
+    "invalid-schema", "invalid-app", "manifest-oversized", "audit-owner", "audit-run",
+    "audit-app", "audit-directory-symlink", "wrong-audit-root",
+])
+def test_private_fleet_source_guest_recovery_plan_rejects_unbound_source(tmp_path: Path, corrupt: str) -> None:
+    registry, audit, digest, _ = _private_source_guest_plan_fixture(tmp_path)
+    target = registry if corrupt.startswith("registry-") else audit
+    if corrupt == "unknown-key":
+        with (registry / "meta").open("a") as handle:
+            handle.write("unrecognized_source_owner=anything\n")
+    elif corrupt == "duplicate-key":
+        with (registry / "meta").open("a") as handle:
+            handle.write(f"source_manifest_sha256={digest}\n")
+    elif corrupt in {"invalid-digest", "audit-digest-mismatch"}:
+        target = registry if corrupt == "invalid-digest" else audit
+        (target / "meta").write_text((target / "meta").read_text().replace(digest, "invalid" if corrupt == "invalid-digest" else "e" * 64))
+    elif corrupt.endswith("digests-missing"):
+        for directory in (registry, audit):
+            (directory / "meta").write_text((directory / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", ""))
+    elif corrupt.endswith("digest-missing"):
+        (target / "meta").write_text((target / "meta").read_text().replace(f"source_manifest_sha256={digest}\n", ""))
+    elif corrupt.endswith("file-missing"):
+        (target / "source-manifest.json").unlink()
+    elif corrupt.endswith("file-changed"):
+        with (target / "source-manifest.json").open("ab") as handle:
+            handle.write(b" ")
+    elif corrupt.endswith("file-symlink"):
+        outside = tmp_path / "outside-manifest.json"
+        (target / "source-manifest.json").rename(outside)
+        (target / "source-manifest.json").symlink_to(outside)
+    elif corrupt.endswith("file-fifo"):
+        (target / "source-manifest.json").unlink()
+        os.mkfifo(target / "source-manifest.json")
+    elif corrupt in {"audit-owner", "audit-run", "audit-app"}:
+        old, new = {"audit-owner": (registry.name, "a" * 32), "audit-run": ("fixture-run", "other-run"), "audit-app": ("navi-whisper-lux-bench", "other-app")}[corrupt]
+        (audit / "meta").write_text((audit / "meta").read_text().replace(old, new))
+    elif corrupt == "audit-directory-symlink":
+        outside = tmp_path / "outside-audit"
+        audit.rename(outside)
+        audit.symlink_to(outside, target_is_directory=True)
+    elif corrupt == "wrong-audit-root":
+        (registry / "meta").write_text((registry / "meta").read_text().replace(f"audit_dir={audit}", f"audit_dir={tmp_path / 'foreign' / registry.name}"))
+    else:
+        value = json.loads((registry / "source-manifest.json").read_bytes())
+        if corrupt == "invalid-schema":
+            value["unexpected"] = True
+        elif corrupt == "invalid-app":
+            value["app"] = "another-app"
+        payload = json.dumps(value).encode() + (b" " * 65536 if corrupt == "manifest-oversized" else b"")
+        new_digest = hashlib.sha256(payload).hexdigest()
+        for directory in (registry, audit):
+            (directory / "source-manifest.json").write_bytes(payload)
+            (directory / "meta").write_text((directory / "meta").read_text().replace(digest, new_digest))
+    def snapshot():
+        return {str(p): ("symlink", str(p.readlink())) if p.is_symlink() else ("file", p.read_bytes()) for d in (registry, audit) for p in d.rglob("*") if p.is_file() or p.is_symlink()}
+    before = snapshot()
+    plan = tmp_path / "plan"
+    result = _private_source_guest_plan_command(registry, audit, plan)
+    assert result.returncode != 0, f"accepted {corrupt}"
+    assert not plan.exists(), f"published a recovery plan for {corrupt}"
+    assert "unexpected-provider-call" not in result.stderr
+    assert snapshot() == before, f"modified durable authority while rejecting {corrupt}"
+
+
 @pytest.fixture
 def autoscaler_runtime_handoff_fixture(tmp_path):
     """Actual status service, with only loopback clients and synthetic credentials."""

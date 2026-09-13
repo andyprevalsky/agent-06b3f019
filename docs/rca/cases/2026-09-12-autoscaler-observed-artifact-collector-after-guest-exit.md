@@ -148,15 +148,47 @@ incident's cause. The final selection includes these three controls.
 Independent final execution passed all 32 cases in 24.60 seconds, and the
 unchanged private second-spawn control now confirms one termination and one
 join. The final reviewer found no runtime blocker; its receipt is
-`handoff-final-independent-review.json` in the same private RCA directory. The next
-cloud infrastructure proof remains pending. The case remains OPEN until the
-repaired boundary is validated in the live
-campaign; local causal verification does not turn proof18 into a successful
-slice. Exact proof18 cleanup was separately verified for all twelve machines
+`handoff-final-independent-review.json` in the same private RCA directory. At
+that point live verification remained pending. The later proof19 observations
+below validate the repaired boundary, while the complete ten-slice acceptance
+remains open. Neither local verification nor a later successful slice turns
+proof18 into a successful slice. Exact proof18 cleanup was separately verified for all twelve machines
 and volumes, both registries, ten durable bundles and its Hub. Those receipts
 are `.context/acceptance/proof18-cleanup-independent/verification.json` and
 `.context/acceptance/proof18-hub-retirement.json`; historical lifecycle and
 native outcomes remain unchanged.
+
+### Live boundary verification and subsequent controller suspension
+
+Proof19 at `891eadf921d6572ce9a4a821a67b139323549b0e` accepted its first two
+slices. The first, `20260913-125235-55066`, independently verified all ten
+runtime-to-collector handoffs, including collection tails of approximately
+30–80 seconds after runtime sealing. Every autoscaler waited for its actual
+child completion, without an early completion marker or autoscaler failure.
+All ten roots had at least five successful correlated LLM queries, complete
+durable evidence and verified cleanup. This validates the repaired boundary;
+the private review is
+`.context/acceptance/proof19-slice1-independent-review/final-review.json`.
+
+The complete proof nevertheless failed in slice three. Native power events
+record clamshell sleep at 13:06:18 UTC on September 13, inventory expiry at
+13:09:14, and eight autoscaler failure markers during the first brief DarkWake
+at 13:14:13. Full wake occurred at 18:43:17. The expired inventory health check
+was sufficient to produce the message that primaries had disappeared; that
+message does not prove native provider deletion. Fresh provider observations
+later found the same eight machine instances still present, with exited guest
+drivers and cleanup acknowledgements. Earlier transient URL errors recovered
+before sleep; their discarded exception details do not establish timeout or DNS
+causes. The native timeline, source predicates and exact instance bindings are
+retained in
+`.context/acceptance/proof19-host-interruption/independent-review/final-findings.json`.
+
+The two historical accepted slices cannot carry into a new ten-slice streak.
+Use a continuously running Linux controller for the replacement campaign,
+including its collectors, local status proxies, Hub and evidence publisher.
+This changes controller placement, not benchmark tasks, model requests,
+evaluation, capacity requirements or acceptance rules. Guest progress and
+forensic result recovery cannot waive a controller infrastructure failure.
 
 ## Human feedback
 

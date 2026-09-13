@@ -78,6 +78,27 @@ they must finish rather than be cut off with a process kill. This setting does
 not change catalog prompts, task timeouts or grading criteria. Cloud `--timeout`
 controls the controller watchdog and is not a substitute for this execution cap.
 
+Long cloud fleet proofs need a continuously running controller host as well as
+cloud benchmark guests. Run the controller, status proxies, Hub, collectors and
+evidence publishers on the same persistent Linux host. Detaching a process or
+using macOS `caffeinate` does not prevent clamshell sleep from suspending local
+inventory publication and collection. Preserve that host's real checkout,
+hostname and ownership records for exact recovery; copying a live owner's
+`.git` records to another host does not transfer recovery authority.
+Set `TZ=UTC` before detaching the controller and keep it for recovery, so legacy
+`ps lstart` ownership strings are rendered consistently. Do not rewrite an
+existing ownership record to work around a timezone change.
+
+PR #1299's infrastructure acceptance is ten consecutive slices of ten actual
+benchmarks. Each benchmark must have at least three successful, correlated LLM
+provider responses in its own agent tree, a trustworthy native evaluation,
+durable evidence and verified teardown. Ordinary benchmark `FAILED` outcomes
+are allowed; `SKIPPED`, infrastructure errors and missing results are not.
+Attempts, dump-file counts and sibling queries do not establish successful
+responses. Do not add calls or alter benchmark behavior to reach the minimum.
+Any infrastructure failure breaks the streak; later artifact recovery preserves
+diagnostic evidence without turning that failed slice into acceptance credit.
+
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.
 
 ```bash
