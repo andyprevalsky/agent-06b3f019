@@ -4,6 +4,8 @@
  * [HIDDEN] -- active agent + no plan/tool/blocker for 800ms --> [VISIBLE]
  * [VISIBLE] -- persisted or ephemeral tool starts -----------> [HIDDEN]
  * [VISIBLE] -- plan/blocker/terminal state/assistant arrives -> [HIDDEN]
+ * [HIDDEN] -- chat mode, last persisted ASSISTANT, no stream -> stay [HIDDEN]
+ *             (hung start_superintelligence: reasoning saved, no Cloud Agent chip)
  */
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import type { AgentDetail, Message } from '../hooks';
@@ -73,6 +75,12 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
   if (hasInProgressTool || hasStreamingPlan || hasStreamingTools) return false;
 
   if (hasStreamingBubbles) return true;
+
+  // Chat escalation persists the router ASSISTANT before the Cloud Agent chip.
+  // If that persist is the last durable row and nothing is streaming, the
+  // handler is not making progress — keep Thinking hidden instead of shimmering
+  // forever on ACTIVE + null workflow.
+  if (isChatMode && last?.role === 'ASSISTANT') return false;
 
   return true;
 }
