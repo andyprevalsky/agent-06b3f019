@@ -23,6 +23,7 @@ import {
 } from './agents-blackbox-harness';
 import {
   RECONCILED_STATUS_MESSAGE,
+  STUCK_CHAT_STATUS_MESSAGE,
   reconcileWorkflowLiveness,
 } from '../../providers/workflowLivenessReconciler';
 
@@ -132,7 +133,7 @@ test('reconciler does not seal a replacement generation from a stale candidate',
   const replacementWorkflowId = `${workflowId}:replacement:${randomUUID()}`;
 
   await makeEligible([agentId]);
-  const summary = await reconcileWorkflowLiveness({
+  await reconcileWorkflowLiveness({
     batchSize: 1000,
     describeStatus: async (id: string) => {
       if (id !== workflowId) return 'RUNNING';
@@ -155,7 +156,9 @@ test('reconciler does not seal a replacement generation from a stale candidate',
     row?.temporalWorkflowId === replacementWorkflowId,
     'the replacement workflow identity must remain current'
   );
-  assert(summary.sealed === 0, 'a stale liveness candidate must not count as sealed');
+  // Do not assert summary.sealed === 0. The same tick may seal unrelated quiet
+  // chat-mode zombies (ACTIVE + null workflow + messageCount 0). The contract
+  // is that THIS replacement row is untouched.
 });
 
 test('reconciler leaves an agent alone when the Temporal read is inconclusive', async () => {
@@ -264,6 +267,98 @@ test('reconciler restores a retryable row and continues after one cleanup fails'
   assert(
     (await statusOf(failedAgentId)) === 'FAILED',
     'the row should seal after cleanup succeeds'
+  );
+});
+
+async function seedStuckChatAgent(
+  userId: string,
+  label: string,
+  overrides: { messageCount?: number } = {}
+): Promise<string> {
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry(`create-stuck-chat-${label}`, async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId,
+        goal: `stuck chat ${label}`,
+        status: 'ACTIVE',
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+        temporalWorkflowId: null,
+        messageCount: overrides.messageCount ?? 0,
+      },
+    });
+    await prisma.message.create({
+      data: {
+        agentId,
+        role: 'USER',
+        text: 'help me check this tests and validate the cheaper one',
+        timestamp: new Date('2026-09-18T20:57:25.321Z'),
+      },
+    });
+    await prisma.message.create({
+      data: {
+        agentId,
+        role: 'ASSISTANT',
+        text: 'The user is asking for a comparison and validation of medical test options, including location choices. This requires multi-step research and planning, not a simple direct answer or current fact lookup.',
+        timestamp: new Date('2026-09-18T20:57:26.252Z'),
+      },
+    });
+  });
+  return agentId;
+}
+
+async function seedStuckChatUser(label: string): Promise<string> {
+  const userId = randomUUID();
+  await withTransientDbRetry(`create-stuck-chat-user-${label}`, async () => {
+    await prisma.user.create({
+      data: { userId, isAnonymous: true, name: `stuck-chat-${label}` },
+    });
+  });
+  return userId;
+}
+
+test('reconciler seals a quiet chat-mode agent whose escalation never started a workflow', async () => {
+  const userId = await seedStuckChatUser('null-workflow');
+  const agentId = await seedStuckChatAgent(userId, 'null-workflow');
+  await makeEligible([agentId]);
+
+  const summary = await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async () => 'RUNNING',
+  });
+
+  assert(
+    (await statusOf(agentId)) === 'FAILED',
+    `stuck chat escalation must be sealed FAILED, got ${await statusOf(agentId)}`
+  );
+  const row = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { statusMessage: true, temporalWorkflowId: true },
+  });
+  assert(
+    row?.statusMessage === STUCK_CHAT_STATUS_MESSAGE,
+    `stuck chat seal must explain the missing workflow, got ${row?.statusMessage}`
+  );
+  assert(row?.temporalWorkflowId === null, 'seal must not invent a workflow id');
+  assert(summary.sealed >= 1, 'stuck chat candidate should count as sealed');
+});
+
+test('reconciler leaves a completed chat-mode agent with a null workflow alone', async () => {
+  const userId = await seedStuckChatUser('completed-turn');
+  const agentId = await seedStuckChatAgent(userId, 'completed-turn', { messageCount: 4 });
+  await makeEligible([agentId]);
+
+  await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async () => 'RUNNING',
+  });
+
+  assert(
+    (await statusOf(agentId)) === 'ACTIVE',
+    'a finished chat turn (messageCount > 0, no workflow) must not be sealed'
   );
 });
 

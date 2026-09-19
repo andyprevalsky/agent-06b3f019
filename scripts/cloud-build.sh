@@ -153,7 +153,10 @@ trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 (
     if [ -f package.json ] && [ ! -d node_modules ]; then
         echo "📦 npm install (root + workspaces)..."
-        npm install --no-audit --no-fund
+        # Arborist on npm 10.9 + this workspace tree throws
+        # `Cannot read properties of null (reading 'edgesOut')` while
+        # resolving vitest peers. --legacy-peer-deps skips that path.
+        npm install --no-audit --no-fund --legacy-peer-deps
     else
         echo "✅ Root node_modules already present"
     fi

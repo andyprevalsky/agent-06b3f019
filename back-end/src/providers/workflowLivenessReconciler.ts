@@ -1,5 +1,6 @@
 /**
- * Seal agent rows whose Temporal workflow is already closed.
+ * Seal agent rows whose Temporal workflow is already closed, and chat-mode rows
+ * whose escalation never started a workflow.
  *
  * Every terminal status write originates INSIDE the workflow
  * (agents/workflows/agent_workflow.py `_mark_failed`/`_mark_complete`). Temporal
@@ -10,16 +11,27 @@
  * "Thinking" shimmer with resume returning 409 and messages silently dropped.
  * See docs/rca/cases/2026-08-04-no-liveness-reconciler-for-externally-closed-workflows.md
  *
+ * Chat create is fire-and-forget (`handleChatMessage`). After
+ * start_superintelligence the row stays ACTIVE with a null workflow until
+ * Temporal acceptance. If persist/start hangs, the catch that fails the agent
+ * never runs — prod a7463bcc sat ACTIVE + messageCount 0 + no Cloud Agent chip
+ * while the FE treated that as live work. The 2026-08-04 job only selected
+ * `temporalWorkflowId not null`, so chat-mode zombies were invisible.
+ *
  * `workflowTerminalCleanup.ts` already runs the opposite direction (DB terminal →
- * kill workflow). This is the missing half: workflow closed → seal the DB row.
+ * kill workflow). This is the missing half: workflow closed → seal the DB row,
+ * and quiet chat escalation with no workflow → seal the DB row.
  *
  * SAFETY: only seal on an AUTHORITATIVE closed reading. A transient Temporal or
  * network error must leave the row untouched — a false positive kills a live
  * agent, which is strictly worse than leaving a stale row for the next tick.
+ * Stuck-chat seals require ACTIVE + null workflow + messageCount 0 + the same
+ * quiet window; a finished chat turn writes messageCount > 0 and is left alone.
  *
- * 10k agents: one bounded batch per tick, one describe per candidate, bounded
- * concurrency. Work scales with the number of open workflows examined per tick,
- * never with total agent count, and holds no cross-agent shared state.
+ * 10k agents: one bounded batch per tick for each candidate class, one describe
+ * per workflow-backed candidate, bounded concurrency. Work scales with the
+ * number of quiet candidates examined per tick, never with total agent count,
+ * and holds no cross-agent shared state.
  */
 
 import type { AgentStatus } from '@prisma/client';
@@ -60,9 +72,18 @@ const DEFAULT_CONCURRENCY = 8;
 export const RECONCILED_STATUS_MESSAGE =
   'Workflow ended without reporting a result (terminated or lost). Sealed by liveness reconciler.';
 
+export const STUCK_CHAT_STATUS_MESSAGE =
+  'Chat escalation never started a workflow. Sealed by liveness reconciler.';
+
 export interface LivenessCandidate {
   agentId: string;
   workflowId: string;
+  status: AgentStatus;
+  statusMessage: string | null;
+}
+
+export interface StuckChatCandidate {
+  agentId: string;
   status: AgentStatus;
   statusMessage: string | null;
 }
@@ -132,6 +153,36 @@ export async function findLivenessCandidates(
           },
         ]
   );
+}
+
+/**
+ * Chat-mode rows that never left the pre-workflow escalation window.
+ *
+ * Finished chat turns persist messageCount > 0 and stay ACTIVE with a null
+ * workflow on purpose. Only a quiet ACTIVE row that never recorded a turn
+ * (the hung start_superintelligence shape) is a candidate.
+ */
+export async function findStuckChatCandidates(
+  deps: Pick<WorkflowLivenessDependencies, 'now' | 'batchSize'>
+): Promise<StuckChatCandidate[]> {
+  const rows = await prisma.agent.findMany({
+    where: {
+      deletedAt: null,
+      temporalWorkflowId: null,
+      status: 'ACTIVE',
+      messageCount: 0,
+      updatedAt: { lt: new Date(deps.now() - MIN_QUIET_MS) },
+    },
+    select: { id: true, status: true, statusMessage: true },
+    orderBy: { updatedAt: 'asc' },
+    take: deps.batchSize,
+  });
+
+  return rows.map((row) => ({
+    agentId: row.id,
+    status: row.status,
+    statusMessage: row.statusMessage,
+  }));
 }
 
 /**
@@ -224,6 +275,80 @@ async function sealAgent(
   return true;
 }
 
+/**
+ * Seal a chat-mode row that never obtained a workflow. Idempotent: the update
+ * is conditional on still being ACTIVE with a null workflow and messageCount 0,
+ * so a late Temporal accept or a completed chat turn wins.
+ */
+async function sealStuckChatAgent(
+  candidate: StuckChatCandidate,
+  deps: Pick<WorkflowLivenessDependencies, 'finalizeInterruptedTools' | 'releaseBrowserSessions'>
+): Promise<boolean> {
+  const inProgressTools = await captureInProgressWorkflowTools(
+    candidate.agentId,
+    candidate.agentId
+  );
+
+  const { count } = await prisma.agent.updateMany({
+    where: {
+      id: candidate.agentId,
+      temporalWorkflowId: null,
+      deletedAt: null,
+      status: 'ACTIVE',
+      messageCount: 0,
+    },
+    data: { status: 'FAILED', statusMessage: STUCK_CHAT_STATUS_MESSAGE },
+  });
+
+  if (count === 0) return false;
+
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  try {
+    await deps.finalizeInterruptedTools(candidate.agentId, candidate.agentId, inProgressTools);
+  } catch (error) {
+    cleanupFailed = true;
+    cleanupError = error;
+  }
+  try {
+    await deps.releaseBrowserSessions(candidate.agentId);
+  } catch (error) {
+    if (cleanupFailed) {
+      log.warn('Browser cleanup also failed after stuck-chat tool cleanup rejected', {
+        agentId: candidate.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } else {
+      cleanupFailed = true;
+      cleanupError = error;
+    }
+  }
+
+  if (cleanupFailed) {
+    const restored = await prisma.agent.updateMany({
+      where: {
+        id: candidate.agentId,
+        temporalWorkflowId: null,
+        deletedAt: null,
+        status: 'FAILED',
+        statusMessage: STUCK_CHAT_STATUS_MESSAGE,
+      },
+      data: { status: candidate.status, statusMessage: candidate.statusMessage },
+    });
+    if (restored.count === 0) {
+      log.error('Could not restore stuck-chat row after terminal cleanup failed', {
+        agentId: candidate.agentId,
+      });
+    }
+    throw cleanupError;
+  }
+  log.warn('Sealed chat-mode agent whose escalation never started a workflow', {
+    agentId: candidate.agentId,
+    previousStatus: candidate.status,
+  });
+  return true;
+}
+
 async function mapWithConcurrency<T>(
   items: T[],
   limit: number,
@@ -244,6 +369,7 @@ export async function reconcileWorkflowLiveness(
 ): Promise<{ examined: number; sealed: number; inconclusive: number }> {
   const deps = { ...defaultDependencies(), ...overrides };
   const candidates = await findLivenessCandidates(deps);
+  const stuckChatCandidates = await findStuckChatCandidates(deps);
 
   let sealed = 0;
   let inconclusive = 0;
@@ -282,12 +408,26 @@ export async function reconcileWorkflowLiveness(
     }
   });
 
+  await mapWithConcurrency(stuckChatCandidates, deps.concurrency, async (candidate) => {
+    try {
+      if (await sealStuckChatAgent(candidate, deps)) sealed++;
+    } catch (error) {
+      inconclusive++;
+      log.warn('Stuck-chat terminal cleanup inconclusive; restored agent for retry', {
+        agentId: candidate.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+  const examined = candidates.length + stuckChatCandidates.length;
   if (sealed > 0 || inconclusive > 0) {
     log.info('Workflow liveness reconcile complete', {
-      examined: candidates.length,
+      examined,
       sealed,
       inconclusive,
+      stuckChatExamined: stuckChatCandidates.length,
     });
   }
-  return { examined: candidates.length, sealed, inconclusive };
+  return { examined, sealed, inconclusive };
 }
