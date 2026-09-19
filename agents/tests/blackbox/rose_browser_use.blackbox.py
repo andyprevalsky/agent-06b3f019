@@ -1361,6 +1361,46 @@ def test_normalize_provider_mixed_tool_batch_keeps_first_action():
     assert out["params"] == {"key": "b"}
 
 
+def test_normalize_provider_printable_input_text_batch_as_one_input_text():
+    calls = [
+        {
+            "name": "input_text",
+            "arguments": json.dumps({"text": key, "clear": False, "index": 1445}),
+        }
+        for key in "bench"
+    ]
+
+    out = normalize_browser_use_tool_calls(calls, thinking="type naturally")
+
+    assert out == {
+        "action": "input_text",
+        "thinking": "type naturally",
+        "index": 1445,
+        "coordinates": None,
+        "element_description": None,
+        "params": {"text": "bench", "clear": False},
+    }
+
+
+def test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action():
+    out = normalize_browser_use_tool_calls(
+        [
+            {
+                "name": "input_text",
+                "arguments": json.dumps({"text": "b", "clear": False, "index": 1445}),
+            },
+            {
+                "name": "input_text",
+                "arguments": json.dumps({"text": "H", "clear": False, "index": 1446}),
+            },
+        ]
+    )
+
+    assert out["action"] == "input_text"
+    assert out["params"]["text"] == "b"
+    assert out["index"] == 1445
+
+
 def test_normalize_provider_special_key_batch_keeps_first_action():
     out = normalize_browser_use_tool_calls(
         [
@@ -2217,6 +2257,14 @@ async def run_all_tests():
     r.record(
         "normalize_provider_special_key_batch",
         test_normalize_provider_special_key_batch_keeps_first_action,
+    )
+    r.record(
+        "normalize_provider_printable_input_text_batch",
+        test_normalize_provider_printable_input_text_batch_as_one_input_text,
+    )
+    r.record(
+        "normalize_provider_input_text_batch_mixed_indexes",
+        test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)

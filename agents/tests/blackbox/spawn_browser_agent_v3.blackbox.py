@@ -322,20 +322,22 @@ def test_read_browser_state_does_not_consume_step_budget():
     from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
 
     iteration, consecutive = 5, 0
-    iteration, consecutive = adjust_iteration_after_action(
+    iteration, consecutive, keystroke = adjust_iteration_after_action(
         iteration=iteration,
         action_name="read_browser_state",
         consecutive_budget_free=consecutive,
     )
     assert iteration == 4
     assert consecutive == 1
-    iteration, consecutive = adjust_iteration_after_action(
+    assert keystroke == 0
+    iteration, consecutive, keystroke = adjust_iteration_after_action(
         iteration=iteration,
         action_name="Read_Browser_State",
         consecutive_budget_free=consecutive,
     )
     assert iteration == 3
     assert consecutive == 2
+    assert keystroke == 0
 
 
 def test_read_browser_state_budget_refund_caps_consecutive_observations():
@@ -346,7 +348,7 @@ def test_read_browser_state_budget_refund_caps_consecutive_observations():
 
     iteration, consecutive = 20, 0
     for _ in range(MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS):
-        iteration, consecutive = adjust_iteration_after_action(
+        iteration, consecutive, _keystroke = adjust_iteration_after_action(
             iteration=iteration,
             action_name="read_browser_state",
             consecutive_budget_free=consecutive,
@@ -354,7 +356,7 @@ def test_read_browser_state_budget_refund_caps_consecutive_observations():
     assert iteration == 20 - MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
     assert consecutive == MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS
     # Next observation consumes budget so the loop cannot spin forever.
-    iteration, consecutive = adjust_iteration_after_action(
+    iteration, consecutive, _keystroke = adjust_iteration_after_action(
         iteration=iteration,
         action_name="read_browser_state",
         consecutive_budget_free=consecutive,
@@ -366,18 +368,130 @@ def test_read_browser_state_budget_refund_caps_consecutive_observations():
 def test_click_resets_budget_free_observation_streak():
     from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
 
-    iteration, consecutive = adjust_iteration_after_action(
+    iteration, consecutive, keystroke = adjust_iteration_after_action(
         iteration=3,
         action_name="read_browser_state",
         consecutive_budget_free=0,
     )
-    assert iteration == 2 and consecutive == 1
-    iteration, consecutive = adjust_iteration_after_action(
+    assert iteration == 2 and consecutive == 1 and keystroke == 0
+    iteration, consecutive, keystroke = adjust_iteration_after_action(
         iteration=iteration + 1,  # loop already incremented for the click turn
         action_name="click",
         consecutive_budget_free=consecutive,
     )
-    assert iteration == 3 and consecutive == 0
+    assert iteration == 3 and consecutive == 0 and keystroke == 0
+
+
+def test_single_char_input_text_continuation_does_not_consume_step_budget():
+    """065aee2c typed benchmark-human@example.com one input_text char per turn.
+
+    The browser prompt allows only one tool per turn, and input_text already
+    humanizes a full string. Counting each append against MAX_ITERATIONS made
+    a 28-character email plus message exhaust 60 steps before Submit.
+    """
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, observe, keystroke = 12, 0, 0
+    for char in "benchmark-human@example.com":
+        iteration, observe, keystroke = adjust_iteration_after_action(
+            iteration=iteration + 1,
+            action_name="input_text",
+            consecutive_budget_free=observe,
+            action_params={"text": char, "clear": False, "index": 1445},
+            consecutive_keystroke_free=keystroke,
+        )
+    assert iteration == 12
+    assert observe == 0
+    assert keystroke == len("benchmark-human@example.com")
+
+
+def test_clearing_or_multi_char_input_text_consumes_step_budget():
+    from domains.spawn_browser_agent_v3.config import adjust_iteration_after_action
+
+    iteration, observe, keystroke = adjust_iteration_after_action(
+        iteration=8,
+        action_name="input_text",
+        consecutive_budget_free=0,
+        action_params={"text": "b", "clear": True, "index": 1445},
+        consecutive_keystroke_free=0,
+    )
+    assert (iteration, observe, keystroke) == (8, 0, 0)
+
+    iteration, observe, keystroke = adjust_iteration_after_action(
+        iteration=9,
+        action_name="input_text",
+        consecutive_budget_free=0,
+        action_params={"text": "benchmark-human@example.com", "clear": False},
+        consecutive_keystroke_free=0,
+    )
+    assert (iteration, observe, keystroke) == (9, 0, 0)
+
+
+def test_keystroke_refund_caps_consecutive_single_chars():
+    from domains.spawn_browser_agent_v3.config import (
+        MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS,
+        adjust_iteration_after_action,
+    )
+
+    iteration, observe, keystroke = 200, 0, 0
+    for _ in range(MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS):
+        iteration, observe, keystroke = adjust_iteration_after_action(
+            iteration=iteration,
+            action_name="input_text",
+            consecutive_budget_free=observe,
+            action_params={"text": "a", "clear": False},
+            consecutive_keystroke_free=keystroke,
+        )
+    assert iteration == 200 - MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS
+    assert keystroke == MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS
+    iteration, observe, keystroke = adjust_iteration_after_action(
+        iteration=iteration,
+        action_name="input_text",
+        consecutive_budget_free=observe,
+        action_params={"text": "a", "clear": False},
+        consecutive_keystroke_free=keystroke,
+    )
+    assert iteration == 200 - MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS
+    assert keystroke == MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS + 1
+
+
+def test_should_skip_input_text_refocus_after_same_index_click():
+    from domains.spawn_browser_agent_v3.service_actions import (
+        should_skip_input_text_refocus,
+    )
+
+    history = SimpleNamespace(
+        get_entries=lambda: [
+            {"action": "click", "index": 1445, "result": {"success": True}},
+        ]
+    )
+    assert (
+        should_skip_input_text_refocus(
+            action_history=history,
+            index=1445,
+            coords=None,
+            clear_before_typing=False,
+        )
+        is True
+    )
+    assert (
+        should_skip_input_text_refocus(
+            action_history=history,
+            index=1445,
+            coords=None,
+            clear_before_typing=True,
+        )
+        is False
+    )
+    assert (
+        should_skip_input_text_refocus(
+            action_history=history,
+            index=1446,
+            coords=None,
+            clear_before_typing=False,
+        )
+        is False
+    )
 
 
 def test_visible_result_completion_rewrites_post_submit_wait():
@@ -14705,6 +14819,47 @@ async def test_execute_input_text_coords_no_humanizer():
         "abc",
     ]
 
+async def test_execute_input_text_skips_humanized_click_when_appending_to_same_index():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = MagicMock()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(449, 363))
+    element = MagicMock()
+    ah = MagicMock()
+    ah.get_entries = MagicMock(
+        return_value=[{"action": "click", "index": 1445, "result": {"success": True}}]
+    )
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=1445,
+            coords=None,
+            params={"text": "e", "clear": False},
+            thinking=None,
+            humanizer=hu,
+            secret_refs=None,
+            password_origins=None,
+            current_url="https://webdecoy.com/product/fcaptcha-demo/",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+    assert out["success"] is True
+    hu.click_at_coords.assert_not_awaited()
+    hu.press_key.assert_not_awaited()
+    hu.type_text.assert_awaited_once_with("e")
+
+
 async def test_execute_input_text_clear_false_does_not_clear():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -19656,6 +19811,22 @@ async def run_all_tests():
         test_click_resets_budget_free_observation_streak,
     )
     r.record(
+        "single_char_input_text_continuation_does_not_consume_step_budget",
+        test_single_char_input_text_continuation_does_not_consume_step_budget,
+    )
+    r.record(
+        "clearing_or_multi_char_input_text_consumes_step_budget",
+        test_clearing_or_multi_char_input_text_consumes_step_budget,
+    )
+    r.record(
+        "keystroke_refund_caps_consecutive_single_chars",
+        test_keystroke_refund_caps_consecutive_single_chars,
+    )
+    r.record(
+        "should_skip_input_text_refocus_after_same_index_click",
+        test_should_skip_input_text_refocus_after_same_index_click,
+    )
+    r.record(
         "visible_result_completion_rewrites_post_submit_wait",
         test_visible_result_completion_rewrites_post_submit_wait,
     )
@@ -20854,6 +21025,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_clear_false",
         test_execute_input_text_clear_false_does_not_clear,
+    )
+    await r.record_async(
+        "execute_input_text_skips_refocus_click",
+        test_execute_input_text_skips_humanized_click_when_appending_to_same_index,
     )
     await r.record_async(
         "execute_input_text_no_target_hum",

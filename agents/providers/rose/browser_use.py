@@ -1210,6 +1210,32 @@ def normalize_browser_use_tool_calls(
                 "params": {"text": "".join(keys), "clear": False},
             }
 
+        texts = [call.get("params", {}).get("text") for call in normalized_calls]
+        indexes = [call.get("index") for call in normalized_calls]
+        if (
+            normalized_calls
+            and len(set(indexes)) == 1
+            and all(
+                call.get("action") == "input_text"
+                and isinstance(text, str)
+                and len(text) == 1
+                and text.isprintable()
+                for call, text in zip(normalized_calls, texts)
+            )
+        ):
+            first_clear = normalized_calls[0].get("params", {}).get("clear")
+            return {
+                "action": "input_text",
+                "thinking": thinking,
+                "index": indexes[0],
+                "coordinates": None,
+                "element_description": None,
+                "params": {
+                    "text": "".join(str(text) for text in texts),
+                    "clear": first_clear is not False,
+                },
+            }
+
     return normalize_browser_use_tool_call(
         tool_calls[0],
         thinking=thinking,
