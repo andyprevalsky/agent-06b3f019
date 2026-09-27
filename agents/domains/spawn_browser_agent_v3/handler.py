@@ -6874,6 +6874,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
         observe_page_state: Dict[str, Any] = {}
         consecutive_budget_free = 0
+        consecutive_keystroke_free = 0
         while iteration < MAX_ITERATIONS:
             iteration += 1
             browser_activity_checkpoint(f"Step {iteration}")
@@ -9487,19 +9488,33 @@ Based on this feedback, I need to continue working on the task and address the i
 
             # Observation-only tools (read_browser_state) replaced free per-turn
             # DOM injection — refund the step so they do not burn the action
-            # budget. Cap consecutive refunds so a stuck model still terminates.
+            # budget. Single-character input_text/press_key appends are the
+            # same class: the tool already types char-by-char internally, so
+            # counting each keystroke against MAX_ITERATIONS makes ordinary
+            # form fills miss Submit (065aee2c / browser-biometrics-webdecoy).
+            # Cap consecutive refunds so a stuck model still terminates.
             prior_iteration = iteration
-            iteration, consecutive_budget_free = adjust_iteration_after_action(
-                iteration=iteration,
-                action_name=action_name,
-                consecutive_budget_free=consecutive_budget_free,
+            iteration, consecutive_budget_free, consecutive_keystroke_free = (
+                adjust_iteration_after_action(
+                    iteration=iteration,
+                    action_name=action_name,
+                    consecutive_budget_free=consecutive_budget_free,
+                    action_params=unified_action.get("params") or {},
+                    consecutive_keystroke_free=consecutive_keystroke_free,
+                )
             )
             if iteration != prior_iteration:
                 logger.info(
-                    "Observation action did not consume step budget",
+                    (
+                        "Observation action did not consume step budget"
+                        if str(action_name or "").strip().lower()
+                        == "read_browser_state"
+                        else "Keystroke continuation did not consume step budget"
+                    ),
                     action=action_name,
                     iteration=iteration,
                     consecutive_budget_free=consecutive_budget_free,
+                    consecutive_keystroke_free=consecutive_keystroke_free,
                 )
 
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)

@@ -3339,6 +3339,75 @@ async def _clear_input_with_events(session: Any) -> None:
         await event.event_result(raise_if_any=True, raise_if_none=False)
 
 
+def _action_history_entries(action_history: Any) -> List[Dict[str, Any]]:
+    getter = getattr(action_history, "get_entries", None)
+    if callable(getter):
+        listed = getter()
+        if isinstance(listed, list):
+            entries: List[Dict[str, Any]] = []
+            for item in listed:
+                if isinstance(item, dict):
+                    entries.append(item)
+                elif hasattr(item, "to_dict"):
+                    converted = item.to_dict()
+                    if isinstance(converted, dict):
+                        entries.append(converted)
+            return entries
+    raw = getattr(action_history, "_entries", None)
+    if isinstance(raw, list):
+        entries = []
+        for item in raw:
+            if isinstance(item, dict):
+                entries.append(item)
+            elif hasattr(item, "to_dict"):
+                converted = item.to_dict()
+                if isinstance(converted, dict):
+                    entries.append(converted)
+        return entries
+    return []
+
+
+def should_skip_input_text_refocus(
+    *,
+    action_history: Any,
+    index: Any,
+    coords: Any,
+    clear_before_typing: bool,
+) -> bool:
+    """Skip a second humanized click when appending into an already-focused field.
+
+    Indexed ``input_text`` used to click before every character. One-character
+    follow-ups with ``clear=false`` therefore paid a full mouse move per
+    keystroke and exhausted the 60-step / 420s webdecoy budget before Submit.
+    """
+    if clear_before_typing:
+        return False
+    entries = _action_history_entries(action_history)
+    if not entries:
+        return False
+    last = entries[-1]
+    last_action = str(last.get("action") or "").strip().lower()
+    if last_action not in {"click", "input_text"}:
+        return False
+    last_result = last.get("result") or {}
+    if isinstance(last_result, dict) and last_result.get("success") is False:
+        return False
+    if index is not None and last.get("index") is not None:
+        try:
+            return int(last["index"]) == int(index)
+        except (TypeError, ValueError):
+            return False
+    last_coords = last.get("coordinates")
+    if isinstance(coords, dict) and isinstance(last_coords, dict):
+        try:
+            return int(last_coords["x"]) == int(coords["x"]) and int(last_coords["y"]) == int(
+                coords["y"]
+            )
+        except (TypeError, ValueError, KeyError):
+            return False
+    return False
+
+
 async def _execute_indexed_input_text(
     *,
     session: Any,
@@ -3394,7 +3463,14 @@ async def _execute_indexed_input_text(
             "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
         }
     if humanizer:
-        await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+        skip_refocus = should_skip_input_text_refocus(
+            action_history=action_history,
+            index=index,
+            coords=element_coords,
+            clear_before_typing=clear_before_typing,
+        )
+        if not skip_refocus:
+            await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
         if clear_before_typing:
             await humanizer.press_key("Control+a")
             await humanizer.press_key("Backspace")
@@ -3437,7 +3513,14 @@ async def _execute_coordinate_input_text(
     x, y = int(coords["x"]), int(coords["y"])
     asyncio.create_task(session.highlight_coordinate_click(x, y))
     if humanizer:
-        await humanizer.click_at_coords(x, y)
+        skip_refocus = should_skip_input_text_refocus(
+            action_history=action_history,
+            index=None,
+            coords=coords,
+            clear_before_typing=clear_before_typing,
+        )
+        if not skip_refocus:
+            await humanizer.click_at_coords(x, y)
         if clear_before_typing:
             await humanizer.press_key("Control+a")
             await humanizer.press_key("Backspace")

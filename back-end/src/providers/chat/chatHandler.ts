@@ -50,6 +50,7 @@ import {
   generateStreamId,
 } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
+import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
 import {
   createEarlyDirectGeneratorCoordinator,
@@ -161,23 +162,25 @@ export async function handleChatMessage(config: {
       where: { id: config.agentId },
       include: { verifier: true },
     });
-    await createMessage({
-      agentId: config.agentId,
-      role: 'ASSISTANT',
-      text: decision.reasoning,
-    });
-    await createMessage({
-      agentId: config.agentId,
-      role: 'TOOL',
-      text: '',
-      skipDuplicateToolCheck: true,
-      metadata: {
-        toolCallId: cloudAgentToolCallId,
-        toolName: CLOUD_AGENT_TOOL_NAME,
-        toolStatus: 'IN_PROGRESS',
-        title: CREATING_CLOUD_AGENT_TITLE,
-        startPhase: decision.mode,
-      },
+    await withChatEscalationDeadline(async () => {
+      await createMessage({
+        agentId: config.agentId,
+        role: 'ASSISTANT',
+        text: decision.reasoning,
+      });
+      await createMessage({
+        agentId: config.agentId,
+        role: 'TOOL',
+        text: '',
+        skipDuplicateToolCheck: true,
+        metadata: {
+          toolCallId: cloudAgentToolCallId,
+          toolName: CLOUD_AGENT_TOOL_NAME,
+          toolStatus: 'IN_PROGRESS',
+          title: CREATING_CLOUD_AGENT_TITLE,
+          startPhase: decision.mode,
+        },
+      });
     });
 
     let started: boolean;

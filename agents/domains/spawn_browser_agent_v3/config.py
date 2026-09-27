@@ -4,6 +4,7 @@ Constants, defaults, and environment reads.
 """
 
 import os
+from typing import Any, Mapping, Optional
 
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 
@@ -183,6 +184,35 @@ BUDGET_FREE_BROWSER_ACTIONS = frozenset({"read_browser_state"})
 MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS = int(
     os.getenv("BROWSER_MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS", "5")
 )
+# The browser loop is one planner tool per turn. When the model types a form
+# "character by character" (task language + input_text already humanizes a
+# full string internally), each keystroke used to consume MAX_ITERATIONS.
+# Smoke agent 065aee2c hit max steps mid-message on webdecoy before Submit.
+# Refund single-character appends so a field fill is one logical action.
+MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS = int(
+    os.getenv("BROWSER_MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS", "128")
+)
+
+
+def _single_printable_char(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 1 and value.isprintable()
+
+
+def is_keystroke_continuation_action(
+    action_name: str,
+    action_params: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """True for a one-character append into an already-focused field."""
+    name = str(action_name or "").strip().lower()
+    params = action_params if isinstance(action_params, Mapping) else {}
+    if name == "input_text":
+        if params.get("clear", True) is not False:
+            return False
+        return _single_printable_char(params.get("text"))
+    if name == "press_key":
+        key = params.get("key", params.get("keys"))
+        return _single_printable_char(key)
+    return False
 
 
 def adjust_iteration_after_action(
@@ -190,20 +220,27 @@ def adjust_iteration_after_action(
     iteration: int,
     action_name: str,
     consecutive_budget_free: int,
-) -> tuple[int, int]:
-    """Refund a step budget unit for observation-only tools.
+    action_params: Optional[Mapping[str, Any]] = None,
+    consecutive_keystroke_free: int = 0,
+) -> tuple[int, int, int]:
+    """Refund a step budget unit for observation-only and keystroke tools.
 
-    Returns ``(new_iteration, new_consecutive_budget_free)``. After
-    ``MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS`` observation-only calls in a row,
-    further observations consume budget so the loop still terminates.
+    Returns ``(new_iteration, new_consecutive_budget_free,
+    new_consecutive_keystroke_free)``. After the matching consecutive cap,
+    further calls consume budget so the loop still terminates.
     """
     name = str(action_name or "").strip().lower()
     if name in BUDGET_FREE_BROWSER_ACTIONS:
         consecutive = int(consecutive_budget_free) + 1
         if consecutive <= MAX_CONSECUTIVE_BUDGET_FREE_ACTIONS:
-            return max(0, int(iteration) - 1), consecutive
-        return int(iteration), consecutive
-    return int(iteration), 0
+            return max(0, int(iteration) - 1), consecutive, 0
+        return int(iteration), consecutive, 0
+    if is_keystroke_continuation_action(name, action_params):
+        consecutive_keystroke = int(consecutive_keystroke_free) + 1
+        if consecutive_keystroke <= MAX_CONSECUTIVE_KEYSTROKE_CONTINUATIONS:
+            return max(0, int(iteration) - 1), 0, consecutive_keystroke
+        return int(iteration), 0, consecutive_keystroke
+    return int(iteration), 0, 0
 
 # Verifier DOM checkpoints retained across the browser activity (evaluate
 # always-on preserved_evidence + pre-write approval snapshots). Bounded so
