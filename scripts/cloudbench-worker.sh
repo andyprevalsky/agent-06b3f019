@@ -18,6 +18,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# Own bootstrap as well as the final worker, so failed starts retain their logs.
+if [ "${CLOUDBENCH_WORKER_SUPERVISED:-}" != "1" ]; then
+    exec python3 "${CLOUDBENCH_WORKER_EVIDENCE_HELPER:?worker evidence helper required}" \
+        run --run-token "${CLOUDBENCH_WORKER_RUN_TOKEN:?worker run token required}" \
+        --machine-id "${CLOUDBENCH_WORKER_MACHINE_ID:?worker machine identity required}" \
+        -- bash "${BASH_SOURCE[0]}" "$@"
+fi
+
 REPO_DIR="/data/repo"
 APP_USER="rose"
 CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

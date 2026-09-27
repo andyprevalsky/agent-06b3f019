@@ -3019,7 +3019,9 @@ sleep() {{ :; }}
 {reap}
 {cleanup}
 {provision}
-provision_worker bench workspace primary fd00::1 0 "$OUT"
+cloudbench_record_worker_evidence_owner() {{ :; }}
+cloudbench_capture_worker_runtime_evidence() {{ :; }}
+provision_worker bench workspace primary fd00::1 0 "$OUT" exact-run-token
 wait || true
 test -s "$OUT/worker-abc123.stage.log"
 if [ "$MODE" = upload-and-reap-failure ] || [ "$MODE" = upload-and-status-failure ]; then
@@ -3342,7 +3344,9 @@ reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
 {provision}
-provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+cloudbench_record_worker_evidence_owner() {{ :; }}
+cloudbench_capture_worker_runtime_evidence() {{ :; }}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
 exit $?
 """
 
@@ -3611,7 +3615,9 @@ reap_machine() {{ printf '%s\n' "$1" > {shlex.quote(str(reaped))}; }}
 fleet_registry_release_id() {{ return 0; }}
 {cleanup}
 {provision}
-provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+cloudbench_record_worker_evidence_owner() {{ :; }}
+cloudbench_capture_worker_runtime_evidence() {{ :; }}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
 rc=$?
 test "$rc" -ne 0
 test ! -s {shlex.quote(str(output / "worker-clones.ids"))}
@@ -4685,7 +4691,9 @@ BENCH_REF=test-ref
 FLEET_WORKER_VM_SIZE=shared-cpu-2x
 FLEET_WORKER_VM_MEMORY=4096
 {provision_worker}
-provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+cloudbench_record_worker_evidence_owner() {{ :; }}
+cloudbench_capture_worker_runtime_evidence() {{ :; }}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
 """
 
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
@@ -4815,7 +4823,9 @@ fly_with_timeout() {{
 sleep() {{ :; }}
 {token_helper}
 {provision}
-provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+cloudbench_record_worker_evidence_owner() {{ :; }}
+cloudbench_capture_worker_runtime_evidence() {{ :; }}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))} exact-run-token
 deadline=$((SECONDS + 5))
 while [ ! -e {shlex.quote(str(output / "worker-feedface000001.ready"))} ] && [ "$SECONDS" -lt "$deadline" ]; do
   sleep 0.05
@@ -19377,6 +19387,12 @@ TIMED_OUT=1
 FINISHED=0
 BENCH_EXIT=''
 FLEET_MACHINE_ID=fixture-machine
+LOCAL_STATUS_PORT=1
+RUN_LOG_TOKEN=run-token
+cloudbench_skip_held_driver_teardown_race() {{ return 1; }}
+# This fixture owns shutdown/run extraction. The adjacent real HTTP fixture
+# exercises the complete raw-log transport.
+cloudbench_collect_runtime_evidence() {{ return 0; }}
 confirm_guest_shutdown() {{
   printf '%s\\n' shutdown > "$ROOT_DIR/order"
   printf '%s\\n' 'RUNSTAMP-run-token' 'RESULT-BEGIN' \\
@@ -19420,6 +19436,242 @@ def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None
     assert 'CARD_JSON="$(awk' in collection
     assert 'RUN_JSON="$(awk' in collection
     assert "Never re-enter Machines-API SSH after DONE" in collection
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-worker", "missing-backend", "auth", "run", "machine", "unsealed", "symlink", "oversize", "fifo", "stack-token", "stack-state", "extra-worker", "hash", "length", "manifest-drift", "short-read", "early-driver", "missing-owner", "wrong-owner", "result-mismatch", "standalone", "durability", "directory-fsync", "infra-probe", "held-demo"])
+def test_boot_terminal_runtime_evidence_collects_complete_logs(tmp_path: Path, fault: str) -> None:
+    """A terminal FAILED task still needs every raw worker/backend log before destruction."""
+    guest = tmp_path / "guest"
+    context = guest / "repo/.context/cloudbench"
+    logs = context / "logs"
+    logs.mkdir(parents=True)
+    (context / "services.json").write_text(json.dumps({"status": "stopped", "env": {"worker_processes": 2}}))
+    (context / "run.json").write_text(json.dumps({"run_id": "fixture-run", "tasks": [{"name": "fixture", "agent_id": "fixture-root", "benchmark_status": "FAILED", "passed": False}]}))
+    (context / "stack.log").write_text("services stopped\n")
+    (context / "cloudbench-stack-cleanup-run-token.status").write_text("state=clean\ntoken=run-token\n")
+    (guest / "cloudbench-driver-clean-run-token.ack").write_text("run-token\n")
+    (guest / "cloudbench-driver.state").write_text("exited\n")
+    original = {"backend.log": b"backend complete\n", "worker.log": b"normal cancellation acknowledged\n", "worker.1.log": "last worker — complete\n".encode()}
+    for name, data in original.items():
+        (logs / name).write_bytes(data)
+    if fault == "early-driver":
+        (context / "run.json").unlink()
+    elif fault == "missing-worker":
+        (logs / "worker.1.log").unlink()
+    elif fault == "missing-backend":
+        (logs / "backend.log").unlink()
+    elif fault in {"unsealed", "infra-probe", "held-demo"}:
+        (guest / "cloudbench-driver.state").write_text("running\n")
+    elif fault == "symlink":
+        (logs / "worker.1.log").unlink()
+        (logs / "worker.1.log").symlink_to(logs / "worker.log")
+    elif fault == "oversize":
+        with (logs / "worker.1.log").open("wb") as handle:
+            handle.truncate(512 * 1024 * 1024 + 1)
+    elif fault == "fifo":
+        (logs / "worker.1.log").unlink()
+        os.mkfifo(logs / "worker.1.log")
+    elif fault.startswith("stack-"):
+        state, token = ("failed", "run-token") if fault == "stack-state" else ("clean", "foreign-token")
+        (context / "cloudbench-stack-cleanup-run-token.status").write_text(f"state={state}\ntoken={token}\n")
+    elif fault == "extra-worker":
+        (logs / "worker.2.log").write_text("unexpected worker\n")
+    ready = guest / "port"
+    output = tmp_path / "out"
+    output.mkdir()
+    driver = tmp_path / "driver.log"
+    driver.write_text("terminal driver\n")
+    environment = {**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "secret-fixture", "FLY_MACHINE_ID": "fixture-machine"}
+    if fault in {"durability", "directory-fsync"}:
+        injection = tmp_path / "injection"
+        injection.mkdir()
+        (injection / "sitecustomize.py").write_text("""
+import os
+from pathlib import Path
+original_open, original_close, original_fsync = os.open, os.close, os.fsync
+opened = {}
+def observed_open(path, *args, **kwargs):
+    descriptor = original_open(path, *args, **kwargs)
+    if isinstance(path, (str, bytes, os.PathLike)):
+        opened[descriptor] = os.fsdecode(path)
+    return descriptor
+def observed_close(descriptor):
+    opened.pop(descriptor, None)
+    return original_close(descriptor)
+def observed_fsync(descriptor):
+    path = opened.get(descriptor)
+    if path and Path(path).is_dir():
+        with open(os.environ["SYNC_EVENTS"], "a") as log:
+            log.write(str(path) + "\\n")
+        if Path(path).name == "logs" and os.environ["SYNC_FAILURE"] == "1":
+            raise OSError("injected directory fsync failure")
+    return original_fsync(descriptor)
+os.open, os.close, os.fsync = observed_open, observed_close, observed_fsync
+""")
+        environment.update(PYTHONPATH=str(injection), SYNC_EVENTS=str(tmp_path / "sync-events"),
+                           SYNC_FAILURE=str(int(fault == "directory-fsync")))
+    launcher = [sys.executable, str(STATUS_SERVER_SCRIPT)]
+    if fault in {"hash", "length", "manifest-drift", "short-read"}:
+        # Keep the real status server; alter only its outgoing response boundary.
+        launcher = [sys.executable, "-c", f'''
+import importlib.util
+spec = importlib.util.spec_from_file_location("status", {str(STATUS_SERVER_SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original = getattr(module, "runtime_evidence_manifest", None)
+calls = 0
+def manifest(*args):
+    global calls
+    calls += 1
+    value = original(*args)
+    if {fault!r} == "hash": value["files"]["logs/worker.1.log"]["sha256"] = "0" * 64
+    if {fault!r} == "length": value["files"]["logs/worker.1.log"]["bytes"] += 1
+    if {fault!r} == "manifest-drift" and calls > 1: value["files"]["logs/worker.1.log"]["sha256"] = "1" * 64
+    return value
+module.runtime_evidence_manifest = manifest
+server = module.ThreadingHTTPServer
+def create_server(address, handler):
+    class Partial(handler):
+        def _serve_recovery_evidence(self, target, maximum):
+            if {fault!r} == "short-read" and target.name == "worker.1.log":
+                self.send_response(200)
+                self.send_header("Content-Length", str(target.stat().st_size))
+                self.end_headers()
+                self.wfile.write(b"partial")
+                self.close_connection = True
+            else: super()._serve_recovery_evidence(target, maximum)
+    return server(address, Partial)
+module.ThreadingHTTPServer = create_server
+raise SystemExit(module.main())
+''']
+    with (tmp_path / "server.log").open("w") as server_log:
+        process = subprocess.Popen([*launcher, "--directory", str(guest), "--port", "0", "--bind", "127.0.0.1", "--run-token", "run-token", "--ready-file", str(ready)], env=environment, stdout=server_log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                assert process.poll() is None, (tmp_path / "server.log").read_text()
+                assert time.monotonic() < deadline, "status server readiness timeout"
+                time.sleep(0.01)
+            cloud = CLOUD_SCRIPT.read_text()
+            block = cloud[cloud.index("# Preserve the complete remote driver") : cloud.index("# ── 5. Retrieve report-card.json")]
+            binding = ""
+            if fault in {"none", "standalone", "durability", "result-mismatch"}:
+                begin = cloud.index('    if python3 "$CLOUDBENCH_RESULT_SCRIPT" "$candidate_run"')
+                binding = cloud[cloud.index('        if [ "${CLOUDBENCH_BOOT_LAUNCH', begin) : cloud.index('        RUN_IDENTITY_OK="1"', begin)] if 'raw runtime evidence does not match' in cloud else ""
+                candidate = output / "candidate.json"
+                candidate.write_bytes((context / "run.json").read_bytes() if fault in {"none", "standalone", "durability"} else b'{"run_id":"wrong"}')
+            owner_fault = ""
+            if fault == "missing-owner":
+                owner_fault = 'rm -f "$OUT_DIR/runtime-evidence.owner.json"'
+            elif fault == "wrong-owner":
+                owner_fault = "printf '%s' '" + json.dumps({"version": 1, "run_token": "foreign", "machine_id": "fixture-machine"}) + "' > \"$OUT_DIR/runtime-evidence.owner.json\""
+            script = f'''set -euo pipefail
+OUT_DIR={shlex.quote(str(output))}
+SSH_LOG={shlex.quote(str(driver))}
+CLOUDBENCH_BOOT_LAUNCH=1
+CLOUDBENCH_INFRA_PROBE={int(fault == 'infra-probe')}
+CLOUDBENCH_SKIP_AUTOSCALER={int(fault == 'held-demo')}
+TIMED_OUT=0
+FINISHED=1
+BENCH_EXIT=1
+RUN_LOG_TOKEN={'wrong-run' if fault == 'run' else 'run-token'}
+FLEET_MACHINE_ID={'wrong-machine' if fault == 'machine' else ('' if fault == 'standalone' else 'fixture-machine')}
+mid=fixture-machine
+LOCAL_STATUS_PORT={int(ready.read_text())}
+export CLOUDBENCH_BARRIER_TOKEN={'wrong-secret' if fault == 'auth' else 'secret-fixture'}
+ssh_read() {{ echo 'unexpected SSH' >&2; return 99; }}
+{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
+{_extract_fleet_function(cloud, 'cloudbench_collect_runtime_evidence() {') if 'cloudbench_collect_runtime_evidence() {' in cloud else ''}
+{_extract_fleet_function(cloud, 'cloudbench_prepare_runtime_evidence() {') if 'cloudbench_prepare_runtime_evidence() {' in cloud else 'cloudbench_prepare_runtime_evidence() { return 0; }'}
+cloudbench_prepare_runtime_evidence
+{owner_fault}
+{block}
+candidate_run="$OUT_DIR/candidate.json"
+{binding}
+'''
+            result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=15)
+            manifest_path = output / "remote-logs/runtime-evidence/manifest.json"
+            assert (output / "remote-logs/cloudbench-driver.log").read_bytes() == driver.read_bytes()
+            if fault in {"infra-probe", "held-demo"}:
+                assert result.returncode == 0, result.stderr
+                assert not manifest_path.exists()
+                return
+            if fault not in {"none", "standalone", "durability"}:
+                assert result.returncode != 0, "incomplete runtime evidence was accepted"
+                if fault == "result-mismatch":
+                    assert manifest_path.exists(), "raw capture itself should be complete"
+                else:
+                    assert not manifest_path.exists(), "failed capture published a complete manifest"
+                intent = json.loads((output / "runtime-evidence.pending").read_text())
+                assert intent == {"version": 1, "run_token": "wrong-run" if fault == "run" else "run-token", "machine_id": "wrong-machine" if fault == "machine" else "fixture-machine"}
+                return
+            assert result.returncode == 0, result.stderr
+            if fault == "durability":
+                synced = [Path(line).name for line in (tmp_path / "sync-events").read_text().splitlines()]
+                staged = [name for name in synced if name.startswith(".runtime-evidence-")]
+                assert "logs" in synced and staged, "capture directories were not made durable before acknowledgement"
+                assert synced.index("logs") < synced.index(staged[0]) < synced.index("remote-logs")
+            assert not (output / "runtime-evidence.pending").exists()
+            assert json.loads((output / "runtime-evidence.owner.json").read_text()) == {"version": 1, "run_token": "run-token", "machine_id": "fixture-machine"}
+            assert manifest_path.is_file(), "boot collector omitted complete runtime evidence"
+            manifest = json.loads(manifest_path.read_text())
+            assert manifest["run_token"] == "run-token" and manifest["machine_id"] == "fixture-machine"
+            for name, data in original.items():
+                copied = manifest_path.parent / "logs" / name
+                assert copied.read_bytes() == data
+                assert manifest["files"]["logs/" + name] == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            assert json.loads((manifest_path.parent / "run.json").read_text())["tasks"][0]["benchmark_status"] == "FAILED"
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("prior", ["none", "foreign", "symlink", "foreign-owner", "symlink-owner"])
+def test_boot_terminal_runtime_evidence_admission_precedes_guest_start(tmp_path: Path, prior: str) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    marker = tmp_path / "runtime-evidence.pending"
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text('{"run_token":"foreign"}\n')
+    owner = tmp_path / "runtime-evidence.owner.json"
+    prior_path = owner if prior.endswith("-owner") else marker
+    if prior.startswith("foreign"):
+        prior_path.write_bytes(foreign.read_bytes())
+    elif prior.startswith("symlink"):
+        prior_path.symlink_to(foreign)
+    prepare = (
+        _extract_fleet_function(cloud, "cloudbench_prepare_runtime_evidence() {")
+        if "cloudbench_prepare_runtime_evidence() {" in cloud
+        else "cloudbench_prepare_runtime_evidence() { return 0; }"
+    )
+    script = f"""set -euo pipefail
+OUT_DIR={shlex.quote(str(tmp_path))}
+RUN_LOG_TOKEN=run-token
+FLEET_MACHINE_ID=fixture-machine
+CLOUDBENCH_BOOT_LAUNCH=1
+unset CLOUDBENCH_BARRIER_TOKEN
+{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
+{prepare}
+cloudbench_prepare_runtime_evidence || exit 70
+python3 -c 'import os,re; assert re.fullmatch("[0-9a-f]{{64}}", os.environ.get("CLOUDBENCH_BARRIER_TOKEN", ""))'
+touch "$OUT_DIR/guest-started"
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=5)
+    if prior != "none":
+        assert result.returncode == 70
+        assert not (tmp_path / "guest-started").exists()
+        assert prior_path.read_bytes() == foreign.read_bytes()
+        return
+    assert result.returncode == 0, result.stderr
+    assert json.loads(marker.read_text()) == {"version": 1, "run_token": "run-token", "machine_id": "fixture-machine"}
+    assert json.loads(owner.read_text()) == json.loads(marker.read_text())
+    assert (tmp_path / "guest-started").exists()
+    call = cloud.index('cloudbench_prepare_runtime_evidence ||')
+    assert call < cloud.index('POST_CONFIG_START_MARKER=', call)
 
 
 def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:

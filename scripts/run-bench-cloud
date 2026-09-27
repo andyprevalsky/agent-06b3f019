@@ -3188,6 +3188,147 @@ confirm_guest_shutdown() {
     echo "❌ guest cleanup was not acknowledged; machine ownership must be retained (HTTP ${status_code:-transport-error})" >&2
     return 1
 }
+cloudbench_prepare_runtime_evidence() {  # before boot config/start; no guest work admitted on failure
+    [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] || return 0
+    cloudbench_skip_held_driver_teardown_race && return 0
+    # Fleet supplies its shared credential; a standalone boot run owns a fresh
+    # credential for the same authenticated status endpoint before guest config.
+    if [ -z "${CLOUDBENCH_BARRIER_TOKEN:-}" ]; then
+        CLOUDBENCH_BARRIER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" || return 1
+    fi
+    export CLOUDBENCH_BARRIER_TOKEN
+    python3 - "$OUT_DIR" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import sys
+os.umask(0o077)
+output_dir, run_token, machine = sys.argv[1:]
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+intent = Path(output_dir) / "runtime-evidence.pending"
+# The fleet owns deletion. Keep this independent of a truthful guest cleanup
+# acknowledgement: failed collection must retain the original volume.
+owner = intent.with_name("runtime-evidence.owner.json")
+row = {"version": 1, "run_token": run_token, "machine_id": machine}
+for path in (owner, intent):
+    with path.open("x") as output:
+        json.dump(row, output, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+descriptor = os.open(intent.parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+}
+
+cloudbench_collect_runtime_evidence() {  # <destination> <port> <run-token> <machine> <deadline>
+    python3 - "$@" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+
+destination, port, run_token, machine, deadline = sys.argv[1:]
+os.umask(0o077)
+assert port.isascii() and port.isdigit() and 1 <= int(port) <= 65535
+assert deadline.isascii() and deadline.isdigit() and int(deadline) > 0
+assert re.fullmatch(r"[A-Za-z0-9._-]+", run_token) and machine
+maximum = 512 * 1024 * 1024
+parent = Path(destination)
+intent = parent.parent / "runtime-evidence.pending"
+owner = intent.with_name("runtime-evidence.owner.json")
+for path in (owner, intent):
+    assert not path.is_symlink() and path.is_file()
+    assert json.loads(path.read_text()) == {"version": 1, "run_token": run_token, "machine_id": machine}
+def timed_out(_signum, _frame):
+    raise TimeoutError("terminal runtime evidence deadline expired")
+signal.signal(signal.SIGALRM, timed_out)
+signal.alarm(int(deadline))
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
+           "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
+url = f"http://127.0.0.1:{port}/runtime-evidence"
+def request(suffix=""):
+    return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=6)
+def manifest():
+    with request() as response:
+        data = response.read(1048577)
+        assert len(data) <= 1048576 and response.status == 200
+        return json.loads(data)
+expected = manifest()
+assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
+files = expected["files"]
+required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
+assert isinstance(files, dict) and required <= files.keys() and len(files) <= 1030
+total = 0
+for name, metadata in files.items():
+    assert name in required or re.fullmatch(r"logs/worker(?:\.[1-9][0-9]*)?\.log", name)
+    assert set(metadata) == {"bytes", "sha256"}
+    assert type(metadata["bytes"]) is int and metadata["bytes"] >= 0
+    assert re.fullmatch(r"[0-9a-f]{64}", metadata["sha256"])
+    total += metadata["bytes"]
+assert total <= maximum
+final = parent / "runtime-evidence"
+assert not final.exists() and not final.is_symlink()
+pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
+for name, metadata in files.items():
+    target = pending / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    remaining = metadata["bytes"]
+    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+        while remaining:
+            chunk = response.read(min(65536, remaining))
+            assert chunk, "runtime evidence response ended early"
+            output.write(chunk)
+            digest.update(chunk)
+            remaining -= len(chunk)
+        assert not response.read(1), "runtime evidence response exceeded manifest"
+        output.flush()
+        os.fsync(output.fileno())
+    assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
+services = json.loads((pending / "services.json").read_text())
+count = services["env"]["worker_processes"]
+assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
+assert set(files) == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
+assert manifest() == expected, "runtime evidence changed across collection"
+with (pending / "manifest.json").open("x") as output:
+    json.dump(expected, output, sort_keys=True)
+    output.write("\n")
+    output.flush()
+    os.fsync(output.fileno())
+# Persist child directory entries before acknowledging the published capture.
+# File fsync alone does not make their names durable across controller failure.
+for directory in (pending / "logs", pending):
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+pending.rename(final)
+descriptor = os.open(parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+signal.alarm(0)
+PY
+}
+
 stop_on_exit() {
     local ec=$?
     release_boot_config_update_slot
@@ -3331,6 +3472,9 @@ LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
 
+# Persist capture authority before boot configuration can launch guest writers.
+# A crash anywhere after admission leaves exact evidence ownership recoverable.
+cloudbench_prepare_runtime_evidence || { echo "❌ could not persist runtime evidence ownership" >&2; exit 70; }
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
@@ -4835,6 +4979,18 @@ if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
 fi
 mkdir -p "$OUT_DIR/remote-logs"
 cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
+    # The driver waits for run.sh's stopped/clean receipt before ACK; the boot
+    # supervisor then seals exited. Read raw logs only across that boundary,
+    # through the existing data plane, before the EXIT trap destroys the guest.
+    # Agent-filtered run JSON rows are capped and cannot replace these files.
+    if ! cloudbench_collect_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
+        "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}"
+    then
+        echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
+        exit 70
+    fi
+fi
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
     for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
         local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
@@ -4892,6 +5048,31 @@ if [ -n "$RUN_JSON" ]; then
         )
     fi
     if python3 "$CLOUDBENCH_RESULT_SCRIPT" "$candidate_run" "${validation_args[@]}"; then
+        if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
+            if ! python3 - "$candidate_run" "$OUT_DIR/remote-logs/runtime-evidence/run.json" \
+                "$OUT_DIR/runtime-evidence.pending" "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+candidate, captured, pending, run_token, machine = sys.argv[1:]
+assert json.loads(Path(candidate).read_bytes()) == json.loads(Path(captured).read_bytes()), "runtime evidence belongs to a different result"
+intent = Path(pending)
+for path in (intent, intent.with_name("runtime-evidence.owner.json")):
+    assert path.is_file() and not path.is_symlink()
+    assert json.loads(path.read_text()) == {"version": 1, "run_token": run_token, "machine_id": machine}
+intent.unlink()
+descriptor = os.open(intent.parent, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+            then
+                echo "❌ raw runtime evidence does not match the terminal result -- infrastructure failure" >&2
+                exit 70
+            fi
+        fi
         RUN_IDENTITY_OK="1"
     else
         echo "❌ Rejected stale or mismatched cloud benchmark artifact."

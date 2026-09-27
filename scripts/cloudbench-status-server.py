@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -24,6 +25,75 @@ BENCH_LOG_ANCHOR_BYTES = 4_096
 MAX_RECOVERY_RECEIPT_BYTES = 65_536
 MAX_RECOVERY_STATE_BYTES = 1_048_576
 MAX_RECOVERY_RUN_BYTES = 512 * 1024 * 1024
+
+
+def read_runtime_metadata(path: Path, maximum: int) -> bytes:
+    if path.resolve(strict=True) != path:
+        raise ValueError("unsafe runtime metadata")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise ValueError("unsafe or oversized runtime metadata")
+        data = source.read(before.st_size + 1)
+        after = path.stat()
+        if len(data) != before.st_size or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise ValueError("runtime metadata changed")
+        return data
+
+
+def runtime_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
+    """Enumerate the complete stopped stack, never a capped agent-filtered view."""
+    context = root / "repo/.context/cloudbench"
+    service_path = context / "services.json"
+    services = json.loads(read_runtime_metadata(service_path, MAX_RECOVERY_STATE_BYTES))
+    count = services["env"]["worker_processes"]
+    if services["status"] != "stopped" or type(count) is not int or not 1 <= count <= 1024:
+        raise ValueError("stack is not stopped or worker inventory is invalid")
+    names = {"worker.log", *(f"worker.{i}.log" for i in range(1, count))}
+    if {p.name for p in (context / "logs").glob("worker*.log")} != names:
+        raise ValueError("worker log inventory is incomplete")
+    cleanup_name = f"cloudbench-stack-cleanup-{run_token}.status"
+    paths = {name: context / name for name in ["services.json", "run.json", "stack.log", cleanup_name, "logs/backend.log", *("logs/" + n for n in sorted(names))]}
+    total = 0
+    for path in paths.values():
+        info = path.lstat()
+        if path.resolve(strict=True) != path or not stat.S_ISREG(info.st_mode):
+            raise ValueError("unsafe runtime evidence")
+        total += info.st_size
+    if total > MAX_RECOVERY_RUN_BYTES:
+        raise ValueError("runtime evidence exceeds recovery byte ceiling")
+    cleanup = dict(line.split("=", 1) for line in read_runtime_metadata(paths[cleanup_name], MAX_RECOVERY_RECEIPT_BYTES).decode().splitlines())
+    if cleanup.get("state") != "clean" or cleanup.get("token") != run_token:
+        raise ValueError("stack cleanup is not acknowledged")
+    return paths
+
+
+def runtime_evidence_manifest(root: Path, run_token: str, machine: str) -> dict:
+    paths = runtime_evidence_paths(root, run_token)
+    files = {}
+    for name, path in paths.items():
+        before = path.stat()
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                raise ValueError("runtime evidence changed before read")
+            digest = hashlib.sha256()
+            remaining = opened.st_size
+            while remaining:
+                block = source.read(min(65_536, remaining))
+                if not block:
+                    raise ValueError("runtime evidence ended early")
+                digest.update(block)
+                remaining -= len(block)
+            after = path.stat()
+            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                raise ValueError("runtime evidence changed during read")
+        files[name] = {"bytes": opened.st_size, "sha256": digest.hexdigest()}
+    if runtime_evidence_paths(root, run_token) != paths:
+        raise ValueError("runtime inventory changed")
+    return {"version": 1, "run_token": run_token, "machine_id": machine, "files": files}
 
 
 def parse_args() -> argparse.Namespace:
@@ -186,6 +256,37 @@ def main() -> int:
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
+            if parsed.path == "/runtime-evidence":
+                supplied = self.headers.get("Authorization", "")
+                if not token or not hmac.compare_digest(supplied, f"Bearer {token}"):
+                    self.send_error(403)
+                    return
+                machine = os.environ.get("FLY_MACHINE_ID", "")
+                if (not run_token or not machine
+                    or self.headers.get("X-Cloudbench-Run-Token") != run_token
+                    or self.headers.get("X-Cloudbench-Machine-Id") != machine
+                    or not cleanup_acknowledged() or read_driver_state() != "exited"):
+                    self.send_error(409, "exact runtime is not sealed")
+                    return
+                try:
+                    parameters = parse_qs(parsed.query, keep_blank_values=True)
+                    if parameters:
+                        if set(parameters) != {"file"} or len(parameters["file"]) != 1:
+                            raise ValueError("invalid runtime evidence request")
+                        paths = runtime_evidence_paths(root, run_token)
+                        target = paths[parameters["file"][0]]
+                        self._serve_recovery_evidence(target, MAX_RECOVERY_RUN_BYTES)
+                    else:
+                        data = json.dumps(runtime_evidence_manifest(root, run_token, machine), sort_keys=True).encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        self.wfile.write(data)
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.send_error(409, "runtime evidence is incomplete or changed")
+                return
             # SimpleHTTPRequestHandler URL-decodes and normalizes dot segments
             # before static serving. Apply the bounded protocol to the resolved
             # target, not the spelling, so aliases (including symlinks) cannot
@@ -329,7 +430,7 @@ def main() -> int:
             if metadata.st_size > maximum:
                 self.send_error(413, "exact recovery evidence is oversized")
                 return
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
             try:
                 descriptor = os.open(resolved, flags)
             except OSError:

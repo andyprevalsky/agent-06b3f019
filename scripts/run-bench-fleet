@@ -656,6 +656,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-boot-payload.py" \
        "$ROOT_DIR/scripts/cloudbench-run.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
+       "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-prisma-client.sh" \
@@ -2054,10 +2055,233 @@ registry_meta_value() {  # registry_meta_value <meta-file> <key>
     sed -n "s/^${key}=//p" "$meta" 2>/dev/null | head -1
 }
 
+cloudbench_record_worker_evidence_owner() {  # <out> <worker> <primary> <run-token> <workspace>
+    python3 - "$@" <<'PY'
+import json, os, re, sys
+from pathlib import Path
+out, machine, primary, token, workspace = sys.argv[1:]
+assert re.fullmatch(r"[0-9a-f]+", machine)
+assert re.fullmatch(r"[0-9a-f]+", primary)
+assert re.fullmatch(r"[A-Za-z0-9._-]+", token)
+directory = Path(out) / "worker-runtime-evidence" / machine
+directory.mkdir(parents=True, exist_ok=False)
+row = dict(version=1, run_token=token, machine_id=machine,
+           primary_machine_id=primary, workspace=workspace)
+with (directory / "owner.json").open("x") as stream:
+    os.chmod(stream.name, 0o600)
+    stream.write(json.dumps(row, sort_keys=True) + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+for path in (directory, directory.parent):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
+}
+
+cloudbench_retain_runtime_evidence() {  # durable independent artifact retention latch
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = "1" ] || return 1
+    : > "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" || return 1
+    cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
+}
+
+cloudbench_capture_worker_runtime_evidence() {  # <bench-output> <worker-id>
+    local out="$1" wid="$2" base token command capture_rc=0
+    base="$out/worker-runtime-evidence/$wid"
+    token="$(python3 - "$base/owner.json" "$wid" <<'PY'
+import json, re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+assert path.is_file() and not path.is_symlink()
+row = json.loads(path.read_text())
+assert row['version'] == 1 and row['machine_id'] == sys.argv[2]
+assert re.fullmatch(r'[0-9a-f]+', row['machine_id'])
+assert re.fullmatch(r'[A-Za-z0-9._-]+', row['run_token'])
+print(row['run_token'])
+PY
+)" || { cloudbench_retain_runtime_evidence; return 1; }
+    if [ -f "$base/capture/manifest.json" ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" \
+            verify-directory --run-token "$token" --machine-id "$wid" \
+            --output "$base/capture" || capture_rc=1
+    else
+        command="python3 /data/cloudbench-worker-evidence.py capture --run-token $token --machine-id $wid --output /data/cloudbench-worker-evidence-$wid.tar"
+        if ! fly_with_timeout 300 ssh console -a "$APP" --machine "$wid" -C "$command" \
+                >> "$base/capture.log" 2>&1 \
+            || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$wid" \
+                "/data/cloudbench-worker-evidence-$wid.tar" "$base/evidence.tar" \
+                >> "$base/capture.log" 2>&1 \
+            || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" \
+                verify "$base/evidence.tar" --run-token "$token" --machine-id "$wid" \
+                --output "$base/capture" >> "$base/capture.log" 2>&1; then
+            capture_rc=1
+        else
+            rm -f "$base/evidence.tar" || capture_rc=1
+        fi
+    fi
+    if [ "$capture_rc" != "0" ]; then
+        cloudbench_retain_runtime_evidence || true
+        return 1
+    fi
+}
+
+cloudbench_validate_primary_runtime_evidence() {  # <bench-output> <machine> <run-token>
+    python3 - "$@" <<'PY'
+import hashlib, json, os, re, stat, sys
+from pathlib import Path
+out = Path(sys.argv[1]).resolve()
+root = out / 'remote-logs/runtime-evidence'
+def read(path, ceiling=1048576):
+    assert path.resolve(strict=True) == path
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as f:
+        info = os.fstat(f.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_size <= ceiling
+        data = f.read(info.st_size + 1)
+        assert len(data) == info.st_size
+        os.fsync(f.fileno())
+        return data
+owner = json.loads(read(out / 'runtime-evidence.owner.json'))
+manifest = json.loads(read(root / 'manifest.json'))
+assert owner['machine_id'] == sys.argv[2] and owner['run_token'] == sys.argv[3]
+assert owner['version'] == manifest['version'] == 1
+assert re.fullmatch(r'[0-9a-f]+', owner['machine_id'])
+assert re.fullmatch(r'[A-Za-z0-9._-]+', owner['run_token'])
+assert all(owner[k] == manifest[k] for k in ('run_token', 'machine_id'))
+services = json.loads(read(root / 'services.json'))
+count = services['env']['worker_processes']
+assert services['status'] == 'stopped' and type(count) is int and 1 <= count <= 1024
+cleanup_name = 'cloudbench-stack-cleanup-' + owner['run_token'] + '.status'
+expected = {'services.json', 'run.json', 'stack.log', cleanup_name, 'logs/backend.log',
+            'logs/worker.log', *(f'logs/worker.{i}.log' for i in range(1, count))}
+assert set(manifest['files']) == expected
+assert {p.name for p in (root / 'logs').glob('worker*.log')} == {Path(p).name for p in expected if p.startswith('logs/worker')}
+cleanup = dict(line.split('=', 1) for line in read(root / cleanup_name).decode().splitlines())
+assert cleanup['state'] == 'clean' and cleanup['token'] == owner['run_token']
+total = 0
+for name, row in manifest['files'].items():
+    assert type(row['bytes']) is int and row['bytes'] >= 0
+    total += row['bytes']
+    assert total <= 512 * 1024 * 1024
+    path = root / name
+    assert path.resolve(strict=True) == path
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as f:
+        before = os.fstat(f.fileno())
+        assert stat.S_ISREG(before.st_mode) and before.st_size == row['bytes']
+        digest = hashlib.sha256()
+        remaining = before.st_size
+        while remaining:
+            block = f.read(min(65536, remaining))
+            assert block
+            remaining -= len(block)
+            digest.update(block)
+        after = path.stat()
+        assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+        assert digest.hexdigest() == row['sha256']
+        os.fsync(f.fileno())
+for directory in (root / 'logs', root, root.parent, out):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
+}
+
+cloudbench_validate_worker_evidence_coverage() {  # <bench-output> <primary> <run-token>
+    python3 - "$1" "$2" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$3" <<'PY'
+import json, re, sys
+from pathlib import Path
+out, primary, audit = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+expected = set()
+for path in (audit / 'fresh').iterdir():
+    assert path.is_file() and not path.is_symlink()
+    row = dict(line.split('=', 1) for line in path.read_text().splitlines())
+    if row.get('source_machine_id') == primary and row.get('machine_id'):
+        assert re.fullmatch(r'[0-9a-f]+', row['machine_id'])
+        expected.add(row['machine_id'])
+ledger = out / 'worker-clones.ids'
+if ledger.exists():
+    assert not ledger.is_symlink()
+    assert set(ledger.read_text().splitlines()) <= expected
+directory = out / 'worker-runtime-evidence'
+actual = set()
+if directory.exists():
+    assert not directory.is_symlink()
+    for path in directory.iterdir():
+        assert path.is_dir() and not path.is_symlink()
+        assert (path / 'owner.json').is_file() and not (path / 'owner.json').is_symlink()
+        owner = json.loads((path / 'owner.json').read_text())
+        assert owner['version'] == 1 and owner['machine_id'] == path.name
+        assert owner['primary_machine_id'] == primary and owner['run_token'] == sys.argv[4]
+        actual.add(path.name)
+assert actual == expected
+PY
+}
+
+cloudbench_collect_remaining_runtime_evidence() {
+    local out owner wid pid j failed=0
+    local -a capture_pids=()
+    for j in "${!CHILD_OUT[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        [ -n "$out" ] || continue
+        if [ -e "$out/runtime-evidence.pending" ] || [ -L "$out/runtime-evidence.pending" ]; then
+            echo "❌ primary runtime evidence remains incomplete: $out" >&2
+            failed=1
+        fi
+        if { [ -e "$out/runtime-evidence.owner.json" ] || [ -L "$out/runtime-evidence.owner.json" ]; } \
+            && ! cloudbench_validate_primary_runtime_evidence "$out" \
+                "${CHILD_MACHINE[$j]}" "$FLEET_OWNER_TOKEN-$j"; then
+            echo "❌ primary runtime evidence failed final verification: $out" >&2
+            failed=1
+        fi
+        if ! cloudbench_validate_worker_evidence_coverage "$out" "${CHILD_MACHINE[$j]}" "$FLEET_OWNER_TOKEN-$j"; then
+            echo "❌ worker runtime evidence does not cover allocated machines: $out" >&2
+            failed=1
+        fi
+        if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ] \
+            && [ "${INFRA_PROBE:-0}" != "1" ] && [ "${SKIP_AUTOSCALER:-0}" != "1" ] \
+            && [ -e "$out/post-config-start.accepted" ] \
+            && [ ! -f "$out/runtime-evidence.owner.json" ]; then
+            echo "❌ admitted primary lost runtime evidence ownership: $out" >&2
+            failed=1
+        fi
+        for owner in "$out"/worker-runtime-evidence/*/owner.json; do
+            [ -e "$owner" ] || continue
+            wid="${owner%/owner.json}"; wid="${wid##*/}"
+            cloudbench_capture_worker_runtime_evidence "$out" "$wid" &
+            capture_pids+=("$!")
+            # Worker SSH is an existing control transport. Bound artifact
+            # retirement to four concurrent transfers, independent of fleet
+            # width or agent count; already retired workers verify locally.
+            if [ "${#capture_pids[@]}" -ge 4 ]; then
+                for pid in "${capture_pids[@]}"; do wait "$pid" || failed=1; done
+                capture_pids=()
+            fi
+        done
+    done
+    for pid in "${capture_pids[@]:-}"; do
+        [ -n "$pid" ] || continue
+        wait "$pid" || failed=1
+    done
+    if [ "$failed" != "0" ]; then
+        cloudbench_retain_runtime_evidence || true
+        return 1
+    fi
+    if [ "${FLEET_REGISTRY_PUBLISHED:-0}" = "1" ]; then
+        rm -f "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" \
+            && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
+    fi
+}
+
+
 fleet_registry_cleanup_state() {  # <registry-dir> <cleanup-policy>
     local registry="${1%/}" policy="$2" guest_cleanup_unconfirmed=0
     if [ -e "$registry/guest-cleanup-unconfirmed" ] \
-        || [ -L "$registry/guest-cleanup-unconfirmed" ]; then
+        || [ -L "$registry/guest-cleanup-unconfirmed" ] \
+        || [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
         guest_cleanup_unconfirmed=1
     fi
     case "$policy:$guest_cleanup_unconfirmed" in
@@ -2106,6 +2330,8 @@ fleet_registry_init() {
     } > "$tmp_meta" || { rm -rf "$staging"; return 1; }
     mv "$tmp_meta" "$meta" || { rm -rf "$staging"; return 1; }
     : > "$staging/guest-cleanup-unconfirmed" \
+        || { rm -rf "$staging"; return 1; }
+    : > "$staging/runtime-evidence-unconfirmed" \
         || { rm -rf "$staging"; return 1; }
     [ "$(registry_meta_value "$meta" version)" = "2" ] \
         && [ "$(registry_meta_value "$meta" app)" = "$APP" ] \
@@ -3994,12 +4220,9 @@ with open(lock_path, "a+", encoding="utf-8") as lock_handle:
         )
         actual_start = probe.stdout.strip()
         if probe.returncode != 0 or not actual_start or actual_start != owner_start:
-            cleanup_unconfirmed = bool(record_owner_token) and os.path.exists(
-                os.path.join(
-                    fleet_ownership_root,
-                    record_owner_token,
-                    "guest-cleanup-unconfirmed",
-                )
+            cleanup_unconfirmed = bool(record_owner_token) and any(
+                os.path.lexists(os.path.join(fleet_ownership_root, record_owner_token, marker))
+                for marker in ("guest-cleanup-unconfirmed", "runtime-evidence-unconfirmed")
             )
             if not cleanup_unconfirmed:
                 os.unlink(path)
@@ -4658,6 +4881,11 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         || { echo "❌ refusing non-child fleet registry cleanup path: $registry" >&2; return 1; }
     if [ -e "$registry/guest-cleanup-unconfirmed" ]; then
         echo "❌ refusing to destroy fleet machines whose guest cleanup is unconfirmed: $registry" >&2
+        return 1
+    fi
+    if [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
+        echo "❌ refusing to destroy fleet machines whose runtime evidence is unconfirmed: $registry" >&2
         return 1
     fi
     [ -d "$registry/clones" ] || return 0
@@ -7175,6 +7403,105 @@ PY
     printf '%s %s\n' "$source_id" "$volume_id"
 }
 
+fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; verified copies only
+    local registry="$1" mapping index out machine bench mode status=0
+    local FLEET_REGISTRY_DIR="$1" FLEET_REGISTRY_PUBLISHED=1
+    local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
+    local -a CHILD_OUT=() CHILD_MACHINE=()
+    FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
+    mapping="$(mktemp)" || return 1
+    if ! python3 - "$registry" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT" > "$mapping" <<'PY'
+import json, re, runpy, sys
+from pathlib import Path
+registry = Path(sys.argv[1])
+def fields(path):
+    assert path.is_file() and not path.is_symlink()
+    return dict(line.split('=', 1) for line in path.read_text().splitlines())
+meta = fields(registry / 'meta')
+assert meta['fleet_owner_token'] == registry.name
+audit = Path(meta['audit_dir'])
+assert audit == Path(sys.argv[2]) / registry.name and audit.resolve() == audit
+assert fields(audit / 'meta')['fleet_owner_token'] == registry.name
+assert re.fullmatch(r'[A-Za-z0-9._-]+', meta['run_id'])
+run = Path(meta['runs_root']) / meta['run_id']
+assert run.is_absolute() and run.resolve() == run
+batch = run / '_batch/benches.json'
+assert batch.is_file() and not batch.is_symlink()
+tasks = json.loads(batch.read_text())
+assert isinstance(tasks, list) and len(tasks) <= 4096
+contract = runpy.run_path(str(Path(sys.argv[3]) / 'cloudbench_execution_provenance.py'))
+matrix = contract['load_task_matrix'](run / 'execution-task-matrix.json')
+provenance_path = run / 'execution-provenance.json'
+assert provenance_path.is_file() and not provenance_path.is_symlink()
+provenance = json.loads(provenance_path.read_text())
+assert not contract['validate_task_matrix_binding'](provenance, matrix)
+assert [{'name': task['name'], 'world_model_mode': 'simulate' if task['mode'] == 'SIM' else 'real'} for task in tasks] == matrix['tasks']
+task_names = {task['name'] for task in tasks}
+assert len(task_names) == len(tasks)
+admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any(
+    (path / name).exists() or (path / name).is_symlink()
+    for name in ('runtime-evidence.owner.json', 'post-config-start.accepted', 'worker-runtime-evidence'))}
+assert admitted_outputs <= task_names
+owned = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
+for index, task in enumerate(tasks):
+    name = task['name']
+    assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
+    out = run / name
+    assert not out.is_symlink()
+    admitted = (out / 'runtime-evidence.owner.json').exists() or (out / 'post-config-start.accepted').exists()
+    if not admitted:
+        assert not (out / 'worker-runtime-evidence').exists()
+        continue
+    identity = out / '.cid'
+    assert identity.is_file() and not identity.is_symlink()
+    machine = identity.read_text().split()[-1]
+    assert machine in owned and re.fullmatch(r'[0-9a-f]+', machine)
+    mode = 'simulate' if task['mode'] == 'SIM' else 'real'
+    print(index, out, machine, name, mode, sep='\t')
+PY
+    then
+        rm -f "$mapping"
+        return 1
+    fi
+    while IFS=$'\t' read -r index out machine bench mode; do
+        CHILD_OUT[$index]="$out"
+        CHILD_MACHINE[$index]="$machine"
+        if ! cloudbench_validate_primary_runtime_evidence "$out" "$machine" "$FLEET_OWNER_TOKEN-$index" \
+            || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py" \
+                "$out/remote-logs/runtime-evidence/run.json" --expected-task "$bench" \
+                --expected-world-model-mode "$mode" \
+                --expected-execution-provenance-file "${out%/*}/execution-provenance.json"; then
+            status=1
+            continue
+        fi
+        # Retention recovery accepts complete forensic copies independently of
+        # whether a benchmark passed. It never supplies streak credit. A pending
+        # transfer can be discharged only by the same canonical result binding.
+        if ! python3 - "$out" <<'PY'
+import json, os, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+canonical = out / 'cloudbench-run.json'
+assert canonical.is_file() and not canonical.is_symlink()
+assert json.loads(canonical.read_bytes()) == json.loads((out / 'remote-logs/runtime-evidence/run.json').read_bytes())
+pending = out / 'runtime-evidence.pending'
+if pending.exists() or pending.is_symlink():
+    assert pending.is_file() and not pending.is_symlink()
+    assert json.loads(pending.read_bytes()) == json.loads((out / 'runtime-evidence.owner.json').read_bytes())
+    pending.unlink()
+    fd = os.open(out, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+PY
+        then status=1; fi
+    done < "$mapping"
+    rm -f "$mapping"
+    [ "$status" = "0" ] || return 1
+    cloudbench_collect_remaining_runtime_evidence
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -7212,7 +7539,12 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
     case "$cleanup_state" in
         reap) ;;
-        quarantined) needs_guest_recovery=1 ;;
+        quarantined)
+            if [ -e "$registry/guest-cleanup-unconfirmed" ] \
+                || [ -L "$registry/guest-cleanup-unconfirmed" ]; then
+                needs_guest_recovery=1
+            fi
+            ;;
         retain)
             echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
             return 1
@@ -7240,13 +7572,20 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             rm -rf "$registry/recovery-lock"
             return 1
         fi
-        policy="$(registry_meta_value "$meta" cleanup_policy)"
-        cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
-        if [ "$cleanup_state" != "reap" ]; then
-            echo "❌ exact stale-owner guest acknowledgement did not authorize provider teardown" >&2
-            rm -rf "$registry/recovery-lock"
-            return 1
-        fi
+    fi
+    if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
+        && ! fleet_recovery_confirm_runtime_evidence "$registry"; then
+        echo "❌ exact stale-owner runtime evidence is incomplete; original volumes remain retained" >&2
+        rm -rf "$registry/recovery-lock"
+        return 1
+    fi
+    policy="$(registry_meta_value "$meta" cleanup_policy)"
+    cleanup_state="$(fleet_registry_cleanup_state "$registry" "$policy")"
+    if [ "$cleanup_state" != "reap" ]; then
+        echo "❌ exact stale-owner receipts did not authorize provider teardown" >&2
+        rm -rf "$registry/recovery-lock"
+        return 1
     fi
     # The supervising waiter already proved the entire controller process group
     # drained. Unlike generic successor recovery, this exact cancellation path
@@ -8029,6 +8368,8 @@ pool_claim_cleanup_unconfirmed() {  # <claim-path>
     registry="$FLEET_OWNERSHIP_ROOT/$owner_token"
     [ "${registry%/*}" = "${FLEET_OWNERSHIP_ROOT%/}" ] || return 2
     [ -e "$registry/guest-cleanup-unconfirmed" ] && return 0
+    { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; } && return 0
     return 1
 }
 
@@ -8784,10 +9125,11 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
     fi
 }
 
+
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}"
     local id claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
-    local claim_digest machine_reap_status
+    local claim_digest machine_reap_status runtime_evidence_failed=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
     ec="$result_ec"
     export -n machines 2>/dev/null || true
@@ -8854,6 +9196,17 @@ cleanup() {
         teardown_failed=1
     fi
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
+    # Guest ACK and copied runtime evidence are independent receipts. Keep the
+    # durable evidence latch through every crash window until all primary and
+    # historical worker captures are verified, including workers scaled down
+    # before the benchmark finished.
+    if ! cloudbench_collect_remaining_runtime_evidence; then
+        echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
+        runtime_evidence_failed=1
+        KEEP_CLONES=1
+        ec=1
+        teardown_failed=1
+    fi
     # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
     # complete lease records owned by this exact controller/run under the same
     # allocator lock before the snapshotted helper is removed.
@@ -8867,8 +9220,9 @@ cleanup() {
     # per-machine inventory polling added N teardown latency after an otherwise
     # perfectly parallel batch. Keep every global lease until a shared inventory
     # read proves its machine stopped (or absent).
-    if [ "$guest_shutdown_failed" = "1" ] && [ -s "$CLAIMED_POOL_FILE" ]; then
-        echo "⚠️  retaining claimed pool machines and ownership claims: guest cleanup is unconfirmed" >&2
+    if { [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; } \
+        && [ -s "$CLAIMED_POOL_FILE" ]; then
+        echo "⚠️  retaining claimed pool machines and ownership claims: guest cleanup or runtime evidence is unconfirmed" >&2
     elif [ -s "$CLAIMED_POOL_FILE" ]; then
         while read -r id; do
             [ -n "$id" ] || continue
@@ -9010,7 +9364,8 @@ cleanup() {
         ec=1
         teardown_failed=1
     fi
-    if [ "$guest_shutdown_failed" = "0" ] && ! reconcile_current_pool_claims; then
+    if [ "$guest_shutdown_failed" = "0" ] && [ "$runtime_evidence_failed" = "0" ] \
+        && ! reconcile_current_pool_claims; then
         echo "❌ could not reconcile this controller's exact pool claims" >&2
         ec=1
         teardown_failed=1
@@ -9036,7 +9391,7 @@ cleanup() {
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
-    if [ "$guest_shutdown_failed" = "1" ]; then
+    if [ "$guest_shutdown_failed" = "1" ] || [ "$runtime_evidence_failed" = "1" ]; then
         echo "⚠️  retaining durable capacity reservation with the recoverable guest machines" >&2
     else
         if ! capacity_release_owner_reservations; then
@@ -10365,6 +10720,12 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         rc=1
     }
     : >> "$cleanup_log" 2>/dev/null || true
+    if [ "$rc" = "0" ] \
+        && [ -e "$cleanup_out/worker-runtime-evidence/$cleanup_wid/owner.json" ] \
+        && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
+        echo "❌ worker $cleanup_wid runtime evidence was not preserved; retaining exact ownership" >&2
+        rc=1
+    fi
     if [ "$rc" = "0" ]; then
         if reap_machine "$cleanup_wid" "$cleanup_log" "$volume_id"; then
             machine_reap_status=0
@@ -10485,8 +10846,9 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
     return 0
 }
 
-provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
+provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out> <run-token>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
+    local runtime_run_token="$7"
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
@@ -10548,6 +10910,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
         return 1
     fi
+    if ! cloudbench_record_worker_evidence_owner "$out" "$wid" "$primary_id" \
+        "$runtime_run_token" "$ws"; then
+        printf '%s\n' "could not preserve worker runtime evidence ownership before launch" \
+            > "$out/autoscaler.failed"
+        return 1
+    fi
     # Allocation is ownership, not capacity. Keep it in worker-clones.ids for
     # teardown, but count it as operational only after the worker health endpoint
     # proves that Temporal worker.run() reached its queue-polling boundary.
@@ -10569,6 +10937,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export REF=$(printf '%q' "$BENCH_REF")"
         echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+        echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
+        echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
+        echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
         echo "export PRIMARY_HOST=$(printf '%q' "$pip")"
         echo "export BACKEND_PORT=$(printf '%q' "$BOX_BACKEND_PORT")"
@@ -10663,12 +11034,14 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
             fly_with_timeout 20 machine start "$wid" -a "$APP" || true
         if ! run_worker_stage_cmd "clear stale worker stage files" \
             fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
+            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-worker-evidence.py /data/cloudbench-fetch-ref.sh /data/cloudbench-env.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
             sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
             continue
         fi
           if run_worker_stage_cmd "upload cloudbench-worker.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker.sh" /data/cloudbench-worker.sh \
+             && run_worker_stage_cmd "upload worker evidence helper" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" /data/cloudbench-worker-evidence.py \
              && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
@@ -11076,7 +11449,7 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             scale_down_since=""
             local n=$((want - cur))
             echo "  ⤴️  [$bench] scale up +$n (desired=$desired, pool=$cur)"
-            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out"; done
+            for _ in $(seq 1 "$n"); do provision_worker "$bench" "$ws" "$cid" "$pip" "$sim" "$out" "$runtime_run_token"; done
         elif [ "$want" -lt "$cur" ]; then
             autoscaler_monotonic_seconds scale_down_now
             if [ "$scale_down_target" != "$want" ] \
