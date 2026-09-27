@@ -124,13 +124,14 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates
   // (kept in sync with POOL_REGISTRY + agents/providers/rose/pricing.py).
-  // mini waterfall mean: haiku ($1/$5) + gemini-3.5-flash-lite ($0.30/$2.50)
-  'rose-labs/rose-1-mini': openRouter(0.65, 3.75),
-  'rose-labs/rose-1-flash': openRouter(0.425, 2.125),
-  // Historical lite pool id (renamed to flash). Keep for ledger rows.
+  // mini waterfall mean: haiku ($1/$5) + gemini-3.1-flash-lite ($0.25/$1.50)
+  'rose-labs/rose-1-mini': openRouter(0.625, 3.25),
+  // flash/browser mean: gemini-3.1-flash-lite ($0.25/$1.50) + gpt-5.6-luna ($0.20/$1.20)
+  'rose-labs/rose-1-flash': openRouter(0.225, 1.35),
+  // Historical lite pool id (renamed to flash). Keep the pre-bench rate for ledger rows.
   'rose-labs/rose-1-lite': openRouter(0.425, 2.125),
   'rose-labs/rose-1-ultra': openRouter(2.75, 15),
-  'rose-labs/rose-1-browser-use': openRouter(0.425, 2.125),
+  'rose-labs/rose-1-browser-use': openRouter(0.225, 1.35),
   // Open-weights-only pool; its waterfall is the single kimi-k3 layer.
   'rose-labs/rose-1-oss': openRouter(3, 15),
 };

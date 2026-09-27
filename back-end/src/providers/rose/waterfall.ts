@@ -94,6 +94,8 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       model,
     });
 
+    // Speed pools pin waterfall effort (low). Ultra leaves it unset.
+    const reasoningEffort = opts.poolSpec.waterfallReasoningEffort ?? opts.reasoningEffort;
     const body = buildOpenRouterBody({
       model,
       messages: opts.messages,
@@ -101,7 +103,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
       providerFastMode: opts.providerFastMode,
-      reasoningEffort: opts.reasoningEffort,
+      reasoningEffort,
       tools: opts.tools,
       toolChoice: opts.toolChoice,
     });

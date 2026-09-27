@@ -215,12 +215,14 @@ def test_pool_registry_lookup():
     assert mini.gpt_auth_model == "gpt-5.6-luna"
     assert mini.waterfall == (
         "anthropic/claude-haiku-4.5",
-        "google/gemini-3.5-flash-lite",
+        "google/gemini-3.1-flash-lite",
     )
+    assert mini.waterfall_reasoning_effort == "low"
     assert flash.name == "rose-1-flash"
     assert flash.claude_auth_model.startswith("claude-")
     assert flash.gpt_auth_model == "gpt-5.6-luna"
-    assert flash.waterfall == ("google/gemini-3.8-flash", "openai/gpt-6-luna")
+    assert flash.waterfall == ("google/gemini-3.1-flash-lite", "openai/gpt-5.6-luna")
+    assert flash.waterfall_reasoning_effort == "low"
     assert ultra.name == "rose-1-ultra"
     from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
     from providers.rose.pools import PARAM_POPULATOR_MODEL
@@ -235,7 +237,9 @@ def test_pool_registry_lookup():
     assert "anthropic/claude-fable-5.1" not in ultra.waterfall
     assert browser_use.claude_auth_model == "claude-sonnet-5"
     assert browser_use.gpt_auth_model == "gpt-5.6-luna"
-    assert browser_use.waterfall == ("google/gemini-3.8-flash", "openai/gpt-6-luna")
+    assert browser_use.waterfall == ("google/gemini-3.1-flash-lite", "openai/gpt-5.6-luna")
+    assert browser_use.waterfall_reasoning_effort == "low"
+    assert ultra.waterfall_reasoning_effort is None
     assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
     assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
@@ -3667,10 +3671,13 @@ async def test_waterfall_falls_through_then_succeeds():
     )
     state = {"i": 0}
 
+    efforts: list[str] = []
+
     def handler(req):
         call_log.append(str(req.url))
         body = json.loads(req.content.decode())
         model = body.get("model", "")
+        efforts.append(body.get("reasoning", {}).get("effort"))
         i = state["i"]
         state["i"] += 1
         if i == 0:
@@ -3690,8 +3697,9 @@ async def test_waterfall_falls_through_then_succeeds():
     kinds = [c.kind for c in chunks]
     assert "content" in kinds
     assert kinds[-1] == "done"
-    # Both steps were called
+    # Both steps were called, and the speed pool pins waterfall effort low.
     assert state["i"] == 2
+    assert efforts == ["low", "low"]
 
 
 async def test_waterfall_skips_anthropic_for_response_format():
@@ -3725,7 +3733,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3.5-flash-lite"]
+    assert models_seen == ["google/gemini-3.1-flash-lite"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3820,7 +3828,7 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3.5-flash-lite"]
+    assert models_seen == ["google/gemini-3.1-flash-lite"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4505,7 +4513,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.5-flash-lite"]
+    assert seen["openrouter_models"] == ["google/gemini-3.1-flash-lite"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4556,7 +4564,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.5-flash-lite"]
+    assert seen["openrouter_models"] == ["google/gemini-3.1-flash-lite"]
     assert any(c.kind == "content" for c in chunks)
 
 

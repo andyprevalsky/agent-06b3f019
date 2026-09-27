@@ -294,9 +294,12 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.name, 'rose-1-flash', 'flash.name');
   assert(lite.claudeAuthModel.startsWith('claude-'), 'flash claudeAuthModel');
   assertEqual(lite.gptAuthModel, 'gpt-5.6-luna', 'flash.gptAuthModel');
+  assertEqual(lite.waterfallReasoningEffort, 'low', 'flash waterfall effort');
+  assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
+  assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
   assertEqual(
     lite.waterfall.join(','),
-    'google/gemini-3.8-flash,openai/gpt-6-luna',
+    'google/gemini-3.1-flash-lite,openai/gpt-5.6-luna',
     'flash OpenRouter waterfall'
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
@@ -316,7 +319,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
   assertEqual(
     browserUse.waterfall.join(','),
-    'google/gemini-3.8-flash,openai/gpt-6-luna',
+    'google/gemini-3.1-flash-lite,openai/gpt-5.6-luna',
     'browserUse OpenRouter waterfall'
   );
   assert(

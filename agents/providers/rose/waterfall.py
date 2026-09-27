@@ -253,6 +253,10 @@ async def waterfall_complete(
             total=len(pool_spec.waterfall),
             model=model,
         )
+        # Speed pools pin a low waterfall effort. xhigh on gemini-3.1 / luna
+        # measured 8–20s TTFT; the same models at low were 1.2s / 7s.
+        # Ultra leaves waterfall_reasoning_effort unset and keeps the caller.
+        wire_effort = pool_spec.waterfall_reasoning_effort or effort
         body = build_openrouter_body(
             model=model,
             messages=messages,
@@ -263,7 +267,7 @@ async def waterfall_complete(
             max_tokens=max_tokens,
             seed=seed,
             provider_fast_mode=provider_fast_mode,
-            effort=effort,
+            effort=wire_effort,
             cache_namespace=cache_namespace,
             skip_cache_write=skip_cache_write,
         )

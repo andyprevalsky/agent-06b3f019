@@ -61,7 +61,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
-    'Lite chat keeps Lite for both routing and generation',
+    'Flash chat keeps Flash for both routing and generation',
     () => {
       const requestedModel = 'rose-labs/rose-1-flash';
       const selected = selectChatPhaseModels(requestedModel);

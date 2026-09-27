@@ -8,13 +8,11 @@
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
  * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
  *
- * Speed vs intelligence (2026-09 analysis vs rose-1-ultra / gpt-5.6-sol ~68 t/s):
- *   - Cerebras/Groq gpt-oss-120b: ~500–3000 t/s (chat exclusive route; text-only)
- *   - google/gemini-3.8-flash: ~150–300 t/s, vision+tools, Agentic Index ~40
- *   - openai/gpt-6-luna: fast/cheap OpenAI tier (~70–125 t/s, $0.10/$0.50)
- *   - google/gemini-3.5-flash-lite: lite multimodal (~400 t/s class)
- *   - TypeSafe Jev: Decisions API only (~110–330 ms) — not a chat waterfall model
- * Planner / verifier / param-populator stay on rose-1-ultra (frontier).
+ * Speed pools from a 2026-09-27 live stream bench (TTFT + tok/s, effort low
+ * and xhigh, 180-word prompt). gemini-3.1-flash-lite won the vision+tools
+ * speed tier (1.19s / 245 tok/s at low). gpt-5.6-luna is the cross-vendor
+ * fallback (gpt-6-luna's xhigh TTFT was 20s vs luna's 11s). Speed waterfalls
+ * pin effort low so xhigh thinking cannot erase that TTFT. Planner stays ultra.
  */
 
 export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
@@ -30,6 +28,11 @@ export interface PoolSpec {
   gptAuthModel: string;
   /** Provider-prefixed model IDs tried in order if claudeAuth fails. */
   waterfall: readonly string[];
+  /**
+   * When set, the OpenRouter waterfall stamps this effort instead of the
+   * caller / xhigh default. claudeAuth and gptAuth are unchanged.
+   */
+  waterfallReasoningEffort?: string;
 }
 
 export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
@@ -39,16 +42,18 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     gptAuthModel: 'gpt-5.6-luna',
     // Keep vision-capable layers — challenge classifier sends screenshots.
     // Haiku remains first (fast Anthropic + anthropic-family skip tests).
-    waterfall: ['anthropic/claude-haiku-4.5', 'google/gemini-3.5-flash-lite'],
+    // Second layer is the measured speed fallback (gemini-3.1-flash-lite).
+    waterfall: ['anthropic/claude-haiku-4.5', 'google/gemini-3.1-flash-lite'],
+    waterfallReasoningEffort: 'low',
   },
   'rose-1-flash': {
     name: 'rose-1-flash',
-    // Sonnet-5 stays the OAuth primary (Haiku is mini). gptAuth drops Terra→Luna
-    // for the fast OpenAI tier. Paid waterfall is Gemini 3.8 Flash then GPT-6 Luna
-    // — both beat Sol on latency/cost; Kimi K3 stays ultra-only.
+    // Sonnet-5 stays the OAuth primary (Haiku is mini). Paid waterfall is the
+    // live-bench speed pair: gemini-3.1-flash-lite then gpt-5.6-luna, effort low.
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['google/gemini-3.8-flash', 'openai/gpt-6-luna'],
+    waterfall: ['google/gemini-3.1-flash-lite', 'openai/gpt-5.6-luna'],
+    waterfallReasoningEffort: 'low',
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
@@ -64,7 +69,8 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     // vision-capable (see VISION_MODELS in agents/providers/rose/transforms.py).
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['google/gemini-3.8-flash', 'openai/gpt-6-luna'],
+    waterfall: ['google/gemini-3.1-flash-lite', 'openai/gpt-5.6-luna'],
+    waterfallReasoningEffort: 'low',
   },
 };
 

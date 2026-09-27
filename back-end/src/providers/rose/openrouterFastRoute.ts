@@ -21,7 +21,7 @@ import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_FAST_CHAT_MODEL = 'google/gemini-3.5-flash-lite';
+export const OPENROUTER_FAST_CHAT_MODEL = 'google/gemini-3.1-flash-lite';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
 export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 2_000;
 

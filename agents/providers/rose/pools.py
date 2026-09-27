@@ -3,17 +3,32 @@
 Both rose-1-flash and rose-1-ultra share the same code path (claudeAuth ->
 waterfall); the only difference is which models are tried at each layer.
 
-Model contract (P1) — speed-optimized 2026-09 (vs ultra / gpt-5.6-sol ~68 t/s):
+Model contract — speed pools retargeted from a 2026-09-27 live stream bench
+(OpenRouter chat completions, 180-word prompt, max_tokens 6000, 3 reps).
+Median user-visible TTFT / decode tok/s at reasoning effort low, then xhigh:
+
+    google/gemini-3.1-flash-lite   1.19s / 245 t/s    8.5s / 334 t/s
+    google/gemini-3.8-flash        1.64s / 124 t/s   23.6s / 253 t/s
+    openai/gpt-5.6-luna            7.4s  / 350 t/s   11.3s / 350 t/s
+    openai/gpt-6-luna              7.4s  / 400 t/s   20.4s / 292 t/s
+    openai/gpt-5.6-sol (ultra)     8.4s  / 224 t/s   12.4s / 168 t/s
+    anthropic/claude-haiku-4.5    (xhigh) 1.9s / 114 t/s, e2e 4.2s
+
+Speed waterfalls pin effort ``low`` and lead with gemini-3.1-flash-lite.
+gpt-6-luna loses to gpt-5.6-luna once effort is xhigh, so the cross-vendor
+fallback is gpt-5.6-luna. Ultra / planner stay frontier.
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3.5-flash-lite
+        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3.1-flash-lite
+        waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite)
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = google/gemini-3.8-flash -> openai/gpt-6-luna
+        waterfall  = google/gemini-3.1-flash-lite -> openai/gpt-5.6-luna
+        waterfall effort = low
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-fable-5-1
@@ -23,7 +38,8 @@ Model contract (P1) — speed-optimized 2026-09 (vs ultra / gpt-5.6-sol ~68 t/s)
     rose-1-browser-use:  (speed-tier, vision-required)
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = google/gemini-3.8-flash -> openai/gpt-6-luna
+        waterfall  = google/gemini-3.1-flash-lite -> openai/gpt-5.6-luna
+        waterfall effort = low
 
 Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b
 (~500–3000 t/s). TypeSafe Jev is Decisions-API only — not waterfallable.
@@ -62,6 +78,12 @@ class PoolSpec:
     is unavailable). Format matches OpenRouter's `provider/model` convention,
     which the transport layer maps to the right endpoint."""
 
+    waterfall_reasoning_effort: str | None = None
+    """When set, the OpenRouter waterfall stamps this effort instead of the
+    caller / xhigh default. Speed pools pin ``low``: measured xhigh TTFT on
+    the fast Gemini/GPT layers jumps from ~1s to 8–24s. claudeAuth and
+    gptAuth keep the caller effort. Ultra leaves this unset."""
+
     direct_auth_enabled: bool = True
     """When False, the OAuth direct-token routes (claudeAuth / gptAuth) are
     skipped entirely and only `waterfall` serves this pool.
@@ -83,17 +105,19 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
             "anthropic/claude-haiku-4.5",
-            "google/gemini-3.5-flash-lite",
+            "google/gemini-3.1-flash-lite",
         ),
+        waterfall_reasoning_effort="low",
     ),
     "rose-1-flash": PoolSpec(
         name="rose-1-flash",
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
-            "google/gemini-3.8-flash",
-            "openai/gpt-6-luna",
+            "google/gemini-3.1-flash-lite",
+            "openai/gpt-5.6-luna",
         ),
+        waterfall_reasoning_effort="low",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
@@ -119,9 +143,10 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         # and a model missing from that allowlist silently drops the image
         # instead of erroring, so the agent would fly blind on fallback.
         waterfall=(
-            "google/gemini-3.8-flash",
-            "openai/gpt-6-luna",
+            "google/gemini-3.1-flash-lite",
+            "openai/gpt-5.6-luna",
         ),
+        waterfall_reasoning_effort="low",
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
     # open-source model -- currently the behavioral-biometrics benchmark, whose
