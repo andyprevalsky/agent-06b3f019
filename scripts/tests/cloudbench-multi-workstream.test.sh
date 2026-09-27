@@ -786,13 +786,9 @@ def machine_dir(machine_id):
 
 
 def rewrite_paths(mdir, command):
-    return (
-        command.replace("/tmp/rb.sh", mdir + "/tmp/rb.sh")
-        .replace("/tmp/rbw.sh", mdir + "/tmp/rbw.sh")
-        .replace("/tmp/rbw.env", mdir + "/tmp/rbw.env")
-        .replace("/tmp/cloudbench-local.patch", mdir + "/tmp/cloudbench-local.patch")
-        .replace("/data", mdir + "/data")
-    )
+    # Rewrite only guest text, never a /data prefix just inserted for the host.
+    prefixes = ("/tmp/rb.sh", "/tmp/rbw.sh", "/tmp/rbw.env", "/tmp/cloudbench-local.patch", "/data")
+    return re.sub("|".join(map(re.escape, prefixes)), lambda match: mdir + match.group(0), command)
 
 
 class locked_state:
@@ -1784,6 +1780,28 @@ else:
     print(f"FATAL: fake flyctl has no handler for: {' '.join(args)}", file=sys.stderr)
     sys.exit(1)
 PY
+
+python3 - "$FAKE_DIR/flyctl.py" <<'PY_PATH_CONTRACT'
+import ast
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+module = ast.parse(source)
+function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "rewrite_paths")
+namespace = {"re": re}
+exec(compile(ast.Module(body=[function], type_ignores=[]), sys.argv[1], "exec"), namespace)
+rewrite = namespace["rewrite_paths"]
+for host_root in ("/var/tmp/fake-machine", "/data/controller-tmp/fake-machine", "/data/data/fake-machine"):
+    for guest in ("/tmp/rb.sh", "/tmp/rbw.sh", "/tmp/rbw.env", "/tmp/cloudbench-local.patch", "/data/worker.log"):
+        assert rewrite(host_root, guest) == host_root + guest, (host_root, guest)
+    command = "bash /tmp/rbw.sh >/data/worker.log"
+    assert rewrite(host_root, command) == "bash " + host_root + "/tmp/rbw.sh >" + host_root + "/data/worker.log"
+    assert rewrite(host_root, "printf unchanged") == "printf unchanged"
+PY_PATH_CONTRACT
+[ "$?" -eq 0 ] || fail "fake guest paths must be translated exactly once"
+echo "PASS: guest path translation preserves host paths containing /data"
 
 cat > "$FAKE_BIN/flyctl" <<SH
 #!/usr/bin/env bash

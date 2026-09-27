@@ -225,6 +225,54 @@ silently skipped or replaced on macOS; separate native Mac environment and
 GitHub transport checks remain separate evidence. Direct macOS execution of the
 whole guest fixture is not claimed to pass.
 
+### DATA-host path translation recurrence
+
+The unchanged full fixture later ran with the reviewed reserve repair and
+outside-checkout Linux temporary files on `/data/controller-tmp`. It passed the
+previous cancellation boundary and scenarios through 2d, then exited 1 at 2e:
+`a launched-but-unready worker must produce an explicit readiness failure`.
+This was before the intended worker-readiness boundary. Both staging attempts
+reported successful SFTP upload, then the real worker adapter raised
+`FileNotFoundError` opening the expected machine-local `/tmp/rbw.sh`.
+
+Exact retained filesystem reads found both uploaded wrapper and environment in
+a directory containing the fake machine's DATA-root prefix twice. The fake
+transport first substituted `/tmp/rbw.sh` with the host path, then substituted
+`/data` in that newly inserted host path. The earlier adapter controls used a
+`/var/tmp` host root and therefore did not cover this substitution collision.
+Searches for `FileNotFoundError rbw.sh run_fake_worker` and
+`fake provider path replacement recursive data filesystem upload destination`
+found no earlier exact path-codec case; this is another incomplete fake
+transport contract exposed by the real worker evidence adapter. The
+[temporary-storage case](2026-09-27-cloud-controller-temp-root-ignored-persistent-volume.md)
+explains the legitimate DATA filesystem selection, not a reason to change it.
+
+The fixture now translates all five existing guest path prefixes in one pass
+over the original command, so it cannot reinterpret the host prefix it just
+inserted. Twenty-one permanent assertions exercise the actual translation
+function with `/var/tmp`, `/data/controller-tmp` and repeated `/data` host roots,
+including mixed guest paths and unchanged non-path commands. They failed on
+the previous function and passed unchanged after the repair. Production code,
+worker readiness criteria, launch semantics, reserve size and deadlines are
+unchanged.
+
+The original full native failure, actual stage logs and misplaced-file hashes
+are retained under `.context/acceptance/proof21-exact-recovery-order-rca/`.
+The focused original 2e body then passed with the complete existing setup
+prefix in 97.28 seconds: real launch occurred, the same five-second readiness
+failure was observed, and the unchanged machine/registry cleanup assertions
+passed. Its actual native exit and output are
+`.context/acceptance/proof21-data-path-fixture-rca/focused-after2.json` and
+`focused-after2.private.log` (SHA256
+`a14aa48b4753714f183484b902bc4ceab815c9df0343e7651c7e191c7de312de`).
+The candidate fixture was SHA256
+`7466ce4e0e2ca1ba3c2f61880d416a780a649ae179c5d890b1084f3c851d6a77`;
+remote tracked source remained `9f3266b6`, with the separately reviewed runtime
+staged privately. A malformed private extraction and a later extraction that
+skipped required Hub setup are preserved as setup failures, not path-repair
+outcomes. The full corrected controller gate and live fleet acceptance remain
+pending; the focused result gives neither full-suite nor live acceptance credit.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures
