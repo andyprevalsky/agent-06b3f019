@@ -9842,6 +9842,9 @@ def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
         f"owned_names_file={tmp_path / 'audits' / owner / 'owned-clones.names'}\n"
         "cleanup_policy=retain\n"
     )
+    audit = tmp_path / "audits" / owner
+    audit.mkdir(parents=True)
+    (audit / "meta").write_text((registry / "meta").read_text())
     (registry / "guest-cleanup-unconfirmed").touch()
     helper = tmp_path / "exact-cleanup-helper"
     helper.write_text(

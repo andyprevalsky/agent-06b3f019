@@ -11,6 +11,7 @@ symptoms:
   - "FLEET_OWNER_PID_START: unbound variable"
   - "ROOT_DIR: unbound variable"
   - test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths times out
+  - "unsafe stale-owner source audit mapping"
 tags:
   - fixtures
   - ownership
@@ -110,3 +111,34 @@ They attempted `psql` on the Linux test host. The fixtures now explicitly model
 no local credential overlay and an inactive optional cost gate; their funded
 fallback and sync-argument assertions are unchanged. Coverage's dump artifact
 directory is writable in the container, matching normal repository setup.
+
+## September 27 recurrence: declared audit directory was never created
+
+The full controller gate at `605e091f` failed the retained-owner evidence test:
+**1 failed, 135 passed**, with `unsafe stale-owner source audit mapping`.
+The fixture wrote `audit_dir` and audit file paths into its registry, but never
+created that directory or its metadata. The stricter private-source recovery
+parser correctly rejected this incomplete authority before reconnecting to the
+guest. Real controller initialization writes the audit before publishing its
+registry. The earlier fixture repair covered shell variables but missed this
+durable bootstrap state.
+
+Archive searches were `unsafe stale-owner source audit mapping` and
+`retained guest recovery fixture ownership audit root`. This is a recurrence
+of the fixture-bootstrap mismatch, not evidence that production ownership
+validation should be relaxed.
+
+The unchanged focused command reproduced the failure and then passed after
+creating the fixture's declared audit directory and matching owner metadata:
+
+```bash
+env TMPDIR=/private/tmp agents/venv/bin/python -m pytest -q --tb=short agents/benchmarks/cloudbench_dependency_sync_test.py -k exact_recovery_seals_actual_retained_owner_remote_evidence_paths
+```
+
+Before: **1 failed** in 0.27 seconds. After: **1 passed** in 1.16 seconds.
+Logs and the hypothesis are retained under
+`.context/acceptance/proof20-controller-fixture-rca/`. The test's assertions,
+deadlines, recovery functions, and deploy registration are unchanged. No
+benchmark definition, model, prompt, evaluator, or production code changed.
+The repair supplies missing fixture data instead of adding a production
+exception; it has no runtime or 10,000-agent cost.
