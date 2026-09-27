@@ -148,6 +148,83 @@ verified. Proof19 remains failed; proof20 allocated no fleet and failed its
 private wrapper Node guard. Proof21 starts with zero accepted slices and must
 independently audit complete evidence before every advance.
 
+## Controller fixture recurrence after complete capture became mandatory
+
+The first full Linux controller gate on `14f0f30` failed scenario 2 of
+`scripts/tests/cloudbench-multi-workstream.test.sh`: the two fake-provider runs
+had no `remote-logs/runtime-evidence`. This was a fixture protocol omission.
+The fake proxy implemented metrics, incremental logs and cleanup health but
+returned 404 for the real collector's new `/runtime-evidence` endpoint. Its
+fake driver also omitted stopped services, raw worker/backend files and the
+clean stack receipt. The controller correctly retained the original volumes.
+The failed native gate receipt remains unchanged; its original temporary
+folder was already absent. A focused unchanged replay used the existing
+keep-on-failure option and retained the inner logs and exact owner record.
+
+The test-only adapter now delegates the runtime endpoint to the production
+status-server handler, supplies the fake guest's stopped-stack files, and lets
+the unchanged collector and fleet validators consume them. Concurrent-run
+assertions verify distinct machine/token ownership, complete two-worker and
+backend inventory, every byte count and hash, canonical run equality, and
+removal of the pending marker only after binding.
+
+The full fixture exposed an older cancellation expectation: it killed the
+controller before collection, then demanded provider deletion solely on guest
+cleanup acknowledgement. That exact early-KILL trigger is preserved. The
+fixture now requires the original machine, volume and registry to remain,
+checks that no destroy was issued and that the neighboring owner is untouched,
+then explicitly resets only validated fake records for later test cases. The
+same distinction applies to pre-supervisor SSH launch failures. Captured
+post-supervisor failures remain a separate cleanup-positive case. These are
+updates to controller fixture contracts, with no benchmark, evaluator, model,
+production timeout or acceptance threshold changes.
+
+A subsequent full fixture run exposed a second adapter error in the added
+post-supervisor control: it returned the real child's later exit code as the
+SSH result, although the production command backgrounds the supervisor with
+`setsid ... &`. That fabricated a transport failure and extra staging retry;
+the fake primary's existing wait expired before worker capture and destruction.
+The adapter now reports successful detached admission while preserving the real
+terminal exit code 1, complete logs and absent readiness. The original failure
+before supervisor admission still returns a transport error. No timeout is
+extended. Capture assertions bind to the current controller's exact provenance
+path, so the paired earlier run cannot supply evidence.
+
+Private causal logs, full-run outcomes, exact candidate hashes and independent
+review are recorded in `.context/acceptance/proof21-controller-fixture-rca/`.
+The unchanged focused primary collection failed with native/durable exit 1
+(`exec-91cce35c...`) and passed after the adapter repair (`exec-8aaf570d...`,
+exit 0). The exact early-KILL retention check passed (`exec-2733c97c...`). An
+independent deletion counterexample for the test reset initially passed despite
+losing a worker; binding the full allocation set made the unchanged two controls
+pass. The first full candidate was interrupted by host ENOSPC/Engine loss
+(`exec-82f18292...`): no durable exit exists, so it earns no completion credit.
+Its recovered log and exact same-container recovery receipt remain preserved.
+
+The unchanged rerun (`exec-e8abfe30...`) exited 1 at the detached-launch adapter
+mismatch. A focused paired replay retained both failure boundaries and reproduced
+that exact failure (`exec-6fc09318...`, exit 1), then passed with identical
+assertions after the transport correction (`exec-20c1a9aa...`, exit 0). The
+prior five adapter controls used a bare command without backgrounding and did
+not establish that wire contract; their actual execution receipts are retained
+without upgrading that claim. One extracted focused script initially omitted
+a closing `fi`; its exit 2 is preserved as test setup failure, not causal proof.
+Five corrected adapter controls using the exact production background command
+also passed on Linux (`exec-0f1b2f7f...`, native/durable exit 0), including
+successful SSH admission with real terminal exit 1, no fabricated readiness and
+immutable retry evidence. Independent source and narrative review found no
+remaining defect. The complete final controller gate remains pending on the
+committed corrected fixture. Existing 27 owning retention/recovery controls separately prove
+deletion after complete forensic copies; cancellation retention does not provide
+benchmark acceptance credit.
+
+The complete fake-provider fixture now runs on Linux because it exercises the
+actual Linux guest supervisor, native process identities and descendant reaping.
+The canonical controller lane uses the owned Linux runtime. No worker cases are
+silently skipped or replaced on macOS; separate native Mac environment and
+GitHub transport checks remain separate evidence. Direct macOS execution of the
+whole guest fixture is not claimed to pass.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures
