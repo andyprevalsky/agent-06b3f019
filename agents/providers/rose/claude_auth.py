@@ -263,9 +263,18 @@ def _model_rejects_forced_tool_choice(model: str) -> bool:
     OpenRouter uses a dot (`claude-fable-5.1`); normalize so both match.
     Do not match leftover Fable 5 (`claude-fable-5`) — that model still
     accepts forced tool_choice.
+
+    Opus 5.5 shares the downgrade. A credited probe was blocked (zero
+    balance) before tool_choice could be confirmed, and a 400 on type
+    any/tool would fail every planner call. Drop the Opus clause once a
+    credited call shows it accepts forced tool_choice.
     """
     canonical = model.lower().replace(".", "-")
-    return "claude-fable-5-1" in canonical or "claude-mythos-5-1" in canonical
+    return (
+        "claude-fable-5-1" in canonical
+        or "claude-mythos-5-1" in canonical
+        or "claude-opus-5-5" in canonical
+    )
 
 
 def _downgrade_forced_tool_choice_if_unsupported(body: Dict[str, Any], model: str) -> None:

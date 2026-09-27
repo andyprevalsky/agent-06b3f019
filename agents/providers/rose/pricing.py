@@ -51,6 +51,9 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "openai/gpt-6-luna":              {"prompt": 0.10 / 1_000_000, "completion": 0.50 / 1_000_000},
     "openai/gpt-6-sol":               {"prompt": 2.00 / 1_000_000, "completion": 10.00 / 1_000_000},
     "openai/gpt-oss-120b":            {"prompt": 0.15 / 1_000_000, "completion": 0.60 / 1_000_000},
+    # OpenRouter list price. AA's first-party card is $0.15/$0.50; we pay OR.
+    "z-ai/glm-5.3-flash":             {"prompt": 0.045 / 1_000_000, "completion": 0.14 / 1_000_000},
+    "anthropic/claude-opus-5.5":      {"prompt": 4.00 / 1_000_000, "completion": 20.00 / 1_000_000},
 }
 
 
@@ -120,6 +123,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-opus-4-8":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-fable-5":    {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
     "claude-fable-5-1":  {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
+    "claude-opus-5-5":   {"input_cents_per_1k": 0.4, "output_cents_per_1k": 2.0},
     "claude-haiku-4.5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     "claude-haiku-4-5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
 }

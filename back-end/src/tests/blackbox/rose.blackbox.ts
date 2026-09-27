@@ -299,19 +299,19 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
   assertEqual(
     lite.waterfall.join(','),
-    'google/gemini-3.1-flash-lite,openai/gpt-5.6-luna',
+    'z-ai/glm-5.3-flash,google/gemini-3.8-flash',
     'flash OpenRouter waterfall'
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assertEqual(PARAM_POPULATOR_MODEL, 'rose-labs/rose-1-ultra', 'param populator model');
   assertEqual(poolForModel(PARAM_POPULATOR_MODEL), 'rose-1-ultra', 'param populator pool');
-  assertEqual(ultra.claudeAuthModel, 'claude-fable-5-1', 'ultra claudeAuthModel');
-  assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
+  assertEqual(ultra.claudeAuthModel, 'claude-opus-5-5', 'ultra claudeAuthModel');
+  assertEqual(ultra.gptAuthModel, 'gpt-6-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from ultra: opus-4.8 was the priciest layer while scoring
   // below sol on every AA index. Sol leads, kimi-k3 backs it from a different vendor.
   assertEqual(
     ultra.waterfall.join(','),
-    'openai/gpt-5.6-sol,moonshotai/kimi-k3',
+    'openai/gpt-6-sol,moonshotai/kimi-k3',
     'ultra OpenRouter waterfall'
   );
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
@@ -319,7 +319,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
   assertEqual(
     browserUse.waterfall.join(','),
-    'google/gemini-3.1-flash-lite,openai/gpt-5.6-luna',
+    'z-ai/glm-5.3-flash,google/gemini-3.8-flash',
     'browserUse OpenRouter waterfall'
   );
   assert(
@@ -972,7 +972,7 @@ async function testClaudeAuth_fable51DowngradesForcedToolChoice() {
     tools: SPAWN_AGENT_TOOL,
     toolChoice: { type: 'tool', name: 'spawn_agent' },
   });
-  assertEqual(named.model, 'claude-fable-5-1', 'ultra claudeAuth model');
+  assertEqual(named.model, 'claude-opus-5-5', 'ultra claudeAuth model');
   assertEqual(
     JSON.stringify(named.tool_choice),
     JSON.stringify({ type: 'auto', disable_parallel_tool_use: true }),

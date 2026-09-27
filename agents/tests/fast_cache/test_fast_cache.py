@@ -1120,13 +1120,15 @@ def test_fable_51_pool_contract_shares_fable_5_fingerprint():
     ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
     assert ctx.llm_key("dag_param_populator", fable_5) == ctx.llm_key("dag_param_populator", fable_51)
     live = rose_cache.request_key_material({"pool": "rose-1-ultra"})
-    assert live["pool_contract"]["claude_auth_model"] == "claude-fable-5-1"
+    assert live["pool_contract"]["claude_auth_model"] == "claude-opus-5-5"
+    # Opus is a different family from Fable, so it must not collapse onto the
+    # fable-5 fingerprint alias.
     aliased = dict(live)
     aliased["pool_contract"] = {
         **live["pool_contract"],
         "claude_auth_model": "claude-fable-5",
     }
-    assert ctx.llm_key("dag_param_populator", live) == ctx.llm_key("dag_param_populator", aliased)
+    assert ctx.llm_key("dag_param_populator", live) != ctx.llm_key("dag_param_populator", aliased)
 
 
 def test_llm_request_key_separates_anthropic_exclusion_policy(monkeypatch):

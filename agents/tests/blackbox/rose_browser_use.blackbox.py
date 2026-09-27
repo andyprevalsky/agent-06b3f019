@@ -57,13 +57,11 @@ def test_browser_use_pool_registered():
     assert "rose-1-browser-use" in POOL_REGISTRY
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
-    assert spec.claude_auth_model == "claude-fable-5-1"
-    assert spec.gpt_auth_model == "gpt-5.6-sol"
-    # Waterfall is GPT-5.6 Sol → Kimi K3. Opus 4.8 was dropped: it was the
-    # priciest layer while scoring below sol on all three AA indices, and the
-    # two survivors come from different vendors so one provider outage cannot
-    # drain the whole waterfall.
-    assert spec.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert spec.claude_auth_model == "claude-sonnet-5"
+    assert spec.gpt_auth_model == "gpt-5.6-luna"
+    # Speed-tier vision waterfall: GLM 5.3 Flash then Gemini 3.8 Flash.
+    assert spec.waterfall == ("z-ai/glm-5.3-flash", "google/gemini-3.8-flash")
+    assert spec.waterfall_reasoning_effort == "low"
     assert not any(m.startswith("anthropic/") for m in spec.waterfall)
     # Legacy bu/yutori models removed.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
@@ -1963,7 +1961,7 @@ async def test_complete_browser_use_gpt_path_succeeds():
     )
 
     assert result["mode"] == "gpt"
-    assert result["actual_model"] == "gpt-5.6-sol-gpt"
+    assert result["actual_model"] == "gpt-5.6-luna-gpt"
     assert result["action"]["action"] == "click"
     assert result["gpt_token_error"] is None
     assert result["usage"]["total_tokens"] == 20
@@ -1980,13 +1978,13 @@ async def test_complete_browser_use_gpt_path_succeeds():
     dumps = sorted(dump_root.glob("*test-bu-gpt.json"))
     assert dumps, "complete_browser_use should dump exact LLM context"
     payload = json.loads(dumps[-1].read_text())
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "gpt-5.6-luna"
     assert payload["message_count"] == 2
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["config"]["actual_model"] == "gpt-5.6-sol"
-    assert payload["config"]["actual_model_raw"] == "gpt-5.6-sol-gpt"
+    assert payload["config"]["actual_model"] == "gpt-5.6-luna"
+    assert payload["config"]["actual_model_raw"] == "gpt-5.6-luna-gpt"
     assert payload["config"]["mode"] == "gpt"
-    assert payload["config"]["effective_params"]["model"] == "gpt-5.6-sol"
+    assert payload["config"]["effective_params"]["model"] == "gpt-5.6-luna"
     assert payload["config"]["effective_params"]["temperature"] is None
     assert payload["config"]["effective_params"]["max_tokens"] is None
     assert payload["config"]["requested_params"]["temperature"] == 1.0
@@ -2104,7 +2102,7 @@ async def test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert result["mode"] == "waterfall"
-    assert result["actual_model"] == "claude-fable-5-1-anthropic"
+    assert result["actual_model"] == "claude-sonnet-5-anthropic"
     assert result["gpt_token_error"] == "rate_limit"
     assert result["action"]["action"] == "click"
     assert result["action"]["index"] == 3

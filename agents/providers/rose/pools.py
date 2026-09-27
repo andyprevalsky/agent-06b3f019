@@ -3,46 +3,51 @@
 Both rose-1-flash and rose-1-ultra share the same code path (claudeAuth ->
 waterfall); the only difference is which models are tried at each layer.
 
-Model contract — speed pools retargeted from a 2026-09-27 live stream bench
-(OpenRouter chat completions, 180-word prompt, max_tokens 6000, 3 reps).
-Median user-visible TTFT / decode tok/s at reasoning effort low, then xhigh:
+Model contract — 2026-09-27 live stream bench plus Artificial Analysis
+Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
+(180-word prompt, effort low). Index is AA, not our harness.
 
-    google/gemini-3.1-flash-lite   1.19s / 245 t/s    8.5s / 334 t/s
-    google/gemini-3.8-flash        1.64s / 124 t/s   23.6s / 253 t/s
-    openai/gpt-5.6-luna            7.4s  / 350 t/s   11.3s / 350 t/s
-    openai/gpt-6-luna              7.4s  / 400 t/s   20.4s / 292 t/s
-    openai/gpt-5.6-sol (ultra)     8.4s  / 224 t/s   12.4s / 168 t/s
-    anthropic/claude-haiku-4.5    (xhigh) 1.9s / 114 t/s, e2e 4.2s
+    z-ai/glm-5.3-flash          TTFT 0.48s, 65–124 tok/s, index 42 (89% of Sol)
+    google/gemini-3.8-flash     TTFT 1.64s / 124 tok/s at low, index 33
+    google/gemini-3.1-flash-lite TTFT 1.19s / 245 tok/s, index 16 (dominated)
+    deepseek-v4.1-flash         TTFT 3.1s / ~420 tok/s, index 39 max
+    openai/gpt-6-sol            xhigh TTFT 14.2s, index 48 max
+    openai/gpt-5.6-sol          xhigh TTFT 12.4s, index 47 max
+    claude-opus-5-5             index 58 max (frontier). tool_choice any/tool
+                                is downgraded like Fable until a credited call
+                                proves Opus accepts forced tool_choice.
 
-Speed waterfalls pin effort ``low`` and lead with gemini-3.1-flash-lite.
-gpt-6-luna loses to gpt-5.6-luna once effort is xhigh, so the cross-vendor
-fallback is gpt-5.6-luna. Ultra / planner stay frontier.
+Speed waterfalls pin effort ``low`` and lead with glm-5.3-flash (vision).
+gemini-3.8-flash is the Google fallback. Ultra claudeAuth is Opus 5.5.
+Paid ultra waterfall is gpt-6-sol -> kimi-k3. Planner stays on ultra.
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3.1-flash-lite
+        waterfall  = anthropic/claude-haiku-4.5 -> z-ai/glm-5.3-flash
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite)
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = google/gemini-3.1-flash-lite -> openai/gpt-5.6-luna
+        waterfall  = z-ai/glm-5.3-flash -> google/gemini-3.8-flash
         waterfall effort = low
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
-        claudeAuth = claude-fable-5-1
-        gptAuth    = gpt-5.6-sol
-        waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
+        claudeAuth = claude-opus-5-5
+        gptAuth    = gpt-6-sol
+        waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:  (speed-tier, vision-required)
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = google/gemini-3.1-flash-lite -> openai/gpt-5.6-luna
+        waterfall  = z-ai/glm-5.3-flash -> google/gemini-3.8-flash
         waterfall effort = low
 
-Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b
-(~500–3000 t/s). TypeSafe Jev is Decisions-API only — not waterfallable.
+Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b.
+Groq's newer qwen3.8-27b is not on OpenRouter's Groq route. TypeSafe Jev
+is Decisions-API only. Yutori n1.5 is a separate computer-use tool schema.
+OpenLake is KV-cache storage, not a model.
 """
 
 from __future__ import annotations
@@ -105,7 +110,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
             "anthropic/claude-haiku-4.5",
-            "google/gemini-3.1-flash-lite",
+            "z-ai/glm-5.3-flash",
         ),
         waterfall_reasoning_effort="low",
     ),
@@ -114,20 +119,20 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
-            "google/gemini-3.1-flash-lite",
-            "openai/gpt-5.6-luna",
+            "z-ai/glm-5.3-flash",
+            "google/gemini-3.8-flash",
         ),
         waterfall_reasoning_effort="low",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
-        claude_auth_model="claude-fable-5-1",
-        gpt_auth_model="gpt-5.6-sol",
-        # claudeAuth is fable 5.1. OpenRouter fable 5.1 is $10/$50 per M vs
-        # sol $2/$10, so the paid waterfall stays sol -> kimi. Anthropic was
-        # dropped earlier (opus-4.8 cost more and scored below sol).
+        claude_auth_model="claude-opus-5-5",
+        gpt_auth_model="gpt-6-sol",
+        # Opus 5.5 is the AA v4.3.2 leader (58) and cheaper than Fable 5.1
+        # ($4/$20 vs $10/$50). Paid waterfall is gpt-6-sol ($2/$10, index 48)
+        # then kimi-k3 (index 44). Fable stays off this waterfall.
         waterfall=(
-            "openai/gpt-5.6-sol",
+            "openai/gpt-6-sol",
             "moonshotai/kimi-k3",
         ),
     ),
@@ -143,8 +148,8 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         # and a model missing from that allowlist silently drops the image
         # instead of erroring, so the agent would fly blind on fallback.
         waterfall=(
-            "google/gemini-3.1-flash-lite",
-            "openai/gpt-5.6-luna",
+            "z-ai/glm-5.3-flash",
+            "google/gemini-3.8-flash",
         ),
         waterfall_reasoning_effort="low",
     ),

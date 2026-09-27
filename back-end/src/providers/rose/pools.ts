@@ -8,11 +8,11 @@
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
  * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
  *
- * Speed pools from a 2026-09-27 live stream bench (TTFT + tok/s, effort low
- * and xhigh, 180-word prompt). gemini-3.1-flash-lite won the vision+tools
- * speed tier (1.19s / 245 tok/s at low). gpt-5.6-luna is the cross-vendor
- * fallback (gpt-6-luna's xhigh TTFT was 20s vs luna's 11s). Speed waterfalls
- * pin effort low so xhigh thinking cannot erase that TTFT. Planner stays ultra.
+ * Speed pools from the 2026-09-27 live bench plus AA Intelligence Index
+ * v4.3.2. glm-5.3-flash leads vision speed (TTFT 0.48s, index 42).
+ * gemini-3.8-flash is the Google fallback (TTFT 1.64s at low, index 33).
+ * Ultra claudeAuth is Opus 5.5 (index 58). Paid waterfall is gpt-6-sol
+ * (index 48) then kimi-k3. Speed waterfalls pin effort low.
  */
 
 export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
@@ -40,36 +40,34 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-mini',
     claudeAuthModel: 'claude-haiku-4-5',
     gptAuthModel: 'gpt-5.6-luna',
-    // Keep vision-capable layers — challenge classifier sends screenshots.
-    // Haiku remains first (fast Anthropic + anthropic-family skip tests).
-    // Second layer is the measured speed fallback (gemini-3.1-flash-lite).
-    waterfall: ['anthropic/claude-haiku-4.5', 'google/gemini-3.1-flash-lite'],
+    // Haiku stays first so anthropic-family skip tests still have a layer.
+    // Second layer is glm-5.3-flash (vision, index 42, TTFT ~0.5s).
+    waterfall: ['anthropic/claude-haiku-4.5', 'z-ai/glm-5.3-flash'],
     waterfallReasoningEffort: 'low',
   },
   'rose-1-flash': {
     name: 'rose-1-flash',
-    // Sonnet-5 stays the OAuth primary (Haiku is mini). Paid waterfall is the
-    // live-bench speed pair: gemini-3.1-flash-lite then gpt-5.6-luna, effort low.
+    // Sonnet-5 stays the OAuth primary. Paid waterfall is glm-5.3-flash then
+    // gemini-3.8-flash, both vision, effort low.
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['google/gemini-3.1-flash-lite', 'openai/gpt-5.6-luna'],
+    waterfall: ['z-ai/glm-5.3-flash', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
-    claudeAuthModel: 'claude-fable-5-1',
-    gptAuthModel: 'gpt-5.6-sol',
-    // claudeAuth is fable 5.1. OpenRouter fable 5.1 is $10/$50 per M vs sol
-    // $2/$10, so the paid waterfall stays sol -> kimi.
-    waterfall: ['openai/gpt-5.6-sol', 'moonshotai/kimi-k3'],
+    claudeAuthModel: 'claude-opus-5-5',
+    gptAuthModel: 'gpt-6-sol',
+    // Opus 5.5 leads AA v4.3.2 (58) at $4/$20. Paid waterfall is gpt-6-sol
+    // ($2/$10, index 48) then kimi-k3 (index 44).
+    waterfall: ['openai/gpt-6-sol', 'moonshotai/kimi-k3'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
-    // Speed-tier browser pool (not ultra). Both waterfall layers must stay
-    // vision-capable (see VISION_MODELS in agents/providers/rose/transforms.py).
+    // Speed-tier browser pool. Both waterfall layers must stay in VISION_MODELS.
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['google/gemini-3.1-flash-lite', 'openai/gpt-5.6-luna'],
+    waterfall: ['z-ai/glm-5.3-flash', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
   },
 };

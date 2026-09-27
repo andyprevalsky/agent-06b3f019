@@ -240,7 +240,7 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
         glmSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
-      if (body.model === 'google/gemini-3.1-flash-lite') return sseResponse(GENERATOR_SSE);
+      if (body.model === 'z-ai/glm-5.3-flash') return sseResponse(GENERATOR_SSE);
       throw new Error(`Unexpected OpenRouter model ${String(body.model)}`);
     }
     throw new Error(`Unexpected route ${url}`);
@@ -252,7 +252,7 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     assert.ok(text.length > 0, 'the independent fallback must rescue both silent Cerebras routes');
 
     const glmBody = openRouterBodies.find((body) => body.model === 'openai/gpt-oss-120b');
-    const fastBody = openRouterBodies.find((body) => body.model === 'google/gemini-3.1-flash-lite');
+    const fastBody = openRouterBodies.find((body) => body.model === 'z-ai/glm-5.3-flash');
     assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter Cerebras spill');
     assert.ok(fastBody, 'the Cerebras spill must race the measured fast fallback model');
     assert.equal(
@@ -315,7 +315,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
       const model = String(body.model);
       openRouterModels.push(model);
       if (model === 'openai/gpt-oss-120b') return sseResponse(GENERATOR_SSE);
-      if (model === 'google/gemini-3.1-flash-lite') {
+      if (model === 'z-ai/glm-5.3-flash') {
         fastSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
@@ -330,7 +330,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       openRouterModels,
-      ['openai/gpt-oss-120b', 'google/gemini-3.1-flash-lite'],
+      ['openai/gpt-oss-120b', 'z-ai/glm-5.3-flash'],
       'the bounded fast fallback must not advance to the general waterfall'
     );
     assert.equal(fastSignal?.aborted, true, 'the losing fast fallback must be aborted');

@@ -63,6 +63,8 @@ VISION_MODELS: frozenset[str] = frozenset({
     # erroring, so the browser agent flies blind on that layer — see the
     # invariant test in tests/blackbox/rose.blackbox.py.
     "moonshotai/kimi-k3",
+    "z-ai/glm-5.3-flash",
+    "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-4",
     "anthropic/claude-sonnet-4.5",
     "anthropic/claude-haiku-4.5",

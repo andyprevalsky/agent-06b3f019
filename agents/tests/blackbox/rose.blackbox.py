@@ -215,13 +215,13 @@ def test_pool_registry_lookup():
     assert mini.gpt_auth_model == "gpt-5.6-luna"
     assert mini.waterfall == (
         "anthropic/claude-haiku-4.5",
-        "google/gemini-3.1-flash-lite",
+        "z-ai/glm-5.3-flash",
     )
     assert mini.waterfall_reasoning_effort == "low"
     assert flash.name == "rose-1-flash"
     assert flash.claude_auth_model.startswith("claude-")
     assert flash.gpt_auth_model == "gpt-5.6-luna"
-    assert flash.waterfall == ("google/gemini-3.1-flash-lite", "openai/gpt-5.6-luna")
+    assert flash.waterfall == ("z-ai/glm-5.3-flash", "google/gemini-3.8-flash")
     assert flash.waterfall_reasoning_effort == "low"
     assert ultra.name == "rose-1-ultra"
     from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
@@ -229,15 +229,15 @@ def test_pool_registry_lookup():
 
     assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
     assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
-    assert ultra.claude_auth_model == "claude-fable-5-1"
-    assert ultra.gpt_auth_model == "gpt-5.6-sol"
-    # OpenRouter fable 5.1 is $10/$50 per M vs sol $2/$10, so the paid
-    # waterfall stays sol -> kimi. claudeAuth is the only fable 5.1 hop.
-    assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert ultra.claude_auth_model == "claude-opus-5-5"
+    assert ultra.gpt_auth_model == "gpt-6-sol"
+    # Opus 5.5 is claudeAuth (index 58, $4/$20). Paid waterfall is gpt-6-sol
+    # (index 48, $2/$10) then kimi-k3. Fable is not on the paid path.
+    assert ultra.waterfall == ("openai/gpt-6-sol", "moonshotai/kimi-k3")
     assert "anthropic/claude-fable-5.1" not in ultra.waterfall
     assert browser_use.claude_auth_model == "claude-sonnet-5"
     assert browser_use.gpt_auth_model == "gpt-5.6-luna"
-    assert browser_use.waterfall == ("google/gemini-3.1-flash-lite", "openai/gpt-5.6-luna")
+    assert browser_use.waterfall == ("z-ai/glm-5.3-flash", "google/gemini-3.8-flash")
     assert browser_use.waterfall_reasoning_effort == "low"
     assert ultra.waterfall_reasoning_effort is None
     assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
@@ -1208,10 +1208,20 @@ _SPAWN_AGENT_TOOL = [
 ]
 
 
+def _fable_pool() -> PoolSpec:
+    """Fable is no longer ultra, but it still 400s on forced tool_choice."""
+    return PoolSpec(
+        name="rose-1-ultra",
+        claude_auth_model="claude-fable-5-1",
+        gpt_auth_model="gpt-6-sol",
+        waterfall=("openai/gpt-6-sol", "moonshotai/kimi-k3"),
+    )
+
+
 def test_fable_5_1_downgrades_named_tool_choice_to_auto():
     """claude-fable-5-1 400s on tool_choice type tool/any (Anthropic docs)."""
     body = build_anthropic_body(
-        pool_spec=get_pool("rose-1-ultra"),
+        pool_spec=_fable_pool(),
         messages=[{"role": "user", "content": "fill params"}],
         tools=_SPAWN_AGENT_TOOL,
         tool_choice={"name": "spawn_agent"},
@@ -1225,9 +1235,23 @@ def test_fable_5_1_downgrades_named_tool_choice_to_auto():
     }
 
 
-def test_fable_5_1_downgrades_any_tool_choice_to_auto():
+def test_opus_5_5_downgrades_forced_tool_choice_until_confirmed():
+    """Opus is ultra. Forced tool_choice stays downgraded until a credited call proves it."""
     body = build_anthropic_body(
         pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-opus-5-5"
+    assert body["tool_choice"] == {"type": "auto"}
+
+
+def test_fable_5_1_downgrades_any_tool_choice_to_auto():
+    body = build_anthropic_body(
+        pool_spec=_fable_pool(),
         messages=[{"role": "user", "content": "fill params"}],
         tools=_SPAWN_AGENT_TOOL,
         tool_choice="any",
@@ -3733,7 +3757,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-flash-lite"]
+    assert models_seen == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3828,7 +3852,7 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-flash-lite"]
+    assert models_seen == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4513,7 +4537,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-flash-lite"]
+    assert seen["openrouter_models"] == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4564,7 +4588,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-flash-lite"]
+    assert seen["openrouter_models"] == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -6946,6 +6970,10 @@ async def run_all_tests():
     r.record(
         "fable_5_1_downgrades_any_tool_choice_to_auto",
         test_fable_5_1_downgrades_any_tool_choice_to_auto,
+    )
+    r.record(
+        "opus_5_5_downgrades_forced_tool_choice_until_confirmed",
+        test_opus_5_5_downgrades_forced_tool_choice_until_confirmed,
     )
     r.record(
         "browser_use_pool_uses_speed_tier_claude_auth",

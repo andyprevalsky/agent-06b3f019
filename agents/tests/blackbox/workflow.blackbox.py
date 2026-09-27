@@ -3150,11 +3150,9 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     `model`, so the workflow fell back to the ROOT pool rate and under-billed
     browser tokens that had actually raced through the browser pool.
 
-    The root pool here is rose-1-flash, NOT rose-1-ultra: ultra and browser-use
-    now share an identical waterfall (gpt-5.6-sol -> kimi-k3) and therefore an
-    identical rate, which would make the "priced at the browser rate, not the
-    root rate" assertion below vacuous. lite (0.1875/0.9375) vs browser-use
-    (0.275/1.5) keeps the two genuinely distinguishable.
+    The root pool here is rose-1-mini. Flash and browser-use share the GLM
+    speed waterfall, so a flash root would make the rate comparison vacuous.
+    Mini (haiku + glm) is priced differently from browser-use (glm + gemini-3.8).
     """
     from domains.spawn_browser_agent_v3.handler import _simulated_browser_usage_items
     from domains.spawn_browser_agent_v3.service import (
@@ -3164,7 +3162,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     from providers.rose.pricing import get_model_pricing
 
     browser_pricing = get_model_pricing("rose-1-browser-use")
-    root_pricing = get_model_pricing("rose-1-flash")
+    root_pricing = get_model_pricing("rose-1-mini")
     tokens_in, tokens_out = 1_186_754, 40_000
     expected = (tokens_in / 1000) * browser_pricing["input_cents_per_1k"] + (tokens_out / 1000) * browser_pricing[
         "output_cents_per_1k"
@@ -3172,12 +3170,12 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     root_priced = (tokens_in / 1000) * root_pricing["input_cents_per_1k"] + (tokens_out / 1000) * root_pricing[
         "output_cents_per_1k"
     ]
-    assert root_priced < expected  # guard: the two rates must actually differ
+    assert abs(root_priced - expected) > 1.0  # guard: the two rates must actually differ
 
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.model = "rose-1-flash"
+    wf.model = "rose-1-mini"
     wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
     wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
     fake = _FakeWorkflowModule()
@@ -3202,7 +3200,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     wf2 = _bare_workflow_instance()
     wf2.agent_id = "a"
     wf2.user_id = "u"
-    wf2.model = "rose-1-flash"
+    wf2.model = "rose-1-mini"
     wf2.input_cents_per_1k = root_pricing["input_cents_per_1k"]
     wf2.output_cents_per_1k = root_pricing["output_cents_per_1k"]
     fake2 = _FakeWorkflowModule()

@@ -961,8 +961,9 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
 
 
 # claudeAuth pin bumps inside a family must not bust Fast Mode exact keys.
-# Live routing still uses the real id (claude-fable-5-1); only the fingerprint
-# stays on the family pin that wrote the July / Sep-8 warm cache.
+# Ultra now routes to claude-opus-5-5 and must not alias onto fable. A leftover
+# fable-5.1 pin still fingerprints as fable-5 so the July / Sep-8 warm cache
+# stays valid.
 _CLAUDE_AUTH_MODEL_FINGERPRINT_ALIASES = {
     "claude-fable-5-1": "claude-fable-5",
 }
