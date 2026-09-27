@@ -246,6 +246,83 @@ fi
 # only its direct shell reparents that descendant, allowing it to mutate durable
 # ownership after controller cleanup returns. Tree teardown must kill the full
 # captured process forest, including a TERM-resistant leaf.
+# Independent assertion helper: zero means the captured descendant is terminal.
+cloudbench_test_process_terminal() {  # <pid> <native-birth>
+  python3 - "$ROOT_DIR/scripts/process-identity.py" "$1" "$2" <<'PY_TREE_STATE'
+import os
+import re
+import runpy
+import subprocess
+import sys
+
+identity = runpy.run_path(sys.argv[1])["current_identity"]
+pid, expected = int(sys.argv[2]), sys.argv[3]
+unknown = object()
+def observed_identity():
+    try:
+        return identity(pid)
+    except (OSError, ValueError, IndexError):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        return unknown
+try:
+    observed = observed_identity()
+    if observed is not unknown and observed != expected:
+        raise SystemExit(0)
+    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, timeout=2)
+    observed = observed_identity()
+    if observed is not unknown and observed != expected:
+        raise SystemExit(0)
+    # Darwin cannot read proc_pidinfo for a zombie. A positive native Z state
+    # still proves it cannot execute; live, malformed or unavailable state fails.
+    terminal = probe.returncode == 0 and re.fullmatch(r"Z[<NLSsl+]*", probe.stdout.strip())
+    raise SystemExit(0 if terminal else 1)
+except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+    raise SystemExit(1)
+PY_TREE_STATE
+}
+
+# Keep one exited direct child deliberately unreaped so this predicate control
+# does not depend on how quickly the host's PID1 reaps reparented descendants.
+# The test parent always joins its exact Popen after checking the native state.
+python3 - "$ROOT_DIR" "$(declare -f cloudbench_test_process_terminal)" <<'PY_TREE_TERMINAL' ||
+import pathlib
+import runpy
+import subprocess
+import sys
+import time
+
+root = pathlib.Path(sys.argv[1])
+identity = runpy.run_path(str(root / "scripts/process-identity.py"))["current_identity"]
+command = 'ROOT_DIR="$1"\n' + sys.argv[2] + '\ncloudbench_test_process_terminal "$2" "$3"'
+child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"], stdin=subprocess.PIPE)
+try:
+    birth = identity(child.pid)
+    def verdict():
+        return subprocess.run(["bash", "-c", command, "terminal-test", str(root), str(child.pid), birth], timeout=3).returncode
+    assert verdict() != 0, "terminal predicate accepted a live exact child"
+    child.stdin.write(b"x")
+    child.stdin.close()
+    deadline = time.monotonic() + 2
+    while True:
+        state = subprocess.check_output(["ps", "-p", str(child.pid), "-o", "stat="], text=True, timeout=1).strip()
+        if state.startswith("Z"):
+            break
+        assert time.monotonic() < deadline, "owned child never reached native zombie state"
+        time.sleep(0.01)
+    # This exact Popen is not reaped, so its PID cannot be recycled. Darwin
+    # may no longer expose proc_pidinfo once the child reaches native Z.
+    assert verdict() == 0, "terminal predicate rejected a non-executing exact zombie"
+finally:
+    if child.poll() is None:
+        child.kill()
+    child.wait(timeout=2)
+assert verdict() == 0, "terminal predicate rejected its reaped child"
+PY_TREE_TERMINAL
+  fail "native descendant terminal-state assertion contract failed"
+
 tree_ready="$TMP_ROOT/tree-ready"
 tree_leaf_pid="$TMP_ROOT/tree-leaf.pid"
 tree_leaked="$TMP_ROOT/tree-leaked"
@@ -267,8 +344,23 @@ for _ in $(seq 1 100); do
 done
 [ -e "$tree_ready" ] || fail "the descendant-tree test child must become ready"
 tree_leaf="$(cat "$tree_leaf_pid")"
+tree_leaf_birth="$(python3 "$ROOT_DIR/scripts/process-identity.py" "$tree_leaf")" ||
+  fail "the descendant-tree test leaf must have a native identity"
+if cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
+  cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
+  fail "the terminal assertion accepted an executing exact descendant"
+fi
+mkdir "$TMP_ROOT/tree-state-probe-fails"
+printf '#!/usr/bin/env bash\nexit 2\n' > "$TMP_ROOT/tree-state-probe-fails/ps"
+chmod +x "$TMP_ROOT/tree-state-probe-fails/ps"
+if PATH="$TMP_ROOT/tree-state-probe-fails:$PATH" \
+    cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
+  cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
+  fail "the terminal assertion accepted an unavailable native state probe"
+fi
 cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
-if kill -0 "$tree_root_pid" 2>/dev/null || kill -0 "$tree_leaf" 2>/dev/null; then
+if kill -0 "$tree_root_pid" 2>/dev/null || \
+    ! cloudbench_test_process_terminal "$tree_leaf" "$tree_leaf_birth"; then
   fail "tracked controller descendants must not survive tree cleanup"
 fi
 [ ! -e "$tree_leaked" ] ||
