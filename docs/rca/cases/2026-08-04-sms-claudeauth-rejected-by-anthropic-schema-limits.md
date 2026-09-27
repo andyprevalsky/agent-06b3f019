@@ -36,7 +36,7 @@ local acceptance reproduced it on the first claudeAuth round:
 WARN [RoseTransport] anthropic.error status=400 body={"message":"Schemas contains
 too many parameters with union types (27 parameters with type arrays or anyOf).
 ... (limit: 16 parameters with unions)"}
-INFO [Rose] waterfall.done pool=rose-1-lite claude_auth_failed=RoseInvalidRequest
+INFO [Rose] waterfall.done pool=rose-1-flash claude_auth_failed=RoseInvalidRequest
 ```
 
 The user-visible cost was silent: SMS still answered, but never on the model the

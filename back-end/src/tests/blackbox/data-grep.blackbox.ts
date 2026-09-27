@@ -1334,7 +1334,7 @@ async function testSnapshotEndpoint(userId: string): Promise<void> {
       snapshotId: snapshot.id,
       source: 'grep-blackbox',
       changes: { added: ['focus'] },
-      model: 'rose-1-lite',
+      model: 'rose-1-flash',
       promptKey: 'snapshot.distill',
     },
   });
@@ -1358,7 +1358,7 @@ async function testSnapshotEndpoint(userId: string): Promise<void> {
     throw new Error(`Unexpected snapshot content/version: ${JSON.stringify(body.snapshot)}`);
   }
   if (
-    !body.snapshot.revisions?.some((r) => r.source === 'grep-blackbox' && r.model === 'rose-1-lite')
+    !body.snapshot.revisions?.some((r) => r.source === 'grep-blackbox' && r.model === 'rose-1-flash')
   ) {
     throw new Error(`Expected the seeded revision in the ledger: ${JSON.stringify(body.snapshot)}`);
   }

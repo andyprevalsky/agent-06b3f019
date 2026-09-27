@@ -236,7 +236,7 @@ parses ate iterations 19 and 20 after 18 turns of real work and it died on
 `run_agent.blackbox.py::test_failed_llm_call_does_not_consume_iteration_budget`,
 observed failing pre-fix ("only 2 LLM calls made") and passing post-fix.
 
-`providers/rose/pools.py` + `pricing.py` — `rose-1-lite` (which generates the
+`providers/rose/pools.py` + `pricing.py` — `rose-1-flash` (which generates the
 response schema that defines every run's pass criteria) moved to
 `google/gemini-3.6-flash` -> `moonshotai/kimi-k3`. `_POOL_WATERFALLS` was a
 hand-copied duplicate of the pool registry behind a "must stay in sync" comment

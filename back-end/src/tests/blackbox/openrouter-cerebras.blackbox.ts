@@ -11,7 +11,7 @@ import { createStreamingCompletion, type CompletionChunk } from '../../providers
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 const OK_SSE = [
-  'data: {"model":"google/gemma-4-31b-it","provider":"Cerebras","choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
+  'data: {"model":"openai/gpt-oss-120b","provider":"Cerebras","choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
   '',
   'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":4,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3}}}',
   '',
@@ -83,14 +83,14 @@ async function run(): Promise<void> {
 
     assert.deepEqual(calls, [OPENROUTER_API_URL]);
     assert.equal(calls.includes(CEREBRAS_API_URL), false);
-    assert.equal(body.model, 'google/gemma-4-31b-it');
-    assert.deepEqual(body.reasoning, { effort: 'none', exclude: true });
+    assert.equal(body.model, 'openai/gpt-oss-120b');
+    assert.deepEqual(body.reasoning, { effort: 'low', exclude: true });
     assert.deepEqual(body.provider, {
       only: ['cerebras'],
       allow_fallbacks: false,
       require_parameters: true,
     });
-    assert.equal(chunks[0]?.actual_model, 'google/gemma-4-31b-it');
+    assert.equal(chunks[0]?.actual_model, 'openai/gpt-oss-120b');
     assert.equal(chunks[0]?.pool_name, 'openrouter-cerebras');
     assert.equal(chunks.at(-1)?.usage?.cache_read_input_tokens, 3);
   } finally {

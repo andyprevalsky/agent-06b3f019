@@ -14,7 +14,7 @@ function makeAgent(status: AgentDetail['status']): AgentDetail {
   return {
     agent_id: 'agent-1',
     goal: 'do a thing',
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'MAC_APP',
     reasoning_effort: 'medium',
     progress: status === 'COMPLETED' ? 1 : 0,

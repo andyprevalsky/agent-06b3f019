@@ -60,7 +60,7 @@ export async function commitStartNewAgent(
           userId,
           goal,
           source: channel,
-          model: 'rose-labs/rose-1-lite',
+          model: 'rose-labs/rose-1-flash',
           reasoningMaxTokens: 2048,
           status: 'STARTING_UP',
           priceLimitCents,
@@ -189,7 +189,7 @@ export async function commitStartNewAgent(
       agentId: startedAgent.id,
       userId,
       goal,
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       reasoningMaxTokens: 2048,
       verifier: {
         type: 'FLOAT_LLM_JUDGE',

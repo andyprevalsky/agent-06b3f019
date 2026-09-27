@@ -517,7 +517,7 @@ class _FakeWFInstance:
         agent_id="a-1",
         depth=0,
         paused=False,
-        model="rose-1-lite",
+        model="rose-1-flash",
         goal="",
         context=None,
     ):
@@ -2768,7 +2768,7 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
             agent_id="a-7",
             user_id="u-7",
             goal="research X",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="task-99",
             init_tool_call_id="init-tc",
             claude_token="ctok",
@@ -2788,7 +2788,7 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     # run_agent was called with explore-specific args
     assert captured["agent_id"] == "a-7"
     assert captured["user_id"] == "u-7"
-    assert captured["model"] == "rose-1-lite"
+    assert captured["model"] == "rose-1-flash"
     assert captured["claude_token"] == "ctok"
     assert captured["call_site_override"] == "explore_agent"
     assert captured["cache_sequence_id"] == "agent:a-7:task:task-99:call:explore_agent"
@@ -2840,7 +2840,7 @@ async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_ev
             agent_id="a-norwitz",
             user_id="u-7",
             goal="research Nick Norwitz",
-            model="rose-1-lite",
+            model="rose-1-flash",
         )
 
     assert "Fast Mode" not in result["result"]
@@ -2873,7 +2873,7 @@ async def test_spawn_explore_agent_activity_reraises_cancel_on_demo():
             agent_id="a-attia",
             user_id="u-7",
             goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky: Peter Attia. Do 3 quick web searches.",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="44c81111-1238-43f0-8b06-a1a20cc902b7",
             init_tool_call_id="tc-oai-timeout-44c81111",
         )
@@ -2902,7 +2902,7 @@ async def test_spawn_explore_agent_activity_reraises_cancel_outside_demo():
             agent_id="a-live",
             user_id="u-7",
             goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="live-cancel",
             init_tool_call_id="tc-live-cancel",
         )
@@ -3007,7 +3007,7 @@ async def test_spawn_explore_agent_activity_explicit_oai_demo_reraises_cancel_on
             agent_id="a-live-flag",
             user_id="u-7",
             goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="explicit-demo-cancel",
             init_tool_call_id="tc-explicit-demo",
             oai_demo=True,
@@ -3038,7 +3038,7 @@ async def test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_dem
             agent_id="a-demo-flag",
             user_id="u-7",
             goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky — Huberman",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="explicit-live-cancel",
             init_tool_call_id="tc-explicit-live",
             oai_demo=False,
@@ -3073,7 +3073,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
             agent_id="a-resolver-leak",
             user_id="u-7",
             goal="Order a Vanilla Bean Shakerato and waffle from Blue Bottle",
-            model="rose-1-lite",
+            model="rose-1-flash",
             task_id="resolver-class-leak",
             init_tool_call_id="tc-resolver-leak",
         )

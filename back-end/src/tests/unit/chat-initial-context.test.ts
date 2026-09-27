@@ -25,7 +25,7 @@ async function testMessagesIgnorePendingComputeAuth(): Promise<void> {
     },
   };
   const context = startInitialChatContext(
-    { agentId: 'agent-1', requestedModel: 'rose-labs/rose-1-lite' },
+    { agentId: 'agent-1', requestedModel: 'rose-labs/rose-1-flash' },
     dependencies
   );
 
@@ -51,7 +51,7 @@ async function testPreservesMessageOrderAndMapping(): Promise<void> {
   ];
 
   const context = startInitialChatContext(
-    { agentId: 'agent-2', requestedModel: 'rose-labs/rose-1-lite' },
+    { agentId: 'agent-2', requestedModel: 'rose-labs/rose-1-flash' },
     {
       findMessages: async () => dbMessages,
     }
@@ -76,7 +76,7 @@ async function testPreservesMessageOrderAndMapping(): Promise<void> {
 async function testMessageQueryFailurePropagates(): Promise<void> {
   const expected = new Error('message query failed');
   const context = startInitialChatContext(
-    { agentId: 'agent-3', requestedModel: 'rose-labs/rose-1-lite' },
+    { agentId: 'agent-3', requestedModel: 'rose-labs/rose-1-flash' },
     {
       findMessages: async () => {
         throw expected;
@@ -98,7 +98,7 @@ async function testWebAndEscalationNeverReadChatCredentials(): Promise<void> {
   };
 
   const webContext = startInitialChatContext(
-    { agentId: 'web-agent', requestedModel: 'rose-labs/rose-1-lite' },
+    { agentId: 'web-agent', requestedModel: 'rose-labs/rose-1-flash' },
     dependencies
   );
   const webMessages = await webContext.messages;
@@ -109,7 +109,7 @@ async function testWebAndEscalationNeverReadChatCredentials(): Promise<void> {
   });
 
   const escalationContext = startInitialChatContext(
-    { agentId: 'escalation-agent', requestedModel: 'rose-labs/rose-1-lite' },
+    { agentId: 'escalation-agent', requestedModel: 'rose-labs/rose-1-flash' },
     dependencies
   );
   await escalationContext.messages;

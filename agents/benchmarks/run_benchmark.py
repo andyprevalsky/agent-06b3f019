@@ -12998,7 +12998,7 @@ async def _warmup_edge_functions(base_url: str):
         return
 
     payload = {
-        "model": "rose-labs/rose-1-lite",
+        "model": "rose-labs/rose-1-flash",
         "messages": [{"role": "user", "content": "Say hi"}],
         "max_tokens": 5,
         "stream": False,

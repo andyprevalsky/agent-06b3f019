@@ -139,7 +139,7 @@ def test_agent_latency_records_span_history_from_embedded_logs():
             "phase": "execute",
             "agent_type": "root",
             "call_site": "execute_loop",
-            "model": "rose-labs/rose-1-lite",
+            "model": "rose-labs/rose-1-flash",
         },
     }
     end = {

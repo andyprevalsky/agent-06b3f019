@@ -20,7 +20,7 @@ async function run(): Promise<void> {
     abortSignal: abortController.signal,
   });
 
-  assert.strictEqual(options.model, 'rose-labs/rose-1-lite');
+  assert.strictEqual(options.model, 'rose-labs/rose-1-flash');
   assert.strictEqual(options.provider_route, 'direct-cerebras');
   assert.strictEqual(options.provider_fast_mode, true);
   assert.strictEqual(options.abort_signal, abortController.signal);

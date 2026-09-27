@@ -46,7 +46,7 @@ export function ModelSelector({
     ? `${selectedInfo.provider}/${selectedInfo.name}`
     : selectedModel;
   const isRoseModel =
-    selectedModel === ROSE_MODEL_IDS.lite || selectedModel === ROSE_MODEL_IDS.ultra;
+    selectedModel === ROSE_MODEL_IDS.flash || selectedModel === ROSE_MODEL_IDS.ultra;
 
   return (
     <>
@@ -123,8 +123,8 @@ function ModelList({ availableModels, selectedModel, onPick }: ModelListProps) {
 }
 
 const ROSE_TOOLTIP_BODY: Record<string, string> = {
-  [ROSE_MODEL_IDS.lite]:
-    'Rose-1-Fast is a mixed-model approach from the best workhorse models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability.',
+  [ROSE_MODEL_IDS.flash]:
+    'Rose-1-Flash is a mixed-model approach from the fastest workhorse models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability.',
   [ROSE_MODEL_IDS.ultra]:
     'Rose-1-Ultra is a mixed-model approach from the smartest models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability.',
 };

@@ -750,7 +750,7 @@ async def _generate_response_schema_with_rose(
         for max_tokens in (2000, 4000):
             try:
                 response = await client.collect(
-                    pool="rose-1-lite",
+                    pool="rose-1-flash",
                     messages=messages,
                     response_model=response_model,
                     temperature=0.3,
@@ -6449,7 +6449,7 @@ async def set_response_schema_activity(
             goal,
             "response_schema",
             {
-                "pool": "rose-1-lite",
+                "pool": "rose-1-flash",
                 "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
                 + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
                 "user": f"Goal: {goal}",

@@ -536,7 +536,7 @@ async def test_compaction_saved_ratio_can_go_negative():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["attempt_completion"],
             initial_context=initial_context,
             is_inside_temporal_activity=True,
@@ -625,7 +625,7 @@ async def test_summarize_tool_result_happy():
                 tool_name="web_fetch",
                 tool_result_text="x" * 6000,
                 parent_objective="learn things",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 cache_sequence_id="agent:agent-1:tool:fetch-1:call:summarize_web_fetch",
             )
     assert out["summarized"] is True

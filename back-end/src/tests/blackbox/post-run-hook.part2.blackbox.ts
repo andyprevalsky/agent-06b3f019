@@ -76,7 +76,7 @@ async function createAgent(params: {
       goal: 'Sign in and check the account page',
       status: params.status,
       statusMessage: params.statusMessage ?? null,
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       reasoningMaxTokens: 2048,
     },
   });

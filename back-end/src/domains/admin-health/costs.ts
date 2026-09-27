@@ -97,12 +97,18 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'openai/gpt-5.5': openAi(5, 30),
   'openai/gpt-5.4': openAi(2.5, 15),
   'google/gemini-3-flash-preview': openRouter(0.5, 3),
+  'google/gemini-3.1-flash-lite': openRouter(0.25, 1.5),
   'google/gemini-3.5-flash': openRouter(1.5, 9),
+  'google/gemini-3.5-flash-lite': openRouter(0.3, 2.5),
   'google/gemini-3.6-flash': openRouter(0.75, 3.75),
+  'google/gemini-3.7-flash': openRouter(0.75, 3.75),
+  'google/gemini-3.8-flash': openRouter(0.75, 3.75),
   'google/gemini-3.1-pro-preview': openRouter(2, 12),
   'moonshotai/kimi-k2.5': openRouter(0.57, 2.85),
   'moonshotai/kimi-k2.7-code': openRouter(0.71, 3.5),
   'moonshotai/kimi-k3': openRouter(3, 15),
+  'openai/gpt-6-luna': openAi(0.1, 0.5, 1.25),
+  'openai/gpt-6-sol': openAi(2, 10, 1.25),
   // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
   'z-ai/glm-4.7': openRouter(0.4, 1.75),
@@ -113,14 +119,18 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // Current chat/SMS Cerebras primary (2026-09-09). Public Cerebras list
   // $0.35/$0.75 per M (ComputePrices 2026-09-07).
   'gpt-oss-120b': uncached(0.35, 0.75),
+  'openai/gpt-oss-120b': openRouter(0.15, 0.6),
   'google/gemini-2.5-flash-lite': openRouter(0.1, 0.4),
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates
   // (kept in sync with POOL_REGISTRY + agents/providers/rose/pricing.py).
-  'rose-labs/rose-1-mini': openRouter(0.75, 4),
-  'rose-labs/rose-1-lite': openRouter(1.875, 9.375),
+  // mini waterfall mean: haiku ($1/$5) + gemini-3.5-flash-lite ($0.30/$2.50)
+  'rose-labs/rose-1-mini': openRouter(0.65, 3.75),
+  'rose-labs/rose-1-flash': openRouter(0.425, 2.125),
+  // Historical lite pool id (renamed to flash). Keep for ledger rows.
+  'rose-labs/rose-1-lite': openRouter(0.425, 2.125),
   'rose-labs/rose-1-ultra': openRouter(2.75, 15),
-  'rose-labs/rose-1-browser-use': openRouter(2.75, 15),
+  'rose-labs/rose-1-browser-use': openRouter(0.425, 2.125),
   // Open-weights-only pool; its waterfall is the single kimi-k3 layer.
   'rose-labs/rose-1-oss': openRouter(3, 15),
 };

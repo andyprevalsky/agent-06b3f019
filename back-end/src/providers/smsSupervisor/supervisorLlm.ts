@@ -2,7 +2,7 @@
  * SMS Supervisor LLM call.
  *
  * Owns exactly one thing: turn a list of messages into a `SupervisorResponse`.
- * Streams a rose-1-lite completion (Cerebras-first), honours the per-user
+ * Streams a rose-1-flash completion (Cerebras-first), honours the per-user
  * blackbox fixture override, and shapes the consumed stream into
  * `{ reasoning, tool_calls }` whether the model answered with native tool_use
  * blocks or with the structured-output JSON envelope as content.
@@ -20,7 +20,7 @@ import type { ToolCall } from './supervisorTools';
 
 const log = createLogger('SmsSupervisor');
 
-export const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
+export const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-flash';
 
 export interface SupervisorResponse {
   reasoning: string;

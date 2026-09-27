@@ -66,7 +66,7 @@ function phaseGeneratorOptions() {
 
 function directGeneratorOptions() {
   return buildGeneratorCompletionOptions({
-    model: 'rose-labs/rose-1-lite',
+    model: 'rose-labs/rose-1-flash',
     messages: [
       { role: 'system', content: GENERATOR_SYSTEM_PROMPT },
       { role: 'user', content: 'answer this request' },
@@ -236,11 +236,11 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     if (url === OPENROUTER_API_URL) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       openRouterBodies.push(body);
-      if (body.model === 'google/gemma-4-31b-it') {
+      if (body.model === 'openai/gpt-oss-120b') {
         glmSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
-      if (body.model === 'google/gemini-2.5-flash-lite') return sseResponse(GENERATOR_SSE);
+      if (body.model === 'google/gemini-3.5-flash-lite') return sseResponse(GENERATOR_SSE);
       throw new Error(`Unexpected OpenRouter model ${String(body.model)}`);
     }
     throw new Error(`Unexpected route ${url}`);
@@ -251,8 +251,8 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     const text = chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('');
     assert.ok(text.length > 0, 'the independent fallback must rescue both silent Cerebras routes');
 
-    const glmBody = openRouterBodies.find((body) => body.model === 'google/gemma-4-31b-it');
-    const fastBody = openRouterBodies.find((body) => body.model === 'google/gemini-2.5-flash-lite');
+    const glmBody = openRouterBodies.find((body) => body.model === 'openai/gpt-oss-120b');
+    const fastBody = openRouterBodies.find((body) => body.model === 'google/gemini-3.5-flash-lite');
     assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter Cerebras spill');
     assert.ok(fastBody, 'the Cerebras spill must race the measured fast fallback model');
     assert.equal(
@@ -314,8 +314,8 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const model = String(body.model);
       openRouterModels.push(model);
-      if (model === 'google/gemma-4-31b-it') return sseResponse(GENERATOR_SSE);
-      if (model === 'google/gemini-2.5-flash-lite') {
+      if (model === 'openai/gpt-oss-120b') return sseResponse(GENERATOR_SSE);
+      if (model === 'google/gemini-3.5-flash-lite') {
         fastSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
@@ -330,7 +330,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       openRouterModels,
-      ['google/gemma-4-31b-it', 'google/gemini-2.5-flash-lite'],
+      ['openai/gpt-oss-120b', 'google/gemini-3.5-flash-lite'],
       'the bounded fast fallback must not advance to the general waterfall'
     );
     assert.equal(fastSignal?.aborted, true, 'the losing fast fallback must be aborted');
@@ -400,20 +400,24 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
     // Same model — never a generic one.
     assert.equal(
       openRouterBody.model,
-      'google/gemma-4-31b-it',
-      'fallover must stay on Gemma-4-31B'
+      'openai/gpt-oss-120b',
+      'fallover must stay on gpt-oss-120b'
     );
-    // Provider unpinned: still prefer Cerebras, but allowed to spill past the cap.
+    // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
     const provider = openRouterBody.provider as {
       order?: string[];
       allow_fallbacks?: boolean;
       only?: string[];
     };
-    assert.deepEqual(provider.order, ['cerebras'], 'fallover should still prefer Cerebras');
+    assert.deepEqual(
+      provider.order,
+      ['cerebras', 'groq'],
+      'fallover should prefer Cerebras then Groq'
+    );
     assert.equal(
       provider.allow_fallbacks,
       true,
-      'fallover must allow spill to another Gemma-4-31B host'
+      'fallover must allow spill to another gpt-oss-120b host'
     );
     assert.equal(provider.only, undefined, 'fallover must not be pinned to Cerebras only');
     assert.ok(chunks.length > 0, 'the fallover must still produce a reply');

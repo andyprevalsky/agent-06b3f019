@@ -32,7 +32,7 @@ vi.mock('@/features/terminal/api', () => ({
 
 function makeDeps(overrides: Partial<QuickQueryDeps> = {}): QuickQueryDeps {
   return {
-    selectedModel: 'rose-1-lite',
+    selectedModel: 'rose-1-flash',
     canSubmitGoals: true,
     clientSource: 'MAC_APP',
     pendingPriceLimitCents: 500,

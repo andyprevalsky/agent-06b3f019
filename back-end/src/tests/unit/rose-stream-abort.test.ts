@@ -73,7 +73,7 @@ async function testCompletionAbortReachesPriorityOpenAiBody(): Promise<void> {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'route this' }],
       provider_route: 'shared-openai-priority',
       abort_signal: upstream.signal,

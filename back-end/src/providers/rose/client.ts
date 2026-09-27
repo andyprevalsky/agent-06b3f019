@@ -4,7 +4,7 @@
  * Mirrors agents/providers/rose/client.py (slim chat-only port). One entry
  * point, `createStreamingCompletion(options)`, that:
  *
- *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-lite`, etc).
+ *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-flash`, etc).
  *   2. When explicitly selected, routes exclusively through either the pool's
  *      OpenRouter waterfall or shared OpenAI priority, failing closed on config.
  *   3. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
@@ -94,7 +94,7 @@ export async function createStreamingCompletion(
   if (!pool) {
     throw new Error(
       `Rose: unknown model ${options.model} (expected rose-labs/rose-1-mini, ` +
-        `rose-labs/rose-1-lite, rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
+        `rose-labs/rose-1-flash, rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
     );
   }
   if (options.response_format && options.response_model) {

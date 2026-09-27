@@ -51,7 +51,7 @@ def test_paid_anthropic_direct_still_priced():
 
 
 def test_pool_pricing_resolves():
-    p = get_pool_pricing("rose-1-lite")
+    p = get_pool_pricing("rose-1-flash")
     assert p is not None
     assert p["input_cents_per_1k"] > 0
     assert p["output_cents_per_1k"] > 0

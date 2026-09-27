@@ -41,7 +41,7 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
   return {
     agent_id: 'agent-xyz',
     goal: 'Test',
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'WEB',
     reasoning_effort: 'medium',
     progress: 0.5,

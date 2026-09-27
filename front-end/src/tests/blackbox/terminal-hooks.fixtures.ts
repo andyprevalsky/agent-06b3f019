@@ -2,7 +2,7 @@ export function makeTerminalHookAgent(overrides: Record<string, unknown> = {}) {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'WEB',
     reasoning_effort: 'medium',
     progress: 0.5,

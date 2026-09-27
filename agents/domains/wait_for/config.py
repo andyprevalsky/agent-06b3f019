@@ -19,4 +19,4 @@ DEFAULT_CHECK_INTERVAL_SECONDS = 900
 DEFAULT_MAX_CHECKS = 20
 
 # Default model for cheap condition evaluation.
-DEFAULT_MODEL = "rose-labs/rose-1-lite"
+DEFAULT_MODEL = "rose-labs/rose-1-flash"

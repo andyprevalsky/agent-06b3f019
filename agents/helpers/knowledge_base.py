@@ -252,7 +252,7 @@ async def save_blueprint_deprecated(user_id: str, blueprint: List[Dict]) -> Dict
         logger.info("Calling LLM to compress blueprint", goal=title, original_messages=len(blueprint))
         result = await call_llm(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": conversation_json}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             temperature=0.3,  # Lower temperature for more focused compression
             max_tokens=4000,  # Allow enough tokens for compressed messages
             response_model=CompressedBlueprintResponse,

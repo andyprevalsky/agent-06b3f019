@@ -10,8 +10,8 @@ first_bad_boundary: providers/smsSupervisor/environmentMessages.ts built an assi
 symptoms:
   - Tool-call assistant message produced no valid function calls but is followed by tool result messages. The conversation transcript is malformed.
   - OpenRouter google/gemini-3.5-flash returned 400
-  - step_failed pool=rose-1-lite step=1 model=google/gemini-3.5-flash
-  - every SMS supervisor round logged actual_model=moonshotai/kimi-k2.7-code pool=rose-1-lite
+  - step_failed pool=rose-1-flash step=1 model=google/gemini-3.5-flash
+  - every SMS supervisor round logged actual_model=moonshotai/kimi-k2.7-code pool=rose-1-flash
 tags:
   - sms-supervisor
   - rose
@@ -31,7 +31,7 @@ status: fixed
 
 Every production SMS-supervisor round was served by the last model in the pool.
 100 sampled prod rounds all logged `actual_model=moonshotai/kimi-k2.7-code
-pool=rose-1-lite`, never the pool's stronger first leg.
+pool=rose-1-flash`, never the pool's stronger first leg.
 
 Two independent defects stack to produce that symptom, and they are separate
 cases. The claudeAuth leg was rejected for its own reason — see
@@ -163,7 +163,7 @@ above are what actually run on every deploy.
 
 ### Bundled change disclosed
 
-The same branch swaps the rose-1-lite last-resort leg from
+The same branch swaps the rose-1-flash last-resort leg from
 `moonshotai/kimi-k2.7-code` to `moonshotai/kimi-k3` at user request. Verified
 against the live OpenRouter models API: k3 is $3.00/$15.00 per Mtok vs
 k2.7-code's $0.74/$3.50 — roughly 4x. That is unrelated to this cause, and it

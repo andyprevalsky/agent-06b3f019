@@ -462,7 +462,7 @@ def test_observability_writes_dev_dump_and_archive_updates():
                 "unit_call",
                 [{"role": "user", "content": "persist me"}],
                 agent_id="agent-1",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
             )
             assert path is not None
             assert Path(path).exists()
@@ -494,7 +494,7 @@ def test_observability_archives_subagent_dumps_under_root_bundle():
                 "subagent_call",
                 [{"role": "user", "content": "persist me under root"}],
                 agent_id="child-agent",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
             )
             assert path is not None
             observability.update_llm_dump(path, output={"text": "done"})

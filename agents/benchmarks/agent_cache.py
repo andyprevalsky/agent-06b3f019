@@ -19,7 +19,7 @@ USAGE — ALL RECENT (no agent_id)
 
 Output format:
 
-  Agent abc123 (rose-1-lite)
+  Agent abc123 (rose-1-flash)
   ├── plan_loop i1       claude-sonnet-4-6-claude  Cache: read=11,607 write=0 → 89% hit
   ├── planner            claude-sonnet-4-6-claude  Cache: read=11,760 write=3,200 → 78% hit
   ├── routerLlm [chat]   claude-sonnet-4-6-claude  Cache: read=5,200 write=1,000 → 72% hit

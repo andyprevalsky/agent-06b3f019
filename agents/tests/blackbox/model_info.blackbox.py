@@ -77,7 +77,7 @@ async def test_rose_pool_returns_200k_from_seed():
 
     with patch("temporalio.activity.heartbeat"):
         from helpers.model_info import get_model_context_window
-        for pool_id in ("rose-labs/rose-1-lite", "rose-labs/rose-1-ultra", "rose-labs/rose-1-browser-use"):
+        for pool_id in ("rose-labs/rose-1-flash", "rose-labs/rose-1-ultra", "rose-labs/rose-1-browser-use"):
             assert await get_model_context_window(pool_id) == 200_000, pool_id
 
     # Cache hits, no new HTTP calls.

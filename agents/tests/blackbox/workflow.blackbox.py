@@ -478,7 +478,7 @@ async def mock_update_agent_tree_state(
 async def mock_generate_completion_summary(
     context: List[Dict[str, Any]],
     goal: str,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
     sub_agent_tool_counts: Dict[str, int] = None,
@@ -516,7 +516,7 @@ async def mock_mark_finished(
 async def mock_compress_context(
     context: list,
     iteration_count: int,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
 ) -> Dict:
     return {"learnings": "compressed learnings", "usage": {}}
 
@@ -804,7 +804,7 @@ DEFAULT_WF_ARGS: list = [
     "agent-test-1",  # agent_id
     "user-test-1",  # user_id
     "Test goal",  # goal
-    "rose-labs/rose-1-lite",  # model
+    "rose-labs/rose-1-flash",  # model
     256,  # reasoning_max_tokens
     {  # verifier
         "type": "FLOAT_LLM_JUDGE",
@@ -872,7 +872,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                             cold_agent_id,
                             "user-test-1",
                             "Wait without polling",
-                            "rose-labs/rose-1-lite",
+                            "rose-labs/rose-1-flash",
                             256,
                             {"type": "FLOAT_LLM_JUDGE"},
                             None,
@@ -1128,7 +1128,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
                         fc_agent_id,
                         "user-test-1",
                         f"{demo_prefix} — refined chat goal (volatile, differs per run)",
-                        "rose-labs/rose-1-lite",
+                        "rose-labs/rose-1-flash",
                         256,
                         {"type": "FLOAT_LLM_JUDGE"},
                         None,  # context
@@ -3150,7 +3150,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     `model`, so the workflow fell back to the ROOT pool rate and under-billed
     browser tokens that had actually raced through the browser pool.
 
-    The root pool here is rose-1-lite, NOT rose-1-ultra: ultra and browser-use
+    The root pool here is rose-1-flash, NOT rose-1-ultra: ultra and browser-use
     now share an identical waterfall (gpt-5.6-sol -> kimi-k3) and therefore an
     identical rate, which would make the "priced at the browser rate, not the
     root rate" assertion below vacuous. lite (0.1875/0.9375) vs browser-use
@@ -3164,7 +3164,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     from providers.rose.pricing import get_model_pricing
 
     browser_pricing = get_model_pricing("rose-1-browser-use")
-    root_pricing = get_model_pricing("rose-1-lite")
+    root_pricing = get_model_pricing("rose-1-flash")
     tokens_in, tokens_out = 1_186_754, 40_000
     expected = (tokens_in / 1000) * browser_pricing["input_cents_per_1k"] + (tokens_out / 1000) * browser_pricing[
         "output_cents_per_1k"
@@ -3177,7 +3177,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
     wf.user_id = "u"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
     wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
     fake = _FakeWorkflowModule()
@@ -3202,7 +3202,7 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     wf2 = _bare_workflow_instance()
     wf2.agent_id = "a"
     wf2.user_id = "u"
-    wf2.model = "rose-1-lite"
+    wf2.model = "rose-1-flash"
     wf2.input_cents_per_1k = root_pricing["input_cents_per_1k"]
     wf2.output_cents_per_1k = root_pricing["output_cents_per_1k"]
     fake2 = _FakeWorkflowModule()
@@ -5091,7 +5091,7 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
         result = await wf._attempt_post_dag_completion(
             agent_id="agent-1",
             user_id="user-1",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
         )
     finally:
         workflow_module._run_verifier = original_run_verifier
@@ -5154,7 +5154,7 @@ async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool()
         result = await wf._attempt_post_dag_completion(
             agent_id="agent-1",
             user_id="user-1",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
         )
     finally:
         workflow_module._run_verifier = original_run_verifier
@@ -5393,7 +5393,7 @@ async def test_workflow_mark_complete_happy_path():
     wf.agent_id = "child-complete-1"
     wf.user_id = "u-mc"
     wf.goal = "finish goal"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = "parent-mc"
     wf.root_agent_id = "root-complete-1"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -5448,7 +5448,7 @@ async def test_workflow_mark_complete_no_parent_no_signal():
     wf.agent_id = "root-mc"
     wf.user_id = "u-mc"
     wf.goal = "root goal"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
     wf.token_count = 0
@@ -5523,7 +5523,7 @@ async def test_workflow_mark_complete_survives_summary_generation_failure():
     wf.agent_id = "root-summary-fail"
     wf.user_id = "u-mc"
     wf.goal = "return one bing result"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -5571,7 +5571,7 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
     wf.agent_id = "gp-huberman-summary"
     wf.user_id = "u-mc"
     wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -5652,7 +5652,7 @@ async def test_workflow_mark_complete_never_persists_raw_tool_envelope_for_any_t
     wf.agent_id = "ordinary-agent-raw-summary"
     wf.user_id = "u-mc"
     wf.goal = "Research a robotics founder and summarize the findings."
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = "ordinary-parent"
     wf.root_agent_id = "ordinary-root"
     wf.agent_source = "WEB"
@@ -5715,7 +5715,7 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
     wf.agent_id = "oai-demo-root"
     wf.user_id = "u-demo"
     wf.goal = OAI_DEMO_ROOT_GOAL_PREFIX
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -5830,7 +5830,7 @@ async def test_workflow_mark_complete_recovers_explore_web_fetch_on_unfiltered_p
     wf.agent_id = "gp-wes-roth-summary"
     wf.user_id = "u-mc"
     wf.goal = "You are analyzing ONE creator for Andy Prevalsky."
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -5926,7 +5926,7 @@ async def test_workflow_mark_complete_polls_assemble_for_schema_outputs():
     wf.agent_id = "root-oai-assemble"
     wf.user_id = "u-mc"
     wf.goal = "Analyze the top 50 creators for Andy Prevalsky."
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -6050,7 +6050,7 @@ async def test_workflow_mark_complete_summary_cost_does_not_cost_limit_root():
     wf.agent_id = "root-summary-cost"
     wf.user_id = "u"
     wf.goal = "g"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -6105,7 +6105,7 @@ async def test_workflow_mark_complete_persists_summary_cost():
     wf.agent_id = "root-summary-cost-persist"
     wf.user_id = "u"
     wf.goal = "g"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -6195,7 +6195,7 @@ async def test_workflow_mark_complete_degraded_summary_keeps_notification():
     wf.agent_id = "root-degraded-summary"
     wf.user_id = "u"
     wf.goal = "return one bing result"
-    wf.model = "rose-1-lite"
+    wf.model = "rose-1-flash"
     wf.parent_workflow_id = None
     wf.agent_source = "WEB"
     wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
@@ -6597,7 +6597,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-approval-jit"
     wf.user_id = "user-1"
-    wf.model = "rose-labs/rose-1-lite"
+    wf.model = "rose-labs/rose-1-flash"
     wf.current_phase = "EXECUTE"
     wf.fast_mode_cache_enabled = True
     wf.fast_cache_goal = "Call the restaurant and book dinner"

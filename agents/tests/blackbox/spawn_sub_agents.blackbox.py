@@ -22,7 +22,7 @@ def _setup():
                 "agent_id": "sub-agent-1",
                 "temporal_workflow_id": "wf-sub-1",
                 "goal": "Research competitors",
-                "model": "rose-labs/rose-1-lite",
+                "model": "rose-labs/rose-1-flash",
                 "status": "RUNNING",
             },
         },
@@ -42,7 +42,7 @@ async def test_spawn_sub_agent_happy_path():
             parent_workflow_id="wf-parent",
             depth=0,
             parent_is_paused=False,
-            parent_model="rose-labs/rose-1-lite",
+            parent_model="rose-labs/rose-1-flash",
         )
 
     assert "agents" in result
@@ -231,7 +231,7 @@ def test_build_spawn_payload_defaults():
         parent_workflow_id="wf-1",
         depth=2,
         parent_is_paused=False,
-        parent_model="rose-labs/rose-1-lite",
+        parent_model="rose-labs/rose-1-flash",
         bus_id=None,
         parent_source="WEB",
         resolved_attachments=[],
@@ -241,7 +241,7 @@ def test_build_spawn_payload_defaults():
     assert payload["start_phase"] == "plan"
     assert payload["depth"] == 2
     assert payload["source"] == "WEB"
-    assert payload["model"] == "rose-labs/rose-1-lite"
+    assert payload["model"] == "rose-labs/rose-1-flash"
     assert payload["max_iterations"] == 25
     assert "verifier" not in payload
     assert "attachments" not in payload  # empty list → omitted
@@ -259,7 +259,7 @@ def test_build_spawn_payload_bad_start_phase_defaults_to_plan():
         parent_workflow_id="wf-1",
         depth=0,
         parent_is_paused=True,
-        parent_model="rose-labs/rose-1-lite",
+        parent_model="rose-labs/rose-1-flash",
         bus_id="bus-1",
         parent_source="MAC_APP",
         resolved_attachments=[{"id": "fp-1"}],
@@ -310,7 +310,7 @@ def test_build_spawn_payload_does_not_forward_parent_context():
         parent_workflow_id="wf-1",
         depth=1,
         parent_is_paused=False,
-        parent_model="rose-labs/rose-1-lite",
+        parent_model="rose-labs/rose-1-flash",
         bus_id="bus-1",
         parent_source="WEB",
         resolved_attachments=[],
@@ -451,7 +451,7 @@ class _FakeParentWorkflow:
         self.goal = "generic parent goal"
         self.fast_cache_goal = None
         self.fast_mode_cache_enabled = False
-        self.model = "rose-labs/rose-1-lite"
+        self.model = "rose-labs/rose-1-flash"
         self.agent_source = "WEB"
         self.child_tool_ids = {}
         self.pending_children = set()
@@ -965,7 +965,7 @@ async def test_spawn_with_prefetched_attachments():
             parent_workflow_id="wf-parent",
             depth=0,
             parent_is_paused=False,
-            parent_model="rose-labs/rose-1-lite",
+            parent_model="rose-labs/rose-1-flash",
             parent_attachments=prefetched,
         )
 

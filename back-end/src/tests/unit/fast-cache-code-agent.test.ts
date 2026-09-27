@@ -211,7 +211,7 @@ test('local runner preserves prod DB URL for shared cache before local override'
 
 test('Rose provider Fast Mode maps to supported downstream request shapes', () => {
   const ultra = getPool('rose-1-ultra');
-  const lite = getPool('rose-1-lite');
+  const lite = getPool('rose-1-flash');
   const opusAuth = { ...ultra, claudeAuthModel: 'claude-opus-4-8' };
   const messages = [{ role: 'user' as const, content: 'hi' }];
 

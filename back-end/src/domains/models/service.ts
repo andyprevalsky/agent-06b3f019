@@ -174,15 +174,15 @@ function sortModels(models: OpenRouterModel[]): SortedModel[] {
  * Build the list of Rose synthetic models to inject at the top of the model list.
  */
 async function buildRoseModels(allModels: OpenRouterModel[]): Promise<SortedModel[]> {
-  const roseFastMetadata = await calculateRoseMetadata('rose-1-lite', allModels);
+  const roseFastMetadata = await calculateRoseMetadata('rose-1-flash', allModels);
   const roseUltraMetadata = await calculateRoseMetadata('rose-1-ultra', allModels);
 
   return [
     {
-      id: 'rose-labs/rose-1-lite',
-      name: 'rose-1-lite',
+      id: 'rose-labs/rose-1-flash',
+      name: 'rose-1-flash',
       provider: 'rose-labs',
-      description: 'Rose Labs fast model optimized for low latency (< 6s avg)',
+      description: 'Rose Labs flash model optimized for low latency (< 6s avg)',
       contextLength: roseFastMetadata.contextLength,
       pricing: roseFastMetadata.pricing,
     },

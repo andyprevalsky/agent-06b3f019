@@ -12,7 +12,7 @@ is intentionally shallow because it exists as a fallback for claudeAuth
 failures, not as its own retry ladder.
 
 This module is the OpenRouter counterpart to `claude_auth.py`. Every model
-in both `rose-1-lite` and `rose-1-ultra` waterfalls routes through
+in both `rose-1-flash` and `rose-1-ultra` waterfalls routes through
 OpenRouter today, so a single transport path is sufficient.
 """
 

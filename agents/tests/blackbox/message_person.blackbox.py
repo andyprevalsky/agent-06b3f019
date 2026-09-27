@@ -479,7 +479,7 @@ async def test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx():
         from tools.message_person import generate_message_activity
 
         result = await generate_message_activity(
-            model="rose-1-lite",
+            model="rose-1-flash",
             system_name="Navi",
             conversation_context="User asked to message Alice",
             person_name="Alice",
@@ -516,7 +516,7 @@ async def test_generate_message_activity_forwards_compute_tokens_to_llm():
         from tools.message_person import generate_message_activity
 
         result = await generate_message_activity(
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             system_name="Navi",
             conversation_context="User asked to message Alice",
             person_name="Alice",
@@ -603,7 +603,7 @@ async def test_generate_message_activity_rejects_truncated_finish_reason():
 
         try:
             await generate_message_activity(
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 system_name="Rose",
                 conversation_context="User asked about speedrun credits",
                 person_name="sr-team@a16z.com",
@@ -958,7 +958,7 @@ def test_build_finished_event_imessage():
             "sent_at": "2026-07-11T22:00:00.000Z",
         },
         gen_usage={"prompt_tokens": 100, "completion_tokens": 20, "actual_model": "rose-ultra"},
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
     )
     assert ev.status == MessageStatus.FINISHED
     assert "Alice" in ev.title
@@ -984,7 +984,7 @@ def test_build_finished_event_email_with_subject():
         generated_message=generated_message,
         delivery_receipt={"channel": "email", "message_id": "gmail-1"},
         gen_usage={},
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
     )
     assert "sender@mine.com" in ev.message
     assert "Hello" in ev.message
@@ -1011,7 +1011,7 @@ def test_build_finished_event_imessage_queued_is_truthful_about_uncertain_timing
             "relay_connected": False,
         },
         gen_usage={},
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
     )
 
     assert ev.status == MessageStatus.FINISHED
@@ -1060,7 +1060,7 @@ class _WFInstance:
     def __init__(self, *, context=None):
         self.user_id = "user-1"
         self.agent_id = "agent-1"
-        self.model = "rose-labs/rose-1-lite"
+        self.model = "rose-labs/rose-1-flash"
         self.context = context or []
         self.system_name = "Navi"
         self.user_context_section = "Full Name: Alice Tester"
@@ -1278,7 +1278,7 @@ async def test_handler_passes_workflow_compute_token_to_generate_activity():
     try:
         result = await MessagePersonManager()._generate_message(
             wf,
-            "rose-labs/rose-1-lite",
+            "rose-labs/rose-1-flash",
             "Navi",
             "conversation",
             "Alice Smith",
@@ -1356,7 +1356,7 @@ async def test_handler_cold_outreach_email_path():
             "generate_message_activity": {
                 "message": "Hi Alice!",
                 "subject": "Hello",
-                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "actual_model": "rose-1-lite"},
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "actual_model": "rose-1-flash"},
             },
             "send_email_activity": {
                 "success": True,
@@ -1511,7 +1511,7 @@ async def test_handler_successful_imessage_requires_delivery_confirmation():
             "fetch_recent_messages_activity": {"messages": []},
             "generate_message_activity": {
                 "message": "Hello Alice!",
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-1-lite"},
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-1-flash"},
             },
             "queue_imessage_activity": {
                 "success": True,

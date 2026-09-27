@@ -1285,7 +1285,7 @@ def test_position_llm_key_busts_when_user_goal_changes():
 def test_position_llm_key_ignores_completion_summary_structured_output_block():
     ctx = FastCacheContext(enabled=True, goal="same coding-agent goal", base_step=0)
     cold_request = {
-        "pool": "rose-1-lite",
+        "pool": "rose-1-flash",
         "messages": [
             {
                 "role": "system",
@@ -2944,7 +2944,7 @@ def test_soft_complete_explore_miss_does_not_call_live(mem, monkeypatch):
     async def body():
         set_context(FastCacheContext(enabled=True, goal=bench, base_step=5, root_goal=bench))
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         kinds = [c.kind for c in chunks]
         assert kinds[0] == "metadata"
@@ -2963,7 +2963,7 @@ def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
         bench = _soft_complete_bench_goal()
         set_context(FastCacheContext(enabled=True, goal=bench, base_step=1, root_goal=bench))
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
@@ -2972,7 +2972,7 @@ def test_cold_explore_miss_passthrough_only_for_allowlisted_bench(mem):
     async def body_non_bench_goes_live():
         set_context(FastCacheContext(enabled=True, goal="Order Blue Bottle", base_step=1))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
 
     asyncio.run(body_allowlisted())
@@ -2985,7 +2985,7 @@ def test_cold_explore_miss_does_not_soft_complete(mem):
     async def body():
         set_context(FastCacheContext(enabled=True, goal="g", base_step=1))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
         # Live path may write-through the fresh response; the critical assertion is
         # that we did not emit a soft-complete attempt_completion stub.
@@ -3021,13 +3021,13 @@ def test_write_only_explore_continues_after_seeding_prior_step(mem, monkeypatch)
     async def body():
         set_context(FastCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=1))
         rose = FakeRose(_full_stream())
-        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
         assert mem.set_calls == 1
 
         set_context(FastCacheContext(enabled=False, goal="spawn-smoke-explore", write_enabled=True, base_step=2))
         rose2 = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose2, call_site="explore_agent", pool="rose-1-flash"))
         assert rose2.calls == 1
         assert mem.set_calls == 2
         assert not any(
@@ -3111,7 +3111,7 @@ def test_swf_miss_uses_scrape_passthrough_not_soft(mem):
             rose_cache.cached_complete(
                 rose,
                 call_site="summarize_web_fetch",
-                pool="rose-1-lite",
+                pool="rose-1-flash",
                 messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
             )
         )
@@ -3134,7 +3134,7 @@ def test_swf_miss_non_bench_goes_live(mem):
             rose_cache.cached_complete(
                 rose,
                 call_site="summarize_web_fetch",
-                pool="rose-1-lite",
+                pool="rose-1-flash",
                 messages=[{"role": "user", "content": "SCRAPED PAGE BODY ABOUT CREATOR"}],
             )
         )
@@ -3464,7 +3464,7 @@ def test_july_explore_falls_back_to_july_hash_and_replays_web_search(mem, monkey
             )
         )
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "web_search"
@@ -3480,7 +3480,7 @@ def test_july_explore_skips_first_step_attempt_completion(mem, monkeypatch):
     """July explore p:1 completion must not reject-loop the chip."""
     stub = {
         "actual_model": "fast-mode-replay",
-        "pool_name": "rose-1-lite",
+        "pool_name": "rose-1-flash",
         "request_id": "july-explore-p1-stub",
         "content": "",
         "tool_calls": [
@@ -3515,7 +3515,7 @@ def test_july_explore_skips_first_step_attempt_completion(mem, monkeypatch):
             )
         )
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "web_search"
@@ -3532,7 +3532,7 @@ def test_july_explore_replays_last_step_completion_summary(mem, monkeypatch):
     )
     completion = {
         "actual_model": "fast-mode-replay",
-        "pool_name": "rose-1-lite",
+        "pool_name": "rose-1-flash",
         "request_id": "july-explore-last-complete",
         "content": "",
         "tool_calls": [
@@ -3567,7 +3567,7 @@ def test_july_explore_replays_last_step_completion_summary(mem, monkeypatch):
             )
         )
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
@@ -3586,7 +3586,7 @@ def test_july_explore_recovers_last_completion_when_step_exhausted(mem, monkeypa
     )
     completion = {
         "actual_model": "fast-mode-replay",
-        "pool_name": "rose-1-lite",
+        "pool_name": "rose-1-flash",
         "request_id": "july-explore-recovered-complete",
         "content": "",
         "tool_calls": [
@@ -3624,7 +3624,7 @@ def test_july_explore_recovers_last_completion_when_step_exhausted(mem, monkeypa
             )
         )
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 0
         tc = next(c for c in chunks if c.kind == "tool_call")
         assert tc.data["name"] == "attempt_completion_with_result"
@@ -3647,7 +3647,7 @@ def test_july_explore_miss_does_not_cold_passthrough(mem):
             )
         )
         rose = FakeRose(_full_stream())
-        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-lite"))
+        chunks = await _drain(rose_cache.cached_complete(rose, call_site="explore_agent", pool="rose-1-flash"))
         assert rose.calls == 1
         assert not any(c.kind == "tool_call" and c.data.get("name") == "attempt_completion_with_result" for c in chunks)
 
@@ -3691,7 +3691,7 @@ def test_rose_client_july_explore_fallback_replays_web_search(mem, monkeypatch):
         monkeypatch.setattr(client, "_complete_impl", fake_impl)
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-flash",
                 messages=[{"role": "user", "content": "go"}],
                 call_site="explore_agent",
                 agent_id="agent-july-explore",

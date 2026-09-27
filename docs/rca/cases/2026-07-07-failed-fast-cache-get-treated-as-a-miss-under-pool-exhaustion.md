@@ -48,7 +48,7 @@ Explicitly confirmed non-issues during this RCA: cost accounting is correct
 child-count variance (51/63/77) is a larger budget spawning more of the tree, not
 list growth. Real residual cost is genuine `explore_agent` misses on
 `-anthropic`-suffixed models served by Rose's own key — by design, since explore
-uses `rose-1-lite` rather than claudeAuth to avoid 429ing the user's Max token
+uses `rose-1-flash` rather than claudeAuth to avoid 429ing the user's Max token
 across 50 children.
 
 ## Solution

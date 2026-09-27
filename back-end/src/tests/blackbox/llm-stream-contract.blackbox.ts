@@ -142,7 +142,7 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
   try {
     await __resetAnthropicApiKeyCooldown();
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'Return structured output' }],
       response_format: {
         type: 'json_schema',

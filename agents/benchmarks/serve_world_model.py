@@ -13,7 +13,7 @@ Everything else matches `wmh serve`:
   - `uvicorn.run(host="127.0.0.1", port=...)`.
 
 Usage:
-    python -m benchmarks.serve_world_model --name <model> --port <port> --root <dir> [--pool rose-1-lite]
+    python -m benchmarks.serve_world_model --name <model> --port <port> --root <dir> [--pool rose-1-flash]
 """
 
 from __future__ import annotations
@@ -205,8 +205,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, help="Project dir holding models/<name>/.")
     parser.add_argument(
         "--pool",
-        default="rose-1-lite",
-        help="Rose pool backing WMH inference (default: rose-1-lite).",
+        default="rose-1-flash",
+        help="Rose pool backing WMH inference (default: rose-1-flash).",
     )
     args = parser.parse_args(argv)
 

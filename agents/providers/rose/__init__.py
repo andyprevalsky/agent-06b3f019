@@ -1,7 +1,7 @@
 """Rose completions client — direct provider calls from agents.
 
 Replaces the Supabase edge function at research/supabase/functions/completions/.
-Both rose-1-lite and rose-1-ultra share one code path; the only difference is
+Both rose-1-flash and rose-1-ultra share one code path; the only difference is
 which model pool they use (see pools.py).
 
 Public API:
@@ -10,7 +10,7 @@ Public API:
 
     client = RoseClient()
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-flash",
         messages=[...],
         claude_auth=ClaudeAuthContext(...),  # optional
         agent_id=agent_id,

@@ -480,7 +480,7 @@ async def _run_execute_dag(
             dag=dag,
             agent_id="agent-1",
             user_id="user-1",
-            model="rose-lite",
+            model="rose-flash",
             context=[],
             execute_activity=execute_activity,
             post_message=post_message,
@@ -612,7 +612,7 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     from domains.param_populator.config import PARAM_POPULATOR_MODEL
 
     assert param_args[1] == PARAM_POPULATOR_MODEL
-    assert param_args[1] != "rose-lite"
+    assert param_args[1] != "rose-flash"
     assert param_args[2] == ["web_search", "spawn_agent", "attempt_completion"]
     assert param_args[8] == "dag_param_populator"
     assert param_args[9] == "test system prompt"

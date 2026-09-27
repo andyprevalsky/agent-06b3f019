@@ -44,18 +44,18 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 
 const tests: Array<[string, () => Promise<void> | void]> = [
   [
-    'Ultra chat uses Lite for both synchronous phases',
+    'Ultra chat uses Flash for both synchronous phases',
     () => {
       const requestedModel = 'rose-labs/rose-1-ultra';
       const selected = selectChatPhaseModels(requestedModel);
 
       assertEqual(selected.requested, requestedModel, 'persisted requested model');
-      assertEqual(selected.router, 'rose-labs/rose-1-lite', 'router model');
+      assertEqual(selected.router, 'rose-labs/rose-1-flash', 'router model');
       assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router provider route');
-      assertEqual(selected.generator, 'rose-labs/rose-1-lite', 'generator model');
+      assertEqual(selected.generator, 'rose-labs/rose-1-flash', 'generator model');
       assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator provider route');
       const generatorPool = poolForModel(selected.generator);
-      assertEqual(generatorPool, 'rose-1-lite', 'generator pool');
+      assertEqual(generatorPool, 'rose-1-flash', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
       assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'generator primary model');
     },
@@ -63,7 +63,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
   [
     'Lite chat keeps Lite for both routing and generation',
     () => {
-      const requestedModel = 'rose-labs/rose-1-lite';
+      const requestedModel = 'rose-labs/rose-1-flash';
       const selected = selectChatPhaseModels(requestedModel);
 
       assertEqual(selected.router, requestedModel, 'router model');
@@ -76,7 +76,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       const selected = selectChatPhaseModels('rose-labs/rose-1-ultra');
       const poolName = poolForModel(selected.router);
 
-      assertEqual(poolName, 'rose-1-lite', 'router pool');
+      assertEqual(poolName, 'rose-1-flash', 'router pool');
       if (!poolName) throw new Error('router model did not resolve to a Rose pool');
       assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'router Cerebras model');
     },

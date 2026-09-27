@@ -1,29 +1,32 @@
 """Model pool registry — single source of truth for Rose's pool definitions.
 
-Both rose-1-lite and rose-1-ultra share the same code path (claudeAuth ->
+Both rose-1-flash and rose-1-ultra share the same code path (claudeAuth ->
 waterfall); the only difference is which models are tried at each layer.
 
-Model contract (P1):
+Model contract (P1) — speed-optimized 2026-09 (vs ultra / gpt-5.6-sol ~68 t/s):
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
         gptAuth    = gpt-5.6-luna
-        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3-flash-preview
+        waterfall  = anthropic/claude-haiku-4.5 -> google/gemini-3.5-flash-lite
 
-    rose-1-lite:
+    rose-1-flash:  (renamed from rose-1-lite)
         claudeAuth = claude-sonnet-5
-        gptAuth    = gpt-5.6-terra
-        waterfall  = google/gemini-3.6-flash -> moonshotai/kimi-k3
+        gptAuth    = gpt-5.6-luna
+        waterfall  = google/gemini-3.8-flash -> openai/gpt-6-luna
 
-    rose-1-ultra:
+    rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-fable-5-1
         gptAuth    = gpt-5.6-sol
         waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
 
-    rose-1-browser-use:
-        claudeAuth = claude-fable-5-1
-        gptAuth    = gpt-5.6-sol
-        waterfall  = openai/gpt-5.6-sol -> moonshotai/kimi-k3
+    rose-1-browser-use:  (speed-tier, vision-required)
+        claudeAuth = claude-sonnet-5
+        gptAuth    = gpt-5.6-luna
+        waterfall  = google/gemini-3.8-flash -> openai/gpt-6-luna
+
+Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b
+(~500–3000 t/s). TypeSafe Jev is Decisions-API only — not waterfallable.
 """
 
 from __future__ import annotations
@@ -33,13 +36,13 @@ from typing import Dict, List, Literal, Tuple
 
 PoolName = Literal[
     "rose-1-mini",
-    "rose-1-lite",
+    "rose-1-flash",
     "rose-1-ultra",
     "rose-1-browser-use",
     "rose-1-oss",
 ]
 
-# DAG / approval param-populator always uses ultra, even when the parent agent is lite.
+# DAG / approval param-populator always uses ultra, even when the parent agent is flash.
 PARAM_POPULATOR_MODEL = "rose-labs/rose-1-ultra"
 
 
@@ -73,23 +76,23 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # Cheapest/fastest tier — used by background condensation passes
     # (web_fetch Haiku filter, tool-result summarization). claudeAuth routes
     # directly to Anthropic's Haiku 4.5; waterfall falls back to OpenRouter's
-    # cheapest fast model.
+    # fastest multimodal lite models.
     "rose-1-mini": PoolSpec(
         name="rose-1-mini",
         claude_auth_model="claude-haiku-4-5",
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
             "anthropic/claude-haiku-4.5",
-            "google/gemini-3-flash-preview",
+            "google/gemini-3.5-flash-lite",
         ),
     ),
-    "rose-1-lite": PoolSpec(
-        name="rose-1-lite",
+    "rose-1-flash": PoolSpec(
+        name="rose-1-flash",
         claude_auth_model="claude-sonnet-5",
-        gpt_auth_model="gpt-5.6-terra",
+        gpt_auth_model="gpt-5.6-luna",
         waterfall=(
-            "google/gemini-3.6-flash",
-            "moonshotai/kimi-k3",
+            "google/gemini-3.8-flash",
+            "openai/gpt-6-luna",
         ),
     ),
     "rose-1-ultra": PoolSpec(
@@ -109,16 +112,15 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # for AVAILABLE_ACTIONS) and the response extractor (tool_use -> UnifiedAction).
     "rose-1-browser-use": PoolSpec(
         name="rose-1-browser-use",
-        claude_auth_model="claude-fable-5-1",
-        gpt_auth_model="gpt-5.6-sol",
-        # Paid waterfall matches ultra (sol -> kimi). claudeAuth is fable 5.1
-        # on both deep pools. Both waterfall layers must stay in VISION_MODELS
-        # (transforms.py) — the browser loop feeds screenshots, and a model
-        # missing from that allowlist silently drops the image instead of
-        # erroring, so the agent would fly blind on fallback.
+        claude_auth_model="claude-sonnet-5",
+        gpt_auth_model="gpt-5.6-luna",
+        # Speed-tier browser pool. Both waterfall layers must stay in
+        # VISION_MODELS (transforms.py) — the browser loop feeds screenshots,
+        # and a model missing from that allowlist silently drops the image
+        # instead of erroring, so the agent would fly blind on fallback.
         waterfall=(
-            "openai/gpt-5.6-sol",
-            "moonshotai/kimi-k3",
+            "google/gemini-3.8-flash",
+            "openai/gpt-6-luna",
         ),
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
@@ -128,12 +130,12 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
     # `direct_auth_enabled=False` is what makes the guarantee real: without it a
     # user's Claude OAuth token would route to claude_auth_model and the pinned
     # open-weights model would never be reached. The direct-token fields below
-    # are therefore inert; PoolSpec requires them, and they mirror rose-1-lite so
+    # are therefore inert; PoolSpec requires them, and they mirror rose-1-flash so
     # any future code path reading them degrades to a normal tier.
     "rose-1-oss": PoolSpec(
         name="rose-1-oss",
         claude_auth_model="claude-sonnet-5",
-        gpt_auth_model="gpt-5.6-terra",
+        gpt_auth_model="gpt-5.6-luna",
         waterfall=("moonshotai/kimi-k3",),
         direct_auth_enabled=False,
     ),

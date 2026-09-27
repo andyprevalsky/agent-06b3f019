@@ -252,7 +252,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       const messages = await loadChatModelMessages(
         {
           agentId: PROD_CHAT_COMPACTION_AGENT_ID,
-          requestedModel: 'rose-labs/rose-1-lite',
+          requestedModel: 'rose-labs/rose-1-flash',
         },
         {
           findMessages: async () =>

@@ -91,7 +91,7 @@ async def test_dag_reasoning_oversize_context_fails_fast():
             dag=dag,
             agent_id="a",
             user_id="u",
-            model="rose-lite",
+            model="rose-flash",
             context=context,
             execute_activity=execute_activity,
             post_message=post_message,

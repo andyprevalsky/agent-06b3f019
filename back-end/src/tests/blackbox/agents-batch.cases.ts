@@ -45,7 +45,7 @@ function makeBatchAgent(opts: {
   return {
     agent_id: randomUUID(),
     goal: opts.goal ?? `Batch child ${RUN_ID} ${randomUUID().slice(0, 8)}`,
-    model: 'rose-labs/rose-1-lite',
+    model: 'rose-labs/rose-1-flash',
     parent_agent_id: opts.parentAgentId,
     parent_workflow_id: opts.parentAgentId,
     bus_id: opts.busId,
@@ -179,7 +179,7 @@ test('POST /agents/batch — child missing goal rolls back the entire batch', as
     // missing goal — Zod rejects
     {
       agent_id: randomUUID(),
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       parent_agent_id: parentId,
       parent_workflow_id: parentId,
       bus_id: parentId,
