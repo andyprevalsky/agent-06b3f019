@@ -328,6 +328,31 @@ time.sleep(60)
                 elif scenario == "final_metadata":
                     self.assertIn("metadata capture failed", " ".join(raised.exception.__notes__))
 
+    def inject_local_status_publication_failure(self):
+        with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
+            handle.write(r"""
+printf() {
+  # Fail only the existing local publication writers. Identity normalization
+  # also uses %s\\n and must keep observing the real native process state.
+  case "${FUNCNAME[1]:-main}:$1" in
+    'main:pid=%s\npid_start=%s\n'|'run_owned_proof_slice:pid=%s\npid_start=%s\n'|'main:%s\n')
+      return 1 ;;
+  esac
+  builtin printf "$@"
+}
+""")
+
+    def test_local_status_publication_fault_preserves_live_identity(self):
+        self.inject_local_status_publication_failure()
+        result = subprocess.run(
+            [BASH, "-c", 'source "$1"; birth="$(cloudbench_pid_start_time "$$")"; '
+             'cloudbench_pid_birth_state "$$" "$birth"',
+             "identity-fault-test", str(self.root / "scripts/lib/cloudbench-env.sh")],
+            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=3,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "live", "publication fault corrupted live identity observation")
+
     def run_case(
         self,
         *,
@@ -355,10 +380,7 @@ time.sleep(60)
         if partial_completion:
             self.inject_partial_completion_read()
         if publication_failure:
-            with (self.root / "scripts/lib/cloudbench-env.sh").open("a") as handle:
-                handle.write(
-                    "\nprintf() {\n case \"$1\" in 'pid=%s\\npid_start=%s\\n'|'%s\\n') return 1 ;; esac\n builtin printf \"$@\"\n}\n"
-                )
+            self.inject_local_status_publication_failure()
         if unknown_body_probe:
             fake_bin = self.root / "bin"
             fake_bin.mkdir()
@@ -574,6 +596,11 @@ printf() {
 
     def test_failed_local_status_publication_does_not_wait_forever(self):
         self.run_case(publication_failure=True)
+        proof = next((self.root / "proofs").glob("*"))
+        for name in ("controller.owner", "controller.exit"):
+            with self.subTest(publication=name):
+                self.assertTrue((proof / name).is_file(), "publication fault did not reach its writer")
+                self.assertEqual((proof / name).read_bytes(), b"", "intended publication fault was bypassed")
 
     def test_skipped_tasks_do_not_count_as_actual_capability_execution(self):
         self.root = self.root.resolve()

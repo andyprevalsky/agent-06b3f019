@@ -19825,6 +19825,77 @@ test "$(wc -l < "$DF_CALLS" | tr -d ' ')" = 2
     )
     assert raced.returncode == 0, raced.stderr
 
+    # Exercise the allocator through the real owning shell function. The native
+    # filesystem case above remains real; these faults isolate capability from
+    # storage failure without allocating a 512 MiB file for every control.
+    fault_dir = tmp_path / "reserve-faults"
+    fault_dir.mkdir()
+    (fault_dir / "sitecustomize.py").write_text("""
+import errno
+import os
+import sys
+
+mode = os.environ['RESERVE_FAULT']
+sys.platform = 'darwin' if mode == 'nonlinux' else 'linux'
+def allocate(fd, offset, size):
+    with open(os.environ['ALLOCATOR_CALLS'], 'a') as log:
+        log.write('allocate\\n')
+    if mode in ('unsupported', 'fallback_failure'):
+        raise OSError(errno.EOPNOTSUPP, 'unsupported allocation')
+    if mode in ('enospc', 'io_failure'):
+        raise OSError(errno.ENOSPC if mode == 'enospc' else errno.EIO, 'allocation failed')
+    if mode == 'sparse':
+        os.ftruncate(fd, size)
+        return
+    os.write(fd, b'x' * (size // 2 if mode == 'short' else size))
+os.posix_fallocate = allocate
+if mode == 'missing':
+    del os.posix_fallocate
+if mode == 'fsync_failure':
+    def failed_fsync(fd):
+        raise OSError(errno.EIO, 'fsync failed')
+    os.fsync = failed_fsync
+""")
+    for mode in (
+        "allocated", "unsupported", "missing", "nonlinux", "enospc",
+        "io_failure", "fsync_failure", "sparse", "short", "fallback_failure",
+    ):
+        exact = tmp_path / f"reserve-{mode}"
+        calls = tmp_path / f"allocator-{mode}"
+        writes = tmp_path / f"dd-{mode}"
+        neighbor = tmp_path / f"neighbor-{mode}"
+        neighbor.write_bytes(b"unrelated")
+        controlled = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=0
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+dd() {{
+  printf 'dd\\n' >> "$DD_CALLS"
+  [ "$RESERVE_FAULT" != fallback_failure ] || return 7
+  command dd "$@"
+}}
+{reserve}
+reserve_cleanup_disk_space
+"""
+        result = subprocess.run(
+            ["bash", "-c", controlled, "reserve", str(exact)],
+            env={**os.environ, "PYTHONPATH": str(fault_dir), "RESERVE_FAULT": mode,
+                 "ALLOCATOR_CALLS": str(calls), "DD_CALLS": str(writes)},
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        expected_success = mode in ("allocated", "unsupported", "missing", "nonlinux")
+        assert (result.returncode == 0) is expected_success, (mode, result.stderr)
+        assert neighbor.read_bytes() == b"unrelated", mode
+        assert calls.exists() is (mode not in ("missing", "nonlinux")), mode
+        assert writes.exists() is (mode in ("unsupported", "missing", "nonlinux", "fallback_failure")), mode
+        if expected_success:
+            st = exact.stat()
+            assert st.st_size == 1048576 and st.st_blocks * 512 >= st.st_size, mode
+            exact.unlink()
+        else:
+            assert not exact.exists(), mode
+
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
     release_call = "release_cleanup_disk_reserve"
     assert cleanup.index(release_call) < cleanup.index("cloudbench_terminate_and_wait")

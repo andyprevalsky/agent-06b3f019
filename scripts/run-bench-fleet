@@ -5157,10 +5157,55 @@ reserve_cleanup_disk_space() {
         || allocated_mb="$maximum_reserve_mb"
 
     rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || return 1
-    if ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
-        bs=1048576 count="$allocated_mb" conv=fsync >/dev/null 2>&1; then
-        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
-        return 1
+    # Linux can reserve real blocks without writing and flushing hundreds of
+    # megabytes of zeroes. Unsupported allocation uses the existing write path;
+    # storage/fsync errors must still fail before any provider mutation.
+    local allocation_status
+    if python3 - "$CLEANUP_DISK_RESERVE_FILE" "$allocated_mb" <<'PY'
+import errno
+import os
+import stat
+import sys
+
+
+def allocate():
+    if sys.platform != "linux" or not hasattr(os, "posix_fallocate"):
+        return 78
+    size = int(sys.argv[2]) * 1048576
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            os.posix_fallocate(fd, 0, size)
+        except OSError as exc:
+            if exc.errno in (errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP):
+                return 78
+            raise
+        os.fsync(fd)
+        observed = os.fstat(fd)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_size != size or observed.st_blocks * 512 < size:
+            return 1
+        return 0
+    finally:
+        os.close(fd)
+
+
+try:
+    sys.exit(allocate())
+except (OSError, ValueError):
+    sys.exit(1)
+PY
+    then
+        allocation_status=0
+    else
+        allocation_status=$?
+    fi
+    if [ "$allocation_status" != 0 ]; then
+        if [ "$allocation_status" != 78 ] \
+            || ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
+                bs=1048576 count="$allocated_mb" conv=fsync >/dev/null 2>&1; then
+            rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+            return 1
+        fi
     fi
     # A sibling controller or unrelated process can allocate between the
     # inventory read and this fsync. Validate the actual post-allocation floor;

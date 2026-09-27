@@ -249,6 +249,60 @@ audit was synthesized from absence: the old audit lacks original controller
 host/birth authority. These records contain the failed attempt; they provide no
 acceptance credit and do not establish a passing live after-proof.
 
+### September 27 publication-fault fixture collision
+
+The final controller on `9f3266b6` failed
+`test_failed_local_status_publication_does_not_wait_forever`: zero recovery
+calls instead of one, followed by `FATAL: detached terminal status arrived
+after its identity anchor vanished with an unproven group`. The environment
+test passed, and the failing owner was truthfully retained with zero credit.
+The original fixture and native exit remain in
+`.context/test-runs/fleet-proof-test_failed_local_status_publication_does_not_wait_forever-jk0tx9bo`
+and `.context/acceptance/proof21-r2-final-controller.log` on the owned Linux host.
+
+This was a defect in this case's publication-fault regression, not a demonstrated
+runtime ownership failure. Searches used the exact fatal message and
+`status publication printf failure detached group identity cleanup`; this case
+owned the original test. The injected shell function rejected every
+`printf '%s\n'`, including the existing native birth normalization in
+`cloudbench_pid_birth_state`. A successful `ps` timestamp became empty and then
+`unknown`; the waiter correctly refused recovery without proof of ownership.
+After-the-fact PID absence does not establish its state at the failed probe.
+The unchanged single test failed in 0.554 seconds; a traced copy then captured
+the real timestamp being rejected from the birth-state caller immediately
+before the fatal message. The shared normalizer predates the fault fixture,
+so this is a latent test collision exposed by scheduling rather than a new
+production regression.
+
+Only `scripts/tests/fleet-stability-cleanup.test.py` changes. The injected fault
+now targets the explicit body/waiter publication caller and format pairs.
+It still rejects body/waiter identity records and both terminal completion
+writes, while ordinary process observation uses the real builtin `printf`.
+A new deterministic control asserts that the same injected fixture still reads
+its live native identity as `live`. The original cleanup, unrelated-owner,
+failed classification, zero-credit and five-second completion assertions are
+unchanged. Added checks require the actual `controller.owner` and
+`controller.exit` files to exist and remain empty, proving the intended write
+failure was not bypassed. Narrowing the fault at its producer removes the
+collision; weakening the runtime's unknown-identity guard would be incorrect.
+
+Private evidence is in `.context/acceptance/proof21-publication-cleanup-rca/`.
+`unchanged.json` preserves the original failing method; `traced.json` contains
+the rejected birth-normalization call. The same two permanent assertions in
+`promoted-before.json` fail under the original injection, then pass under the
+scoped injection in `candidate-after.json`. The readable final source is
+AST-equivalent; `final-after.json` pins its exact test SHA256
+`9e0135152bcfb559bf9b5599b342f1945eb9caeb5729c1ad901a80b02f3714b0`
+and records two passes in 1.268 seconds with native exit 0. Executed private
+payload hashes are distinct from the unchanged remote checkout's source hashes.
+The command selects `FleetFailureCleanup.test_local_status_publication_fault_preserves_live_identity`
+and `FleetFailureCleanup.test_failed_local_status_publication_does_not_wait_forever`
+from `python3 scripts/tests/fleet-stability-cleanup.test.py` through the existing
+owning fixture. The existing full controller continues to discover the module.
+The original failed controller remains failed; the final whole controller on
+the next committed head and the 100-run proof remain pending. No production
+source, benchmark task, evaluator, model, prompt or timeout changes.
+
 ## Verification limits
 
 The local owning-boundary before/after regression passes. The failed live
