@@ -23,6 +23,14 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from providers.rose.schema import build_anthropic_tools_from_response_model
+from tools.prompts import attempt_completion_prompt
+
+# Single source of truth for verifier rules. The browser prompt embeds the
+# same grading block as the main agent so attempt_completion semantics do not
+# drift between agent types.
+from utils.prompts import VERIFICATION_RULES
+
 
 def recover_from_challenge_enabled() -> bool:
     """Temp kill-switch for challenge recovery (bench A/B).
@@ -33,14 +41,6 @@ def recover_from_challenge_enabled() -> bool:
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
 
-from providers.rose.schema import build_anthropic_tools_from_response_model
-from tools.prompts import attempt_completion_prompt
-
-# Single source of truth for verifier rules. The browser prompt embeds the
-# same grading block as the main agent so attempt_completion semantics do not
-# drift between agent types.
-from utils.prompts import VERIFICATION_RULES
-from utils.user_facing_writing_prompt import user_facing_text_description
 
 logger = structlog.get_logger()
 
