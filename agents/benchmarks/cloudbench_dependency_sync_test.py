@@ -12217,8 +12217,9 @@ def test_recovery_proxy_batch_claim_rolls_back_partial_publication(
     assert not [path for path in root.iterdir() if path.name.isdigit()]
 
 
+@pytest.mark.parametrize("terminal", [False, True])
 def test_forced_exact_reaper_uses_only_owned_machine_ids_and_exact_volume_ids(
-    tmp_path: Path,
+    tmp_path: Path, terminal: bool,
 ) -> None:
     """Exact stale-owner cleanup must never inventory or resolve neighboring Machines."""
     fleet = FLEET_SCRIPT.read_text()
@@ -12292,13 +12293,13 @@ FLY() {{
       cat <<'STATUS'
 Machine ID: {machine_id}
 Instance ID: fixture
-State: started
+State: {"destroyed" if terminal else "started"}
 HostStatus: ok
 
 VM
   ID            = {machine_id}
   Instance ID   = fixture
-  State         = started
+  State         = {"destroyed" if terminal else "started"}
   Image         = fixture
   Name          = {machine_name}
   Private IP    = fdaa::101
@@ -12351,6 +12352,7 @@ reap_registry_clones "$REGISTRY" forced || exit 90
     assert result.returncode == 0, result.stderr + result.stdout
     call_lines = calls.read_text().splitlines()
     assert any(line.startswith(f"machine status {machine_id} ") for line in call_lines)
+    assert any(line.startswith("machine destroy ") for line in call_lines) is not terminal
     assert all("machines list" not in line for line in call_lines)
     assert all(
         machine_id in line or machine_volume in line or volume_only in line or line.startswith("machine stop")

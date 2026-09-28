@@ -5108,29 +5108,38 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
             volume_id="$(fleet_registry_reconcile_mounted_volume \
                 "$registry" "$clone_name" "$id")" || return 1
         fi
-        if [ "$mode" = "stale" ]; then
-            case "$state" in
-                stopped) : ;;
-                started)
-                    runner_count="$(registry_runner_count "$id")" || {
-                        echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
-                        return 1
-                    }
-                    if [ "$runner_count" != "0" ]; then
-                        echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
-                        return 1
-                    fi
-                    ;;
-                *)
-                    echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
-                    return 1
-                    ;;
-            esac
-            echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+        if [ "$state" = "destroyed" ]; then
+            # Exact-ID provider status already proves this Machine is terminal.
+            # Reissuing Fly's destroy call can wait a full minute per clone on
+            # an already retired fleet; only its separately owned Volume needs
+            # a final exact-ID deletion receipt.
+            echo "🧹 verifying volume of already-destroyed fleet clone $id (name=$clone_name)"
+            if reap_volume "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
         else
-            echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+            if [ "$mode" = "stale" ]; then
+                case "$state" in
+                    stopped) : ;;
+                    started)
+                        runner_count="$(registry_runner_count "$id")" || {
+                            echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
+                            return 1
+                        }
+                        if [ "$runner_count" != "0" ]; then
+                            echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
+                            return 1
+                        fi
+                        ;;
+                    *)
+                        echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
+                        return 1
+                        ;;
+                esac
+                echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+            else
+                echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+            fi
+            if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
         fi
-        if reap_machine "$id" "" "$volume_id"; then cleanup_status=0; else cleanup_status=$?; fi
         terminal_disposition=""
         [ "$cleanup_status" -eq 0 ] && terminal_disposition=destroyed-verified-absent
         [ "$cleanup_status" -eq 74 ] && terminal_disposition=destroyed-provider-retained
