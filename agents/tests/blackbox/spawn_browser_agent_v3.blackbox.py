@@ -7242,6 +7242,35 @@ def test_passkeys_are_revalidated_after_start_navigation():
     assert navigated < revalidate < main_loop
 
 
+def test_passkey_boundary_syncs_force_invalidate_before_inject():
+    """Nav/rotation syncs must invalidate cached authenticator health first.
+
+    Agents f380ca3c / c3b1ca09 (browser-amazon-return 2026-09-28): after start
+    navigation the health check returned ``seeded 0`` against a dying Kernel
+    virtual-authenticator id; ~5–6s later CDP reported ``environment has not
+    been enabled``. Amazon's sign-in page had already probed the empty
+    authenticator and disabled the passkey CTA. Boundary contexts must call
+    ``invalidate_passkey_state_for_live_target`` before ``inject_passkeys``;
+    ordinary session-start / realm syncs must not (they rely on the health
+    check so we do not thrash a healthy authenticator).
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    helper_start = source.index("async def sync_passkeys_onto_target(")
+    helper_end = source.index("browser_task_paused_for_resume", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "invalidate_passkey_state_for_live_target()" in helper
+    assert 'context in ("after start navigation", "after proxy rotation")' in helper
+    # inject must come AFTER the invalidate gate in source order
+    assert helper.index("invalidate_passkey_state_for_live_target()") < helper.index(
+        "dom_service.inject_passkeys("
+    )
+
+
 def test_passkey_usage_readback_does_not_rebuild_authenticator():
     """Usage polling must be read-only — rebuilding mid-ceremony kills Amazon passkeys.
 
@@ -20576,6 +20605,10 @@ async def run_all_tests():
     r.record(
         "passkeys_revalidated_after_start_navigation",
         test_passkeys_are_revalidated_after_start_navigation,
+    )
+    r.record(
+        "passkey_boundary_syncs_force_invalidate_before_inject",
+        test_passkey_boundary_syncs_force_invalidate_before_inject,
     )
     r.record(
         "passkey_usage_readback_does_not_rebuild_authenticator",
