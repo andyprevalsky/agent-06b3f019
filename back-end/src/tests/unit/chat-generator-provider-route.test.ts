@@ -398,11 +398,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       'a Cerebras 402 quota must fall over to OpenRouter'
     );
     // Same model — never a generic one.
-    assert.equal(
-      openRouterBody.model,
-      'openai/gpt-oss-120b',
-      'fallover must stay on gpt-oss-120b'
-    );
+    assert.equal(openRouterBody.model, 'openai/gpt-oss-120b', 'fallover must stay on gpt-oss-120b');
     // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
     const provider = openRouterBody.provider as {
       order?: string[];

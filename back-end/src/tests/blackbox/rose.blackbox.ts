@@ -3262,9 +3262,9 @@ async function testClient_responseModelBuildsCodexTextFormat() {
 
   try {
     const stream = await createStreamingCompletion({
-        model: 'rose-labs/rose-1-ultra',
-        messages: [{ role: 'user', content: 'score it' }],
-        gpt_token: 'gpt-token',
+      model: 'rose-labs/rose-1-ultra',
+      messages: [{ role: 'user', content: 'score it' }],
+      gpt_token: 'gpt-token',
       response_model: responseModel(
         'ScoreResponse',
         z.object({

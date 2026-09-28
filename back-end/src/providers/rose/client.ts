@@ -45,6 +45,7 @@ import {
   runCerebrasChatWithWaterfallFallback,
   selectExclusiveCerebrasChatRoute,
 } from './exclusiveCerebrasChatRoute';
+import { createStreamAccumulator, dumpDisplayModel, emitRoseChunk } from './completionChunks';
 
 const log = createLogger('Rose');
 
@@ -73,13 +74,6 @@ function shortRequestId(): string {
 
 function openAiApiKey(): string | undefined {
   return process.env[GPT_API_KEY_ENV];
-}
-
-function dumpDisplayModel(actualModel: string): string {
-  if (actualModel.endsWith('-claude')) return actualModel.slice(0, -'-claude'.length);
-  if (actualModel.endsWith('-gpt')) return actualModel.slice(0, -'-gpt'.length);
-  if (actualModel.endsWith('-openai')) return actualModel.slice(0, -'-openai'.length);
-  return actualModel;
 }
 
 /**
@@ -148,16 +142,8 @@ interface WrapOptions {
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
-  const outputParts: string[] = [];
-  const reasoningParts: string[] = [];
-  const toolCalls: Array<Record<string, unknown>> = [];
-  let finishReason: string | null = null;
+  const acc = createStreamAccumulator();
   let dumpPath: string | null = null;
-
-  let metadata: { actual_model: string; pool_name: string } = {
-    actual_model: '',
-    pool_name: '',
-  };
 
   if (opts.options.dump_context) {
     dumpPath = dumpLlmContext({
@@ -198,135 +184,30 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   }
 
-  const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null => {
-    if (chunk.kind === 'metadata') {
-      metadata = {
-        actual_model: chunk.data.actual_model ?? '',
-        pool_name: chunk.data.pool_name ?? '',
-      };
-      // Caller doesn't need a dedicated metadata chunk — every CompletionChunk
-      // we emit carries actual_model + pool_name inline (parity with the
-      // deleted edge function's behavior).
-      return null;
-    }
-    if (chunk.kind === 'content') {
-      outputParts.push(chunk.data.text);
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              content: chunk.data.text,
-              item_id: chunk.data.item_id,
-              output_index: chunk.data.output_index,
-              content_index: chunk.data.content_index,
-              phase: chunk.data.phase,
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'reasoning') {
-      reasoningParts.push(chunk.data.text);
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              reasoning: chunk.data.text,
-              item_id: chunk.data.item_id,
-              output_index: chunk.data.output_index,
-              content_index: chunk.data.content_index,
-              phase: chunk.data.phase,
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'usage') {
-      finishReason = chunk.data.finish_reason ?? 'stop';
-      return {
-        choices: [{ index: 0, delta: {}, finish_reason: chunk.data.finish_reason ?? 'stop' }],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-        usage: {
-          prompt_tokens: chunk.data.prompt_tokens ?? 0,
-          completion_tokens: chunk.data.completion_tokens ?? 0,
-          total_tokens: chunk.data.total_tokens ?? 0,
-          cache_creation_input_tokens: chunk.data.cache_creation_input_tokens,
-          cache_read_input_tokens: chunk.data.cache_read_input_tokens,
-        },
-      };
-    }
-    if (chunk.kind === 'tool_call') {
-      toolCalls.push({
-        id: chunk.data.id,
-        name: chunk.data.name,
-        arguments: chunk.data.arguments,
-      });
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  id: chunk.data.id,
-                  type: 'function',
-                  function: { name: chunk.data.name, arguments: chunk.data.arguments },
-                },
-              ],
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'codex_reasoning_item') {
-      return {
-        choices: [{ index: 0, delta: {}, finish_reason: null }],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-        codex_reasoning_item: chunk.data,
-      };
-    }
-    return null;
-  };
+  const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null =>
+    emitRoseChunk({
+      chunk,
+      options: opts.options,
+      poolSize: poolSpec.waterfall.length,
+      acc,
+    });
 
   const finalizeDump = (error?: unknown) => {
     if (!dumpPath) return;
-    const actualModelRaw = metadata.actual_model || '';
+    const actualModelRaw = acc.metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
     updateLlmDump(dumpPath, {
       model: actualModel ?? opts.options.model,
       config: {
         actual_model: actualModel,
         actual_model_raw: actualModelRaw || null,
-        pool_name: metadata.pool_name || null,
-        finish_reason: finishReason,
+        pool_name: acc.metadata.pool_name || null,
+        finish_reason: acc.finishReason,
       },
       extra: {
-        output: outputParts.join(''),
-        reasoning: reasoningParts.join(''),
-        tool_calls: toolCalls,
+        output: acc.outputParts.join(''),
+        reasoning: acc.reasoningParts.join(''),
+        tool_calls: acc.toolCalls,
         error:
           error instanceof Error
             ? { name: error.name, message: error.message, stack: error.stack }

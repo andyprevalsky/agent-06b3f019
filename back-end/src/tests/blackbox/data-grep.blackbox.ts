@@ -1358,7 +1358,9 @@ async function testSnapshotEndpoint(userId: string): Promise<void> {
     throw new Error(`Unexpected snapshot content/version: ${JSON.stringify(body.snapshot)}`);
   }
   if (
-    !body.snapshot.revisions?.some((r) => r.source === 'grep-blackbox' && r.model === 'rose-1-flash')
+    !body.snapshot.revisions?.some(
+      (r) => r.source === 'grep-blackbox' && r.model === 'rose-1-flash'
+    )
   ) {
     throw new Error(`Expected the seeded revision in the ledger: ${JSON.stringify(body.snapshot)}`);
   }
