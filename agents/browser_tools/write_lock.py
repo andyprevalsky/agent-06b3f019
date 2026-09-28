@@ -279,6 +279,20 @@ RETURN_COMMIT_CONTINUE_LABELS = frozenset({
     "confirm",
 })
 
+# Wizard-step Continues that share `/spr/returns/contract` with the final commit.
+# Agent c1b33ca5 (2026-09-28 browser-amazon-return): clicked
+# ``resolutions-section-continue-button`` (Continue after picking Visa refund)
+# intending to reach drop-off selection; write_lock treated it as the final
+# commit, so the approval lacked a named drop-off and the judge failed.
+# These machine ids must keep Continue unlocked; phrase-only Continues on the
+# same URL still lock (agent 785a3207 final commit).
+RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS = (
+    "resolutions-section-continue",
+    "productconditioncontinue",
+    "reasoncontinue",
+    "methodcontinue",
+)
+
 # Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
 # agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
 # agent e20e5a4e) matched "buy now" inside Terms of Purchase text, forced a
@@ -696,17 +710,29 @@ def detect_amazon_return_self_service_block(url: str, page_text: str) -> Optiona
     return None
 
 
+def _has_return_commit_continue_exclusion(element_text: str) -> bool:
+    """True when the click signal is a mid-wizard Continue on a commit URL."""
+    haystack = normalize_write_lock_text(element_text)
+    if not haystack:
+        return False
+    return any(marker in haystack for marker in RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS)
+
+
 def is_return_button(element_text: str, url: str = "") -> bool:
     """Check if element text indicates a return/refund confirmation control.
 
     Phrase matches ("Confirm your return", …) apply on any URL. On Amazon SPR
     contract/confirm commit URLs, a bare Continue/Submit/Confirm label is also
-    a return commit — those pages use Continue as the irreversible CTA.
+    a return commit — those pages use Continue as the irreversible CTA — unless
+    the signal carries a mid-wizard exclusion marker (resolution/method step).
     """
     if not element_text:
         return False
 
     on_return_commit_url = is_return_commit_url(url)
+    exclude_bare_continue = on_return_commit_url and _has_return_commit_continue_exclusion(
+        element_text
+    )
 
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
@@ -721,7 +747,11 @@ def is_return_button(element_text: str, url: str = "") -> bool:
             if normalize_write_lock_text(phrase) in text_lower:
                 logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
                 return True
-        if on_return_commit_url and text_lower in RETURN_COMMIT_CONTINUE_LABELS:
+        if (
+            on_return_commit_url
+            and not exclude_bare_continue
+            and text_lower in RETURN_COMMIT_CONTINUE_LABELS
+        ):
             logger.debug(
                 f"Element text '{signal[:80]}' matched return-commit Continue on {url[:80]}"
             )

@@ -2866,8 +2866,11 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Use generic_write for return/refund confirmations. Put item title in target and "
-            "refund amount, original payment method, drop-off/shipping method, and return-by "
-            "date in payload_summary. Do not invent purchase ratings or product-detail URLs."
+            "refund amount, original payment method, the named drop-off/pickup location from "
+            "the page (e.g. 'Whole Foods Dropoff' — never a bare 'drop-off/pickup' placeholder), "
+            "and return-by date in payload_summary. Do not invent purchase ratings or "
+            "product-detail URLs. If no named drop-off is visible yet, the irreversible commit "
+            "has not been reached — do not fabricate one."
         ),
     ),
     (

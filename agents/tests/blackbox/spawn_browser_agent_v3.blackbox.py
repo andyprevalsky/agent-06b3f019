@@ -13682,6 +13682,20 @@ def test_write_lock_return_continue_on_amazon_contract_url():
     assert not is_return_button("View return/refund status", contract)
     assert is_return_button("Confirm your return", confirm)
 
+    # Mid-wizard resolution Continue on contract URL must stay unlocked so the
+    # agent can reach drop-off selection (c1b33ca5).
+    resolutions = "submit\nContinue\nresolutions-section-continue-button"
+    assert not is_return_button(resolutions, contract)
+    assert not is_return_button(
+        "Continue\nresolutions-section-continue-button",
+        contract,
+    )
+    # Explicit confirm phrases still lock even when a wizard id is present.
+    assert is_return_button(
+        "Confirm your return\nresolutions-section-continue-button",
+        contract,
+    )
+
 
 def test_amazon_return_self_service_block_detection_and_prompt():
     """CS-review return wall must surface a recovery note; groceries exclude snacks.
