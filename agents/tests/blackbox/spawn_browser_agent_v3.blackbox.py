@@ -3633,6 +3633,65 @@ async def test_click_press_holds_no_remote_round_trip_between_down_and_up():
     # The drifted release (motor noise without a longer press) is the CDP path's
     # job and is asserted by test_humanized_click_presses_and_releases_via_cdp_*.
 
+
+async def test_click_at_same_coords_still_emits_pointer_trajectory():
+    """RCA (agent 7f8b9c24): FCaptcha vision_ai 'teleport clicks'.
+
+    When the cursor is already on the target, `_move_to_unlocked` used to no-op.
+    The subsequent press then had zero preceding mouseMoved samples and was
+    scored as "Click injected with no pointer trajectory". Always wander in.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class TrackingMouse:
+        def __init__(self):
+            self.moves: list[tuple[float, float]] = []
+
+        async def move(self, x, y):
+            self.moves.append((float(x), float(y)))
+
+        async def down(self, **kwargs):
+            return None
+
+        async def up(self, **kwargs):
+            return None
+
+        async def click(self, *args, **kwargs):
+            return None
+
+    class FakeKeyboard:
+        async def press(self, *args, **kwargs):
+            return None
+
+    mouse = TrackingMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=FakeKeyboard(),
+        viewport_size={"width": 1280, "height": 800},
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+                "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS": "1",
+                "BROWSER_AGENT_CDP_MOUSE_TRANSPORT": "0",
+            },
+            clear=False,
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        await humanizer.initialize_cursor((360, 240))
+        mouse.moves.clear()
+        await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
+
+    assert len(mouse.moves) >= 3, (
+        f"same-coord click must emit an approach trajectory; got {len(mouse.moves)} moves"
+    )
+
+
 async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -21271,6 +21330,10 @@ async def run_all_tests():
     await r.record_async(
         "click_press_has_no_round_trip_inside_hold",
         test_click_press_holds_no_remote_round_trip_between_down_and_up,
+    )
+    await r.record_async(
+        "click_at_same_coords_emits_pointer_trajectory",
+        test_click_at_same_coords_still_emits_pointer_trajectory,
     )
     await r.record_async(
         "browser_humanizer_cursor_observer_after_overlay",
