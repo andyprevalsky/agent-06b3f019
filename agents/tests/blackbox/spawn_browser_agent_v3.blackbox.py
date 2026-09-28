@@ -20578,8 +20578,8 @@ async def run_all_tests():
         test_passkeys_are_revalidated_after_start_navigation,
     )
     r.record(
-        "passkeys_revalidated_before_each_usage_readback",
-        test_passkeys_are_revalidated_before_each_usage_readback,
+        "passkey_usage_readback_does_not_rebuild_authenticator",
+        test_passkey_usage_readback_does_not_rebuild_authenticator,
     )
     await r.record_async(
         "provider_handoff_replaces_humanizer",

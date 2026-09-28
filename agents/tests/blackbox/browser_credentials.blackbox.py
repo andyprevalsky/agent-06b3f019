@@ -765,6 +765,10 @@ async def run_all_tests():
         test_passkey_injection_recovers_after_virtual_environment_loss,
     )
     await runner.record_async(
+        "passkey_sync_skips_rebuild_after_transient_getcredentials_failure",
+        test_passkey_sync_skips_rebuild_after_transient_getcredentials_failure,
+    )
+    await runner.record_async(
         "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
         test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target,
     )
