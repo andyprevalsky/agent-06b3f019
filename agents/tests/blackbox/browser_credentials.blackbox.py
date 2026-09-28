@@ -408,6 +408,12 @@ def _webauthn_browser_double():
         if method == "WebAuthn.enable":
             state.enabled.add(target_id)
             return {}
+        if method == "WebAuthn.disable":
+            state.enabled.discard(target_id)
+            for authenticator_id, (owner, _) in list(state.authenticators.items()):
+                if owner == target_id:
+                    del state.authenticators[authenticator_id]
+            return {}
         if method == "Page.setInterceptFileChooserDialog":
             return {}
         if method == "WebAuthn.addVirtualAuthenticator":
@@ -415,10 +421,27 @@ def _webauthn_browser_double():
                 raise RuntimeError(
                     "The Virtual Authenticator Environment has not been enabled for this session"
                 )
+            # Chrome: only one internal authenticator per environment.
+            for authenticator_id, (owner, _) in state.authenticators.items():
+                if owner == target_id:
+                    raise RuntimeError(
+                        {
+                            "code": -32602,
+                            "message": "Chrome only supports one internal authenticator per environment",
+                        }
+                    )
             state.next_id += 1
             authenticator_id = f"authenticator-{state.next_id}"
             state.authenticators[authenticator_id] = (target_id, {})
             return {"authenticatorId": authenticator_id}
+        if method == "WebAuthn.removeVirtualAuthenticator":
+            authenticator_id = params.get("authenticatorId")
+            if authenticator_id not in state.authenticators:
+                raise RuntimeError(
+                    {"code": -32602, "message": "Could not find a Virtual Authenticator matching the ID"}
+                )
+            del state.authenticators[authenticator_id]
+            return {}
         if method == "WebAuthn.addCredential":
             if params["authenticatorId"] not in state.authenticators:
                 raise RuntimeError(
@@ -631,6 +654,11 @@ async def test_invalidate_forces_rebuild_when_health_check_would_trust_stale() -
     environment seconds later and disabled the passkey CTA. Callers that know
     a navigation/target boundary just happened must invalidate so the next
     sync re-enables + re-seeds instead of trusting that health check.
+
+    Invalidate must also remove the Chrome-side authenticator — forgetting the
+    cache alone leaves the old internal authenticator in place and the next
+    ``addVirtualAuthenticator`` fails with ``Chrome only supports one internal
+    authenticator per environment`` (agent f203ae7b).
     """
     from browser_tools.dom_service import DOMService
 
@@ -639,26 +667,27 @@ async def test_invalidate_forces_rebuild_when_health_check_would_trust_stale() -
     dom._session = _fake_webauthn_session(send)
 
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
     authenticator_before = sum(
         1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
     )
     add_cred_before = sum(1 for method, _ in state.calls if method == "WebAuthn.addCredential")
+    old_authenticator_ids = set(state.authenticators)
 
     # Without invalidate, a healthy health-check is a no-op reseed.
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
-    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") == enable_before
     assert (
         sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
         == authenticator_before
     )
 
-    # Invalidate mimics the post-nav / post-rotation boundary: forget the
-    # cached authenticator id + armed bit even though getCredentials would
-    # still succeed against the dying environment.
-    dom.invalidate_passkey_state_for_live_target()
+    # Invalidate removes the Chrome-side authenticator, then the next sync
+    # creates a fresh one + re-seeds (cannot trust the dying health check).
+    await dom.invalidate_passkey_state_for_live_target()
+    assert any(method == "WebAuthn.removeVirtualAuthenticator" for method, _ in state.calls)
+    assert not (old_authenticator_ids & set(state.authenticators)), (
+        "invalidate must remove the stale Chrome-side authenticator before recreate"
+    )
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
-    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") == enable_before + 1
     assert (
         sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
         == authenticator_before + 1

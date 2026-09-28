@@ -5786,7 +5786,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             return 0
         # Known target-boundary contexts: never trust cached authenticator health.
         if context in ("after start navigation", "after proxy rotation"):
-            dom_service.invalidate_passkey_state_for_live_target()
+            await dom_service.invalidate_passkey_state_for_live_target()
         injected = await dom_service.inject_passkeys(list(seeded_decrypted_passkeys_by_credential_id.values()))
         logger.info(
             "Seeded cloud-custody passkeys onto browser virtual authenticator",

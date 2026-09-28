@@ -1129,36 +1129,83 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
-    def invalidate_passkey_state_for_live_target(self) -> None:
-        """Forget cached authenticator state on the focused target.
+    async def invalidate_passkey_state_for_live_target(self) -> None:
+        """Force the next sync to rebuild the live authenticator (post-nav/rotation).
 
         Kernel/Chrome can leave ``WebAuthn.getCredentials`` succeeding briefly
         after a navigation while the virtual-authenticator environment is already
-        dying. Agent f380ca3c (browser-amazon-return 2026-09-28): ``after start
-        navigation`` logged ``seeded 0`` (health check trusted the stale id), then
-        ~6s later reported ``environment has not been enabled`` — so Amazon's
-        sign-in page probed an empty authenticator and disabled the passkey CTA.
-        Callers that know a navigation/target boundary just happened must
-        invalidate before syncing rather than trust that health check.
+        dying. Agents f380ca3c / c3b1ca09 (browser-amazon-return 2026-09-28):
+        ``after start navigation`` logged ``seeded 0`` (health check trusted the
+        stale id), then ~5–6s later reported ``environment has not been enabled``
+        — so Amazon's sign-in page probed an empty authenticator and disabled the
+        passkey CTA.
+
+        Forgetting our cache alone is not enough: Chrome still holds the old
+        internal authenticator, and ``addVirtualAuthenticator`` then fails with
+        ``Chrome only supports one internal authenticator per environment``
+        (agent f203ae7b). Remove the Chrome-side authenticator first; if remove
+        fails, ``WebAuthn.disable`` wipes the environment so the next sync can
+        re-enable + create cleanly.
         """
         session = self._session
         target_id = getattr(session, "agent_focus_target_id", None) if session is not None else None
         if not target_id:
             return
+        authenticator_id = self._passkey_authenticator_by_target.get(target_id)
         had_state = (
-            target_id in self._passkey_authenticator_by_target
+            authenticator_id is not None
             or target_id in self._passkey_seeded_by_target
             or target_id in self._armed_targets
         )
+        removed = False
+        if session is not None:
+            try:
+                cdp_session = await session.get_or_create_cdp_session(target_id, focus=False)
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ [passkey] could not open CDP session during invalidate: {e}"
+                )
+                cdp_session = None
+            if cdp_session is not None and authenticator_id:
+                try:
+                    await self._send_cdp_command(
+                        cdp_session,
+                        "WebAuthn.removeVirtualAuthenticator",
+                        {"authenticatorId": authenticator_id},
+                    )
+                    removed = True
+                except Exception as e:
+                    logger.warning(
+                        "⚠️ [passkey] removeVirtualAuthenticator failed during "
+                        f"invalidate; disabling WebAuthn environment: {e}"
+                    )
+                    try:
+                        await self._send_cdp_command(cdp_session, "WebAuthn.disable", {})
+                    except Exception as e2:
+                        logger.warning(
+                            f"⚠️ [passkey] WebAuthn.disable failed during invalidate: {e2}"
+                        )
+            elif cdp_session is not None and target_id in self._armed_targets:
+                # No cached authenticator id but environment was armed — wipe so
+                # a leftover Chrome-side authenticator cannot block recreate.
+                try:
+                    await self._send_cdp_command(cdp_session, "WebAuthn.disable", {})
+                except Exception as e:
+                    logger.warning(
+                        f"⚠️ [passkey] WebAuthn.disable failed during invalidate: {e}"
+                    )
+
         self._passkey_authenticator_by_target.pop(target_id, None)
         self._passkey_seeded_by_target.pop(target_id, None)
         self._passkey_seeded_at_by_target.pop(target_id, None)
-        # Drop armed so `_arm_target` re-issues WebAuthn.enable on the next sync.
-        self._armed_targets.discard(target_id)
+        if not removed:
+            # Environment may have been disabled above, or we never had a live
+            # remove — next sync must re-issue WebAuthn.enable.
+            self._armed_targets.discard(target_id)
         if had_state:
             logger.info(
                 "🔑 [passkey] invalidated cached authenticator state for live target "
-                f"(force rebuild on next sync) target={target_id[:12]}"
+                f"(force rebuild on next sync; removed={removed}) target={target_id[:12]}"
             )
 
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
@@ -1305,7 +1352,53 @@ class DOMService:
                 )
                 authenticator_id = result.get("authenticatorId")
             except Exception as e:
-                raise RuntimeError("Failed to create the browser passkey authenticator") from e
+                # Stale Chrome-side authenticator left after a cache-only
+                # invalidate (or a failed remove) blocks recreate. Remove any
+                # leftover we still know about / wipe the environment, then retry
+                # once — agent f203ae7b hit this exact CDP error after nav.
+                error = str(e).lower()
+                one_internal = "only supports one internal authenticator" in error
+                if not one_internal:
+                    raise RuntimeError("Failed to create the browser passkey authenticator") from e
+                logger.warning(
+                    "⚠️ [passkey] addVirtualAuthenticator blocked by existing internal "
+                    "authenticator; removing stale authenticator and retrying"
+                )
+                stale_id = self._passkey_authenticator_by_target.get(target_id)
+                try:
+                    if stale_id:
+                        await self._send_cdp_command(
+                            cdp_session,
+                            "WebAuthn.removeVirtualAuthenticator",
+                            {"authenticatorId": stale_id},
+                        )
+                    else:
+                        await self._send_cdp_command(cdp_session, "WebAuthn.disable", {})
+                        await self._send_cdp_command(
+                            cdp_session,
+                            "WebAuthn.enable",
+                            {"enableUI": False},
+                        )
+                        self._armed_targets.add(target_id)
+                    result = await self._send_cdp_command(
+                        cdp_session,
+                        "WebAuthn.addVirtualAuthenticator",
+                        {
+                            "options": {
+                                "protocol": "ctap2",
+                                "transport": "internal",
+                                "hasResidentKey": True,
+                                "hasUserVerification": True,
+                                "isUserVerified": True,
+                                "automaticPresenceSimulation": True,
+                            }
+                        },
+                    )
+                    authenticator_id = result.get("authenticatorId")
+                except Exception as retry_error:
+                    raise RuntimeError(
+                        "Failed to create the browser passkey authenticator"
+                    ) from retry_error
             if not authenticator_id:
                 raise RuntimeError("Browser passkey authenticator did not return an id")
         self._passkey_authenticator_by_target[target_id] = authenticator_id

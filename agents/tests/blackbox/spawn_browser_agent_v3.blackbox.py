@@ -7264,6 +7264,7 @@ def test_passkey_boundary_syncs_force_invalidate_before_inject():
     helper = source[helper_start:helper_end]
 
     assert "invalidate_passkey_state_for_live_target()" in helper
+    assert "await dom_service.invalidate_passkey_state_for_live_target()" in helper
     assert 'context in ("after start navigation", "after proxy rotation")' in helper
     # inject must come AFTER the invalidate gate in source order
     assert helper.index("invalidate_passkey_state_for_live_target()") < helper.index(
