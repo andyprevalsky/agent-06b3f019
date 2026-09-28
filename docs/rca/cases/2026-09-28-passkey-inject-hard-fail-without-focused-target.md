@@ -9,19 +9,22 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/browser_tools/dom_service.py::inject_passkeys — raises RuntimeError when agent_focus_target_id is missing while ensure_browser_overlays_suppressed soft-fails the same condition
 symptoms:
   - "No focused browser target is available for passkey injection"
+  - "Expected at least one handler to return a non-None result, but none did!"
+  - "Reconnection failed — CDP still not connected"
   - "Failed during: goto"
-  - spawn_browser_agent toolStatus ERROR title Task Failed
-  - browser_error_type RuntimeError
+  - "Browser state captured"
 tags:
   - passkey
   - browser
   - cdp
   - focus
   - steel
+  - browser-state
 sources:
   - agent a890a362-9775-410c-beb0-c251cd511845
+  - commit fd4a359cda5875b171fd2d5d31c07b29b46175ad
 repro: agents/tests/blackbox/browser_credentials.blackbox.py::test_passkey_inject_without_focused_target_retains_held_keys
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -88,7 +91,51 @@ focus; no new fan-in, queries, or broadcasts.
 
 ## Human feedback
 
-None recorded.
+Evidence-only RCA requested (`Do NOT propose a fix yet`) for the full
+a890a362 symptom set (passkey focus gap, CDP reconnect, BrowserStateRequest
+None, read_browser_state / respawn churn). Passkey soft-fail landed on
+branch `cursor/rca-explore-browser-failures-dc1c` as commit `fd4a359cd`
+before this expanded write-up; BrowserStateRequest / CDP-dead sibling path
+is still open (no owning-boundary cement beyond supervisor recovery budget).
+
+## Sibling evidence on the same root agent (still open)
+
+Prod API snapshot (`924` messages; `7` browser starts; `4` Task Failed):
+
+| task_id | browser_error_type | message | last_action |
+| --- | --- | --- | --- |
+| `9a497ffb-…` | RuntimeError | No focused browser target…passkey injection | goto |
+| `43a281cb-…` | RuntimeError | No focused browser target…passkey injection | wait |
+| `cb8f4f7d-…` | ValueError | Expected at least one handler…BrowserStateRequestEvent | goto |
+| `bef7bd0b-…` | ValueError | Expected at least one handler…BrowserStateRequestEvent | goto |
+
+Supervisor recovery on the ValueError tasks logged
+`browser_url_error:ValueError:Expected at least one handler…` **8× each**
+(`BROWSER_SUPERVISOR_MAX_RECOVERIES` default 8 in
+`agents/domains/spawn_browser_agent_v3/config.py:163`), then Task Failed —
+proving the step-start `get_browser_state` path at
+`handler.py:6990-7010`, not the in-action soft-recover wrapper at
+`handler.py:9086-9112`.
+
+Browser-use ownership for the None-result shape:
+
+- `browser_use/browser/session.py:1512` —
+  `event_result(raise_if_none=True, raise_if_any=True)`
+- `bubus/models.py:521-523` — raises the exact ValueError string
+- `watchdog_base.py:98-123` — when `not is_cdp_connected`, returns `None`
+  (or raises `ConnectionError: … Reconnection failed — CDP still not connected`
+  if `is_reconnecting` waited and still dead)
+- `DownloadsWatchdog.on_BrowserStateRequestEvent` always returns `None`;
+  `DOMWatchdog` is the only non-None producer — so both showing `✅` with
+  empty results means the wrapper short-circuited before DOMWatchdog body
+  (CDP disconnected / reconnect failed), not that DOMWatchdog returned a
+  summary that bubus discarded.
+
+Counts (API, not worker log): `68` `read_browser_state` FINISHED (message
+body empty in API — tool result "Browser state captured." is in
+`service_actions.py:878`), `35` Navigating/Navigated pairs to
+`your-orders/orders?timeFilt…`, `17` supervisor recoveries, Steel live
+views `connect.steel.dev/v1/sessions/{f247b11f…,d6a2eef3…}/player`.
 
 ## Reusable lesson
 
