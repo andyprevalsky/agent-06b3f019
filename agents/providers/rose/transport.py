@@ -26,6 +26,7 @@ logger = structlog.get_logger()
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_RESPONSES_API_URL = "https://api.openai.com/v1/responses"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+CEREBRAS_API_URL = "https://api.cerebras.ai/v1/chat/completions"
 CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 # Mirrors research/.../service/claude-token.ts:320-322. The combination of
@@ -91,6 +92,13 @@ def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai
         "Content-Type": "application/json",
         "HTTP-Referer": referer,
         "X-Title": "Rose Agents",
+    }
+
+
+def _cerebras_headers(cerebras_key: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {cerebras_key}",
+        "Content-Type": "application/json",
     }
 
 
@@ -269,6 +277,46 @@ async def post_openrouter_stream(
                     status=response.status_code,
                     # See post_anthropic_stream for rationale — log length
                     # only; raw body stays on the response for the classifier.
+                    error_body_len=len(error_body),
+                )
+                response._rose_error_body = error_body  # type: ignore[attr-defined]
+            yield response
+
+
+@contextlib.asynccontextmanager
+async def post_cerebras_stream(
+    *,
+    body: Dict[str, Any],
+    cerebras_key: str,
+    request_id: str,
+    agent_id: Optional[str] = None,
+    call_site: Optional[str] = None,
+    connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+) -> AsyncIterator[httpx.Response]:
+    """Open a streaming POST to Cerebras chat completions (not OpenRouter)."""
+    timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
+    logger.info(
+        "rose.transport.cerebras.start",
+        request_id=request_id,
+        agent_id=agent_id,
+        call_site=call_site,
+        model=body.get("model"),
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream(
+            "POST",
+            CEREBRAS_API_URL,
+            headers=_cerebras_headers(cerebras_key),
+            json=body,
+        ) as response:
+            if response.status_code >= 400:
+                error_body = (await response.aread()).decode("utf-8", errors="replace")
+                logger.warning(
+                    "rose.transport.cerebras.error",
+                    request_id=request_id,
+                    agent_id=agent_id,
+                    call_site=call_site,
+                    status=response.status_code,
                     error_body_len=len(error_body),
                 )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]

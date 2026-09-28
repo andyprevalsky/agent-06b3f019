@@ -8,11 +8,9 @@
  * gptAuth    = direct ChatGPT Codex Responses call (user/pool OAuth token).
  * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
  *
- * Speed pools from the 2026-09-27 live bench plus AA Intelligence Index
- * v4.3.2. glm-5.3-flash leads vision speed (TTFT 0.48s, index 42).
- * gemini-3.8-flash is the Google fallback (TTFT 1.64s at low, index 33).
- * Ultra claudeAuth is Opus 5.5 (index 58). Paid waterfall is gpt-6-sol
- * (index 48) then kimi-k3. Speed waterfalls pin effort low.
+ * rose-1-flash / rose-1-browser-use skip Claude/GPT auth. Primary is
+ * Cerebras qwen-3.8-27b (direct). OpenRouter fallback is qwen/qwen3.8-27b
+ * then google/gemini-3.8-flash. Planner stays rose-1-ultra (Opus 5.5).
  */
 
 export type PoolName = 'rose-1-mini' | 'rose-1-flash' | 'rose-1-ultra' | 'rose-1-browser-use';
@@ -33,6 +31,13 @@ export interface PoolSpec {
    * caller / xhigh default. claudeAuth and gptAuth are unchanged.
    */
   waterfallReasoningEffort?: string;
+  /**
+   * When false, skip Claude/GPT OAuth and funded API keys. Default true.
+   */
+  directAuthEnabled?: boolean;
+  /** Bare Cerebras inventory id posted to api.cerebras.ai, not OpenRouter. */
+  cerebrasModel?: string;
+  cerebrasReasoningEffort?: string;
 }
 
 export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
@@ -47,12 +52,13 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   },
   'rose-1-flash': {
     name: 'rose-1-flash',
-    // Sonnet-5 stays the OAuth primary. Paid waterfall is glm-5.3-flash then
-    // gemini-3.8-flash, both vision, effort low.
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['z-ai/glm-5.3-flash', 'google/gemini-3.8-flash'],
+    waterfall: ['qwen/qwen3.8-27b', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
+    directAuthEnabled: false,
+    cerebrasModel: 'qwen-3.8-27b',
+    cerebrasReasoningEffort: 'xhigh',
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
@@ -64,11 +70,13 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',
-    // Speed-tier browser pool. Both waterfall layers must stay in VISION_MODELS.
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-luna',
-    waterfall: ['z-ai/glm-5.3-flash', 'google/gemini-3.8-flash'],
+    waterfall: ['qwen/qwen3.8-27b', 'google/gemini-3.8-flash'],
     waterfallReasoningEffort: 'low',
+    directAuthEnabled: false,
+    cerebrasModel: 'qwen-3.8-27b',
+    cerebrasReasoningEffort: 'xhigh',
   },
 };
 
@@ -81,6 +89,7 @@ const ALIAS_TO_POOL: Record<string, PoolName> = {
   'rose-labs/rose-1-browser-use': 'rose-1-browser-use',
   rose: 'rose-1-flash',
   'rose-flash': 'rose-1-flash',
+  'rose-fast': 'rose-1-flash',
   'rose-lite': 'rose-1-flash',
   'rose-mini': 'rose-1-mini',
   'rose-ultra': 'rose-1-ultra',

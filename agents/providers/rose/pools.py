@@ -17,9 +17,10 @@ Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
                                 is downgraded like Fable until a credited call
                                 proves Opus accepts forced tool_choice.
 
-Speed waterfalls pin effort ``low`` and lead with glm-5.3-flash (vision).
-gemini-3.8-flash is the Google fallback. Ultra claudeAuth is Opus 5.5.
-Paid ultra waterfall is gpt-6-sol -> kimi-k3. Planner stays on ultra.
+rose-1-flash / rose-1-browser-use skip Claude/GPT auth and funded API keys.
+Primary is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
+fallback is qwen/qwen3.8-27b then google/gemini-3.8-flash. Planner stays
+on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5
@@ -27,10 +28,10 @@ Paid ultra waterfall is gpt-6-sol -> kimi-k3. Planner stays on ultra.
         waterfall  = anthropic/claude-haiku-4.5 -> z-ai/glm-5.3-flash
         waterfall effort = low
 
-    rose-1-flash:  (renamed from rose-1-lite)
-        claudeAuth = claude-sonnet-5
-        gptAuth    = gpt-5.6-luna
-        waterfall  = z-ai/glm-5.3-flash -> google/gemini-3.8-flash
+    rose-1-flash:  (renamed from rose-1-lite; rose-fast)
+        direct_auth_enabled = False
+        cerebras   = qwen-3.8-27b (xhigh)
+        waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
@@ -38,10 +39,10 @@ Paid ultra waterfall is gpt-6-sol -> kimi-k3. Planner stays on ultra.
         gptAuth    = gpt-6-sol
         waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
 
-    rose-1-browser-use:  (speed-tier, vision-required)
-        claudeAuth = claude-sonnet-5
-        gptAuth    = gpt-5.6-luna
-        waterfall  = z-ai/glm-5.3-flash -> google/gemini-3.8-flash
+    rose-1-browser-use:  (same rose-fast hop as flash)
+        direct_auth_enabled = False
+        cerebras   = qwen-3.8-27b (xhigh)
+        waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
 Chat exclusive routes (not pool waterfalls): Cerebras/Groq gpt-oss-120b.
@@ -90,13 +91,17 @@ class PoolSpec:
     gptAuth keep the caller effort. Ultra leaves this unset."""
 
     direct_auth_enabled: bool = True
-    """When False, the OAuth direct-token routes (claudeAuth / gptAuth) are
-    skipped entirely and only `waterfall` serves this pool.
+    """When False, OAuth and funded API-key routes (claudeAuth / gptAuth /
+    ANTHROPIC_API_KEY / GPT_API_KEY) are skipped. The pool then starts at
+    `cerebras_model` (if set) and falls through to `waterfall`."""
 
-    A pool that exists to guarantee a specific model must own that guarantee
-    itself rather than depending on the caller also setting an env flag --
-    otherwise the pool silently routes to a direct-token provider and the
-    guarantee is void."""
+    cerebras_model: str | None = None
+    """Bare Cerebras inventory id, posted to api.cerebras.ai (not OpenRouter)."""
+
+    cerebras_reasoning_effort: str | None = None
+    """Effort stamped on the direct Cerebras hop. Independent of the
+    OpenRouter waterfall effort so the 1,500 tok/s Qwen point can stay
+    xhigh while Gemini fallback stays low."""
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
@@ -119,10 +124,13 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-luna",
         waterfall=(
-            "z-ai/glm-5.3-flash",
+            "qwen/qwen3.8-27b",
             "google/gemini-3.8-flash",
         ),
         waterfall_reasoning_effort="low",
+        direct_auth_enabled=False,
+        cerebras_model="qwen-3.8-27b",
+        cerebras_reasoning_effort="xhigh",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
@@ -148,10 +156,13 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         # and a model missing from that allowlist silently drops the image
         # instead of erroring, so the agent would fly blind on fallback.
         waterfall=(
-            "z-ai/glm-5.3-flash",
+            "qwen/qwen3.8-27b",
             "google/gemini-3.8-flash",
         ),
         waterfall_reasoning_effort="low",
+        direct_auth_enabled=False,
+        cerebras_model="qwen-3.8-27b",
+        cerebras_reasoning_effort="xhigh",
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
     # open-source model -- currently the behavioral-biometrics benchmark, whose

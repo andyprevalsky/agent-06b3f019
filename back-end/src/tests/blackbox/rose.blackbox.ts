@@ -81,6 +81,7 @@ import {
 import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
+  CEREBRAS_API_URL,
   CODEX_API_URL,
   OPENAI_RESPONSES_API_URL,
   OPENROUTER_API_URL,
@@ -105,6 +106,7 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.GPT_API_KEY;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.CEREBRAS_API_KEY;
     await __resetAnthropicApiKeyCooldown();
     await fn();
     return { name, passed: true, duration: Date.now() - start };
@@ -276,6 +278,7 @@ async function testPool_forModelFuzzy() {
   assertEqual(poolForModel('rose-labs/rose-1-mini'), 'rose-1-mini', 'mini');
   assertEqual(poolForModel('rose'), 'rose-1-flash', 'rose alias');
   assertEqual(poolForModel('rose-flash'), 'rose-1-flash', 'rose-flash alias');
+  assertEqual(poolForModel('rose-fast'), 'rose-1-flash', 'rose-fast alias');
   assertEqual(poolForModel('rose-ultra'), 'rose-1-ultra', 'rose-ultra alias');
   assertEqual(poolForModel('rose-mini'), 'rose-1-mini', 'rose-mini alias');
   // Strict resolution: unknown rose-labs/* identifiers fall through to null so
@@ -297,9 +300,12 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.waterfallReasoningEffort, 'low', 'flash waterfall effort');
   assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
+  assertEqual(lite.directAuthEnabled, false, 'flash skips Claude/GPT auth');
+  assertEqual(lite.cerebrasModel, 'qwen-3.8-27b', 'flash Cerebras primary');
+  assertEqual(lite.cerebrasReasoningEffort, 'xhigh', 'flash Cerebras effort');
   assertEqual(
     lite.waterfall.join(','),
-    'z-ai/glm-5.3-flash,google/gemini-3.8-flash',
+    'qwen/qwen3.8-27b,google/gemini-3.8-flash',
     'flash OpenRouter waterfall'
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
@@ -317,9 +323,11 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.claudeAuthModel, 'claude-sonnet-5', 'browserUse.claudeAuthModel');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
+  assertEqual(browserUse.directAuthEnabled, false, 'browser skips Claude/GPT auth');
+  assertEqual(browserUse.cerebrasModel, 'qwen-3.8-27b', 'browser Cerebras primary');
   assertEqual(
     browserUse.waterfall.join(','),
-    'z-ai/glm-5.3-flash,google/gemini-3.8-flash',
+    'qwen/qwen3.8-27b,google/gemini-3.8-flash',
     'browserUse OpenRouter waterfall'
   );
   assert(
@@ -371,7 +379,7 @@ async function testClaudeAuth_happyPath() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'test-token',
     });
@@ -381,7 +389,7 @@ async function testClaudeAuth_happyPath() {
     assertEqual(openrouterCalls, 0, 'openrouter call count');
     assert(chunks.length > 0, 'chunks emitted');
     const first = chunks[0];
-    assertEqual(first.requested_model, 'rose-labs/rose-1-flash', 'requested_model');
+    assertEqual(first.requested_model, 'rose-labs/rose-1-ultra', 'requested_model');
     assertEqual(first.pool_name, 'claude-token', 'pool_name=claude-token');
     assert(
       first.actual_model.endsWith('-claude'),
@@ -420,7 +428,7 @@ async function testGptAuth_happyPathUsesCodexResponses() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [
         { role: 'system', content: 'be exact' },
         { role: 'user', content: 'hi' },
@@ -454,7 +462,7 @@ async function testGptAuth_happyPathUsesCodexResponses() {
       capturedBody?.prompt_cache_key as string,
       'x-client-request-id mirrors prompt cache key'
     );
-    assertEqual(capturedBody?.model, getPool('rose-1-flash').gptAuthModel, 'codex model');
+    assertEqual(capturedBody?.model, getPool('rose-1-ultra').gptAuthModel, 'codex model');
     assertEqual(capturedBody?.stream, true, 'stream true');
     assertEqual(capturedBody?.store, false, 'store false');
     assert(!('max_tokens' in (capturedBody ?? {})), 'max_tokens omitted');
@@ -591,7 +599,7 @@ async function testGptAuth_codex404FallsThroughToWaterfall() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       gpt_token: 'blocked-codex-token',
       gpt_account_id: 'acct_404',
@@ -1187,7 +1195,7 @@ async function testClaudeAuth_401FallsThroughToWaterfall() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'test-token',
     });
@@ -1197,7 +1205,7 @@ async function testClaudeAuth_401FallsThroughToWaterfall() {
     assertEqual(openrouterCalls, 1, 'fell through to openrouter');
     assert(chunks.length > 0, 'chunks emitted from waterfall');
     const first = chunks[0];
-    assertEqual(first.pool_name, 'rose-1-flash', 'pool_name from waterfall (not claude-token)');
+    assertEqual(first.pool_name, 'rose-1-ultra', 'pool_name from waterfall (not claude-token)');
     assert(
       !first.actual_model.endsWith('-claude'),
       `actual_model should NOT have -claude suffix, got ${first.actual_model}`
@@ -1223,7 +1231,7 @@ async function testClaudeAuth_400FallsThroughNoRetry() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'test-token',
     });
@@ -1257,7 +1265,7 @@ async function testClaudeAuth_429RetriesWithBackoffThenSucceeds() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'test-token',
     });
@@ -1610,6 +1618,86 @@ async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
   }
 }
 
+async function testFlash_skipsAuthAndHitsCerebrasQwen() {
+  process.env.CEREBRAS_API_KEY = 'csk-test';
+  process.env.OPENROUTER_API_KEY = 'or-must-not-run';
+  let cerebrasCalls = 0;
+  let anthropicCalls = 0;
+  let openrouterCalls = 0;
+  let capturedBody: Record<string, unknown> | undefined;
+  installFetchStub((url, init) => {
+    if (url === CEREBRAS_API_URL) {
+      cerebrasCalls++;
+      capturedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return errorResponse(500, 'auth must be skipped');
+    }
+    if (url === OPENROUTER_API_URL) {
+      openrouterCalls++;
+      return errorResponse(500, 'waterfall must not run');
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'claude-oauth-must-not-run',
+      gpt_token: 'gpt-oauth-must-not-run',
+    });
+    const chunks = await collect(stream);
+    assertEqual(cerebrasCalls, 1, 'direct Cerebras hop');
+    assertEqual(anthropicCalls, 0, 'flash skips Claude auth');
+    assertEqual(openrouterCalls, 0, 'waterfall not reached');
+    assertEqual(capturedBody?.model, 'qwen-3.8-27b', 'Cerebras inventory id');
+    assertEqual(capturedBody?.reasoning_effort, 'xhigh', 'Cerebras effort');
+    assertEqual(chunks[0]?.pool_name, 'cerebras-direct', 'pool provenance');
+    assertEqual(chunks[0]?.actual_model, 'qwen-3.8-27b', 'actual model');
+  } finally {
+    restoreFetch();
+    delete process.env.CEREBRAS_API_KEY;
+  }
+}
+
+async function testFlash_cerebrasFailureFallsToOpenRouterQwen() {
+  process.env.CEREBRAS_API_KEY = 'csk-test';
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  let cerebrasCalls = 0;
+  const openrouterModels: string[] = [];
+  installFetchStub((url, init) => {
+    if (url === CEREBRAS_API_URL) {
+      cerebrasCalls++;
+      return errorResponse(503, 'cerebras down');
+    }
+    if (url === OPENROUTER_API_URL) {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { model?: string };
+      openrouterModels.push(body.model ?? '');
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      messages: [{ role: 'user', content: 'hi' }],
+      claude_token: 'claude-oauth-must-not-run',
+    });
+    const chunks = await collect(stream);
+    assertEqual(cerebrasCalls, 1, 'Cerebras attempted');
+    assertEqual(openrouterModels[0], 'qwen/qwen3.8-27b', 'first OpenRouter fallback');
+    assert(chunks.length > 0, 'waterfall served after Cerebras failure');
+    assertEqual(chunks[0]?.actual_model, 'qwen/qwen3.8-27b', 'actual model');
+  } finally {
+    restoreFetch();
+    delete process.env.CEREBRAS_API_KEY;
+  }
+}
+
 async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
@@ -1640,7 +1728,7 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
   try {
     const chunks = await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'hi' }],
       })
     );
@@ -1648,7 +1736,7 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     assertEqual(anthropicCalls, 0, 'did NOT fall through to Anthropic');
     assertEqual(openrouterCalls, 0, 'did NOT fall through to OpenRouter');
     assertEqual(capturedHeaders.Authorization, 'Bearer sk-proj-test-key', 'sent OpenAI bearer');
-    assertEqual(capturedBody?.model, 'gpt-5.6-luna', 'uses Rose Flash GPT model');
+    assertEqual(capturedBody?.model, 'gpt-6-sol', 'uses Rose Ultra GPT model');
     assertEqual(capturedBody?.service_tier, 'priority', 'uses GPT fast mode');
     assert(chunks[0].actual_model.endsWith('-openai'), 'actual_model marks OpenAI key path');
   } finally {
@@ -1685,7 +1773,7 @@ async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter()
   try {
     const chunks = await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'hi' }],
       })
     );
@@ -1871,7 +1959,7 @@ async function testAnthropicApiKey_servesAsDefaultWhenNoToken() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       // no claude_token / gpt_token — api-key default should engage
     });
@@ -1917,7 +2005,7 @@ async function testAnthropicApiKey_computeTokenTakesPrecedence() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'test-oauth-token',
     });
@@ -1955,7 +2043,7 @@ async function testAnthropicApiKey_402OpensCircuitAndStopsHammering() {
     // First call: api-key 402 → falls through to waterfall.
     await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'hi' }],
       })
     );
@@ -1965,7 +2053,7 @@ async function testAnthropicApiKey_402OpensCircuitAndStopsHammering() {
     // Second call: breaker is open → api-key tier skipped, straight to waterfall.
     await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'hi again' }],
       })
     );
@@ -3083,7 +3171,7 @@ async function testClient_reasoningChunkRoutedToCompletionChunk() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3127,7 +3215,7 @@ async function testClient_usageChunkExposesCacheTokens() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3155,9 +3243,9 @@ async function testClient_responseModelBuildsCodexTextFormat() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
-      messages: [{ role: 'user', content: 'score it' }],
-      gpt_token: 'gpt-token',
+        model: 'rose-labs/rose-1-ultra',
+        messages: [{ role: 'user', content: 'score it' }],
+        gpt_token: 'gpt-token',
       response_model: responseModel(
         'ScoreResponse',
         z.object({
@@ -3229,7 +3317,7 @@ async function testClient_toolCallChunkPropagatesToCompletionChunk() {
   try {
     const chunks = await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'use the tool' }],
         gpt_token: 'gpt-token',
       })
@@ -3267,7 +3355,7 @@ async function testClient_codexReasoningItemPropagatesToCompletionChunk() {
   try {
     const chunks = await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-flash',
+        model: 'rose-labs/rose-1-ultra',
         messages: [{ role: 'user', content: 'answer with reasoning item' }],
         gpt_token: 'gpt-token',
       })
@@ -3323,7 +3411,7 @@ async function testClient_midStreamErrorPropagatesAfterContent() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3419,7 +3507,7 @@ async function testClient_claudeAuthFailedThenWaterfallFailsTooReportsTypedError
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3433,7 +3521,7 @@ async function testClient_claudeAuthFailedThenWaterfallFailsTooReportsTypedError
       raised instanceof RoseAllFailed,
       `claudeAuth then waterfall fail → RoseAllFailed (terminal), got ${raised}`
     );
-    const pool = getPool('rose-1-flash');
+    const pool = getPool('rose-1-ultra');
     assertEqual(
       (raised as RoseAllFailed).stepErrors.length,
       pool.waterfall.length,
@@ -3480,7 +3568,7 @@ async function testClient_cacheableSystemPromptSplitOnBoundary() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [markCacheable('STATIC_PREFIX', 'DYNAMIC_TAIL'), { role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3525,7 +3613,7 @@ async function testClient_lastUserMessageGetsCacheBreakpoint() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'a question' }],
       claude_token: 'tok',
     });
@@ -3562,7 +3650,7 @@ async function testClient_responseFormatTransformedToOutputConfig() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
       response_format: {
@@ -3650,7 +3738,7 @@ async function testClient_postContentStreamErrorPropagatesDirectly() {
 
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3683,7 +3771,7 @@ async function testClient_metadataChunkIsBuffered() {
   });
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-flash',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'hi' }],
       claude_token: 'tok',
     });
@@ -3792,6 +3880,14 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / no token goes direct to waterfall',
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
+    },
+    {
+      name: 'flash / skips auth and hits Cerebras Qwen',
+      fn: testFlash_skipsAuthAndHitsCerebrasQwen,
+    },
+    {
+      name: 'flash / Cerebras failure falls to OpenRouter Qwen',
+      fn: testFlash_cerebrasFailureFallsToOpenRouterQwen,
     },
     {
       name: 'openai api-key / serves before Anthropic and OpenRouter',

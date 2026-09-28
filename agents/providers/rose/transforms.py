@@ -57,6 +57,8 @@ VISION_MODELS: frozenset[str] = frozenset({
     "google/gemini-3.6-flash",
     "google/gemini-3.7-flash",
     "google/gemini-3.8-flash",
+    "qwen/qwen3.8-27b",
+    "qwen-3.8-27b",
     # Vision-capable per OpenRouter (text+image+video->text). Required by the
     # rose-1-ultra / rose-1-browser-use / rose-1-flash waterfalls. A waterfall
     # model missing from this set silently strips screenshots instead of

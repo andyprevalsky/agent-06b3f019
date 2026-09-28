@@ -40,6 +40,7 @@ import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { exclusiveCerebrasCompletion, POOL_CEREBRAS_IDLE_TIMEOUT_MS } from './cerebrasRoute';
 import {
   runCerebrasChatWithWaterfallFallback,
   selectExclusiveCerebrasChatRoute,
@@ -452,10 +453,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
 
   // 1. claudeAuth attempt (with fall-through buffering)
+  const allowDirectAuth = poolSpec.directAuthEnabled !== false;
   let claudeAuthFailed: RoseError | null = null;
   let gptAuthFailed: RoseError | null = null;
   let openAiApiKeyFailed: RoseError | null = null;
-  if (opts.options.claude_token) {
+  if (allowDirectAuth && opts.options.claude_token) {
     const failure = yield* attemptClaudeAuthWithRecovery({
       poolSpec,
       options: opts.options,
@@ -481,7 +483,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
 
   // 2. gptAuth attempt (with fall-through buffering)
-  if (opts.options.gpt_token) {
+  if (allowDirectAuth && opts.options.gpt_token) {
     try {
       yield* runWithFallThrough({
         produce: () =>
@@ -526,7 +528,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
   // when no compute token served (or it fell through), before Anthropic and
   // OpenRouter. Force provider fast mode for this funded route.
-  const sharedOpenAiKey = openAiApiKey();
+  const sharedOpenAiKey = allowDirectAuth ? openAiApiKey() : undefined;
   if (sharedOpenAiKey) {
     try {
       yield* runWithFallThrough({
@@ -584,7 +586,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       request_id: opts.requestId,
     });
   }
-  if (anthropicApiKey && !apiKeyOnCooldown) {
+  if (allowDirectAuth && anthropicApiKey && !apiKeyOnCooldown) {
     try {
       yield* runWithFallThrough({
         produce: () =>
@@ -637,6 +639,44 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 3. Waterfall — this is the terminal pipeline; unwrap the internal
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
+  const cerebrasKey = process.env.CEREBRAS_API_KEY;
+  if (poolSpec.cerebrasModel && cerebrasKey) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          exclusiveCerebrasCompletion({
+            options: opts.options,
+            cerebrasKey,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+            model: poolSpec.cerebrasModel,
+            reasoningEffort: poolSpec.cerebrasReasoningEffort,
+            idleTimeoutMs: POOL_CEREBRAS_IDLE_TIMEOUT_MS,
+          }),
+        emit: emitChunk,
+      });
+      log.info('cerebras.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        model: poolSpec.cerebrasModel,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      finalizeDump();
+      return;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        log.info('fall_through_from_cerebras', {
+          request_id: opts.requestId,
+          reason: err.cause.name,
+          model: poolSpec.cerebrasModel,
+        });
+      } else {
+        finalizeDump(err);
+        throw err;
+      }
+    }
+  }
+
   if (opts.options.disable_waterfall) {
     const error =
       anthropicApiKeyFailed ??

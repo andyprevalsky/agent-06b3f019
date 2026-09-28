@@ -40,6 +40,7 @@ _MODEL_TO_POOL: dict[str, PoolName] = {
     "rose-labs/rose-1-oss": "rose-1-oss",
     "rose": "rose-1-flash",
     "rose-flash": "rose-1-flash",
+    "rose-fast": "rose-1-flash",
     "rose-lite": "rose-1-flash",
     "rose-mini": "rose-1-mini",
     "rose-ultra": "rose-1-ultra",

@@ -16,6 +16,9 @@ from _test_utils import (
     teardown_mock,
 )
 
+# rose-fast hits Cerebras first when this is set; auth-path tests use ultra.
+os.environ.pop("CEREBRAS_API_KEY", None)
+
 
 def test_prepare_schema_for_openai():
     """prepare_schema_for_openai returns strict OpenAI-ready JSON schema."""
@@ -2226,7 +2229,7 @@ async def test_call_llm_rose_path():
 
             result = await call_llm(
                 messages=[{"role": "user", "content": "hi"}],
-                model="rose-labs/rose-1-flash",
+                model="rose-labs/rose-1-ultra",
                 call_site="test",
             )
     finally:
@@ -2237,7 +2240,7 @@ async def test_call_llm_rose_path():
     assert result["usage"]["prompt_tokens"] == 10
     assert result["usage"]["completion_tokens"] == 20
     assert result["usage"]["total_tokens"] == 30
-    assert result["usage"]["actual_model"] == "claude-sonnet-5-anthropic"
+    assert result["usage"]["actual_model"] == "claude-opus-5-5-anthropic"
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
@@ -2261,7 +2264,7 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
                 {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "q"},
             ],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             response_format={"type": "json_object"},
             claude_token="ct-123",
             skip_cache_write=True,
@@ -2274,7 +2277,7 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
     call = anthropic_calls[0]
     assert any(k.lower() == "authorization" for k in call["requestHeaders"])
     body = json.loads(call["requestBody"])
-    assert body["model"] == "claude-sonnet-5"
+    assert body["model"] == "claude-opus-5-5"
     assert body["stream"] is True
     assert isinstance(body["system"], list)
     # skip_cache_write=True keeps system cache_control for reads but strips message breakpoint
@@ -2314,7 +2317,7 @@ async def test_call_llm_rose_response_model_uses_output_config():
     with patch("temporalio.activity.heartbeat"):
         result = await call_llm(
             messages=[{"role": "user", "content": "return result"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             response_model=SimpleResult,
             claude_token="ct-123",
             call_site="test-submit-model",
@@ -3550,7 +3553,7 @@ async def test_call_llm_verifier_claude_token_and_schema():
     with patch("temporalio.activity.heartbeat"):
         result, _usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "go"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             config=config,
             response_schema={"fields": [{"name": "summary", "type": "str"}]},
             claude_token="ct-99",
@@ -3558,8 +3561,8 @@ async def test_call_llm_verifier_claude_token_and_schema():
 
     # Bearer token forwarded to Anthropic as-is.
     assert captured["headers"].get("authorization") == "Bearer ct-99"
-    # Anthropic body uses claudeAuth model from rose-1-flash pool.
-    assert captured["body"]["model"] == "claude-sonnet-5"
+    # Anthropic body uses claudeAuth model from rose-1-ultra pool.
+    assert captured["body"]["model"] == "claude-opus-5-5"
     assert captured["body"]["stream"] is True
     assert result["score"] == 1.0
     assert result["output"]["summary"] == "ok"
@@ -4471,8 +4474,8 @@ async def test_call_planner_llm_activity_happy_path():
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
     assert captured["batch_user_id"] == "planner-user"
     assert "scoped referenced text" in json.dumps(planner_body)
-    # Anthropic uses the claudeAuth model from the rose-1-flash pool.
-    assert planner_body["model"] == "claude-sonnet-5"
+    # Planner always uses rose-1-ultra, even when the caller passed "rose".
+    assert planner_body["model"] == "claude-opus-5-5"
     assert planner_body["stream"] is True
     # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
     # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
@@ -6380,7 +6383,7 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
     with patch("temporalio.activity.heartbeat"):
         result, usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "x"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             config=config,
             claude_token="expired-token",
             call_site="verifier-err",

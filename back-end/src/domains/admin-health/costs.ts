@@ -104,6 +104,8 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'google/gemini-3.6-flash': openRouter(0.75, 3.75),
   'google/gemini-3.7-flash': openRouter(0.75, 3.75),
   'google/gemini-3.8-flash': openRouter(0.75, 3.75),
+  'qwen/qwen3.8-27b': openRouter(0.15, 0.8),
+  'qwen-3.8-27b': uncached(0.15, 0.8),
   'z-ai/glm-5.3-flash': openRouter(0.045, 0.14),
   'google/gemini-3.1-pro-preview': openRouter(2, 12),
   'moonshotai/kimi-k2.5': openRouter(0.57, 2.85),
@@ -128,13 +130,13 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // (kept in sync with POOL_REGISTRY + agents/providers/rose/pricing.py).
   // mini waterfall mean: haiku ($1/$5) + glm-5.3-flash ($0.045/$0.14)
   'rose-labs/rose-1-mini': openRouter(0.5225, 2.57),
-  // flash/browser mean: glm-5.3-flash ($0.045/$0.14) + gemini-3.8-flash ($0.75/$3.75)
-  'rose-labs/rose-1-flash': openRouter(0.3975, 1.945),
+  // flash/browser mean: qwen3.8-27b ($0.15/$0.80) + gemini-3.8-flash ($0.75/$3.75)
+  'rose-labs/rose-1-flash': openRouter(0.45, 2.275),
   // Historical lite pool id (renamed to flash). Keep the pre-bench rate for ledger rows.
   'rose-labs/rose-1-lite': openRouter(0.425, 2.125),
   // ultra waterfall mean: gpt-6-sol ($2/$10) + kimi-k3 ($3/$15)
   'rose-labs/rose-1-ultra': openRouter(2.5, 12.5),
-  'rose-labs/rose-1-browser-use': openRouter(0.3975, 1.945),
+  'rose-labs/rose-1-browser-use': openRouter(0.45, 2.275),
   // Open-weights-only pool; its waterfall is the single kimi-k3 layer.
   'rose-labs/rose-1-oss': openRouter(3, 15),
 };

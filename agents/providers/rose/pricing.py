@@ -33,6 +33,8 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3.6-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
     "google/gemini-3.7-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
     "google/gemini-3.8-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "qwen/qwen3.8-27b":               {"prompt": 0.15 / 1_000_000, "completion": 0.80 / 1_000_000},
+    "qwen-3.8-27b":                   {"prompt": 0.15 / 1_000_000, "completion": 0.80 / 1_000_000},
     "moonshotai/kimi-k2.5":           {"prompt": 0.57 / 1_000_000, "completion": 2.85 / 1_000_000},
     "moonshotai/kimi-k2.7-code":      {"prompt": 0.71 / 1_000_000, "completion": 3.50 / 1_000_000},
     "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
