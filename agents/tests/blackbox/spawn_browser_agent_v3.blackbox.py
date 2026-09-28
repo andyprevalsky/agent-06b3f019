@@ -13163,6 +13163,84 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
+
+async def test_execute_click_write_lock_amazon_contract_continue_triggers_approval():
+    """Continue on /spr/returns/contract is the live Amazon return commit CTA.
+
+    Reproduces 785a3207: element_text ``submit\\nContinue`` on the contract URL
+    must raise ``needs_write_approval`` / ``return`` before the click runs.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.attributes = {"type": "submit", "role": "button"}
+    element.get_all_children_text = MagicMock(return_value="submit\nContinue")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=63833,
+        coords=None,
+        thinking=None,
+        humanizer=None,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf"
+        ),
+        system_name="Rose",
+    )
+
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "return"
+    assert "Continue" in out["element_text"]
+    ah.record_action.assert_not_awaited()
+
+
+async def test_execute_click_write_lock_amazon_cart_continue_does_not_trigger():
+    """Wizard Continues on /spr/returns/cart stay unlocked (reason/refund steps)."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(10, 20))
+    element = MagicMock()
+    element.attributes = {"type": "submit"}
+    element.get_all_children_text = MagicMock(return_value="submit\nContinue")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=34176,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/cart"
+            "?itemId=jmsjoxmusitttop&orderId=114-52626"
+        ),
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    hu.click_at_coords.assert_awaited_once_with(10, 20)
+    ah.record_action.assert_awaited()
+
 async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input():
     """A textless shadow input inherits the bounded label beside it in its nearest ancestor."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -13252,6 +13330,46 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
     assert not is_return_button("Return to your orders")
+
+
+def test_write_lock_return_continue_on_amazon_contract_url():
+    """Amazon SPR contract Commit Continue must lock; wizard Continues must not.
+
+    RCA agent 785a3207 (2026-09-28 browser-amazon-return): write_lock click
+    check saw ``submit\\nContinue`` on ``/spr/returns/contract/…`` and allowed
+    the click; the agent landed on ``/spr/returns/confirmation/`` with no
+    attention request. Intermediate Continues on ``/spr/returns/cart`` must
+    stay unlocked so the reason/refund wizard can proceed.
+    """
+    from browser_tools.write_lock import is_return_button, is_return_commit_url
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf?ref_=spr_itms_post"
+    )
+    cart = (
+        "https://www.amazon.com/spr/returns/cart"
+        "?itemId=jmsjoxmusitttop&orderId=114-5262647-6331410"
+    )
+    confirm = "https://www.amazon.com/spr/returns/confirm"
+
+    assert is_return_commit_url(contract)
+    assert is_return_commit_url(confirm)
+    assert not is_return_commit_url(cart)
+    assert not is_return_commit_url("https://www.amazon.com/your-orders/orders")
+    assert not is_return_commit_url(
+        "https://www.amazon.com/spr/returns/confirmation/d2304f78-2fdb-43d0-b8d5-8a531ff1"
+    )
+
+    assert is_return_button("submit\nContinue", contract)
+    assert is_return_button("Continue", contract)
+    assert is_return_button("Continue", confirm)
+    assert not is_return_button("Continue", cart)
+    assert not is_return_button("submit\nContinue", cart)
+    assert not is_return_button("Continue")  # no URL → phrase-only path
+    assert not is_return_button("Refund to your Visa ending in 9616", contract)
+    assert not is_return_button("View return/refund status", contract)
+    assert is_return_button("Confirm your return", confirm)
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -21007,6 +21125,14 @@ async def run_all_tests():
         test_execute_click_write_lock_return_confirmation_triggers_approval,
     )
     await r.record_async(
+        "execute_click_write_lock_amazon_contract_continue",
+        test_execute_click_write_lock_amazon_contract_continue_triggers_approval,
+    )
+    await r.record_async(
+        "execute_click_write_lock_amazon_cart_continue_open",
+        test_execute_click_write_lock_amazon_cart_continue_does_not_trigger,
+    )
+    await r.record_async(
         "execute_click_write_lock_shadow_input_ancestor_text",
         test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input,
     )
@@ -21017,6 +21143,10 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
+    )
+    r.record(
+        "write_lock_return_continue_on_amazon_contract_url",
+        test_write_lock_return_continue_on_amazon_contract_url,
     )
     r.record(
         "write_lock_purchase_button_excludes_terms_consent_prose",

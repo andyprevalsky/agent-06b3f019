@@ -261,6 +261,24 @@ RETURN_BUTTON_PHRASES = [
     "submit return",
 ]
 
+# Amazon SPR final-commit routes. Intermediate wizard Continues live under
+# `/spr/returns/cart` and must NOT lock; only the contract/confirm commit does.
+# Agent 785a3207 (2026-09-28 browser-amazon-return): Continue on
+# `/spr/returns/contract/…` submitted the refund with no write_lock attention
+# because the CTA is labeled "Continue", not "Confirm your return".
+RETURN_COMMIT_URL_PATH_PATTERNS = (
+    "/spr/returns/contract",
+    "/spr/returns/confirm",
+)
+
+# Exact (whitespace-stripped) labels that commit a return on RETURN_COMMIT URLs.
+# Do not use bare substring "return" — "Return to your orders" must stay open.
+RETURN_COMMIT_CONTINUE_LABELS = frozenset({
+    "continue",
+    "submit",
+    "confirm",
+})
+
 # Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
 # agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
 # agent e20e5a4e) matched "buy now" inside Terms of Purchase text, forced a
@@ -628,10 +646,31 @@ def is_purchase_button(element_text: str) -> bool:
     return False
 
 
-def is_return_button(element_text: str) -> bool:
-    """Check if element text indicates a return/refund confirmation control."""
+def is_return_commit_url(url: str) -> bool:
+    """True when the URL is an irreversible Amazon (or similar) return commit page.
+
+    ``/spr/returns/confirmation/…`` is the *post*-submit receipt and must not
+    match the ``/spr/returns/confirm`` commit pattern.
+    """
+    if not url:
+        return False
+    path = (urlparse(url).path or "").lower()
+    if "/spr/returns/confirmation" in path:
+        return False
+    return any(pattern in path for pattern in RETURN_COMMIT_URL_PATH_PATTERNS)
+
+
+def is_return_button(element_text: str, url: str = "") -> bool:
+    """Check if element text indicates a return/refund confirmation control.
+
+    Phrase matches ("Confirm your return", …) apply on any URL. On Amazon SPR
+    contract/confirm commit URLs, a bare Continue/Submit/Confirm label is also
+    a return commit — those pages use Continue as the irreversible CTA.
+    """
     if not element_text:
         return False
+
+    on_return_commit_url = is_return_commit_url(url)
 
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
@@ -646,6 +685,11 @@ def is_return_button(element_text: str) -> bool:
             if normalize_write_lock_text(phrase) in text_lower:
                 logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
                 return True
+        if on_return_commit_url and text_lower in RETURN_COMMIT_CONTINUE_LABELS:
+            logger.debug(
+                f"Element text '{signal[:80]}' matched return-commit Continue on {url[:80]}"
+            )
+            return True
     return False
 
 
