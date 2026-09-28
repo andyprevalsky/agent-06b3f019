@@ -18803,6 +18803,17 @@ admit_app_capacity_with_wait
     assert result.returncode == 1
 
 
+def test_capacity_admission_follows_nested_canary_and_precedes_provisioning() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    canary = fleet.index("fleet_infra_canary_preflight || exit $?")
+    refresh = fleet.index('warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)"', canary)
+    admission = fleet.index("admit_app_capacity_with_wait || exit 1", canary)
+    provision = fleet.index("# ── Phase 1: provision every bench", canary)
+    assert canary < refresh < admission < provision
+    pool = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then'):canary]
+    assert pool.index("admit_app_capacity_with_wait || exit 1") < pool.index('provision_pool "$PROVISION_POOL"')
+
+
 def test_capacity_guard_reserves_machine_slots_for_boot_config_replacements(tmp_path: Path) -> None:
     """Fly enforces a Machine-count ceiling independently of shared CPU units.
 

@@ -10432,8 +10432,6 @@ admit_app_capacity_with_wait() {
         }
     done
 }
-admit_app_capacity_with_wait || exit 1
-
 release_capacity_reservation_after_primary_start_accounted() {
     # Replacement slots are no longer needed once every stopped boot config is
     # committed.  Keep the shared-unit reservation until Fly inventory itself
@@ -10523,6 +10521,7 @@ except Exception:
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
+    admit_app_capacity_with_wait || exit 1
     # Pool slots all observe ONE controller-owned inventory stream. Without it,
     # 30 readiness loops each issued machine+volume list calls every five
     # seconds (90 API reads/cycle), recreating resource_exhausted before the
@@ -11854,6 +11853,15 @@ fleet_infra_canary_preflight() {
     return 0
 }
 fleet_infra_canary_preflight || exit $?
+
+# The preflight starts a nested fleet with its own capacity reservation. Reserve
+# this fleet only after it exits, or its canary counts our pending slots twice
+# and can deadlock against the app Machine ceiling before either fleet starts.
+warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+    echo "❌ App capacity guard could not refresh machine state after infra canary." >&2
+    exit 1
+}
+admit_app_capacity_with_wait || exit 1
 
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
