@@ -15,9 +15,11 @@ const GPT_API_KEY_COOLDOWN_NAME = 'gpt_api_key_cooldown';
 const GPT_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 let cachedGptKeyCooldownUntilMs = 0;
 let lastGptKeyCooldownDbCheckMs = 0;
+let gptKeyCooldownCacheRevision = 0;
 
 /** Test-only: refresh the local cache without changing the persisted cooldown. */
 export function __clearGptApiKeyCooldownCache(): void {
+  gptKeyCooldownCacheRevision++;
   cachedGptKeyCooldownUntilMs = 0;
   lastGptKeyCooldownDbCheckMs = 0;
 }
@@ -285,6 +287,7 @@ export async function isGptApiKeyOnCooldown(): Promise<boolean> {
   if (now < cachedGptKeyCooldownUntilMs) return true;
   if (now - lastGptKeyCooldownDbCheckMs < GPT_API_KEY_COOLDOWN_DB_RECHECK_MS) return false;
   lastGptKeyCooldownDbCheckMs = now;
+  const cacheRevision = gptKeyCooldownCacheRevision;
   const row = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -295,13 +298,17 @@ export async function isGptApiKeyOnCooldown(): Promise<boolean> {
     },
     select: { rateLimitedUntil: true },
   });
+  if (cacheRevision !== gptKeyCooldownCacheRevision) {
+    return Date.now() < cachedGptKeyCooldownUntilMs;
+  }
   cachedGptKeyCooldownUntilMs = row?.rateLimitedUntil?.getTime() ?? 0;
-  return now < cachedGptKeyCooldownUntilMs;
+  return Date.now() < cachedGptKeyCooldownUntilMs;
 }
 
 /** Back the shared funded GPT_API_KEY off after a provider quota response. */
 export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
+  gptKeyCooldownCacheRevision++;
   cachedGptKeyCooldownUntilMs = until.getTime();
   await prisma.integration.upsert({
     where: {

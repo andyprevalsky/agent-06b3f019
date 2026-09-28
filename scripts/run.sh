@@ -965,11 +965,20 @@ if ! ensure_fast_mode_cache_schema bash -c \
     exit 1
 fi
 
-# Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
-# sub-agent fan-out competes with the agent's own writes for the connection pool
-# (the known P2024 timeout signature). A bigger local pool absorbs the burst.
-export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
-export DIRECT_URL="$LOCAL_DB_URL"
+# Docker gives each stack its own Postgres server, so a 50-connection pool can
+# absorb a sub-agent fan-out. System Postgres is shared by every local stack:
+# three concurrent /deploy stacks with 50 connections each exceed its default
+# max_connections=100 and leave child workflows stranded at STARTING_UP.
+# Keep a smaller per-stack pool there and let Prisma queue the short DB reads.
+configure_local_db_url() {
+    local connection_limit=50
+    if $USE_SYSTEM_PG; then
+        connection_limit=12
+    fi
+    export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${connection_limit}&pool_timeout=30"
+    export DIRECT_URL="$LOCAL_DB_URL"
+}
+configure_local_db_url
 
 # Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and
 # run on EVERY boot because the box DB lives on ephemeral rootfs (resets on Fly

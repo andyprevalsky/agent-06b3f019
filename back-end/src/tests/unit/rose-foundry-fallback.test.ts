@@ -272,6 +272,23 @@ async function main(): Promise<void> {
         void _;
       }
     }, RoseRateLimitError);
+    let nonObjectCalls = 0;
+    globalThis.fetch = (async () => {
+      nonObjectCalls++;
+      return new Response('null', { status: 429, headers: { 'retry-after': '60' } });
+    }) as typeof fetch;
+    await assert.rejects(async () => {
+      for await (const _ of openAiApiKeyComplete({
+        poolSpec: POOL_REGISTRY['rose-1-ultra'],
+        model: 'gpt-6-sol',
+        messages: [{ role: 'user', content: 'hi' }],
+        openAiKey: 'test-key',
+        requestId: 'non-object-rate-limit',
+      })) {
+        void _;
+      }
+    }, RoseRateLimitError);
+    assert.equal(nonObjectCalls, 1, 'non-object error body remains an ordinary 429');
     process.stdout.write('GPT key: credit 429s cool; ordinary 429 stays transient\n');
   } finally {
     globalThis.fetch = originalFetch;

@@ -109,6 +109,8 @@ export function selectReusableKernelProxy(
     if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) return false;
     if (proxy.status !== 'available') return false;
     const config = proxy.config as Record<string, unknown> | undefined;
+    if (!config || Object.keys(config).length !== Object.keys(candidate.config).length)
+      return false;
     return Object.entries(candidate.config).every(
       ([key, value]) => String(config?.[key] ?? '').toLowerCase() === value.toLowerCase()
     );

@@ -49,11 +49,12 @@ const OPENAI_CREDIT_ERROR_CODES = new Set([
 
 function isOpenAiCreditError(errorBody: string): boolean {
   try {
-    const parsed = JSON.parse(errorBody) as { error?: { code?: unknown; type?: unknown } };
+    const parsed = JSON.parse(errorBody) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    const error = (parsed as { error?: { code?: unknown; type?: unknown } }).error;
     return (
-      (typeof parsed.error?.code === 'string' &&
-        OPENAI_CREDIT_ERROR_CODES.has(parsed.error.code)) ||
-      parsed.error?.type === 'insufficient_quota'
+      (typeof error?.code === 'string' && OPENAI_CREDIT_ERROR_CODES.has(error.code)) ||
+      error?.type === 'insufficient_quota'
     );
   } catch {
     return false;

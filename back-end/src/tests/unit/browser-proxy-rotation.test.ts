@@ -70,6 +70,15 @@ function testRestoredProxyReuse(): void {
     ),
     undefined
   );
+  const countryCandidate = kernelProxyCandidates({ country: 'US' })[0]!;
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [{ ...matching, name: countryCandidate.name, config: { country: 'US', state: 'CA' } }],
+      countryCandidate
+    ),
+    undefined,
+    'a state-restricted proxy must not satisfy a country-only candidate'
+  );
 }
 
 function testRotationTierLadder(): void {
