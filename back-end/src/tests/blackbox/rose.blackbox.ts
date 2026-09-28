@@ -2264,6 +2264,25 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   // Latency chat routes: effort still ALWAYS set (low for Cerebras/gpt-oss; xhigh default for OR-fast).
   const cerebras = buildCerebrasChatBody({ messages });
   assertEqual(cerebras.reasoning_effort, 'low', 'cerebras stamps reasoning_effort=low');
+  const cerebrasCached = buildCerebrasChatBody({
+    messages: [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'text',
+            text: 'you are helpful',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      },
+      { role: 'user', content: 'hi' },
+    ] as CompletionMessage[],
+  });
+  assert(
+    !JSON.stringify(cerebrasCached).includes('cache_control'),
+    'Cerebras body strips cache_control (live qwen-3.8-27b 400s it)'
+  );
 
   const orCerebras = buildOpenRouterCerebrasBody({ messages });
   assertEqual(

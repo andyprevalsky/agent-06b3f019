@@ -61,6 +61,21 @@ export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
   return kind === 'content' || kind === 'tool_call';
 }
 
+function stripCerebrasCacheControl<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripCerebrasCacheControl(item)) as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'cache_control') continue;
+      out[key] = stripCerebrasCacheControl(nested);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 export function buildCerebrasChatBody(
   options: CompletionOptions,
   model: string = CEREBRAS_CHAT_MODEL,
@@ -69,9 +84,11 @@ export function buildCerebrasChatBody(
   // Do not send `clear_thinking` — that flag is GLM-only. Gemma-4-31b rejects
   // it with 400 wrong_api_format, which would re-trigger the waterfall path
   // this migration exists to leave.
+  // Cerebras also 400s Anthropic/OpenRouter cache_control on content parts
+  // (live qwen-3.8-27b 2026-09-28: property unsupported).
   return {
     model,
-    messages: normalizeOpenAiToolCalls(options.messages),
+    messages: stripCerebrasCacheControl(normalizeOpenAiToolCalls(options.messages)),
     stream: true,
     stream_options: { include_usage: true },
     reasoning_effort: reasoningEffort,

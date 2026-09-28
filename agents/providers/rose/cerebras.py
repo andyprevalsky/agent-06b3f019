@@ -24,6 +24,24 @@ logger = structlog.get_logger()
 CEREBRAS_DIRECT_POOL = "cerebras-direct"
 
 
+def _strip_cerebras_cache_control(value: Any) -> Any:
+    """Cerebras rejects Anthropic/OpenRouter ``cache_control`` markers.
+
+    Live qwen-3.8-27b (2026-09-28) 400s
+    ``messages.0.system.content.list[...].text.cache_control`` as unsupported
+    and then falls through to OpenRouter. Keep text/image parts; drop the key.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _strip_cerebras_cache_control(nested)
+            for key, nested in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [_strip_cerebras_cache_control(item) for item in value]
+    return value
+
+
 def build_cerebras_body(
     *,
     model: str,
@@ -38,9 +56,12 @@ def build_cerebras_body(
     openrouter_tools = _openrouter_tools(tools)
     body: Dict[str, Any] = {
         "model": model,
-        "messages": transform_messages_for_openai(
-            messages,
-            tools_declared=bool(openrouter_tools),
+        "messages": _strip_cerebras_cache_control(
+            transform_messages_for_openai(
+                messages,
+                tools_declared=bool(openrouter_tools),
+                inject_cache_breakpoints=False,
+            )
         ),
         "stream": True,
         "stream_options": {"include_usage": True},

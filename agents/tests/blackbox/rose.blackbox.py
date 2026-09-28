@@ -270,6 +270,60 @@ def test_pool_registry_lookup():
     }
 
 
+def test_build_cerebras_body_strips_cache_control():
+    """Cerebras 400s Anthropic/OpenRouter cache_control on system parts.
+
+    Live hop 2026-09-28: qwen-3.8-27b rejected
+    ``messages.0.system.content.list[...].text.cache_control`` as unsupported
+    and fell through to OpenRouter. The body must keep text/image parts and
+    drop every cache_control key.
+    """
+    from providers.rose.cerebras import build_cerebras_body
+
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "you are helpful",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"type": "text", "text": "phase rules"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look", "cache_control": {"type": "ephemeral"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aaa"},
+                    },
+                ],
+            },
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        effort="high",
+    )
+    dumped = json.dumps(body)
+    assert "cache_control" not in dumped
+    assert body["model"] == "qwen-3.8-27b"
+    assert body["reasoning_effort"] == "high"
+    system = body["messages"][0]["content"]
+    assert isinstance(system, list)
+    assert system[0]["type"] == "text"
+    assert system[0]["text"] == "you are helpful"
+    user = body["messages"][1]["content"]
+    assert any(part.get("type") == "image_url" for part in user)
+
+
 def test_every_waterfall_model_is_vision_capable():
     """Every pool waterfall model must be in VISION_MODELS.
 
@@ -4667,6 +4721,7 @@ async def test_flash_skips_auth_and_hits_cerebras_qwen():
             seen["cerebras"] += 1
             seen["models"].append(body.get("model"))
             seen["effort"].append(body.get("reasoning_effort"))
+            assert "cache_control" not in json.dumps(body)
             return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
         if host == "api.anthropic.com":
             seen["anthropic"] += 1
@@ -4681,7 +4736,19 @@ async def test_flash_skips_auth_and_hits_cerebras_qwen():
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
                 pool="rose-1-flash",
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "you are helpful",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "hi"},
+                ],
                 claude_auth=ClaudeAuthContext(token="sk-ant-oat01-test", source="user", user_id="u"),
                 gpt_auth=gpt_auth_from_token("gt-test", "acct"),
             )
@@ -6701,6 +6768,7 @@ async def run_all_tests():
     r.record("classify_claude_token_error", test_classify_claude_token_error_each_branch)
 
     r.record("pool_registry_lookup", test_pool_registry_lookup)
+    r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(
