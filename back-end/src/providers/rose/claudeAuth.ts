@@ -116,11 +116,6 @@ function supportsAnthropicFastMode(model: string): boolean {
   return ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].includes(model);
 }
 
-function supportsAdaptiveControls(model: string): boolean {
-  // Haiku 4.5 supports neither adaptive thinking nor output_config.effort.
-  return !model.startsWith('claude-haiku-4-5');
-}
-
 function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
   if (messages.length === 0) return;
   const last = messages[messages.length - 1];
@@ -263,11 +258,10 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     max_tokens: opts.maxTokens ?? 8192,
     stream: true,
     system: systemBlocks,
+    thinking: { type: 'adaptive' },
     temperature: 1,
+    output_config: { effort: normalizeReasoningEffort(opts.effort) },
   };
-  if (supportsAdaptiveControls(opts.poolSpec.claudeAuthModel)) {
-    body.thinking = { type: 'adaptive' };
-  }
   if (opts.providerFastMode === true && supportsAnthropicFastMode(opts.poolSpec.claudeAuthModel)) {
     body.speed = 'fast';
   }
@@ -307,13 +301,11 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     }
   }
 
-  // Set effort once, after tool config has selected the output format. Haiku
-  // 4.5 rejects it even when a structured response is requested.
-  if (supportsAdaptiveControls(opts.poolSpec.claudeAuthModel)) {
-    const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
-    oc.effort = normalizeReasoningEffort(opts.effort);
-    body.output_config = oc;
-  }
+  // Set effort AFTER applyAnthropicToolConfig (which may drop output_config)
+  // for json_schema reasons) — effort is always valid regardless of tool mode.
+  const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
+  oc.effort = normalizeReasoningEffort(opts.effort);
+  body.output_config = oc;
 
   enforceCacheBlockBudget(body);
 

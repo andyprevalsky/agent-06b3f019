@@ -97,7 +97,7 @@ class BrowserThinkingStream:
         if chunk.kind == "metadata":
             actual_model = str(chunk.data.get("actual_model") or "")
             self._is_claude = actual_model.endswith("-claude")
-            self._is_gpt = actual_model.endswith(("-gpt", "-openai", "-foundry"))
+            self._is_gpt = actual_model.endswith("-gpt")
             await self._publish_assistant(delta="", done=False)
             return
 

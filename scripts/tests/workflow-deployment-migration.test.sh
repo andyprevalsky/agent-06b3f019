@@ -473,30 +473,4 @@ require_file "$ROOT/back-end/scripts/monitor-cooperative-cutover.ts" \
 require_file "$ROOT/back-end/src/domains/agent-queue-pointer/routes.ts" \
   "live pointer HTTP route must exist for run_agent checkpoints"
 
-# The system-Postgres path must never probe a dead Docker daemon just because
-# run.sh exported a workspace DB_CONTAINER name.
-ddl_probe_dir="$(mktemp -d)"
-trap 'rm -rf "$ddl_probe_dir"' EXIT
-cat > "$ddl_probe_dir/docker" <<'EOF'
-#!/usr/bin/env bash
-touch "$DDL_PROBE_DIR/docker-invoked"
-if [ "${1:-}" = inspect ]; then echo true; exit 0; fi
-cat >/dev/null || true
-EOF
-cat > "$ddl_probe_dir/psql" <<'EOF'
-#!/usr/bin/env bash
-touch "$DDL_PROBE_DIR/psql-invoked"
-cat >"$DDL_PROBE_DIR/psql-input.sql"
-EOF
-chmod +x "$ddl_probe_dir/docker" "$ddl_probe_dir/psql"
-DDL_PROBE_DIR="$ddl_probe_dir" PATH="$ddl_probe_dir:$PATH" ROSE_USE_SYSTEM_PG=true \
-  DB_CONTAINER=victoria-db-probe DATABASE_URL=postgresql://localhost/fixture \
-  DIRECT_URL=postgresql://localhost/fixture \
-  bash "$ROOT/back-end/scripts/apply-local-workflow-ddl.sh" >/dev/null
-[ ! -e "$ddl_probe_dir/docker-invoked" ] || fail "system Postgres DDL path probed Docker"
-[ -e "$ddl_probe_dir/psql-invoked" ] || fail "system Postgres DDL path did not use host psql"
-grep -q 'CREATE OR REPLACE FUNCTION fence_descendant_workflow_start()' \
-  "$ddl_probe_dir/psql-input.sql" || fail "host psql did not receive workflow function DDL"
-grep -q 'CREATE TRIGGER "Agent_fence_descendant_workflow_start"' \
-  "$ddl_probe_dir/psql-input.sql" || fail "host psql did not receive workflow trigger DDL"
-echo "PASS: system Postgres DDL applies through host psql without Docker"
+

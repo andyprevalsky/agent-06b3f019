@@ -124,7 +124,7 @@ if $USE_SYSTEM_PG; then
     PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$SRC_DB" >/dev/null 2>&1 || true
     PGPASSWORD=postgres createdb -h localhost -p 5432 -U postgres "$SRC_DB" || {
         echo "❌ could not create system source database $SRC_DB" | tee -a "$SUMMARY"; exit 1; }
-    echo "   restoring source into ${SRC_DB}…" | tee -a "$SUMMARY"
+    echo "   restoring source into $SRC_DB…" | tee -a "$SUMMARY"
     PGPASSWORD=postgres pg_restore -h localhost -p 5432 -U postgres -d "$SRC_DB" \
         --no-owner --no-acl "$DUMP" >/dev/null 2>&1 || true
     SRC_ROWS="$(psql_db "$SRC_DB" -tAc \

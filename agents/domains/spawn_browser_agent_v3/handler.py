@@ -69,8 +69,11 @@ from .challenge_recovery import (
     recover_from_challenge,
     verify_live_page_cleared_challenge,
 )
+from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
+    browser_start_to_close_timeout_minutes,
+    skip_browser_network_recording,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -84,6 +87,7 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    adjust_iteration_after_action,
     NAVIGATE_TO_URL_TIMEOUT_SECONDS,
     SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
     SESSION_INIT_TRANSIENT_RETRY_SECONDS,
@@ -91,9 +95,6 @@ from .config import (
     SESSION_RETRY_INTERVAL_SECONDS,
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
-    adjust_iteration_after_action,
-    browser_start_to_close_timeout_minutes,
-    skip_browser_network_recording,
 )
 from .credential_runtime import build_realm_credential_state
 from .download_persist import BrowserDownloadPersister
@@ -118,8 +119,8 @@ from .repo import (
     init_browser_session,
     mark_steel_session_auth_failed,
     prepare_browser_auth,
-    probe_cookie_variant_ephemeral,
     propagate_browser_run_credentials,
+    probe_cookie_variant_ephemeral,
     recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -146,13 +147,17 @@ from .service import (
     safe_time,
     select_auth_assistance_current_url,
 )
+from .visible_result_completion import (
+    forced_visible_result_completion_action,
+    should_force_visible_result_completion,
+)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
-    apply_user_write_lock_grant,
     execute_action,
     get_domain_from_url,
     get_element_description,
+    apply_user_write_lock_grant,
     grant_site_write_lock_approvals,
     resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
@@ -173,10 +178,6 @@ from .service_crypto import (
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
-from .visible_result_completion import (
-    forced_visible_result_completion_action,
-    should_force_visible_result_completion,
-)
 
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
@@ -6506,6 +6507,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         t_nav = time.monotonic()
         if not write_lock_resume_state:
             from browser_use.browser.events import NavigateToUrlEvent
+
+            # Align browser-use's hardcoded 20s Page.navigate wait with our
+            # TIMEOUT_NavigateToUrlEvent budget before the first start_url hit.
+            apply_browser_use_navigate_timeout_patch()
 
             nav_url = start_url
             if not nav_url.startswith(("http://", "https://", "about:", "file:")):

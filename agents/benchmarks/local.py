@@ -684,11 +684,6 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
     """Remove the exact isolated DB when startup failed before its manifest."""
     if not stack.isolated or not stack.workspace_name:
         return
-    # start_services forces system Postgres for isolated POSIX stacks even when
-    # the parent environment omits this flag. A container name remains exported
-    # for workspace identity; probing Docker can hang when its daemon is down.
-    if os.name != "nt" or os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() in {"1", "true", "yes"}:
-        return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
     try:

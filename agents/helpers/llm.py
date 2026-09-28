@@ -6166,7 +6166,7 @@ async def call_llm_activity(
         # Create dynamic action model
         AgentActionModel = create_agent_action_model(tool_names)
 
-        # Model family is detected from actual_model in the stream response.
+        # Direct-token mode is detected from actual_model in stream response, not from input token presence.
         _is_claude = [False]  # Mutable list so closures can update it
         _is_gpt = [False]
 
@@ -6174,14 +6174,14 @@ async def call_llm_activity(
             # "-claude" suffix = user's own Claude token ($0, skipped the waterfall)
             # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
-            is_gpt_model = actual_model.endswith(("-gpt", "-openai", "-foundry"))
+            is_user_gpt = actual_model.endswith(("-gpt", "-foundry"))
             _is_claude[0] = is_user_claude
-            _is_gpt[0] = is_gpt_model
+            _is_gpt[0] = is_user_gpt
             logger.info(
-                "🎨 Model family detection",
+                "🎨 Direct-token detection",
                 actual_model=actual_model,
                 is_claude=is_user_claude,
-                is_gpt=is_gpt_model,
+                is_gpt=is_user_gpt,
             )
 
         # Streaming callback - posts directly to Supabase Realtime

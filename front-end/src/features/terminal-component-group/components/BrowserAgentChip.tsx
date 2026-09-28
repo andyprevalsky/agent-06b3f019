@@ -67,7 +67,7 @@ import {
   seekTargetFromOffset,
   type TrajectoryStep,
 } from './browser-agent-chip/recordingTrajectorySync';
-import { LiveViewFrame } from './browser-status-bar/BrowserLiveViewFrame';
+import { LiveViewFrame } from './browser-status-bar/LiveViewFrame';
 
 type Tab = 'result' | 'recording';
 

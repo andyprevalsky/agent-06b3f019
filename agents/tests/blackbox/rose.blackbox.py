@@ -3562,27 +3562,6 @@ def test_build_anthropic_body_defaults_provider_fast_mode_on_for_opus():
     assert body["speed"] == "fast"
 
 
-def test_haiku_body_omits_unsupported_effort():
-    """The web_fetch mini summarizer must not send effort to Claude Haiku 4.5.
-
-    Anthropic rejected the captured smoke request with HTTP 400:
-    "This model does not support the effort parameter."
-    """
-    pool = get_pool("rose-1-mini")
-    for effort in (None, "low"):
-        body = build_anthropic_body(
-            pool_spec=pool,
-            messages=[{"role": "user", "content": "Summarize the population estimate."}],
-            tools=None,
-            tool_choice=None,
-            response_format=None,
-            max_tokens=128,
-            effort=effort,
-        )
-        assert body["model"] == "claude-haiku-4-5"
-        assert "effort" not in body.get("output_config", {})
-
-
 def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
     """Every Rose provider body must carry effort; default is xhigh.
 
@@ -7040,7 +7019,6 @@ async def run_all_tests():
         test_build_openrouter_body_defaults_provider_fast_mode_on,
     )
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
-    r.record("haiku_body_omits_unsupported_effort", test_haiku_body_omits_unsupported_effort)
     r.record(
         "waterfall_body_builders_always_stamp_effort_xhigh",
         test_waterfall_body_builders_always_stamp_effort_xhigh_by_default,

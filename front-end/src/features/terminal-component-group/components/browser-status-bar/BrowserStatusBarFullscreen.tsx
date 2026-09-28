@@ -43,7 +43,7 @@ import {
 } from './BrowserFullscreenOverlays';
 import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
-import { LiveViewFrame } from './BrowserLiveViewFrame';
+import { LiveViewFrame } from './LiveViewFrame';
 import type {
   BrowserSessionMetadata,
   OutputSchemaRef,

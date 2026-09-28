@@ -6,7 +6,6 @@ import {
 } from './claudeCredentials';
 import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
-import { nonLocalDatabaseReason } from '../utils/localDatabaseUrl';
 
 const log = createLogger('ComputeCredentials');
 
@@ -663,10 +662,6 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
 
 /** Test-only: clear both the in-memory cache and the DB cooldown row. */
 export async function __resetAnthropicApiKeyCooldown(): Promise<void> {
-  const unsafeDatabase = nonLocalDatabaseReason(process.env.DATABASE_URL);
-  if (unsafeDatabase) {
-    throw new Error(`Refusing test-only Anthropic cooldown reset: ${unsafeDatabase}`);
-  }
   cachedCooldownUntilMs = 0;
   lastCooldownDbCheckMs = 0;
   await prisma.integration.deleteMany({

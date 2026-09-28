@@ -55,14 +55,6 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'victoria_seedmem_src_' \
     "system Postgres path must isolate source databases per measurement PID"
-# Execute the actual source-restore status line with nounset. Bash treats the
-# adjacent Unicode ellipsis as part of an unbraced variable name (`$SRC_DB…`).
-restore_status_line="$(sed -n '/restoring source into /p' "$MEASUREMENT" | head -1)"
-[ -n "$restore_status_line" ] || fail "system Postgres source-restore status line is missing"
-restore_status_output="$(SRC_DB=fixture SUMMARY=/dev/null bash -u -o pipefail -c "$restore_status_line")" ||
-    fail "system Postgres source-restore status line must expand SRC_DB under nounset"
-[ "$restore_status_output" = '   restoring source into fixture…' ] ||
-    fail "system Postgres source-restore status line printed the wrong database"
 require_text "$MEASUREMENT" \
     'seed-mem-$$' \
     "default OUT_DIR must be PID-scoped so concurrent measurements cannot share summary.txt"

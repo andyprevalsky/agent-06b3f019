@@ -36,8 +36,7 @@ DDL_SQL="$(
   ' "$MIGRATION_SQL"
 )"
 
-if [[ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ]] &&
-  [[ -n "${DB_CONTAINER:-}" ]] &&
+if [[ -n "${DB_CONTAINER:-}" ]] &&
   command -v docker >/dev/null 2>&1 &&
   docker inspect "$DB_CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -qx true; then
   printf '%s\n' "$DDL_SQL" |

@@ -259,7 +259,10 @@ export function buildRouterCompletionOptions(params: {
     model: params.model,
     messages: params.messages,
     temperature: 0.3,
-    // Keep router reasoning minimal to bound chat latency on OpenRouter.
+    // The router is a small structured classification step. Gemini 3.5 Flash
+    // enables medium reasoning by default on OpenRouter, which can consume most
+    // of the synchronous chat latency budget after a Cerebras stall. Keep its
+    // mandatory reasoning at the provider's minimum, just like the generator.
     effort: 'minimal',
     response_format: {
       type: 'json_schema',

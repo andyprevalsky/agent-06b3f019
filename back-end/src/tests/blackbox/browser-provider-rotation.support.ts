@@ -93,27 +93,6 @@ export function isSteelCapacityRateLimit(error: unknown): boolean {
   );
 }
 
-export function assertSteelCapacityClassifier(): void {
-  assert(
-    isSteelCapacityRateLimit(
-      new Error(
-        '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
-      )
-    ),
-    'expected the explicit Steel capacity response to be retryable'
-  );
-  assert(
-    !isSteelCapacityRateLimit(
-      new Error('/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}')
-    ),
-    'another provider rate limit must fail closed'
-  );
-  assert(
-    !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
-    'Steel authentication failures must fail closed'
-  );
-}
-
 /**
  * True only when a `/rotate-proxy` failure is a genuine Steel live-infra OUTAGE:
  * a 5xx whose body is production's post-retry "Failed to create Steel

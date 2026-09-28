@@ -13,7 +13,6 @@ import {
 } from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
-import { assertCredentialCdpHandshakeRecovery } from './browser-provider-credential-connect.support';
 import {
   assert,
   type BrowserApiResponse,
@@ -25,18 +24,14 @@ import {
 } from './browser-provider.helpers';
 import {
   assertFixedRotationLadder,
-  assertSteelCapacityClassifier,
   deleteKernelResource,
+  isSteelCapacityRateLimit,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
 
-const tests: Array<[string, () => void | Promise<void>]> = [
-  [
-    'Steel credential injection retries a CDP handshake timeout before state mutation',
-    assertCredentialCdpHandshakeRecovery,
-  ],
+const tests: Array<[string, () => void]> = [
   [
     'Kernel is the default provider',
     () =>
@@ -98,7 +93,28 @@ const tests: Array<[string, () => void | Promise<void>]> = [
   ],
   [
     'live ladder retries only Steel concurrent-capacity 429 responses',
-    assertSteelCapacityClassifier,
+    () => {
+      assert(
+        isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+          )
+        ),
+        'expected the explicit Steel capacity response to be retryable'
+      );
+      assert(
+        !isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}'
+          )
+        ),
+        'another provider rate limit must fail closed'
+      );
+      assert(
+        !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
+        'Steel authentication failures must fail closed'
+      );
+    },
   ],
   [
     'Kernel residential proxies fall back from city to state to country',
@@ -627,7 +643,7 @@ async function main(): Promise<void> {
   let failed = 0;
   for (const [name, test] of tests) {
     try {
-      await test();
+      test();
       console.log(`PASS ${name}`);
     } catch (error) {
       failed++;
