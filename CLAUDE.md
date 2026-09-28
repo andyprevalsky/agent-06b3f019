@@ -242,6 +242,14 @@ cleanup and ten durable FE/LLM evidence bundles before advancing. Keep the norma
 7,200-second execution backstop; this explicitly bounded proof uses **300 seconds
 in both the environment and CLI**. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
+After each valid slice, report the whole slice's wall-clock time and every
+bench's individual wall-clock time (including startup, evidence collection and
+teardown, alongside the task-execution duration where available). Inspect the
+critical path before advancing. Apply and validate any infrastructure-only
+change that can reduce the slice's end-to-end wall clock by more than 5% without
+changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
+or result classification. A source change or INFRA failure restarts the ten-slice
+streak on a clean commit; forensic recovery never retroactively grants credit.
 
 Local execution is explicit:
 `scripts/run-bench --local <task...>` or

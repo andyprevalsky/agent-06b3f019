@@ -117,6 +117,14 @@ Attempts, dump-file counts and sibling queries do not establish successful
 responses. Do not add calls or alter benchmark behavior to reach the minimum.
 Any infrastructure failure breaks the streak; later artifact recovery preserves
 diagnostic evidence without turning that failed slice into acceptance credit.
+For each valid slice, log elapsed wall time from launch through verified cleanup,
+and each bench's elapsed wall time from its exact machine admission through
+guest shutdown. Also report the task duration from the sealed run artifact so
+provisioning, evaluation, evidence transfer, and teardown remain visible.
+Review the slice's critical path before advancing and implement any safe
+infrastructure improvement exceeding 5% of end-to-end slice time. A code change
+starts a new ten-slice streak; do not shorten or change the task evaluation to
+make this proof pass.
 
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.
 
