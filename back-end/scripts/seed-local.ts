@@ -508,6 +508,7 @@ type SyncIntegrationsOptions = {
 };
 
 async function syncIntegrations(options: SyncIntegrationsOptions = {}): Promise<number> {
+  // Compute overlays omit agentcard so local agentcard-setup reset/complete fixtures hold.
   activeRemotePoolIntegrationIds.clear();
   const computeTokensOnly = options.computeTokensOnly === true;
   // Full seed imports every Integration for the user. Compute-token overlays
