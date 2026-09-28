@@ -21,6 +21,8 @@ sources:
   - PR #1299
   - fleet run 20260910-212223-85449
   - agent cee43eed-c9c5-4a64-95c1-9f409d3fd713
+  - fleet run 20260928-131153-24839
+  - agent 9a9283c8-b72e-4b0f-914e-f82f0dfd08af
 repro: agents/benchmarks/cloud_batch_cleanup_test.py
 status: open
 ---
@@ -452,3 +454,43 @@ thirteen prerequisites apply only to `99c3f978`; this changed source requires
 fresh full validation. Zero slices are accepted. Proof fifteen allocated no
 task resources because the protected shared warm source remained busy; proof
 sixteen has not launched. This case stays open pending the required live proof.
+
+## Recurrence: proof 23 stalled before recording cleanup
+
+Proof `capability-stability-20260928131153-24802` ran ten real tasks in its
+first slice on `474d5ae5f72fea35ada058388e02afcd8adda7d4`. Nine roots had
+ordinary task outcomes and complete evidence. Root
+`9a9283c8-b72e-4b0f-914e-f82f0dfd08af` reached the 300-second test
+backstop, but one of its four browser tasks had an ERROR terminal with an
+IN_PROGRESS recording and no attached playback. The archive refresh rejected
+it with `Cloud evidence finalization failed: TimeoutError`. The other three
+browser tasks attached their recordings. This attempt has zero accepted slices.
+
+The retained worker log places cancellation of the affected activity at
+13:25:13 UTC. Cursor broadcasting continued for more than 80 seconds. Neither
+`Browser cleanup started in background` nor a finished recording appeared for
+that task before the archive's 60-second readiness bound elapsed at 13:26:31.
+The activity's cancellation handler performs passkey capture and CDP disconnect
+before its `finally` schedules recording cleanup; those awaits had no bound.
+This is a producer-side recurrence of the missing-recording symptom. The
+archive's fail-closed check was correct and was not relaxed. The exact original
+guest volume was forked inertly; its bench, stack, backend, worker, and run
+files were SHA-256 archived before retiring the failed fleet's resources.
+
+Local owning-boundary reproduction:
+`agents/venv/bin/python .context/setup/repro-browser-terminal-disconnect.py`.
+Before the repair it failed after 10.39 seconds with
+`AssertionError: ['passkey_captured', 'disconnect_started']`; the terminal
+disconnect held the activity. The identical command now reports
+`PASS bounded terminal disconnect: 0.052s`. The shared terminal I/O helper
+bounds both passkey capture and CDP disconnect, including operations that
+ignore cancellation. The background cleanup's own CDP disconnect uses the
+same bound after recording publication. The permanent
+`terminal_disconnect_stall_does_not_block_recording_cleanup` browser blackbox
+simulates cancellation-resistant CDP I/O; the full browser blackbox suite
+exited zero. No task definition, prompt, model, evaluator, recording readiness
+rule, or benchmark timeout changed.
+
+This causal test does not establish the exact benchmark outcome or a ten-slice
+cloud acceptance. A fresh unchanged cloud fleet run from the repaired source
+remains required, so the case stays open.
