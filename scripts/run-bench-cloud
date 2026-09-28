@@ -1737,8 +1737,8 @@ actual=\$(sha256sum '$remote_dir/workspace.diff' | cut -d ' ' -f1)
 [ \"\$actual\" = '$digest' ] || { echo 'FATAL: warm workspace patch checksum mismatch' >&2; exit 1; }
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='$REMOTE_REPO'
 bash '$remote_dir/prepare.sh' '$REMOTE_REPO' '$remote_dir/workspace.diff'
-git -C '$REMOTE_REPO' apply --check '$remote_dir/workspace.diff'
-git -C '$REMOTE_REPO' apply '$remote_dir/workspace.diff'" "${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' apply --check '$remote_dir/workspace.diff'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' apply '$remote_dir/workspace.diff'" "${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
 }
 
 # SSH-exec a shell snippet on the machine, streaming output.
