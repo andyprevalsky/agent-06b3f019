@@ -86,27 +86,35 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     assert clone_dir.is_dir() and not clone_dir.is_symlink()
     fresh = [fields(path) for path in fresh_dir.iterdir()]
     clones = [fields(path) for path in clone_dir.iterdir()]
-    assert len(fresh) == len(clones) >= len(rows)
-    assert len({row["volume_id"] for row in fresh}) == len(fresh)
+    assert len(fresh) >= len(clones) >= len(rows)
+    allocated = [row for row in fresh if row.get("volume_id")]
+    assert len({row["volume_id"] for row in allocated}) == len(allocated)
     by_machine = {row["machine_id"]: row for row in fresh if row.get("machine_id")}
     assert len(by_machine) == len(rows)
     by_clone = {row["name"]: row for row in clones}
     assert len(by_clone) == len(clones)
     unadmitted = []
+    unallocated = []
     for original in fresh:
         if original.get("machine_id"):
             continue
         assert original["version"] == "1"
         assert original["fleet_owner_token"] == owner
         assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
-        assert original["source"] == "fresh-clone" and original["disposition"] == "owned"
+        assert original["source"] == "fresh-clone"
         assert re.fullmatch(r"[0-9a-f]+", original["source_machine_id"])
         name, volume = original["clone_name"], original["volume_id"]
         assert re.fullmatch(r"[A-Za-z0-9._-]+", name) and name not in (".", "..")
+        if original["disposition"] == "not-allocated-verified":
+            assert not volume and name not in by_clone
+            unallocated.append(name)
+            continue
         assert re.fullmatch(r"vol_[a-zA-Z0-9]+", volume)
+        assert original["disposition"] == "owned"
         assert by_clone[name] == {"name": name, "volume_id": volume}
         unadmitted.append(volume)
     assert len(set(unadmitted)) == len(unadmitted)
+    assert len(fresh) == len(clones) + len(unallocated)
     expected_members: dict[str, dict] = {}
     expected_total = 0
     incomplete = 0
@@ -207,10 +215,12 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     active_machines = {row["id"] for row in machines}
     active_volumes = {row["id"] for row in volumes}
     assert not active_machines.intersection(by_machine)
-    assert not active_volumes.intersection(row["volume_id"] for row in fresh)
+    assert not active_volumes.intersection(row["volume_id"] for row in allocated)
+    assert not {row.get("name") for row in machines + volumes}.intersection(unallocated)
     return {"schema": "cloudbench-forensic-retirement-verified-v1",
             "owner": owner, "run_id": meta["run_id"], "tasks": len(rows),
             "incomplete_tasks": incomplete, "unadmitted_clones": len(unadmitted),
+            "unallocated_attempts": len(unallocated),
             "files": len(seen),
             "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
 

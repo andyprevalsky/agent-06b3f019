@@ -22847,7 +22847,7 @@ wait "$signaller"
     assert not list(scratch.iterdir())
 
 
-@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live"])
+@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live"])
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
     owner = "a" * 32
     run_id = "fixture-run"
@@ -22889,6 +22889,12 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         (registry / "clones" / "unadmitted").write_text(
             f"name=unadmitted\nvolume_id={unadmitted_volume}\n"
         )
+    if fault.startswith("unallocated-"):
+        (audit / "fresh" / "unallocated").write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+            f"clone_name=unallocated\nsource=fresh-clone\nsource_machine_id={'c' * 14}\n"
+            "machine_id=\nvolume_id=\ndisposition=not-allocated-verified\n"
+        )
     (registry / "runtime-evidence-unconfirmed").touch()
     (out / ".cid").write_text(f"run {machine}\n")
     (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
@@ -22924,7 +22930,10 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     manifest_path.write_text(json.dumps(manifest))
     machines = tmp_path / "machines.json"
     volumes = tmp_path / "volumes.json"
-    machines.write_text(json.dumps([{"id": machine}] if fault == "live-machine" else []))
+    machines.write_text(json.dumps(
+        [{"id": machine}] if fault == "live-machine" else
+        [{"id": "c" * 14, "name": "unallocated"}] if fault == "unallocated-name-live" else []
+    ))
     volumes.write_text(json.dumps(
         [{"id": volume}] if fault == "live-volume" else
         [{"id": unadmitted_volume}] if fault == "unadmitted-live" else []
@@ -22948,10 +22957,11 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
                "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
                "--machines", str(machines), "--volumes", str(volumes)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "collected"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected"):
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["proof_credit"] == 0
         assert json.loads(result.stdout)["unadmitted_clones"] == (fault == "unadmitted-absent")
+        assert json.loads(result.stdout)["unallocated_attempts"] == (fault == "unallocated-absent")
     else:
         assert result.returncode != 0, f"unsafe {fault} was accepted"
     assert (out / "runtime-evidence.pending").exists() == (fault not in ("pending", "collected", "collected-mismatch"))
@@ -22977,11 +22987,12 @@ fly_with_timeout() {{
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 '''
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "collected"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected"):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
         assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
         assert receipt["unadmitted_clones"] == (fault == "unadmitted-absent")
+        assert receipt["unallocated_attempts"] == (fault == "unallocated-absent")
         assert not (registry / "runtime-evidence-unconfirmed").exists()
         assert (out / "runtime-evidence.pending").exists() == (fault != "collected")
     else:

@@ -121,6 +121,65 @@ def backend_payload(event):
     ).encode()
 
 
+def test_runless_zero_session_guest_needs_complete_deleted_root(cleanup, tmp_path):
+    """An evaluated run may hang before run.json despite having no browser sessions."""
+    output = tmp_path / "exact-output"
+    output.mkdir()
+    backend = tmp_path / "backend.log"
+    args = SimpleNamespace(
+        owner="a" * 32,
+        fleet_run_id="fixture-run",
+        bench="planner-memory-blue-bottle-on",
+        machine_id="deadbeef000019",
+        output_dir=str(output),
+        guest_run_token="fixture-run-0",
+        backend_log=backend,
+    )
+    prefix = (
+        "[Server] Server started mode=fixture port=3001\n"
+        "[HTTP] POST /api/agents -> 201\n"
+        f"path=/api/agents/{ROOT_AGENT}\n"
+    )
+    terminal = "[Server] SIGTERM received, closing server...\n"
+    backend.write_text(
+        prefix
+        + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n"
+        + terminal
+    )
+    manifest = cleanup.active_provider_manifest(args)
+    assert manifest["root_agent_id"] == ROOT_AGENT
+    assert manifest["sessions"] == {"kernel": [], "steel": []}
+    assert manifest["evidence"]["allocation_event_count"] == 0
+    assert manifest["evidence"]["browser_session_mutation_count"] == 0
+
+    for incomplete in (
+        prefix + terminal,
+        prefix + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 500\n" + terminal,
+        prefix + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n",
+        prefix + "[Prisma] model=BrowserSession operation=create status=ok\n"
+        + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n" + terminal,
+    ):
+        backend.write_text(incomplete)
+        with pytest.raises(cleanup.CleanupEvidenceError):
+            cleanup.active_provider_manifest(args)
+
+
+def test_stopped_machine_status_accepts_fly_colorized_section_headers(cleanup, tmp_path):
+    status = tmp_path / "machine-status.txt"
+    status.write_text(
+        "Machine ID: deadbeef000019\n"
+        "State: stopped\n\n"
+        "\x1b[1mVM\x1b[0m\n"
+        " ID │ deadbeef000019\n"
+        " State │ stopped\n"
+        " Name │ cloudbench-exact-guest\n"
+        "\x1b[1mEvent Logs\x1b[0m\n"
+    )
+    assert cleanup.parse_stopped_machine_status(
+        status, "deadbeef000019", "cloudbench-exact-guest"
+    ) == hashlib.sha256(status.read_bytes()).hexdigest()
+
+
 @pytest.mark.parametrize("event", [
     "Created Ker\x1b[32mnel\x1b[0m browser session sessionId=fixture123",
     "Created Ste\x1b[32mel\x1b[0m session: fixture123",

@@ -3930,6 +3930,28 @@ async def _run_with_agent_execution_backstop(
     return data, metadata.get("approvals_triggered", 0), metadata.get("approvals_resolved", 0), reason
 
 
+async def _stop_realtime_tree_capture(
+    task: asyncio.Task, stop: asyncio.Event, *, attempts: int = 5, interval: float = 2.0
+) -> None:
+    """Retire best-effort tree capture before finalizing the evaluated result.
+
+    A Realtime subscription can absorb a cancellation while reconnecting. Keep
+    an explicit stop condition and retry cancellation under a finite deadline;
+    a capture that still owns work is an infrastructure error, not a task FAIL.
+    """
+    stop.set()
+    for _ in range(attempts):
+        if task.done():
+            break
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=interval)
+        if done:
+            break
+    if not task.done():
+        raise RuntimeError("Realtime tree capture did not stop after bounded cancellation")
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def _poll_agent(
     base_url: str,
     agent_id: str,
@@ -12360,6 +12382,7 @@ async def run_single_task(
     world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
+    realtime_tree_stop = asyncio.Event()
     live_fixture_manifests: list[dict] = []
     interrupt_cleanup_started = False
     interrupt_cleanup_ready = False
@@ -12378,16 +12401,21 @@ async def run_single_task(
 
         async def discover_tree_agents() -> None:
             seen = {agent_id}
-            while True:
+            while not realtime_tree_stop.is_set():
                 try:
                     for agent_info in await get_agent_tree(base_url, agent_id):
+                        if realtime_tree_stop.is_set():
+                            break
                         aid = agent_info.get("agent_id")
                         if aid and aid not in seen:
                             seen.add(aid)
                             await subscribe_supabase_realtime_agent(aid)
                 except Exception:
                     pass
-                await asyncio.sleep(2)
+                try:
+                    await asyncio.wait_for(realtime_tree_stop.wait(), timeout=2)
+                except TimeoutError:
+                    pass
 
         realtime_tree_task = asyncio.create_task(discover_tree_agents(), name=f"realtime-capture-{agent_id[:8]}")
 
@@ -13141,9 +13169,12 @@ async def run_single_task(
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
     finally:
+        realtime_tree_error = None
         if realtime_tree_task:
-            realtime_tree_task.cancel()
-            await asyncio.gather(realtime_tree_task, return_exceptions=True)
+            try:
+                await _stop_realtime_tree_capture(realtime_tree_task, realtime_tree_stop)
+            except Exception as exc:
+                realtime_tree_error = exc
         if realtime_monitor:
             await realtime_monitor.stop()
         if phone_callee is not None:
@@ -13181,6 +13212,8 @@ async def run_single_task(
             os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
         if interrupt_cleanup_ready:
             _complete_interrupt_cleanup()
+        if realtime_tree_error is not None:
+            raise realtime_tree_error
 
 
 def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:

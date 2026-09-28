@@ -537,9 +537,31 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     root_agent_id = parse_active_root_agent(text)
     sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
     if not sessions["kernel"] and not sessions["steel"]:
-        raise CleanupEvidenceError(
-            "active backend evidence contains no exact provider session identity"
+        # An interrupted runner can exit after evaluating a task but before it
+        # saves run.json. A task that never opened a browser has no positive
+        # provider identity to release. Accept that case only from the complete
+        # single-server log, after the exact root DELETE succeeded, with no
+        # allocation, BrowserSession write, or payment write. The subsequent
+        # stopped-Machine proof fences any further provider creation.
+        validate_complete_backend_lifecycle(text)
+        root_deletes = re.findall(
+            rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
+            text,
         )
+        if (
+            text.count("[HTTP] POST /api/agents -> 201") != 1
+            or len(root_deletes) != 1
+            or allocation_event_count != 0
+            or mutation_count != 0
+            or re.search(
+                r"\bmodel=(?:Purchase|AgentCardPurchase|AgentPayment)\b[^\n]*"
+                r"\boperation=(?:create|update|updateMany|upsert|delete|deleteMany)\b",
+                text,
+            )
+        ):
+            raise CleanupEvidenceError(
+                "runless zero-session evidence lacks exact terminal cleanup"
+            )
     return {
         "schema_version": SCHEMA,
         "version": 1,

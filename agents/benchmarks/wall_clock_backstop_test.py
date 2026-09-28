@@ -16,6 +16,31 @@ def test_backstop_default_and_explicit_override(monkeypatch):
     assert runner.benchmark_wall_clock_backstop_seconds() == 300
 
 
+def test_realtime_tree_capture_finishes_after_lost_first_cancellation():
+    async def case():
+        stop = asyncio.Event()
+        cancellations = 0
+
+        async def reconnecting_capture():
+            nonlocal cancellations
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancellations += 1
+                    if cancellations >= 2:
+                        return
+
+        task = asyncio.create_task(reconnecting_capture())
+        await asyncio.sleep(0)
+        await runner._stop_realtime_tree_capture(task, stop, attempts=3, interval=0.01)
+        assert stop.is_set()
+        assert task.done()
+        assert cancellations == 2
+
+    asyncio.run(case())
+
+
 @pytest.mark.parametrize("value", ["", "0", "-1", "1.5", "nan", "300; exit", "３００"])
 def test_invalid_backstop_cannot_disable_safety(monkeypatch, value):
     monkeypatch.setenv("BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS", value)
