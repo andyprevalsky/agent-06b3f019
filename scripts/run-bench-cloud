@@ -86,8 +86,10 @@ export PYTHONDONTWRITEBYTECODE=1
 APP="navi-whisper-lux-bench"
 PROD_APP="navi-whisper-lux"   # NEVER touch this.
 REGION="${CLOUDBENCH_REGION:-iad}"
-MACHINE_NAME="cloudbench-warm"
-VOLUME_NAME="cloudbench_data"     # Fly volume names must be [a-z0-9_].
+MACHINE_NAME="${CLOUDBENCH_WARM_MACHINE_NAME:-cloudbench-warm}"
+VOLUME_NAME="${CLOUDBENCH_WARM_VOLUME_NAME:-cloudbench_data}"     # Fly volume names must be [a-z0-9_].
+case "$MACHINE_NAME" in ''|*[!a-z0-9-]*) echo "Invalid warm machine name" >&2; exit 2 ;; esac
+case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exit 2 ;; esac
 ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
@@ -131,6 +133,10 @@ STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
 POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
+WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+if [ "$MACHINE_NAME" != cloudbench-warm ]; then
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+fi
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
 # Cross-workspace app-environment lock primitive (acquire/release/assert). Its
 # wait budget must outlast a peer's warm-dep refresh so concurrent fleets queue
@@ -2462,9 +2468,9 @@ for m in json.load(sys.stdin) or []:
     # freshness without mounting anything. Shared across sibling workspaces
     # via the git-common dir (same pattern as pool claims).
     printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
-        > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+        > "$WARM_DEPS_STATE_FILE"
     echo "✅ warm volume deps refreshed; fresh snapshot: $NEW_SNAP"
-    echo "   state: $GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    echo "   state: $WARM_DEPS_STATE_FILE"
     exit 0
 fi
 
@@ -2570,7 +2576,7 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     # volume only after the model reported ready and the source is proven quiescent; otherwise
     # successful maintenance silently leaves every benchmark on the previous WMH corpus.
     read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
-        < "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true
+        < "$WARM_DEPS_STATE_FILE" 2>/dev/null || true
     if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
         echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
         exit 1
@@ -2590,7 +2596,7 @@ for m in json.load(sys.stdin) or []:
     create_volume_snapshot_exact "$VOL_ID" || exit 1
     NEW_SNAP="$CREATED_SNAPSHOT_ID"
     printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
-        "$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+        "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"
     echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
 
     # EXIT trap parks the already-stopped source machine.

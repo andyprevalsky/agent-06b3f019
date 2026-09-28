@@ -251,6 +251,17 @@ changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
 streak on a clean commit; forensic recovery never retroactively grants credit.
 
+Fly's legacy `cloudbench-warm` donor has a 40 GB volume, although current
+`run-bench-cloud --setup` defaults to 20 GB. Snapshot clones inherit the donor
+volume's size, and a 40 GB snapshot cannot be restored into a smaller volume.
+For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
+`CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
+nondefault machine uses its own git-common dependency/snapshot proof file, so
+it cannot borrow the legacy donor's freshness claim. Copy the complete donor
+data, verify it, stop the new machine before snapshotting, and pass an exact
+infra canary before using it for real benchmarks. Preserve the old donor until
+the replacement has proved startup and teardown.
+
 Local execution is explicit:
 `scripts/run-bench --local <task...>` or
 `scripts/run-bench --local --rerun-failed latest`. The local wrapper starts an

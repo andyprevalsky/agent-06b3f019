@@ -13994,6 +13994,8 @@ def _preflight_harness(
     snap_epoch: int,
     refresh_status: int = 0,
     refreshed_snapshot: str = "snap-transaction",
+    state_filename: str = "cloudbench-warm-deps.fp",
+    selected_state_name: str = "cloudbench-warm-deps.fp",
 ) -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
     fleet = FLEET_SCRIPT.read_text()
@@ -14020,7 +14022,7 @@ def _preflight_harness(
     common = tmp_path / "common"
     common.mkdir()
     if state_line is not None:
-        (common / "cloudbench-warm-deps.fp").write_text(state_line + "\n")
+        (common / state_filename).write_text(state_line + "\n")
     calls = tmp_path / "calls"
     calls.write_text("")
 
@@ -14035,6 +14037,7 @@ BENCHES=(a b c)
 ROOT_DIR="$ROOT"
 RUN_BENCH_CLOUD_BIN="$ROOT/scripts/run-bench-cloud"
 GIT_COMMON_DIR="$COMMON"
+WARM_DEPS_STATE_FILE="$COMMON/{selected_state_name}"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
 FLY() {{
@@ -14107,6 +14110,25 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     assert calls.read_text() == ""
 
 
+def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path) -> None:
+    alternate = "cloudbench-warm-deps.cloudbench-warm-proof20.fp"
+    legacy, _ = _preflight_harness(
+        tmp_path / "legacy", state_line="NODEFP PYFP 1000 snap-current",
+        dirty=False, autorefresh="0", snap_epoch=2000,
+        selected_state_name=alternate,
+    )
+    assert legacy.returncode != 0
+
+    qualified, calls = _preflight_harness(
+        tmp_path / "qualified", state_line="NODEFP PYFP 1000 snap-current",
+        dirty=False, autorefresh="0", snap_epoch=2000,
+        state_filename=alternate, selected_state_name=alternate,
+    )
+    assert qualified.returncode == 0, qualified.stderr
+    assert "fast bring-up" in qualified.stdout
+    assert calls.read_text() == ""
+
+
 
 @pytest.mark.parametrize("scenario", ["pinned", "direct", "bad_digest", "tampered_upload", "fetch_failure", "patch_conflict", "no_delta"])
 def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, scenario: str) -> None:
@@ -14168,6 +14190,7 @@ BENCH_REF={base}
 APP=fixture
 MACHINE_NAME=cloudbench-warm
 GIT_COMMON_DIR={shlex.quote(str(common))}
+WARM_DEPS_STATE_FILE={shlex.quote(str(common / "cloudbench-warm-deps.fp"))}
 CLOUDBENCH_GUEST_PREPARE_PATCH_SCRIPT={shlex.quote(str(ROOT / "scripts/cloudbench-prepare-patch.sh"))}
 CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
 ensure_app() {{ echo ensure >> "$CALLS"; }}
@@ -14937,7 +14960,8 @@ def test_refresh_deps_mode_contract() -> None:
     # bounded wait for a COMPLETE fresh snapshot
     assert "CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90" in snapshot_helper
     # shared freshness state recorded for fleet preflights
-    assert "cloudbench-warm-deps.fp" in mode
+    assert 'WARM_DEPS_STATE_FILE' in mode
+    assert 'cloudbench-warm-deps.fp' in cloud
     assert "cloudbench_node_dependency_fingerprint" in mode
     assert "cloudbench_manifest_fingerprint" in mode
     # flag is wired
@@ -17193,7 +17217,7 @@ def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot()
 
     assert 'create_volume_snapshot_exact "$VOL_ID"' in refresh
     assert 'NEW_SNAP="$CREATED_SNAPSHOT_ID"' in refresh
-    assert '"$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"' in refresh
+    assert '"$NEW_SNAP" > "$WARM_DEPS_STATE_FILE"' in refresh
     assert "WMH model snapshot published for fleet clones" in refresh
 
 
@@ -21653,6 +21677,7 @@ MACHINE_NAME=cloudbench-warm
 VOLUME_NAME=cloudbench_data
 ROOT_DIR="$FIXTURE/workspace"
 GIT_COMMON_DIR="$FIXTURE/common"
+WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
 FLEET_DIR="$ROOT_DIR/.context/run"
 mkdir -p "$FLEET_DIR"
 SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}

@@ -742,8 +742,10 @@ STALE_OWNER_RECOVERY_PORTS_FILE=""
 
 APP="navi-whisper-lux-bench"
 REGION="${CLOUDBENCH_REGION:-iad}"
-MACHINE_NAME="cloudbench-warm"
-VOLUME_NAME="cloudbench_data"
+MACHINE_NAME="${CLOUDBENCH_WARM_MACHINE_NAME:-cloudbench-warm}"
+VOLUME_NAME="${CLOUDBENCH_WARM_VOLUME_NAME:-cloudbench_data}"
+case "$MACHINE_NAME" in ''|*[!a-z0-9-]*) echo "Invalid warm machine name" >&2; exit 2 ;; esac
+case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exit 2 ;; esac
 # The warm maintenance source is intentionally roomy (shared-cpu-4x/8GB), but
 # inheriting that shape across 37 primaries consumed 148 CPU units. With prod's
 # observed 16 active units, Fly rejected the 37th at its 160-unit overcommit
@@ -882,6 +884,10 @@ GIT_COMMON_DIR="$(cd "$GIT_COMMON_DIR" 2>/dev/null && pwd -P)" || {
     echo "❌ could not canonicalize the shared git ownership root" >&2
     exit 1
 }
+WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+if [ "$MACHINE_NAME" != cloudbench-warm ]; then
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+fi
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
@@ -9991,7 +9997,7 @@ else
         echo "❌ could not read volume snapshots for $VOL_ID after 6 attempts (provider read failure, not a missing snapshot)" >&2
         exit 1
     fi
-    RECORDED_SNAP_ID="$(awk 'NF >= 4 {print $4; exit}' "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true)"
+    RECORDED_SNAP_ID="$(awk 'NF >= 4 {print $4; exit}' "$WARM_DEPS_STATE_FILE" 2>/dev/null || true)"
     # The newest snapshot is not necessarily proven: an interrupted refresh can
     # leave a newer complete snapshot without ever publishing its dependency
     # proof. Prefer the exact recorded snapshot while it still exists and is
@@ -10096,7 +10102,7 @@ warm_deps_preflight() {
         fi
         return 0
     fi
-    local state="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    local state="$WARM_DEPS_STATE_FILE"
     local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
