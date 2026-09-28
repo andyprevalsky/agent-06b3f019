@@ -259,10 +259,7 @@ export function buildRouterCompletionOptions(params: {
     model: params.model,
     messages: params.messages,
     temperature: 0.3,
-    // The router is a small structured classification step. Gemini 3.5 Flash
-    // enables medium reasoning by default on OpenRouter, which can consume most
-    // of the synchronous chat latency budget after a Cerebras stall. Keep its
-    // mandatory reasoning at the provider's minimum, just like the generator.
+    // Keep router reasoning minimal to bound chat latency on OpenRouter.
     effort: 'minimal',
     response_format: {
       type: 'json_schema',
@@ -501,9 +498,9 @@ export async function callRouterLlm(params: {
       isClaude = true;
       log.info('[RouterLLM] User Claude token detected', { actualModel });
     }
-    if (!isGpt && actualModel?.endsWith('-gpt')) {
+    if (!isGpt && (actualModel?.endsWith('-gpt') || actualModel?.endsWith('-foundry'))) {
       isGpt = true;
-      log.info('[RouterLLM] User GPT token detected', { actualModel });
+      log.info('[RouterLLM] GPT model detected', { actualModel });
     }
 
     const delta = chunk.choices[0]?.delta;

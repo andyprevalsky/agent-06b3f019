@@ -321,10 +321,7 @@ export function buildGeneratorCompletionOptions(params: {
     model: params.model,
     messages: params.messages,
     temperature: 0.7,
-    // Keep synchronous chat fallbacks latency-bounded. Cerebras disables
-    // reasoning at its provider boundary; OpenRouter models such as Gemini
-    // require reasoning, so request their smallest supported budget instead
-    // of accepting the provider's slower default.
+    // Keep fallback reasoning minimal to bound chat latency.
     effort: 'minimal',
     response_format: {
       type: 'json_schema',
@@ -581,7 +578,7 @@ async function callGeneratorLlmCore(
       if (!isClaude && actualModel?.endsWith('-claude')) {
         isClaude = true;
       }
-      if (!isGpt && actualModel?.endsWith('-gpt')) {
+      if (!isGpt && (actualModel?.endsWith('-gpt') || actualModel?.endsWith('-foundry'))) {
         isGpt = true;
       }
 

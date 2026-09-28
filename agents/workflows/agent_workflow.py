@@ -3700,9 +3700,9 @@ class AgentWorkflow:
                 )
                 continue
 
-            if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
+            if isinstance(model, str) and model.endswith(("-claude", "-gpt", "-foundry")):
                 workflow.logger.info(
-                    f"💰 $0 cost (direct compute token): actual_model={model}, "
+                    f"💰 $0 user charge: actual_model={model}, "
                     f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
                 )
                 usage_items_for_db.append(
@@ -4143,7 +4143,7 @@ class AgentWorkflow:
                 output_rate = actual_pricing["output_cents_per_1k"]
                 if input_rate == 0 and output_rate == 0:
                     workflow.logger.info(
-                        f"💰 $0 cost (direct compute token): actual_model={actual_model}, "
+                        f"💰 $0 user charge: actual_model={actual_model}, "
                         f"in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 

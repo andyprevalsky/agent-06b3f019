@@ -4955,6 +4955,53 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     assert metadata.data.get("claude_token_error") == "auth_error"
 
 
+async def test_client_foundry_server_error_falls_through_to_openrouter():
+    """A Foundry failure before output must preserve the Ultra waterfall."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "openrouter ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    attempted = []
+
+    def handler(req):
+        url = str(req.url)
+        if "a-4989-resource.openai.azure.com" in url:
+            attempted.append("foundry")
+            return httpx.Response(500, text="upstream unavailable")
+        if "openrouter.ai" in url:
+            attempted.append("openrouter")
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    with patch.dict(
+        os.environ,
+        {
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "test-key",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+            "GPT_API_KEY": "",
+            "ANTHROPIC_API_KEY": "",
+        },
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
+                call_site="test-foundry-server-fallthrough",
+            )
+        )
+
+    assert attempted == ["foundry", "openrouter"]
+    assert next(c for c in chunks if c.kind == "metadata").data["actual_model"] == "openai/gpt-6-sol"
+    assert any(c.kind == "content" and c.data.get("text") == "openrouter ok" for c in chunks)
+
+
 async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     """RoseClient-level direct-auth TTFT is retriable if no chunk reached the caller."""
 
@@ -7066,6 +7113,10 @@ async def run_all_tests():
     )
     await r.record_async("client_collect_common_timing_logs", test_client_collect_emits_common_rose_timing_logs)
     await r.record_async("client_fallthrough_to_waterfall", test_client_falls_through_from_claude_auth_to_waterfall)
+    await r.record_async(
+        "client_foundry_server_error_falls_through_to_openrouter",
+        test_client_foundry_server_error_falls_through_to_openrouter,
+    )
     await r.record_async(
         "client_direct_auth_ttft_fallthrough",
         test_client_direct_auth_ttft_falls_through_before_first_chunk,
