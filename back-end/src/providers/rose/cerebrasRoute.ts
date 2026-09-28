@@ -35,6 +35,8 @@ const log = createLogger('CerebrasRoute');
 export const CEREBRAS_CHAT_MODEL = 'gpt-oss-120b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 1_200;
+/** Pool hop (rose-fast Qwen high; Cerebras max) — not the 1.2s chat stall. */
+export const POOL_CEREBRAS_IDLE_TIMEOUT_MS = 90_000;
 /** Archived Cerebras id — must never be reintroduced as the chat primary. */
 export const ARCHIVED_CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';
 /** Listed on /models but chat/completions 404s (2026-09-09). */
@@ -59,16 +61,37 @@ export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
   return kind === 'content' || kind === 'tool_call';
 }
 
-export function buildCerebrasChatBody(options: CompletionOptions): Record<string, unknown> {
+function stripCerebrasCacheControl<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripCerebrasCacheControl(item)) as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'cache_control') continue;
+      out[key] = stripCerebrasCacheControl(nested);
+    }
+    return out as T;
+  }
+  return value;
+}
+
+export function buildCerebrasChatBody(
+  options: CompletionOptions,
+  model: string = CEREBRAS_CHAT_MODEL,
+  reasoningEffort: string = CEREBRAS_CHAT_REASONING_EFFORT
+): Record<string, unknown> {
   // Do not send `clear_thinking` — that flag is GLM-only. Gemma-4-31b rejects
   // it with 400 wrong_api_format, which would re-trigger the waterfall path
   // this migration exists to leave.
+  // Cerebras also 400s Anthropic/OpenRouter cache_control on content parts
+  // (live qwen-3.8-27b 2026-09-28: property unsupported).
   return {
-    model: CEREBRAS_CHAT_MODEL,
-    messages: normalizeOpenAiToolCalls(options.messages),
+    model,
+    messages: stripCerebrasCacheControl(normalizeOpenAiToolCalls(options.messages)),
     stream: true,
     stream_options: { include_usage: true },
-    reasoning_effort: CEREBRAS_CHAT_REASONING_EFFORT,
+    reasoning_effort: reasoningEffort,
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_completion_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
@@ -91,9 +114,17 @@ export async function* exclusiveCerebrasCompletion(params: {
   cerebrasKey: string;
   requestId: string;
   callSite?: string;
+  model?: string;
+  reasoningEffort?: string;
+  idleTimeoutMs?: number;
 }): AsyncIterable<RoseStreamChunk> {
-  const body = buildCerebrasChatBody(params.options);
-  const preTokenTimeoutMs = chatIdleTimeoutMs();
+  const model = params.model ?? CEREBRAS_CHAT_MODEL;
+  const body = buildCerebrasChatBody(
+    params.options,
+    model,
+    params.reasoningEffort ?? CEREBRAS_CHAT_REASONING_EFFORT
+  );
+  const preTokenTimeoutMs = params.idleTimeoutMs ?? chatIdleTimeoutMs();
   const preTokenError = new RoseStallError(
     `Cerebras produced no model output within ${preTokenTimeoutMs}ms (request_id=${params.requestId})`
   );
@@ -125,7 +156,7 @@ export async function* exclusiveCerebrasCompletion(params: {
     }
 
     for await (const chunk of parseOpenAISSE(response.body, {
-      actualModel: CEREBRAS_CHAT_MODEL,
+      actualModel: model,
       poolName: CEREBRAS_DIRECT_POOL,
       requestId: params.requestId,
       idleTimeoutMs: preTokenTimeoutMs,
@@ -146,7 +177,7 @@ export async function* exclusiveCerebrasCompletion(params: {
     log.info('done', {
       request_id: params.requestId,
       call_site: params.callSite,
-      model: CEREBRAS_CHAT_MODEL,
+      model,
     });
   } catch (error) {
     // Preserve caller cancellation and normalize pre-content transport/parser

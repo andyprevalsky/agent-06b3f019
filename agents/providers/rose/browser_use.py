@@ -1,6 +1,6 @@
 """Browser-use sub-flow - message build + tool-call extraction.
 
-Browser-use rides the same claudeAuth -> waterfall machinery as rose-1-lite
+Browser-use rides the same claudeAuth -> waterfall machinery as rose-1-flash
 and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
 
   - The user message bundles a full browser snapshot (URL, viewport,

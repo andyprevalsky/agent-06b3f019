@@ -203,8 +203,8 @@ async function testListModels_happy() {
   const body = assertSchema(ListModelsResponse, res.data, 'GET /api/models');
   if (body.models.length < 2)
     throw new Error(`Expected at least 2 models, got ${body.models.length}`);
-  if (body.models[0].id !== 'rose-labs/rose-1-lite')
-    throw new Error(`Expected first model rose-labs/rose-1-lite, got ${body.models[0].id}`);
+  if (body.models[0].id !== 'rose-labs/rose-1-flash')
+    throw new Error(`Expected first model rose-labs/rose-1-flash, got ${body.models[0].id}`);
   if (body.models[1].id !== 'rose-labs/rose-1-ultra')
     throw new Error(`Expected second model rose-labs/rose-1-ultra, got ${body.models[1].id}`);
 }
@@ -233,7 +233,7 @@ async function testListModels_roseModelShape() {
   const res = await request(`${BASE_URL}/api/models`);
   assertStatus(res.status, 200, res.data);
   const body = res.data as { models: ModelItemType[] };
-  for (const roseId of ['rose-labs/rose-1-lite', 'rose-labs/rose-1-ultra']) {
+  for (const roseId of ['rose-labs/rose-1-flash', 'rose-labs/rose-1-ultra']) {
     const model = body.models.find((m) => m.id === roseId);
     if (!model) throw new Error(`${roseId} not found`);
     if (
@@ -247,6 +247,13 @@ async function testListModels_roseModelShape() {
     if (model.provider !== 'rose-labs')
       throw new Error(`${roseId} expected provider=rose-labs, got ${model.provider}`);
   }
+  const flash = body.models.find((m) => m.id === 'rose-labs/rose-1-flash');
+  if (!flash) throw new Error('rose-labs/rose-1-flash not found');
+  if (flash.name !== 'rose-fast')
+    throw new Error(`flash display name should be rose-fast, got ${flash.name}`);
+  if (!/cerebras/i.test(flash.description ?? '') || !/qwen/i.test(flash.description ?? '')) {
+    throw new Error(`flash description should mention Cerebras Qwen, got ${flash.description}`);
+  }
 }
 
 async function testListModels_roseModelsFirst() {
@@ -254,8 +261,8 @@ async function testListModels_roseModelsFirst() {
   const res = await request(`${BASE_URL}/api/models`);
   assertStatus(res.status, 200, res.data);
   const body = res.data as { models: ModelItemType[] };
-  if (body.models[0].id !== 'rose-labs/rose-1-lite')
-    throw new Error(`First model should be rose-1-lite, got ${body.models[0].id}`);
+  if (body.models[0].id !== 'rose-labs/rose-1-flash')
+    throw new Error(`First model should be rose-1-flash, got ${body.models[0].id}`);
   if (body.models[1].id !== 'rose-labs/rose-1-ultra')
     throw new Error(`Second model should be rose-1-ultra, got ${body.models[1].id}`);
 }

@@ -61,7 +61,7 @@ async def run_cost_context_test():
         print(f"   Timeout: {TEST_TIMEOUT}s")
         agent_id = await spawn_agent(
             goal=TEST_PROMPT,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             timeout=TEST_TIMEOUT,
         )
         print(f"   Agent ID: {agent_id}")

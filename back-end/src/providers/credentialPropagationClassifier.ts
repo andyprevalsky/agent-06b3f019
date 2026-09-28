@@ -560,7 +560,7 @@ async function classifierContent(
   const directAuth = await directAuthForClassifier(agent);
   const credentialInventory = await loadCredentialInventory(agent.userId, credentialRefs);
   const stream = await createStreamingCompletion({
-    model: 'rose-labs/rose-1-lite',
+    model: 'rose-labs/rose-1-flash',
     temperature: 0,
     max_tokens: 200,
     ...directAuth,

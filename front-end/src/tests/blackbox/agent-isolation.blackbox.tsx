@@ -37,7 +37,7 @@ function makeAgent(agentId: string): AgentDetail {
     agent_id: agentId,
     goal: `goal for ${agentId}`,
     title: `title for ${agentId}`,
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'WEB',
     reasoning_effort: 'medium',
     progress: 0.5,

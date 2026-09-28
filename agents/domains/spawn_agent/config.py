@@ -10,7 +10,7 @@ from typing import Final
 EXPLORE_ACTIVITY_TIMEOUT = timedelta(seconds=600)  # 10 min max (medium default)
 EXPLORE_HEARTBEAT_TIMEOUT = timedelta(seconds=120)
 EXPLORE_MAX_ITERATIONS = 20  # medium depth; see EXPLORE_DEPTH_LIMITS
-EXPLORE_DEFAULT_MODEL = "rose-labs/rose-1-lite"
+EXPLORE_DEFAULT_MODEL = "rose-labs/rose-1-flash"
 EXPLORE_MESSAGE_TRUNCATE_LEN = 500
 EXPLORE_GOAL_DISPLAY_LEN = 200
 

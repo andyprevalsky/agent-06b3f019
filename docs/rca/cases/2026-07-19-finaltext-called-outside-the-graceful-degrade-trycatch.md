@@ -10,12 +10,12 @@ first_bad_boundary: "supervisorHandler.ts line ~655 — `callSupervisorLlm` invo
 symptoms:
   - '"Sorry, something went wrong." sent as the SMS reply'
   - '"Expected one structured output item, received 0" StructuredOutputCardinalityError'
-  - a reasoning-only or empty structured response from rose-1-lite crashes the supervisor turn
+  - a reasoning-only or empty structured response from rose-1-flash crashes the supervisor turn
 tags:
   - sms
   - supervisor
   - structured-output
-  - rose-1-lite
+  - rose-1-flash
   - error-handling
 sources:
   - PR #807
@@ -26,7 +26,7 @@ status: fixed
 ## Problem
 
 Prod incident 2026-07-19: user `5824c58c` texted "where can I get chicken wings
-near me" and received "Sorry, something went wrong." When `rose-1-lite` returned a
+near me" and received "Sorry, something went wrong." When `rose-1-flash` returned a
 reasoning-only / empty / ambiguous structured response — zero native `tool_calls`
 AND zero emittable content items — `finalText()` threw
 `StructuredOutputCardinalityError` ("Expected one structured output item, received

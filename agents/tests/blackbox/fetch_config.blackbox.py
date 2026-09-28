@@ -20,7 +20,7 @@ def _setup():
             "json": {
                 "agent": {
                     "id": "agent-1",
-                    "model": "rose-1-lite",
+                    "model": "rose-1-flash",
                     "reasoning_max_tokens": 256,
                     "status": "ACTIVE",
                     "tools": [{"id": "tool-1"}, {"id": "tool-2"}],
@@ -45,7 +45,7 @@ async def test_happy_path():
 
         result = await fetch_agent_config("agent-1")
 
-    assert result["model"] == "rose-1-lite"
+    assert result["model"] == "rose-1-flash"
     assert result["status"] == "ACTIVE"
     assert result["tool_ids"] == ["tool-1", "tool-2"]
     assert result["write_lock_enabled"] is False

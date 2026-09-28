@@ -614,7 +614,7 @@ In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP 
 
 - `back-end/src/providers/rose/` - TS client (chat path: router/generator/supervisor)
 - `agents/providers/rose/` - Python client (agent/browser-use path)
-- `back-end/src/providers/rose/pools.ts` / `agents/providers/rose/pools.py` - Canonical pool registry (`rose-1-lite`, `rose-1-ultra`, `rose-1-browser-use`)
+- `back-end/src/providers/rose/pools.ts` / `agents/providers/rose/pools.py` - Canonical pool registry (`rose-1-flash`, `rose-1-ultra`, `rose-1-browser-use`)
 - `back-end/src/routes/agents.ts` - Agents API (create, poll, pause/resume)
 - `back-end/src/providers/hybridAuth.ts` - API key authentication. There is NO
   `src/middleware/` directory — both auth middlewares (`auth.ts`, `hybridAuth.ts`)
@@ -788,7 +788,7 @@ Every LLM call in the agent pipeline, ordered by execution flow.
 
 | #   | Call Site                                                                             | Model        | claudeAuth | Forces Ultra | Context Composition                                                                                                                                                 | Est. Tokens |
 | --- | ------------------------------------------------------------------------------------- | ------------ | ---------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| S1  | **Explore Agent** `tools/spawn_agent.py` → `run_agent`                                | rose-1-lite  | **NO**     | no           | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k       |
+| S1  | **Explore Agent** `tools/spawn_agent.py` → `run_agent`                                | rose-1-flash  | **NO**     | no           | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k       |
 | S2  | **Browser Agent** `tools/spawn_browser_agent_v3.py` → `call_llm_structured_streaming` | agent.model  | YES        | no           | `build_browser_system_prompt` (400t) + step history + screenshots (multimodal, heavy)                                                                               | 5-30k       |
 | S3  | **Sub-Agent** spawns full workflow (A1-A5 repeat)                                     | parent.model | YES        | no           | Inherits parent user_context (gatable via context_gates) + own conversation                                                                                         | recursive   |
 
@@ -846,7 +846,7 @@ Each LLM call site, the context chunks it receives, and which `context_gates` ke
 
 1. **A3/A5 Verifier** - Gets full conversation with no truncation. On long runs (20+ iterations) this balloons to 40-80k. Not yet gated.
 2. **T1 message_person** - `call_llm` doesn't pass `claude_token`. Small per-call cost.
-3. **Schema gen** (`setResponseSchema.ts`) - Forces Rose Ultra for a simple task. Rose Lite would suffice.
+3. **Schema gen** (`setResponseSchema.ts`) - Forces Rose Ultra for a simple task. Rose Flash would suffice.
 
 ## CodeRabbit Review
 

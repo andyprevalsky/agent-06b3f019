@@ -53,7 +53,7 @@ export const handlers = [
   http.get(`${API_BASE}/models`, () => {
     return HttpResponse.json({
       models: [
-        { id: 'rose-1-lite', name: 'Rose 1 Lite', provider: 'rose', description: 'Fast model' },
+        { id: 'rose-1-flash', name: 'Rose 1 Flash', provider: 'rose', description: 'Fast model' },
         {
           id: 'rose-1-ultra',
           name: 'Rose 1 Ultra',
@@ -97,7 +97,7 @@ export const handlers = [
         {
           agent_id: 'agent-001',
           goal: 'Test agent',
-          model: 'rose-1-lite',
+          model: 'rose-1-flash',
           source: 'WEB',
           reasoning_effort: 'medium',
           progress: 50,
@@ -133,7 +133,7 @@ export const handlers = [
       agent: {
         agent_id: params.agentId,
         goal: 'Test agent',
-        model: 'rose-1-lite',
+        model: 'rose-1-flash',
         source: 'WEB',
         reasoning_effort: 'medium',
         progress: 50,
@@ -183,7 +183,7 @@ export const handlers = [
     return HttpResponse.json({
       agent_id: 'new-agent-001',
       goal: 'New test agent',
-      model: 'rose-1-lite',
+      model: 'rose-1-flash',
       source: 'WEB',
       reasoning_effort: 'medium',
       progress: 0,

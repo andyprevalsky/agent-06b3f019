@@ -3,7 +3,7 @@
   "baseline_status": "PASS",
   "route": "openrouter",
   "actual_model": "google/gemini-3.5-flash",
-  "pool": "rose-1-lite",
+  "pool": "rose-1-flash",
   "parent_goal": "Order an iron and something to iron a shirt on (ironing board or mat) via DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105. Use the user's saved payment method. Confirm total cost, delivery ETA, and list of ordered items. Log in using the authenticated DoorDash session. Once the order is placed, extract and return: the order ID, the total cost in USD, the delivery ETA, and the list of ordered items with their names and price.",
   "bad_spawn_goal": "Order an iron and an ironing board/mat/pad on DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105. Log in using the authenticated DoorDash session, find a retailer like Target, Walgreens, or CVS that has both items, add them to the cart, verify the address, use the saved payment method, and place the order. Extract and return the order_id, total_cost_usd, delivery_eta, and ordered_items (with name and price).",
   "prior_fail_in_context": true,

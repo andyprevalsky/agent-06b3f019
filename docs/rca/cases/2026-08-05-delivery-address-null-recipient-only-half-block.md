@@ -28,7 +28,7 @@ status: open
 
 ## Problem
 
-A prod SMS agent (`d045dbcd-03e6-407e-8005-f109bddf8933`, model `rose-1-lite`,
+A prod SMS agent (`d045dbcd-03e6-407e-8005-f109bddf8933`, model `rose-1-flash`,
 PLAN phase) told the user at 21:17:44Z: **"I don't have a delivery address on
 file for Aman. Can you confirm the full delivery address (street, city, state,
 zip)?"** The user reported this as nonsense — "I thought we auto inject the user

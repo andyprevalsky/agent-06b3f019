@@ -10,7 +10,7 @@ describe('selected agent model ownership', () => {
     const initialProps = {
       selectedAgentId: 'agent-a' as string | null,
       modelOwnerId: 'agent-a' as string | undefined,
-      model: 'rose-1-lite' as string | undefined,
+      model: 'rose-1-flash' as string | undefined,
     };
     const { rerender } = renderHook(
       ({ selectedAgentId, modelOwnerId, model }) =>
@@ -23,7 +23,7 @@ describe('selected agent model ownership', () => {
         ),
       { initialProps },
     );
-    expect(setSelectedModel).toHaveBeenLastCalledWith('rose-1-lite');
+    expect(setSelectedModel).toHaveBeenLastCalledWith('rose-1-flash');
 
     rerender({ selectedAgentId: 'agent-b', modelOwnerId: 'agent-b', model: undefined });
 

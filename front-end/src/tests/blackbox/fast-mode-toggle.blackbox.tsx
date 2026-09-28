@@ -133,7 +133,7 @@ describe('Fast Mode account gating', () => {
             {
               agent_id: 'agent-1',
               status: 'ACTIVE',
-              model: 'rose-labs/rose-1-lite',
+              model: 'rose-labs/rose-1-flash',
               write_lock_enabled: true,
               tree_cost_cents: 0,
               price_limit_cents: 100,

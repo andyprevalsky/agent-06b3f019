@@ -29,7 +29,7 @@ describe('cerebras chat model inventory', () => {
     );
     assert.equal(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b');
     assert.notEqual(CEREBRAS_CHAT_MODEL, CHAT_DEAD_CEREBRAS_MODEL);
-    assert.equal(OPENROUTER_CEREBRAS_MODEL, 'google/gemma-4-31b-it');
+    assert.equal(OPENROUTER_CEREBRAS_MODEL, 'openai/gpt-oss-120b');
   });
 
   it('builds a Cerebras body gpt-oss-120b accepts (no clear_thinking, effort low)', () => {

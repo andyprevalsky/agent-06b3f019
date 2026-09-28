@@ -13,12 +13,12 @@ async def test_fetch_pricing_pool_average():
 
         result = await fetch_model_pricing("rose-1-ultra")
 
-    # rose-1-ultra waterfall: openai/gpt-5.6-sol ($2.50/$15 per M) +
+    # rose-1-ultra waterfall: openai/gpt-6-sol ($2/$10 per M) +
     # moonshotai/kimi-k3 ($3/$15 per M).
-    # Average input: (2.5+3)/2 = $2.75/M -> 0.275 cents/1k
-    assert abs(result["input_cents_per_1k"] - 0.275) < 1e-9
-    # Average output: (15+15)/2 = $15.00/M -> 1.5 cents/1k
-    assert abs(result["output_cents_per_1k"] - 1.5) < 1e-9
+    # Average input: (2+3)/2 = $2.50/M -> 0.25 cents/1k
+    assert abs(result["input_cents_per_1k"] - 0.25) < 1e-9
+    # Average output: (10+15)/2 = $12.50/M -> 1.25 cents/1k
+    assert abs(result["output_cents_per_1k"] - 1.25) < 1e-9
 
 
 async def test_every_pool_model_has_provider_pricing():

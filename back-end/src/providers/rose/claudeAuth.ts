@@ -89,7 +89,11 @@ function modelRejectsForcedToolChoice(model: string): boolean {
   // Official Claude API IDs are claude-fable-5-1 / claude-mythos-5-1.
   // OpenRouter uses a dot (claude-fable-5.1). Do not match leftover Fable 5.
   const canonical = model.toLowerCase().replace(/\./g, '-');
-  return canonical.includes('claude-fable-5-1') || canonical.includes('claude-mythos-5-1');
+  return (
+    canonical.includes('claude-fable-5-1') ||
+    canonical.includes('claude-mythos-5-1') ||
+    canonical.includes('claude-opus-5-5')
+  );
 }
 
 function downgradeForcedToolChoiceIfUnsupported(
@@ -276,10 +280,10 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
 
   addToolCacheBreakpoint(body);
 
-  // Fable 5.1 / Mythos 5.1 reject forced tool_choice (400). Official API ID
-  // is claude-fable-5-1. Run this before the thinking conflict so a named
-  // required_tool still becomes auto + disable_parallel_tool_use instead of
-  // a bare auto from the thinking fallback.
+  // Fable 5.1 / Mythos 5.1 reject forced tool_choice (400). Opus 5.5 is on
+  // the same list until a credited call proves it accepts type any/tool.
+  // Run this before the thinking conflict so a named required_tool still
+  // becomes auto + disable_parallel_tool_use instead of a bare auto.
   downgradeForcedToolChoiceIfUnsupported(body, opts.poolSpec.claudeAuthModel);
 
   // Anthropic rejects `thinking` together with a forced (`any`/`tool`)

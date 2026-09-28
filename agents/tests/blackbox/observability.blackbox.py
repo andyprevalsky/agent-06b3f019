@@ -48,7 +48,7 @@ def test_prod_llm_context_dump_emits_clickhouse_payload_and_update():
             "explore_agent",
             [{"role": "user", "content": "full repro prompt"}],
             agent_id="agent-1",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             config={"deadline_s": 170},
             tools=[{"name": "web_search"}],
         )
@@ -103,7 +103,7 @@ def test_prod_llm_context_dump_kill_switch():
                 "explore_agent",
                 [{"role": "user", "content": "sensitive prompt"}],
                 agent_id="agent-1",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
             )
 
             assert path is not None
@@ -129,7 +129,7 @@ def test_agent_context_materializes_clickhouse_dump_events():
         "span_id": "span-1",
         "dump_id": "dump-1",
         "call_site": "explore_agent",
-        "model": "rose-labs/rose-1-lite",
+        "model": "rose-labs/rose-1-flash",
         "message_count": 1,
         "messages": [{"role": "user", "content": "prompt"}],
     }
@@ -193,7 +193,7 @@ def test_prod_llm_context_dump_skips_oversize_payload():
             "explore_agent",
             [{"role": "user", "content": "x" * 20_000}],
             agent_id="agent-1",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
         )
 
         # Oversize payloads are skipped, not dumped.

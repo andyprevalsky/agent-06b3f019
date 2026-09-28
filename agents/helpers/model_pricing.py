@@ -49,7 +49,7 @@ def get_default_pricing(model: str) -> Dict[str, float]:
     normalized = model.lower()
     if "rose-1-ultra" in normalized or "rose-ultra" in normalized:
         return {"input_cents_per_1k": 0.125, "output_cents_per_1k": 0.5}
-    if "rose-1-lite" in normalized or "rose-lite" in normalized or "rose-fast" in normalized:
+    if "rose-1-flash" in normalized or "rose-flash" in normalized or "rose-fast" in normalized:
         return {"input_cents_per_1k": 0.05, "output_cents_per_1k": 0.15}
     return {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.3}
 

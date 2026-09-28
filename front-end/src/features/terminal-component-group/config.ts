@@ -70,13 +70,17 @@ export const COST_WARNING_RATIO = 0.8;
 
 /** Model IDs for the Rose racing endpoints — used for the model-selector descriptions. */
 export const ROSE_MODEL_IDS = {
-  lite: 'rose-labs/rose-1-lite',
+  flash: 'rose-labs/rose-1-flash',
+  /** Display alias for the rose-fast speed pool (same id as `flash`). */
+  fast: 'rose-labs/rose-1-flash',
+  /** @deprecated Use `flash`. Kept for older imports/tests. */
+  lite: 'rose-labs/rose-1-flash',
   ultra: 'rose-labs/rose-1-ultra',
 } as const;
 
 /** Static descriptions for the built-in Rose models in the model picker. */
 export const ROSE_MODEL_DESCRIPTIONS: Record<string, string> = {
-  [ROSE_MODEL_IDS.lite]: 'Fast and cost-effective for everyday tasks',
+  [ROSE_MODEL_IDS.flash]: 'Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra',
   [ROSE_MODEL_IDS.ultra]: 'Most capable for complex reasoning',
 };
 

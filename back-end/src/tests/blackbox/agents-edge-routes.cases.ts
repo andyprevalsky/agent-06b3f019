@@ -249,7 +249,7 @@ test('POST /agents — with X-Forwarded-For header (geoip path)', async () => {
       ...apiKeyHeaders(session.user.id),
       'X-Forwarded-For': '8.8.8.8',
     },
-    body: JSON.stringify({ goal: 'Geoip test agent', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Geoip test agent', model: 'rose-1-flash' }),
   });
   // Agent creation should succeed (geoip lookup happens asynchronously)
   assertStatus(res.status, 201, res.data);
@@ -331,7 +331,7 @@ test('POST /agents — no resolvable IP falls back to user delivery address', as
       // Private IP → geoip returns null → delivery-address fallback engages.
       'X-Forwarded-For': '10.0.0.5',
     },
-    body: JSON.stringify({ goal: 'Delivery-address proxy test', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Delivery-address proxy test', model: 'rose-1-flash' }),
   });
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
@@ -356,7 +356,7 @@ test('POST /agents — X-Benchmark-Run key persists isBenchmark; spoof/absent st
   const marked = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': API_KEY },
-    body: JSON.stringify({ goal: 'Benchmark-flagged agent', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Benchmark-flagged agent', model: 'rose-1-flash' }),
   });
   assertStatus(marked.status, 201, marked.data);
   const markedId = (marked.data as { agent_id: string }).agent_id;
@@ -366,7 +366,7 @@ test('POST /agents — X-Benchmark-Run key persists isBenchmark; spoof/absent st
   const spoofed = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': 'true' },
-    body: JSON.stringify({ goal: 'Spoofed benchmark agent', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Spoofed benchmark agent', model: 'rose-1-flash' }),
   });
   assertStatus(spoofed.status, 201, spoofed.data);
   const spoofedId = (spoofed.data as { agent_id: string }).agent_id;
@@ -374,7 +374,7 @@ test('POST /agents — X-Benchmark-Run key persists isBenchmark; spoof/absent st
   const unmarked = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
     headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ goal: 'Regular agent', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Regular agent', model: 'rose-1-flash' }),
   });
   assertStatus(unmarked.status, 201, unmarked.data);
   const unmarkedId = (unmarked.data as { agent_id: string }).agent_id;
@@ -469,7 +469,7 @@ test('POST /agents — with private IP in X-Forwarded-For', async () => {
       ...apiKeyHeaders(session.user.id),
       'X-Forwarded-For': '192.168.1.1',
     },
-    body: JSON.stringify({ goal: 'Private IP test', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'Private IP test', model: 'rose-1-flash' }),
   });
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
@@ -485,7 +485,7 @@ test('POST /agents — with IPv6-mapped IPv4 X-Forwarded-For', async () => {
       ...apiKeyHeaders(session.user.id),
       'X-Forwarded-For': '::ffff:10.0.0.1',
     },
-    body: JSON.stringify({ goal: 'IPv6 mapped test', model: 'rose-1-lite' }),
+    body: JSON.stringify({ goal: 'IPv6 mapped test', model: 'rose-1-flash' }),
   });
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
@@ -509,7 +509,7 @@ test('POST /:id/messages — missing message field → 400', async () => {
 test('POST /agents — with different model names (model pricing)', async () => {
   const session = await createAnonymousSession('model-pricing');
   // Create agents with different models to exercise modelPricing getModelPricing
-  for (const model of ['rose-1-lite', 'rose-1-ultra']) {
+  for (const model of ['rose-1-flash', 'rose-1-ultra']) {
     const res = await request(`${BASE_URL}/api/agents`, {
       method: 'POST',
       headers: apiKeyHeaders(session.user.id),

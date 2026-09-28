@@ -214,7 +214,7 @@ def _read_backend_api_key() -> str | None:
 
 async def spawn_agent(
     goal: str,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     timeout: int = DEFAULT_TIMEOUT,
     task_queue: Optional[str] = None,
     start_phase: Optional[str] = None,
@@ -224,7 +224,7 @@ async def spawn_agent(
 
     Args:
         goal: The goal/prompt for the agent
-        model: The model to use (default: rose-1-lite)
+        model: The model to use (default: rose-1-flash)
         timeout: Timeout in seconds (not used here, just for reference)
         task_queue: The Temporal task queue to use
         start_phase: Optional "plan" or "execute" workflow phase to bypass chat mode
@@ -1252,7 +1252,7 @@ async def run_e2e_test(
     name: str,
     goal: str,
     timeout: int = DEFAULT_TIMEOUT,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     expected_patterns: Optional[list[str]] = None,
     expected_tools: Optional[list[str]] = None,
     expected_credential_ref_kinds: Optional[list[str]] = None,

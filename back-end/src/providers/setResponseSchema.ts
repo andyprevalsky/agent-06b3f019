@@ -1,6 +1,6 @@
 /**
  * Async schema generation for agents with exponential backoff retry.
- * Generates structured response schemas from goals using Rose Lite.
+ * Generates structured response schemas from goals using Rose Flash.
  *
  * Why this matters: the downstream verifier scores 1.0 IFF every field in
  * this schema can be populated from grounded tool-result evidence. Generic
@@ -406,7 +406,7 @@ Given a goal, return JSON with:
 Output JSON only. Do not include prose outside the JSON envelope.`;
 
 /**
- * Parameters for one streaming attempt against Rose Lite.
+ * Parameters for one streaming attempt against Rose Flash.
  *
  * Pulled out so the max_tokens escalation retry (rule E9 — mirror
  * agents/helpers/llm.py:1276-1313) can re-call with a larger budget
@@ -465,7 +465,7 @@ function isRetryableSchemaError(error: unknown): boolean {
 }
 
 /**
- * Drain the Rose Lite stream once and produce a parsed schema.
+ * Drain the Rose Flash stream once and produce a parsed schema.
  *
  * Returns the parsed schema, token usage, and the final finish_reason so
  * the caller can decide whether to escalate max_tokens.
@@ -476,7 +476,7 @@ function isRetryableSchemaError(error: unknown): boolean {
  */
 async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<StreamAttemptResult> {
   const stream = await createStreamingCompletion({
-    model: 'rose-labs/rose-1-lite',
+    model: 'rose-labs/rose-1-flash',
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
       { role: 'user', content: `Goal: ${opts.goal}` },
@@ -547,7 +547,7 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
 }
 
 /**
- * Generate a structured response schema from a goal using Rose Lite.
+ * Generate a structured response schema from a goal using Rose Flash.
  *
  * Two-tier retry:
  *   1. INNER (max_tokens escalation): if the first stream truncates with
@@ -604,7 +604,7 @@ export async function generateResponseSchema(
       }
 
       const durationMs = Date.now() - startTime;
-      log.info('Generated response schema via Rose Lite', {
+      log.info('Generated response schema via Rose Flash', {
         goal: goal.substring(0, 50),
         fieldCount: result.parsed.fields.length,
         fieldNames: result.parsed.fields.map((f) => f.name),
@@ -681,7 +681,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
           return;
         }
 
-        // Generate schema using Rose Lite
+        // Generate schema using Rose Flash
         const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal);
 
         // Update agent with schema and token usage

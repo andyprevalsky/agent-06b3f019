@@ -47,6 +47,10 @@ from providers.rose.browser_use import (
 from tools.prompts import attempt_completion_prompt
 from utils.prompts import VERIFICATION_RULES
 
+# Browser-use is a rose-fast pool. Tests that want OpenRouter must not inherit
+# a live CEREBRAS_API_KEY; Cerebras-specific cases set it themselves.
+os.environ.pop("CEREBRAS_API_KEY", None)
+
 
 # =====================================================================
 # Pool registry
@@ -57,13 +61,12 @@ def test_browser_use_pool_registered():
     assert "rose-1-browser-use" in POOL_REGISTRY
     spec = get_pool("rose-1-browser-use")
     assert spec.name == "rose-1-browser-use"
-    assert spec.claude_auth_model == "claude-fable-5-1"
-    assert spec.gpt_auth_model == "gpt-5.6-sol"
-    # Waterfall is GPT-5.6 Sol → Kimi K3. Opus 4.8 was dropped: it was the
-    # priciest layer while scoring below sol on all three AA indices, and the
-    # two survivors come from different vendors so one provider outage cannot
-    # drain the whole waterfall.
-    assert spec.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert spec.claude_auth_model == "claude-sonnet-5"
+    assert spec.gpt_auth_model == "gpt-5.6-luna"
+    assert spec.waterfall == ("qwen/qwen3.8-27b", "google/gemini-3.8-flash")
+    assert spec.waterfall_reasoning_effort == "low"
+    assert spec.direct_auth_enabled is False
+    assert spec.cerebras_model == "qwen-3.8-27b"
     assert not any(m.startswith("anthropic/") for m in spec.waterfall)
     # Legacy bu/yutori models removed.
     assert all("yutori" not in m and "browser-use" not in m for m in spec.waterfall)
@@ -1863,134 +1866,147 @@ async def test_complete_browser_use_preserves_printable_native_tool_batch():
     }
 
 
-async def test_complete_browser_use_claude_path_succeeds():
-    """Valid claudeAuth receives native tools and returns a native tool call."""
-    captured_bodies: list[dict] = []
-
-    def handler(req):
-        url = str(req.url)
-        if "api.anthropic.com" in url:
-            captured_bodies.append(json.loads(req.content.decode()))
-            return httpx.Response(
-                200,
-                text=_anthropic_tool_sse("click", '{"index": 3}'),
-                headers={"Content-Type": "text/event-stream"},
-            )
-        return httpx.Response(500, text="should not hit waterfall")
-
-    set_mock_handler(handler)
-    client = RoseClient(openrouter_key="ork-x")
-
-    result = await client.complete_browser_use(
-        task="click submit",
-        browser_state=_browser_state(),
-        action_history=[],
-        available_actions=["click"],
-        include_screenshot=False,
-        claude_auth=claude_auth_from_token("good-token"),
-        call_site="test-bu-claude",
-    )
-
-    assert result["mode"] == "claude"
-    assert result["action"]["action"] == "click"
-    assert result["claude_token_error"] is None
-    assert captured_bodies
-    body = captured_bodies[0]
-    assert body["tool_choice"]["type"] == "auto"
-    assert body["tools"][0]["name"] == "click"
-    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
-
-
-async def test_complete_browser_use_gpt_path_succeeds():
-    """Valid gptAuth -> Codex Responses returns a native tool call -> mode=gpt."""
-    sse_lines = []
-    sse_lines += _ev(
-        "response.output_item.done",
-        {
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "call_id": "call_click",
-                "name": "click",
-                "arguments": '{"index": 3}',
+async def test_complete_browser_use_cerebras_path_succeeds():
+    """rose-fast browser-use skips Claude/GPT auth and hits Cerebras Qwen."""
+    sse_body = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
             },
-        },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
     )
-    sse_lines += _ev(
-        "response.completed",
-        {
-            "type": "response.completed",
-            "response": {
-                "usage": {
-                    "input_tokens": 12,
-                    "output_tokens": 8,
-                    "total_tokens": 20,
-                }
-            },
-        },
-    )
-    sse_body = "\n".join(sse_lines)
-
     captured: list[str] = []
     captured_bodies: list[dict] = []
 
     def handler(req):
         url = str(req.url)
         captured.append(url)
-        if "chatgpt.com/backend-api/codex/responses" in url:
+        if "api.cerebras.ai" in url:
             captured_bodies.append(json.loads(req.content.decode()))
+            return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+        if "api.anthropic.com" in url:
+            return httpx.Response(500, text="auth must be skipped")
+        return httpx.Response(500, text="should not hit waterfall")
+
+    set_mock_handler(handler)
+    client = RoseClient(openrouter_key="ork-x")
+
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click"],
+            include_screenshot=False,
+            claude_auth=claude_auth_from_token("good-token"),
+            gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            call_site="test-bu-cerebras",
+        )
+
+    assert result["mode"] == "waterfall"
+    assert result["actual_model"] == "qwen-3.8-27b"
+    assert result["pool_name"] == "cerebras-direct"
+    assert result["action"]["action"] == "click"
+    assert result["claude_token_error"] is None
+    assert result["gpt_token_error"] is None
+    assert any("api.cerebras.ai" in u for u in captured)
+    assert all("api.anthropic.com" not in u for u in captured)
+    assert all("openrouter.ai" not in u for u in captured)
+    assert captured_bodies
+    body = captured_bodies[0]
+    assert body["model"] == "qwen-3.8-27b"
+    assert body["reasoning_effort"] == "high"
+    assert body["tool_choice"] == "auto"
+    assert body["tools"][0]["function"]["name"] == "click"
+    assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
+
+
+async def test_complete_browser_use_dumps_cerebras_context():
+    """Browser-use dumps the Cerebras hop, not a skipped GPT/Claude route."""
+    sse_body = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
+    )
+    captured: list[str] = []
+
+    def handler(req):
+        url = str(req.url)
+        captured.append(url)
+        if "api.cerebras.ai" in url:
             return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="should not hit waterfall")
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
     dump_root = ROOT.parent / ".llm-dumps" / "unbound"
-    for path in dump_root.glob("*test-bu-gpt.json"):
+    for path in dump_root.glob("*test-bu-cerebras-dump.json"):
         path.unlink()
 
-    result = await client.complete_browser_use(
-        task="click submit",
-        browser_state=_browser_state(),
-        action_history=[],
-        available_actions=["click", "click_coordinates"],
-        include_screenshot=False,
-        gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
-        call_site="test-bu-gpt",
-        dump_extra={
-            "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
-            "iteration": 7,
-        },
-    )
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click", "click_coordinates"],
+            include_screenshot=False,
+            gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            call_site="test-bu-cerebras-dump",
+            dump_extra={
+                "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
+                "iteration": 7,
+            },
+        )
 
-    assert result["mode"] == "gpt"
-    assert result["actual_model"] == "gpt-5.6-sol-gpt"
+    assert result["mode"] == "waterfall"
+    assert result["actual_model"] == "qwen-3.8-27b"
     assert result["action"]["action"] == "click"
     assert result["gpt_token_error"] is None
     assert result["usage"]["total_tokens"] == 20
-    assert any("chatgpt.com/backend-api/codex/responses" in u for u in captured)
+    assert any("api.cerebras.ai" in u for u in captured)
+    assert all("chatgpt.com" not in u for u in captured)
     assert all("openrouter.ai" not in u for u in captured)
-    assert captured_bodies
-    body = captured_bodies[0]
-    assert body["tool_choice"] == "auto"
-    assert body["tools"][0]["name"] == "click"
-    assert [tool["name"] for tool in body["tools"]] == ["click", "click_coordinates"]
-    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
-    assert "# Available Actions" not in body["instructions"]
 
-    dumps = sorted(dump_root.glob("*test-bu-gpt.json"))
+    dumps = sorted(dump_root.glob("*test-bu-cerebras-dump.json"))
     assert dumps, "complete_browser_use should dump exact LLM context"
     payload = json.loads(dumps[-1].read_text())
-    assert payload["model"] == "gpt-5.6-sol"
+    assert payload["model"] == "qwen-3.8-27b"
     assert payload["message_count"] == 2
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["config"]["actual_model"] == "gpt-5.6-sol"
-    assert payload["config"]["actual_model_raw"] == "gpt-5.6-sol-gpt"
-    assert payload["config"]["mode"] == "gpt"
-    assert payload["config"]["effective_params"]["model"] == "gpt-5.6-sol"
-    assert payload["config"]["effective_params"]["temperature"] is None
-    assert payload["config"]["effective_params"]["max_tokens"] is None
-    assert payload["config"]["requested_params"]["temperature"] == 1.0
-    assert payload["config"]["requested_params"]["max_tokens"] == 16000
+    assert payload["config"]["actual_model"] == "qwen-3.8-27b"
+    assert payload["config"]["mode"] == "waterfall"
     assert payload["tools"][0]["name"] == "click"
     assert [tool["name"] for tool in payload["tools"]] == ["click", "click_coordinates"]
     assert payload["config"]["tool_choice"] == "auto"
@@ -2000,27 +2016,28 @@ async def test_complete_browser_use_gpt_path_succeeds():
 
 async def test_complete_browser_use_bypasses_fast_cache_context():
     """Browser-use LLM calls must not read or write provider fast-cache."""
-    sse_lines = []
-    sse_lines += _ev(
-        "response.output_item.done",
-        {
-            "type": "response.output_item.done",
-            "item": {
-                "type": "function_call",
-                "call_id": "call_click",
-                "name": "click",
-                "arguments": '{"index": 3}',
+    sse_body = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
             },
-        },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
     )
-    sse_lines += _ev(
-        "response.completed",
-        {
-            "type": "response.completed",
-            "response": {"usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}},
-        },
-    )
-    sse_body = "\n".join(sse_lines)
     captured: list[str] = []
 
     def handler(req):
@@ -2028,7 +2045,7 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
         captured.append(url)
         if "fast-cache" in url:
             return httpx.Response(500, text="browser-use should bypass fast-cache")
-        if "chatgpt.com/backend-api/codex/responses" in url:
+        if "api.cerebras.ai" in url:
             return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
         return httpx.Response(500, text="unexpected endpoint")
 
@@ -2036,102 +2053,116 @@ async def test_complete_browser_use_bypasses_fast_cache_context():
     token = set_context(FastCacheContext(enabled=True, goal="click submit", write_enabled=True))
     try:
         client = RoseClient(openrouter_key="ork-x")
-        result = await client.complete_browser_use(
-            task="click submit",
-            browser_state=_browser_state(),
-            action_history=[],
-            available_actions=["click", "click_coordinates"],
-            include_screenshot=False,
-            gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
-            agent_id="agent-fast-cache-bypass",
-            call_site="browser_use_step_1",
-        )
+        with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
+            result = await client.complete_browser_use(
+                task="click submit",
+                browser_state=_browser_state(),
+                action_history=[],
+                available_actions=["click", "click_coordinates"],
+                include_screenshot=False,
+                gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+                agent_id="agent-fast-cache-bypass",
+                call_site="browser_use_step_1",
+            )
     finally:
         reset_context(token)
 
     assert result["action"]["action"] == "click"
     assert not any("fast-cache" in url for url in captured)
-    assert any("chatgpt.com/backend-api/codex/responses" in url for url in captured)
+    assert any("api.cerebras.ai" in url for url in captured)
 
 
-async def test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic_api_key():
-    """GPT rate-limit -> Anthropic API-key fallback still receives browser action tools."""
-    import providers.rose.client as rc
-
-    rc._reset_anthropic_api_key_cooldown_cache()
+async def test_complete_browser_use_cerebras_failure_preserves_tools_on_openrouter():
+    """Cerebras failure -> OpenRouter still receives browser action tools."""
+    sse_body = _openai_sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_click",
+                                    "type": "function",
+                                    "function": {"name": "click", "arguments": '{"index": 3}'},
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}},
+        ]
+    )
     captured: list[str] = []
-    anthropic_bodies: list[dict] = []
+    openrouter_bodies: list[dict] = []
 
     def handler(req):
         url = str(req.url)
-        if req.url.path.endswith("/anthropic-key/cooldown"):
-            return httpx.Response(200, json={"onCooldown": False})
         captured.append(url)
-        if "chatgpt.com/backend-api/codex/responses" in url:
-            return httpx.Response(
-                429,
-                json={
-                    "error": {
-                        "type": "usage_limit_reached",
-                        "message": "The usage limit has been reached",
-                    }
-                },
-            )
-        if "api.anthropic.com" in url:
-            anthropic_bodies.append(json.loads(req.content.decode()))
-            return httpx.Response(
-                200,
-                text=_anthropic_tool_sse("click", '{"index": 3}'),
-                headers={"Content-Type": "text/event-stream"},
-            )
-        return httpx.Response(500, text="should not hit openrouter")
+        if "api.cerebras.ai" in url:
+            return httpx.Response(503, text="cerebras down")
+        if "openrouter.ai" in url:
+            openrouter_bodies.append(json.loads(req.content.decode()))
+            return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+        if "api.anthropic.com" in url or "chatgpt.com" in url:
+            return httpx.Response(500, text="auth must be skipped")
+        return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    try:
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}):
-            result = await client.complete_browser_use(
-                task="click submit",
-                browser_state=_browser_state(),
-                action_history=[],
-                available_actions=["click", "goto"],
-                include_screenshot=False,
-                gpt_auth=gpt_auth_from_token("rate-limited-gpt-token", "acct_123"),
-                call_site="test-bu-gpt-rate-limit-api-key-tools",
-            )
-    finally:
-        rc._reset_anthropic_api_key_cooldown_cache()
+    with patch.dict(
+        os.environ,
+        {"CEREBRAS_API_KEY": "csk-test", "ANTHROPIC_API_KEY": "sk-ant-test", "GPT_API_KEY": "sk-proj-test"},
+        clear=False,
+    ):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click", "goto"],
+            include_screenshot=False,
+            gpt_auth=gpt_auth_from_token("rate-limited-gpt-token", "acct_123"),
+            call_site="test-bu-cerebras-fallthrough-tools",
+        )
 
     assert result["mode"] == "waterfall"
-    assert result["actual_model"] == "claude-fable-5-1-anthropic"
-    assert result["gpt_token_error"] == "rate_limit"
+    assert result["actual_model"] == "qwen/qwen3.8-27b"
     assert result["action"]["action"] == "click"
     assert result["action"]["index"] == 3
-    assert any("chatgpt.com/backend-api/codex/responses" in u for u in captured)
-    assert any("api.anthropic.com" in u for u in captured)
-    assert all("openrouter.ai" not in u for u in captured)
-    assert anthropic_bodies
-    body = anthropic_bodies[0]
-    assert body["tool_choice"]["type"] == "auto"
-    assert [tool["name"] for tool in body["tools"]] == ["click", "goto"]
-    assert body["tools"][0]["description"] == BROWSER_USE_TOOLS["click"]["description"]
+    assert any("api.cerebras.ai" in u for u in captured)
+    assert any("openrouter.ai" in u for u in captured)
+    assert all("api.anthropic.com" not in u for u in captured)
+    assert all("chatgpt.com" not in u for u in captured)
+    assert openrouter_bodies
+    body = openrouter_bodies[0]
+    assert body["model"] == "qwen/qwen3.8-27b"
+    assert body["tool_choice"] == "auto"
+    assert [tool["function"]["name"] for tool in body["tools"]] == ["click", "goto"]
+    assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]
 
 
-async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
-    """Anthropic 401 → fall through to openrouter; claude_token_error=auth_error."""
+async def test_complete_browser_use_auth_tokens_are_ignored():
+    """Claude/GPT tokens on rose-fast browser-use never open those providers."""
     sse_body = _openai_sse(
         [
             {"choices": [{"delta": {"content": _ACTION_TEXT}, "finish_reason": "stop"}]},
             {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
         ]
     )
+    captured: list[str] = []
 
     def handler(req):
         url = str(req.url)
-        if "api.anthropic.com" in url:
+        captured.append(url)
+        if "api.anthropic.com" in url or "chatgpt.com" in url:
             return httpx.Response(401, json={"error": {"message": "expired"}})
-        return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+        if "openrouter.ai" in url:
+            return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
@@ -2143,12 +2174,17 @@ async def test_complete_browser_use_claude_401_falls_through_to_waterfall():
         available_actions=["click"],
         include_screenshot=False,
         claude_auth=claude_auth_from_token("expired-token"),
-        call_site="test-bu-fallthrough",
+        gpt_auth=gpt_auth_from_token("expired-gpt", "acct"),
+        call_site="test-bu-auth-ignored",
     )
 
     assert result["mode"] == "waterfall"
-    assert result["claude_token_error"] == "auth_error"
+    assert result["claude_token_error"] is None
+    assert result["gpt_token_error"] is None
     assert result["action"]["action"] == "click"
+    assert any("openrouter.ai" in u for u in captured)
+    assert all("api.anthropic.com" not in u for u in captured)
+    assert all("chatgpt.com" not in u for u in captured)
 
 
 # =====================================================================
@@ -2324,17 +2360,17 @@ async def run_all_tests():
         "complete_browser_use_printable_native_tool_batch",
         test_complete_browser_use_preserves_printable_native_tool_batch,
     )
-    await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)
-    await r.record_async("complete_browser_use_gpt_path", test_complete_browser_use_gpt_path_succeeds)
+    await r.record_async("complete_browser_use_cerebras_path", test_complete_browser_use_cerebras_path_succeeds)
+    await r.record_async("complete_browser_use_dumps_cerebras_context", test_complete_browser_use_dumps_cerebras_context)
     await r.record_async(
         "complete_browser_use_bypasses_fast_cache", test_complete_browser_use_bypasses_fast_cache_context
     )
     await r.record_async(
-        "complete_browser_use_gpt_rate_limit_api_key_tools",
-        test_complete_browser_use_gpt_rate_limit_preserves_tools_for_anthropic_api_key,
+        "complete_browser_use_cerebras_failure_preserves_tools",
+        test_complete_browser_use_cerebras_failure_preserves_tools_on_openrouter,
     )
     await r.record_async(
-        "complete_browser_use_claude_401_fallthrough", test_complete_browser_use_claude_401_falls_through_to_waterfall
+        "complete_browser_use_auth_tokens_ignored", test_complete_browser_use_auth_tokens_are_ignored
     )
 
     await r.record_async("execute_read_browser_state", test_execute_read_browser_state_returns_formatted_snapshot)

@@ -144,7 +144,7 @@ def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
     # and no Anthropic anywhere (guarded by the autouse fixture).
     assert len(fake_client.calls) == 1
     call = fake_client.calls[0]
-    assert call["pool"] == "rose-1-lite"
+    assert call["pool"] == "rose-1-flash"
     assert call["messages"][0] == {"role": "system", "content": "SYS"}
     assert call["messages"][1] == {"role": "user", "content": "go"}
     # The rotation-capable context is handed straight to the client — the provider does
@@ -156,7 +156,7 @@ def test_complete_maps_text_and_usage_via_rose_only(monkeypatch):
 def test_config_model_defaults_to_pool_for_metering():
     provider = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()))
     # WorldModel.step reads provider.config.model for metering.
-    assert provider.config.model == "rose-1-lite"
+    assert provider.config.model == "rose-1-flash"
 
     labeled = RoseWMHProvider(client=_FakeRoseClient(RoseResponse()), model_label="claude-haiku")
     assert labeled.config.model == "claude-haiku"

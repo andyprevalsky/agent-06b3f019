@@ -166,7 +166,7 @@ async def _run_single_iteration(
             user_id="user-test",
             system_prompt=mock_system_prompt,
             verifier_prompt_generator=mock_verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
             initial_context=ctx,
             is_inside_temporal_activity=is_inside_temporal_activity,
@@ -346,7 +346,7 @@ async def test_rejected_completion_continues_with_stable_schema():
             user_id="user-test",
             system_prompt=prompt,
             verifier_prompt_generator=prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["web_search", "attempt_completion_with_result"],
             initial_context=[{"role": "USER", "text": "Research it", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
@@ -1029,7 +1029,7 @@ async def test_compress_context_rejects_non_shrinking_result():
     async def mock_execute_activity(fn, args=None, **kwargs):
         return {"context": grown, "usage": {}, "success": True}
 
-    result_ctx, success = await _compress_context(mock_execute_activity, context, "rose-lite")
+    result_ctx, success = await _compress_context(mock_execute_activity, context, "rose-flash")
 
     assert success is False
     assert result_ctx is context
@@ -1061,7 +1061,7 @@ async def test_compress_context_returns_new_context_on_success():
     result_ctx, success = await _compress_context(
         mock_execute_activity,
         context,
-        "rose-lite",
+        "rose-flash",
         on_tokens=on_tokens,
     )
 
@@ -1070,7 +1070,7 @@ async def test_compress_context_returns_new_context_on_success():
     assert captured_args[0][1] == [
         context,
         len(context),
-        "rose-lite",
+        "rose-flash",
         None,
         None,
         None,
@@ -1102,7 +1102,7 @@ async def test_compress_context_forwards_compute_token_context():
     await _compress_context(
         mock_execute_activity,
         [{"role": "USER", "text": "x"}],
-        "rose-lite",
+        "rose-flash",
         agent_id="agent-1",
         user_id="user-1",
         gpt_token="gpt-token",
@@ -1114,7 +1114,7 @@ async def test_compress_context_forwards_compute_token_context():
     assert captured_args[0][1] == [
         [{"role": "USER", "text": "x"}],
         1,
-        "rose-lite",
+        "rose-flash",
         None,
         None,
         None,
@@ -1196,7 +1196,7 @@ async def test_run_agent_reuses_rotated_compute_token_next_iteration():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["web_search", "attempt_completion"],
             initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
@@ -1265,7 +1265,7 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["attempt_completion"],
             initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
@@ -1326,7 +1326,7 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["attempt_completion"],
             initial_context=[{"role": "USER", "text": "Find updates", "timestamp": "2024-01-01T00:00:00Z"}],
             is_inside_temporal_activity=True,
@@ -1390,7 +1390,7 @@ async def test_compress_context_failure_preserves_original():
         return {"context": None, "usage": {}, "success": False, "error": "boom"}
 
     original = [{"role": "USER", "text": "x"}]
-    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-lite")
+    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-flash")
     assert success is False
     assert result_ctx is original
 
@@ -1403,7 +1403,7 @@ async def test_compress_context_activity_exception_preserves_original():
         raise RuntimeError("temporal exploded")
 
     original = [{"role": "USER", "text": "x"}]
-    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-lite")
+    result_ctx, success = await _compress_context(mock_execute_activity, original, "rose-flash")
     assert success is False
     assert result_ctx is original
 
@@ -1445,7 +1445,7 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["attempt_completion"],
             initial_context=initial_context,
             is_inside_temporal_activity=True,
@@ -1497,7 +1497,7 @@ async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
             user_id="user-test",
             system_prompt=system_prompt,
             verifier_prompt_generator=verifier_prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["attempt_completion"],
             initial_context=initial_context,
             is_inside_temporal_activity=True,
@@ -1537,7 +1537,7 @@ async def test_run_verifier_posts_in_progress_and_finished():
         execute_activity=execute_activity,
         context=[],
         verifier_prompt_generator=verifier_prompt,
-        model="rose-lite",
+        model="rose-flash",
         agent_id="agent-1",
         task_id=None,
         post_message=post_message,
@@ -1583,7 +1583,7 @@ async def test_run_verifier_dynamic_schema_getter():
         execute_activity=execute_activity,
         context=[],
         verifier_prompt_generator=verifier_prompt,
-        model="rose-lite",
+        model="rose-flash",
         agent_id="a",
         task_id="t",
         post_message=None,
@@ -1677,7 +1677,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
             user_id="user-test",
             system_prompt=prompt,
             verifier_prompt_generator=prompt,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tools=["spawn_agent", "attempt_completion"],
             initial_context=context,
             is_inside_temporal_activity=False,
@@ -2218,7 +2218,7 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
                 user_id="user-test",
                 system_prompt=mock_system_prompt,
                 verifier_prompt_generator=mock_system_prompt,
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 tools=["attempt_completion"],
                 initial_context=[{"role": "USER", "text": "hi", "timestamp": "2024-01-01T00:00:00Z"}],
                 is_inside_temporal_activity=True,

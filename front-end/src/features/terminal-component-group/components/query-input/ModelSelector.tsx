@@ -46,7 +46,7 @@ export function ModelSelector({
     ? `${selectedInfo.provider}/${selectedInfo.name}`
     : selectedModel;
   const isRoseModel =
-    selectedModel === ROSE_MODEL_IDS.lite || selectedModel === ROSE_MODEL_IDS.ultra;
+    selectedModel === ROSE_MODEL_IDS.flash || selectedModel === ROSE_MODEL_IDS.ultra;
 
   return (
     <>
@@ -123,8 +123,8 @@ function ModelList({ availableModels, selectedModel, onPick }: ModelListProps) {
 }
 
 const ROSE_TOOLTIP_BODY: Record<string, string> = {
-  [ROSE_MODEL_IDS.lite]:
-    'Rose-1-Fast is a mixed-model approach from the best workhorse models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability.',
+  [ROSE_MODEL_IDS.flash]:
+    'Rose-fast runs execute and browser on Cerebras Qwen 3.8 27B, then OpenRouter Qwen 3.8 27B and Gemini 3.8 Flash. Planner always uses Rose-1-Ultra (Opus 5.5). Skips Claude and GPT auth tokens.',
   [ROSE_MODEL_IDS.ultra]:
     'Rose-1-Ultra is a mixed-model approach from the smartest models of OpenAi, Anthropic, Google, and more. Our mixed-model approach outperforms single-model approaches in terms of latency, accuracy, cost & reliability.',
 };

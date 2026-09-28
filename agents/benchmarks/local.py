@@ -52,13 +52,32 @@ def selected_tasks_need_shared_fast_cache(task_names: Sequence[str]) -> bool:
 
 
 def _dotenv_fast_mode_cache_database_url() -> str:
+    """Read the shared July cache URL the same way scripts/run.sh does.
+
+    Prefer an explicit FAST_MODE_CACHE_DATABASE_URL, then fall back to the
+    prod DATABASE_URL in back-end/.env. Isolated mass-agent smokes require
+    that shared cache; requiring a separately named key silently failed
+    every cloud VM that only has DATABASE_URL.
+    """
     env_path = REPO_ROOT / "back-end" / ".env"
     if not env_path.is_file():
         return ""
-    for line in env_path.read_text().splitlines():
-        if line.startswith("FAST_MODE_CACHE_DATABASE_URL="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
+    found: dict[str, str] = {}
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DATABASE_URL"}:
+            continue
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (
+            value.startswith("'") and value.endswith("'")
+        ):
+            value = value[1:-1]
+        found[key] = value
+    return found.get("FAST_MODE_CACHE_DATABASE_URL") or found.get("DATABASE_URL") or ""
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path

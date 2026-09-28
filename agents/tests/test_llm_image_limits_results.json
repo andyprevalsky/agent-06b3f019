@@ -1,6 +1,6 @@
 [
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 0,
     "model_name": "moonshotai/kimi-k2-0905",
     "file_size_mb": 1,
@@ -16,7 +16,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 1,
@@ -52,7 +52,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 2,
@@ -88,7 +88,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 3,
@@ -124,7 +124,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 4,
@@ -160,7 +160,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 5,
@@ -196,7 +196,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 10,
@@ -232,7 +232,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 15,
@@ -268,7 +268,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 1,
     "model_name": "openai/gpt-5.2",
     "file_size_mb": 20,
@@ -278,7 +278,7 @@
     "error": "Request timed out after 20s"
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 1,
@@ -314,7 +314,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 2,
@@ -350,7 +350,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 3,
@@ -386,7 +386,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 4,
@@ -422,7 +422,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 5,
@@ -458,7 +458,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 10,
@@ -494,7 +494,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 15,
@@ -530,7 +530,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 2,
     "model_name": "google/gemini-2.5-flash",
     "file_size_mb": 20,
@@ -540,7 +540,7 @@
     "error": "Request timed out after 20s"
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 3,
     "model_name": "anthropic/claude-haiku-4.5",
     "file_size_mb": 1,
@@ -577,7 +577,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 3,
     "model_name": "anthropic/claude-haiku-4.5",
     "file_size_mb": 2,
@@ -614,7 +614,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 3,
     "model_name": "anthropic/claude-haiku-4.5",
     "file_size_mb": 3,
@@ -651,7 +651,7 @@
     }
   },
   {
-    "pool": "rose-lite",
+    "pool": "rose-flash",
     "model_seed": 3,
     "model_name": "anthropic/claude-haiku-4.5",
     "file_size_mb": 4,

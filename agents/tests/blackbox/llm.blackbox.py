@@ -16,6 +16,9 @@ from _test_utils import (
     teardown_mock,
 )
 
+# rose-fast hits Cerebras first when this is set; auth-path tests use ultra.
+os.environ.pop("CEREBRAS_API_KEY", None)
+
 
 def test_prepare_schema_for_openai():
     """prepare_schema_for_openai returns strict OpenAI-ready JSON schema."""
@@ -1929,7 +1932,7 @@ async def test_set_response_schema_activity_success():
     assert result["usage"]["total_tokens"] == 150
 
     assert rose_calls
-    assert rose_calls[0]["pool"] == "rose-1-lite"
+    assert rose_calls[0]["pool"] == "rose-1-flash"
     assert rose_calls[0]["call_site"] == "response_schema"
     assert rose_calls[0]["response_model"].__name__ == "_GeneratedResponseSchemaWithTitle"
     assert "SAME JSON response" in rose_calls[0]["messages"][0]["content"]
@@ -2113,7 +2116,7 @@ async def test_codex_responses_body_has_input_for_system_only_context():
     from providers.rose.pools import get_pool
 
     body = build_codex_responses_body(
-        pool_spec=get_pool("rose-1-lite"),
+        pool_spec=get_pool("rose-1-flash"),
         messages=[{"role": "system", "content": "System instructions only"}],
         request_id="req-1",
     )
@@ -2226,7 +2229,7 @@ async def test_call_llm_rose_path():
 
             result = await call_llm(
                 messages=[{"role": "user", "content": "hi"}],
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-ultra",
                 call_site="test",
             )
     finally:
@@ -2237,7 +2240,7 @@ async def test_call_llm_rose_path():
     assert result["usage"]["prompt_tokens"] == 10
     assert result["usage"]["completion_tokens"] == 20
     assert result["usage"]["total_tokens"] == 30
-    assert result["usage"]["actual_model"] == "claude-sonnet-5-anthropic"
+    assert result["usage"]["actual_model"] == "claude-opus-5-5-anthropic"
 
 
 async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
@@ -2261,7 +2264,7 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
                 {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "q"},
             ],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             response_format={"type": "json_object"},
             claude_token="ct-123",
             skip_cache_write=True,
@@ -2274,7 +2277,7 @@ async def test_call_llm_rose_with_claude_token_and_skip_cache_write():
     call = anthropic_calls[0]
     assert any(k.lower() == "authorization" for k in call["requestHeaders"])
     body = json.loads(call["requestBody"])
-    assert body["model"] == "claude-sonnet-5"
+    assert body["model"] == "claude-opus-5-5"
     assert body["stream"] is True
     assert isinstance(body["system"], list)
     # skip_cache_write=True keeps system cache_control for reads but strips message breakpoint
@@ -2314,7 +2317,7 @@ async def test_call_llm_rose_response_model_uses_output_config():
     with patch("temporalio.activity.heartbeat"):
         result = await call_llm(
             messages=[{"role": "user", "content": "return result"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             response_model=SimpleResult,
             claude_token="ct-123",
             call_site="test-submit-model",
@@ -2995,7 +2998,7 @@ async def test_call_llm_structured_streaming_happy_path():
 
     response, usage, detected = await call_llm_structured_streaming(
         messages=[{"role": "user", "content": "hi"}],
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
         temperature=0.7,
         max_tokens=512,
         response_model=AgentAction,
@@ -3012,9 +3015,9 @@ async def test_call_llm_structured_streaming_happy_path():
     assert usage["completion_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
-    # Waterfall path uses the first model in rose-1-lite's fallback list.
-    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
-    assert usage["pool_name"] == "rose-1-lite"
+    # Waterfall path uses the first model in rose-1-flash's fallback list.
+    assert usage["actual_model"] == get_pool("rose-1-flash").waterfall[0]
+    assert usage["pool_name"] == "rose-1-flash"
     assert usage["cancelled"] is False
     assert detected == []
 
@@ -3058,7 +3061,7 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
 
     response, _usage, _detected = await call_llm_structured_streaming(
         messages=[{"role": "user", "content": "hi"}],
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
         temperature=0.7,
         max_tokens=512,
         response_model=AgentAction,
@@ -3142,7 +3145,7 @@ async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers(
 
     response, _usage, _detected = await call_llm_structured_streaming(
         messages=[{"role": "user", "content": "when is the meeting?"}],
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
         temperature=0.7,
         max_tokens=512,
         response_model=AgentAction,
@@ -3176,7 +3179,7 @@ async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
         captured_messages.append(json.loads(json.dumps(kwargs.get("messages") or [])))
         yield StreamChunk(
             kind="metadata",
-            data={"actual_model": "claude-sonnet-4-6-claude", "pool_name": "rose-1-lite", "request_id": "r1"},
+            data={"actual_model": "claude-sonnet-4-6-claude", "pool_name": "rose-1-flash", "request_id": "r1"},
         )
         if calls["n"] == 1:
             # `query` is required by the web_search schema — this fails validation.
@@ -3317,8 +3320,8 @@ async def test_call_llm_structured_streaming_model_detected_callback():
         call_site="test",
     )
 
-    # No claude_token → routes through waterfall → first model from rose-1-lite.
-    assert seen_models == [get_pool("rose-1-lite").waterfall[0]]
+    # No claude_token → routes through waterfall → first model from rose-1-flash.
+    assert seen_models == [get_pool("rose-1-flash").waterfall[0]]
 
 
 async def test_call_llm_verifier_streaming_parses_score():
@@ -3352,9 +3355,9 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert result["score"] == 0.75
     assert result["reasoning"] == "looks good"
     assert usage["prompt_tokens"] == 100
-    # Waterfall path → first model from rose-1-lite.
-    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
-    assert usage["pool_name"] == "rose-1-lite"
+    # Waterfall path → first model from rose-1-flash.
+    assert usage["actual_model"] == get_pool("rose-1-flash").waterfall[0]
+    assert usage["pool_name"] == "rose-1-flash"
 
 
 async def test_call_llm_verifier_uses_large_output_cap():
@@ -3550,7 +3553,7 @@ async def test_call_llm_verifier_claude_token_and_schema():
     with patch("temporalio.activity.heartbeat"):
         result, _usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "go"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             config=config,
             response_schema={"fields": [{"name": "summary", "type": "str"}]},
             claude_token="ct-99",
@@ -3558,8 +3561,8 @@ async def test_call_llm_verifier_claude_token_and_schema():
 
     # Bearer token forwarded to Anthropic as-is.
     assert captured["headers"].get("authorization") == "Bearer ct-99"
-    # Anthropic body uses claudeAuth model from rose-1-lite pool.
-    assert captured["body"]["model"] == "claude-sonnet-5"
+    # Anthropic body uses claudeAuth model from rose-1-ultra pool.
+    assert captured["body"]["model"] == "claude-opus-5-5"
     assert captured["body"]["stream"] is True
     assert result["score"] == 1.0
     assert result["output"]["summary"] == "ok"
@@ -4471,8 +4474,8 @@ async def test_call_planner_llm_activity_happy_path():
     assert anthropic_calls[0]["headers"].get("authorization") == "Bearer ct-planner-123"
     assert captured["batch_user_id"] == "planner-user"
     assert "scoped referenced text" in json.dumps(planner_body)
-    # Anthropic uses the claudeAuth model from the rose-1-lite pool.
-    assert planner_body["model"] == "claude-sonnet-5"
+    # Planner always uses rose-1-ultra, even when the caller passed "rose".
+    assert planner_body["model"] == "claude-opus-5-5"
     assert planner_body["stream"] is True
     # Anthropic's literal "max" stalls — we normalize to "xhigh" (the highest
     # reliably-streaming level, mirroring gpt_auth which maps "max" → "xhigh").
@@ -4513,7 +4516,7 @@ async def test_call_llm_activity_happy_path_with_messages_list():
     ):
         result = await call_llm_activity(
             messages_or_agent_id=[{"role": "user", "content": "hi"}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tool_names=[],
             reasoning_max_tokens=0,
             agent_id="agent-llm-act",
@@ -4641,7 +4644,7 @@ async def test_call_llm_activity_rejects_wrong_required_tool_non_retryably():
         try:
             await call_llm_activity(
                 messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 tool_names=["web_search", "attempt_completion"],
                 reasoning_max_tokens=0,
                 call_site="required-tool-contract-test",
@@ -4679,7 +4682,7 @@ async def test_call_llm_activity_forces_required_tool_at_provider():
     ):
         result = await call_llm_activity(
             messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tool_names=["web_search", "attempt_completion"],
             reasoning_max_tokens=0,
             call_site="required-tool-provider-contract-test",
@@ -5881,7 +5884,7 @@ async def test_call_llm_rose_with_usage_and_cache_fields():
 
     response = await call_llm(
         messages=[{"role": "user", "content": "ping"}],
-        model="rose-labs/rose-1-lite",
+        model="rose-labs/rose-1-flash",
         temperature=0.5,
         max_tokens=256,
     )
@@ -6124,7 +6127,7 @@ async def _call_llm_structured_streaming_replayed_native_tool_call_without_json_
             kind="metadata",
             data={
                 "actual_model": "claude-sonnet-4-6-anthropic",
-                "pool_name": "rose-1-lite",
+                "pool_name": "rose-1-flash",
                 "request_id": "cached-r1",
                 "from_fast_cache": True,
             },
@@ -6305,7 +6308,7 @@ async def test_call_llm_escalates_max_tokens_on_finish_reason_length():
                     reasoning="",
                     codex_reasoning_items=[],
                     actual_model="claude-sonnet-4-6-claude",
-                    pool_name="rose-1-lite",
+                    pool_name="rose-1-flash",
                     request_id="req-trunc",
                     claude_token_error=None,
                     gpt_token_error=None,
@@ -6322,7 +6325,7 @@ async def test_call_llm_escalates_max_tokens_on_finish_reason_length():
                 reasoning="",
                 codex_reasoning_items=[],
                 actual_model="claude-sonnet-4-6-claude",
-                pool_name="rose-1-lite",
+                pool_name="rose-1-flash",
                 request_id="req-full",
                 claude_token_error=None,
                 gpt_token_error=None,
@@ -6337,7 +6340,7 @@ async def test_call_llm_escalates_max_tokens_on_finish_reason_length():
     with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
         result = await call_llm(
             messages=[{"role": "user", "content": "draft the email"}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             max_tokens=1024,
             call_site="message_person",
         )
@@ -6380,7 +6383,7 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
     with patch("temporalio.activity.heartbeat"):
         result, usage = await _call_llm_verifier(
             messages=[{"role": "user", "content": "x"}],
-            model="rose",
+            model="rose-labs/rose-1-ultra",
             config=config,
             claude_token="expired-token",
             call_site="verifier-err",
@@ -6484,7 +6487,7 @@ async def test_call_llm_activity_no_stream_id_skips_streaming_callbacks():
     with patch("temporalio.activity.heartbeat"):
         result = await call_llm_activity(
             messages_or_agent_id=[{"role": "user", "content": "hi"}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             tool_names=[],
             reasoning_max_tokens=0,
             # no agent_id / stream_id
@@ -6693,7 +6696,7 @@ async def test_call_llm_structured_streaming_rose_cancelled_error_propagates():
         try:
             await call_llm_structured_streaming(
                 messages=[{"role": "user", "content": "q"}],
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 temperature=0.5,
                 max_tokens=256,
                 response_model=AgentAction,
@@ -6971,7 +6974,7 @@ async def test_call_llm_structured_streaming_gpt_native_streams_reasoning_to_chu
 
     response, usage, detected = await call_llm_structured_streaming(
         messages=[{"role": "user", "content": "q"}],
-        model="rose",
+        model="rose-labs/rose-1-ultra",
         temperature=0.7,
         max_tokens=512,
         response_model=AgentAction,
@@ -7685,8 +7688,8 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
             call_site="verifier-test",
         )
     assert parsed["score"] == 0.9
-    # Waterfall path → first model from rose-1-lite pool.
-    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
+    # Waterfall path → first model from rose-1-flash pool.
+    assert usage["actual_model"] == get_pool("rose-1-flash").waterfall[0]
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 1
 

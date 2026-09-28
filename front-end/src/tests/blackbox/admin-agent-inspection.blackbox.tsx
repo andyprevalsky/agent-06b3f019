@@ -38,7 +38,7 @@ function agentDetail(inspectionContext: Record<string, string> | null) {
     agent: {
       agent_id: 'foreign-agent',
       goal: 'Foreign account run',
-      model: 'rose-1-lite',
+      model: 'rose-1-flash',
       source: 'WEB',
       reasoning_effort: 'medium',
       progress: 50,

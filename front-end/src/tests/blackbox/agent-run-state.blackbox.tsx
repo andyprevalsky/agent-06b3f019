@@ -43,7 +43,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     goal: 'A test goal',
     title: null,
     pinned_at: null,
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'WEB',
     reasoning_effort: 'medium',
     progress: 0.25,

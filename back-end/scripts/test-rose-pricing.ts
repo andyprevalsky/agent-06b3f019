@@ -9,7 +9,7 @@ async function testRosePricing() {
   console.log('🧪 Testing Rose model pricing with new pools...\n');
 
   const models = [
-    'rose-labs/rose-1-lite',
+    'rose-labs/rose-1-flash',
     'rose-labs/rose-1-ultra',
   ];
 

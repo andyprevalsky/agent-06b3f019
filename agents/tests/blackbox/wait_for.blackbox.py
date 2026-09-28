@@ -25,7 +25,7 @@ async def test_evaluate_condition_uses_llm_not_httpx():
             result = await evaluate_condition_activity(
                 condition="Has the deployment completed?",
                 evidence="Deploy pipeline shows green status",
-                model="rose-1-lite",
+                model="rose-1-flash",
             )
 
     assert result["satisfied"] is True
@@ -48,7 +48,7 @@ async def test_no_outbound_http_calls():
             await evaluate_condition_activity(
                 condition="Test condition",
                 evidence="Test evidence",
-                model="rose-1-lite",
+                model="rose-1-flash",
             )
 
     assert len(get_captured_requests()) == 0
@@ -69,7 +69,7 @@ async def test_evaluate_condition_negative():
         result = await evaluate_condition_activity(
             condition="Is it done?",
             evidence="Spinner visible",
-            model="rose-1-lite",
+            model="rose-1-flash",
         )
 
     assert result["satisfied"] is False
@@ -92,7 +92,7 @@ async def test_evaluate_condition_loose_json_fallback():
         result = await evaluate_condition_activity(
             condition="C",
             evidence="E",
-            model="rose-1-lite",
+            model="rose-1-flash",
         )
     assert result["satisfied"] is True
     assert "coerced" in result["reasoning"]
@@ -110,7 +110,7 @@ async def test_evaluate_condition_non_json_fallback():
         result = await evaluate_condition_activity(
             condition="C",
             evidence="E",
-            model="rose-1-lite",
+            model="rose-1-flash",
         )
     assert result["satisfied"] is False
     assert "maybe later" in result["reasoning"]
@@ -133,7 +133,7 @@ async def test_evaluate_condition_accepts_prefixed_and_fenced_json():
             result = await evaluate_condition_activity(
                 condition="C",
                 evidence="E",
-                model="rose-1-lite",
+                model="rose-1-flash",
             )
         assert result["satisfied"] is True
 
@@ -256,7 +256,7 @@ class _WFInstance:
     def __init__(self, *, paused=False, cost_limit_reached=False, fast_mode_cache_enabled=False, goal=""):
         self.user_id = "user-1"
         self.agent_id = "agent-1"
-        self.model = "rose-1-lite"
+        self.model = "rose-1-flash"
         self.context_gates = {}
         self.is_paused = paused
         self._cost_limit_reached = cost_limit_reached

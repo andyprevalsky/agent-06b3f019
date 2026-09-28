@@ -56,7 +56,7 @@ async function run(): Promise<void> {
   try {
     const chunks = await collect(
       await createStreamingCompletion({
-        model: 'rose-labs/rose-1-lite',
+        model: 'rose-labs/rose-1-flash',
         messages: [
           { role: 'system', content: 'system' },
           { role: 'user', content: 'reply' },

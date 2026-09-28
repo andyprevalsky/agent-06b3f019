@@ -3,7 +3,7 @@
 Standalone agent loop (no Temporal) that:
 - Uses build_system_prompt for the exact PLAN phase prompt
 - Uses create_agent_action_model for structured tool call parsing
-- Calls rose-1-lite via call_llm_structured_streaming
+- Calls rose-1-flash via call_llm_structured_streaming
 - Intercepts set_plan → captures state and stops
 - Intercepts send_message_to_user → routes to simulate_user
 - Executes web_search/web_fetch via direct HTTP (no Temporal heartbeat)
@@ -29,7 +29,7 @@ from .simulate_user import simulate_user
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 30
-MODEL = 'rose-labs/rose-1-lite'
+MODEL = 'rose-labs/rose-1-flash'
 
 
 class SetPlanTrap(Exception):  # noqa: N818

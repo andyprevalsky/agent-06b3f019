@@ -27,8 +27,16 @@ from providers.rose.pools import POOL_REGISTRY
 # model. Re-check against the live catalog when adding a waterfall layer.
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
+    "google/gemini-3.1-flash-lite":   {"prompt": 0.25 / 1_000_000, "completion": 1.50 / 1_000_000},
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
+    "google/gemini-3.5-flash-lite":   {"prompt": 0.30 / 1_000_000, "completion": 2.50 / 1_000_000},
     "google/gemini-3.6-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "google/gemini-3.7-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "google/gemini-3.8-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "qwen/qwen3.8-27b":               {"prompt": 0.15 / 1_000_000, "completion": 0.80 / 1_000_000},
+    # Cerebras direct hop (api.cerebras.ai), not the OpenRouter qwen/* row.
+    # Official Cerebras list 2026-09-25: $0.99 / $1.49 per million.
+    "qwen-3.8-27b":                   {"prompt": 0.99 / 1_000_000, "completion": 1.49 / 1_000_000},
     "moonshotai/kimi-k2.5":           {"prompt": 0.57 / 1_000_000, "completion": 2.85 / 1_000_000},
     "moonshotai/kimi-k2.7-code":      {"prompt": 0.71 / 1_000_000, "completion": 3.50 / 1_000_000},
     "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
@@ -44,6 +52,12 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "openai/gpt-5.6-luna":            {"prompt": 0.20 / 1_000_000, "completion": 1.20 / 1_000_000},
     "openai/gpt-5.6-terra":           {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
     "openai/gpt-5.6-sol":             {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
+    "openai/gpt-6-luna":              {"prompt": 0.10 / 1_000_000, "completion": 0.50 / 1_000_000},
+    "openai/gpt-6-sol":               {"prompt": 2.00 / 1_000_000, "completion": 10.00 / 1_000_000},
+    "openai/gpt-oss-120b":            {"prompt": 0.15 / 1_000_000, "completion": 0.60 / 1_000_000},
+    # OpenRouter list price. AA's first-party card is $0.15/$0.50; we pay OR.
+    "z-ai/glm-5.3-flash":             {"prompt": 0.045 / 1_000_000, "completion": 0.14 / 1_000_000},
+    "anthropic/claude-opus-5.5":      {"prompt": 4.00 / 1_000_000, "completion": 20.00 / 1_000_000},
 }
 
 
@@ -63,6 +77,8 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.6-luna-gpt":         {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "gpt-5.6-terra-gpt":        {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
     "gpt-5.6-sol-gpt":          {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-6-luna-gpt":           {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
+    "gpt-6-sol-gpt":            {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
 # Direct OpenAI API pricing (the `-openai` suffix == GPT_API_KEY -> api.openai.com).
@@ -90,6 +106,8 @@ _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
     # Sol is the ONLY model in this set whose direct rate differs from
     # OpenRouter's: $5/$30 direct vs $2.50/$15 via OpenRouter.
     "gpt-5.6-sol-openai":   {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
+    "gpt-6-luna-openai":    {"input_cents_per_1k": 0.01,  "output_cents_per_1k": 0.05},
+    "gpt-6-sol-openai":     {"input_cents_per_1k": 0.2,   "output_cents_per_1k": 1.0},
 }
 
 
@@ -109,6 +127,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
     "claude-opus-4-8":   {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.5},
     "claude-fable-5":    {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
     "claude-fable-5-1":  {"input_cents_per_1k": 1.0, "output_cents_per_1k": 5.0},
+    "claude-opus-5-5":   {"input_cents_per_1k": 0.4, "output_cents_per_1k": 2.0},
     "claude-haiku-4.5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
     "claude-haiku-4-5":  {"input_cents_per_1k": 0.1, "output_cents_per_1k": 0.5},
 }

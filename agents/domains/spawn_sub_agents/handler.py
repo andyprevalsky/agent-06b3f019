@@ -172,7 +172,7 @@ class SpawnSubAgentManager(ToolManager):
             else:
                 bus_id = parent_bus_id
 
-            parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
+            parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             parent_source = getattr(workflow_instance, "agent_source", "WEB")
             child_agent_id = str(workflow.uuid4())
 

@@ -19,9 +19,9 @@ Rose Agents are autonomous AI systems that can execute complex, multi-step tasks
   The task for the agent to accomplish. Be specific and detailed.
 </ParamField>
 
-<ParamField body="model" type="string" default="rose-1-lite">
+<ParamField body="model" type="string" default="rose-1-flash">
   The model to use:
-  - `rose-1-lite` - Fast, cost-effective
+  - `rose-1-flash` - Fast, cost-effective
   - `rose-1-ultra` - High quality reasoning
 </ParamField>
 
@@ -33,7 +33,7 @@ curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
   -H "x-api-key: YOUR_API_KEY" \
   -d '{
     "goal": "Research the top 5 AI startups founded in 2024 and summarize their products",
-    "model": "rose-1-lite"
+    "model": "rose-1-flash"
   }'
 ```
 
@@ -43,7 +43,7 @@ curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
 {
   "agent_id": "550e8400-e29b-41d4-a716-446655440000",
   "goal": "Research the top 5 AI startups founded in 2024...",
-  "model": "rose-1-lite",
+  "model": "rose-1-flash",
   "status": "ACTIVE",
   "progress": 0,
   "created_at": "2024-01-15T10:30:00Z"
@@ -72,7 +72,7 @@ curl "https://navi-j9a9.onrender.com/api/agents/550e8400-e29b-41d4-a716-44665544
   "agent": {
     "agent_id": "550e8400-e29b-41d4-a716-446655440000",
     "goal": "Research the top 5 AI startups...",
-    "model": "rose-1-lite",
+    "model": "rose-1-flash",
     "status": "ACTIVE",
     "status_message": "Searching for AI startups...",
     "progress": 0.35,

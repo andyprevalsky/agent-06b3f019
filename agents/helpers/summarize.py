@@ -562,7 +562,7 @@ def _strip_compact_analysis(summary: str) -> str:
 async def compress_context(
     context: List[Dict],
     iteration_count: int,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     claude_token: Optional[str] = None,
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
@@ -712,7 +712,7 @@ async def summarize_tool_result(
     tool_name: str,
     tool_result_text: str,
     parent_objective: str,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     claude_token: Optional[str] = None,
     claude_token_source: Optional[str] = None,
     claude_token_pool_id: Optional[str] = None,
@@ -976,7 +976,7 @@ Rules for files_to_download:
 async def generate_completion_summary(
     context: List[Dict[str, Any]],
     goal: str,
-    model: str = "rose-labs/rose-1-lite",
+    model: str = "rose-labs/rose-1-flash",
     structured_response: Dict[str, Any] = None,
     output_schema: Dict[str, Any] = None,
     sub_agent_tool_counts: Dict[str, int] = None,
