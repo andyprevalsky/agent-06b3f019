@@ -524,6 +524,10 @@ forensic verifier now accepts either the exact pending owner marker or two
 matching copies of the collected result. A missing pending marker without
 those copies, or mismatched copies, still refuses recovery. The focused test
 includes both successful and rejected collected states.
+The collected JSON can exceed the small owner-marker size limit; the copy
+comparison has its own bounded 64 MiB limit. A read-only native-inventory
+preflight accepted proof24's exact ten archived tasks, one retired unadmitted
+clone, and two incomplete task archives with zero credit.
 
 ## Human feedback
 

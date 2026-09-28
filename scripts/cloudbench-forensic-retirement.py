@@ -138,8 +138,10 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         else:
             # The normal collector clears pending only after publishing the
             # exact canonical result. A failed peer may still retain pending.
-            assert object_file(out / "cloudbench-run.json") == object_file(
-                out / "remote-logs/runtime-evidence/run.json")
+            canonical = regular_bytes(out / "cloudbench-run.json", 64 * 1024 * 1024)
+            assert canonical == regular_bytes(
+                out / "remote-logs/runtime-evidence/run.json", 64 * 1024 * 1024)
+            assert isinstance(json.loads(canonical), dict)
         files = row["files"]
         missing = row["missing"]
         assert isinstance(files, dict) and isinstance(missing, list)
