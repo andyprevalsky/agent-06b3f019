@@ -9,6 +9,7 @@ import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
+import { connectCredentialCdp } from './injectionConnection';
 import {
   injectCacheStorageState,
   injectIndexedDBState,
@@ -360,6 +361,7 @@ export async function injectUserData(
     }
     throw new Error('No WebSocket URL found for session');
   }
+  const sessionWsUrl = dbSession.wsUrl;
 
   let cookies: Awaited<ReturnType<typeof prisma.cookie.findMany>> = [];
   const steelContextId =
@@ -463,9 +465,11 @@ export async function injectUserData(
       const { chromium } = await import('playwright');
       const connectTimeoutMs = credentialCdpConnectTimeoutMs();
       log.info(`  [3/9] Connecting to CDP...`, { connectTimeoutMs });
-      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl), {
-        timeout: connectTimeoutMs,
-      });
+      browser = await connectCredentialCdp(() =>
+        chromium.connectOverCDP(steelCdpConnectionUrl(sessionWsUrl), {
+          timeout: connectTimeoutMs,
+        })
+      );
       log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
     }
     const context = browser.contexts()[0];

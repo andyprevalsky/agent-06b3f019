@@ -283,6 +283,7 @@ export async function postFoundryResponsesStream(
       method: 'POST',
       headers: { 'api-key': options.apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify(options.body),
+      redirect: 'manual',
       signal,
     })
   );

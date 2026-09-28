@@ -144,9 +144,14 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
       }
       return;
     } catch (err) {
-      if (yieldedVisible || !(err instanceof RoseError)) throw err;
-      lastError = err;
-      if (err instanceof RoseRateLimitError) {
+      if (yieldedVisible || opts.abortSignal?.aborted) throw err;
+      lastError =
+        err instanceof RoseError
+          ? err
+          : new RoseServerError(
+              `Foundry stream failed: ${err instanceof Error ? err.name : 'unknown'}`
+            );
+      if (lastError instanceof RoseRateLimitError) {
         cooldownUntil.set(deployment, Date.now() + cooldownMs(response.headers));
       }
     }

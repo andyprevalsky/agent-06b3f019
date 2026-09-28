@@ -3700,6 +3700,9 @@ class AgentWorkflow:
                 )
                 continue
 
+            # own_cost_cents and price_limit_cents are the user's charge ledger.
+            # Foundry's separate Azure bill is monitored through Azure billing;
+            # it must not consume a user's $0 compute-token limit.
             if isinstance(model, str) and model.endswith(("-claude", "-gpt", "-foundry")):
                 workflow.logger.info(
                     f"💰 $0 user charge: actual_model={model}, "

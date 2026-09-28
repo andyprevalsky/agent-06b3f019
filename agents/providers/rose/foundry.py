@@ -108,6 +108,7 @@ async def foundry_complete(
                 cache_namespace=cache_namespace,
                 request_id=request_id,
             )
+            yielded_visible = False
             try:
                 async with client.stream("POST", url, headers={"api-key": key}, json=body) as response:
                     if response.status_code != 200:
@@ -135,7 +136,6 @@ async def foundry_complete(
                         continue
 
                     buffered: Optional[StreamChunk] = None
-                    yielded_visible = False
                     try:
                         async for chunk in parse_responses_sse(
                             response,
@@ -162,7 +162,9 @@ async def foundry_complete(
                         logger.warning(
                             "rose.foundry.stream_failed", deployment=deployment, error_type=type(exc).__name__
                         )
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+            except httpx.TransportError as exc:
+                if yielded_visible:
+                    raise
                 last_error = RoseServerError(f"Foundry transport failed: {type(exc).__name__}")
                 logger.warning("rose.foundry.transport_failed", deployment=deployment, error_type=type(exc).__name__)
     raise last_error

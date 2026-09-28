@@ -40,18 +40,11 @@ The deployment name substitutes for the GPT model ID in the request body.
    A live response returned `x-ratelimit-limit-requests: 10000` and
    `x-ratelimit-limit-tokens: 10000000`. Treat those as observed limits, not a
    quota guarantee; the deployed SKU, allocation, and subscription tier still
-   need a management-plane check. For a fresh resource, the CLI form is:
-
-   ```bash
-   az cognitiveservices account deployment create \
-     -g rg-roselabs-ai-prod -n a-4989-resource \
-     --deployment-name gpt-6-sol \
-     --model-name gpt-6-sol --model-version 2026-09-22 \
-     --model-format OpenAI --sku-name GlobalStandard --sku-capacity 1
-   ```
-
-   Check the resource's quota first: `--sku-capacity 1` is a small starting
-   allocation, not a throughput recommendation.
+   need a management-plane check. For another deployment, first verify the
+   model version and available Global Standard capacity in Foundry, then assign
+   a distinct name and allocate part of the existing quota. The successful
+   data-plane call does not reveal the deployment's configured model version
+   or capacity.
 
 2. Set the following in both `agents/.env` and `back-end/.env` locally and in
    the corresponding Fly and Render secret stores for production. Keep the
@@ -88,7 +81,15 @@ write, $10 output** for short context; **$4, $0.40, $5, $15** respectively
 for long context. Azure bills the resource even though Rose marks the
 `-foundry` route as **$0 in user-facing token cost**, matching the requested
 compute-token treatment. This zeroing is an accounting policy, not free Azure
-inference. Priority requests can have a higher token rate; Microsoft's public
+inference. Rose's per-agent price limit uses that same user-facing cost ledger,
+so Foundry does not advance the user's limit, just as compute-token calls do.
+Track the separate Azure expense through Cost Management and resource budget
+alerts. Azure budgets send alerts rather than stopping inference, and quota is
+a throughput limit rather than a spend cap. Foundry quota tiers can increase
+automatically with usage; use an application spend guard if a hard cap is
+required.
+
+Priority requests can have a higher token rate; Microsoft's public
 pricing page has not yet published GPT-6 Sol's Priority Processing rate, so
 confirm it in the Azure pricing portal or billing agreement before enabling
 production traffic. Monitor Azure Cost Management for actual spend. Provisioned
@@ -128,7 +129,7 @@ Local `agents/.env` and `back-end/.env` contain the endpoint, key, and deploymen
 name. Render's stored values were read back and matched, its env-only deploy
 completed, and `/health` returned 200. Fly lists all three secrets as Deployed,
 and every started worker checked had the matching runtime values. Production
-still needs the code from this branch deployed before the Foundry fallback is
-active there. The repo also requires these backend secrets mirrored to its
+must serve a commit containing this fallback before the route is active there.
+The repo also requires these backend secrets mirrored to its
 Codex-cloud `rose` environment through that environment's settings UI; this
 workspace has no setter for it, so that mirror remains to be verified.

@@ -873,6 +873,37 @@ interface JsonSchemaNode {
   required?: string[];
 }
 
+async function testClaudeAuth_haikuOmitsUnsupportedControls() {
+  // Captured Anthropic response from the spawn-sub-agents smoke:
+  // HTTP 400 "This model does not support the effort parameter."
+  const poolSpec = getPool('rose-1-mini');
+  const messages: CompletionMessage[] = [{ role: 'user', content: 'Summarize the source.' }];
+  const plain = buildAnthropicBody({ poolSpec, messages });
+  assertEqual(plain.model, 'claude-haiku-4-5', 'mini Claude model');
+  assert(!('thinking' in plain), 'Haiku 4.5 must not receive adaptive thinking');
+  assert(
+    !('effort' in ((plain.output_config as Record<string, unknown> | undefined) ?? {})),
+    'Haiku 4.5 must not receive output_config.effort'
+  );
+
+  const structured = buildAnthropicBody({
+    poolSpec,
+    messages,
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+    effort: 'low',
+  });
+  assertEqual(
+    (structured.tool_choice as Record<string, unknown>).type,
+    'any',
+    'structured Haiku response keeps forced tool choice'
+  );
+  assert(!('thinking' in structured), 'structured Haiku call omits adaptive thinking');
+  assert(
+    !('effort' in ((structured.output_config as Record<string, unknown> | undefined) ?? {})),
+    'explicit effort is also omitted for Haiku 4.5'
+  );
+}
+
 async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
   const extracted = extractToolsFromResponseFormat({
     type: 'json_schema',
@@ -3855,6 +3886,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / fable 5.1 downgrades forced tool_choice to auto',
       fn: testClaudeAuth_fable51DowngradesForcedToolChoice,
+    },
+    {
+      name: 'claudeAuth / Haiku omits unsupported controls',
+      fn: testClaudeAuth_haikuOmitsUnsupportedControls,
     },
     {
       name: 'claudeAuth / nullable relaxation keeps non-nullable fields required',

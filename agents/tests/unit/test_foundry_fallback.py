@@ -126,3 +126,46 @@ async def test_partial_stream_never_splices_deployments(monkeypatch):
             chunks.append(chunk)
     assert len(calls) == 1
     assert chunks[1].data["text"] == "Partial"
+
+
+@pytest.mark.asyncio
+async def test_precontent_protocol_error_tries_next_deployment(monkeypatch):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content)["model"])
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("connection closed before headers")
+        return httpx.Response(200, text=_sse({"type": "response.output_text.delta", "delta": "Hi"}))
+
+    _install_http(monkeypatch, handler)
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol,gpt-6-sol-b")
+    chunks = [chunk async for chunk in _call()]
+    assert len(calls) == 2
+    assert chunks[1].data["text"] == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_postcontent_protocol_error_never_retries(monkeypatch):
+    calls = []
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield f'data: {json.dumps({"type": "response.output_text.delta", "delta": "Partial"})}\n\n'.encode()
+            raise httpx.RemoteProtocolError("connection closed after content")
+
+        async def aclose(self):
+            pass
+
+    def handler(request):
+        calls.append(json.loads(request.content)["model"])
+        return httpx.Response(200, stream=BrokenStream())
+
+    _install_http(monkeypatch, handler)
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol,gpt-6-sol-b")
+    chunks = []
+    with pytest.raises(httpx.RemoteProtocolError):
+        async for chunk in _call():
+            chunks.append(chunk)
+    assert len(calls) == 1
+    assert chunks[1].data["text"] == "Partial"
