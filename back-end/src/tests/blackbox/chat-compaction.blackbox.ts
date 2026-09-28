@@ -464,9 +464,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
           ensureWithinBudget: async (params) => {
             ensureRawCount = params.rawMessages.length;
             if (params.rawMessages.some((message) => isInternalSubagentMessage(message))) {
-              throw new Error(
-                'subAgentId explore rows must be stripped before ensureWithinBudget'
-              );
+              throw new Error('subAgentId explore rows must be stripped before ensureWithinBudget');
             }
             return params.rawMessages;
           },
