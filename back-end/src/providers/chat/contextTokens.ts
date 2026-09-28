@@ -76,6 +76,11 @@ export function messageSummaryWeight(message: ChatMessage): number {
 }
 
 export function estimateContextTokens(messages: ChatMessage[]): number {
+  // Sub-agent internal rows are excluded because callers must already strip
+  // them (agent: filter_internal_subagent_messages; chat: contextScope.ts).
+  // Counting them here while a caller still sends them to the model is how
+  // post-completion chat on agent 3b5c2813 blew past Cerebras/OpenRouter
+  // 131k with estimateContextTokens still under the 167k compact trigger.
   return messages.reduce((total, message) => {
     if (message.metadata?.subAgentId) return total;
     return total + messageSummaryWeight(message);
