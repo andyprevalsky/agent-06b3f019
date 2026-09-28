@@ -302,7 +302,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
   assertEqual(lite.directAuthEnabled, false, 'flash skips Claude/GPT auth');
   assertEqual(lite.cerebrasModel, 'qwen-3.8-27b', 'flash Cerebras primary');
-  assertEqual(lite.cerebrasReasoningEffort, 'xhigh', 'flash Cerebras effort');
+  assertEqual(lite.cerebrasReasoningEffort, 'high', 'flash Cerebras effort');
   assertEqual(
     lite.waterfall.join(','),
     'qwen/qwen3.8-27b,google/gemini-3.8-flash',
@@ -1654,7 +1654,7 @@ async function testFlash_skipsAuthAndHitsCerebrasQwen() {
     assertEqual(anthropicCalls, 0, 'flash skips Claude auth');
     assertEqual(openrouterCalls, 0, 'waterfall not reached');
     assertEqual(capturedBody?.model, 'qwen-3.8-27b', 'Cerebras inventory id');
-    assertEqual(capturedBody?.reasoning_effort, 'xhigh', 'Cerebras effort');
+    assertEqual(capturedBody?.reasoning_effort, 'high', 'Cerebras effort');
     assertEqual(chunks[0]?.pool_name, 'cerebras-direct', 'pool provenance');
     assertEqual(chunks[0]?.actual_model, 'qwen-3.8-27b', 'actual model');
   } finally {

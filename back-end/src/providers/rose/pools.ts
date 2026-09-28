@@ -58,7 +58,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     waterfallReasoningEffort: 'low',
     directAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
-    cerebrasReasoningEffort: 'xhigh',
+    cerebrasReasoningEffort: 'high',
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
@@ -76,7 +76,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     waterfallReasoningEffort: 'low',
     directAuthEnabled: false,
     cerebrasModel: 'qwen-3.8-27b',
-    cerebrasReasoningEffort: 'xhigh',
+    cerebrasReasoningEffort: 'high',
   },
 };
 

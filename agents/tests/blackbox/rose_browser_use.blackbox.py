@@ -1930,7 +1930,7 @@ async def test_complete_browser_use_cerebras_path_succeeds():
     assert captured_bodies
     body = captured_bodies[0]
     assert body["model"] == "qwen-3.8-27b"
-    assert body["reasoning_effort"] == "xhigh"
+    assert body["reasoning_effort"] == "high"
     assert body["tool_choice"] == "auto"
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]

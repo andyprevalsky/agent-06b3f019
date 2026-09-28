@@ -35,7 +35,7 @@ const log = createLogger('CerebrasRoute');
 export const CEREBRAS_CHAT_MODEL = 'gpt-oss-120b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 1_200;
-/** Pool hop (rose-fast Qwen xhigh) — not the 1.2s chat stall. */
+/** Pool hop (rose-fast Qwen high; Cerebras max) — not the 1.2s chat stall. */
 export const POOL_CEREBRAS_IDLE_TIMEOUT_MS = 90_000;
 /** Archived Cerebras id — must never be reintroduced as the chat primary. */
 export const ARCHIVED_CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';

@@ -234,7 +234,8 @@ def test_pool_registry_lookup():
     assert flash.waterfall_reasoning_effort == "low"
     assert flash.direct_auth_enabled is False
     assert flash.cerebras_model == "qwen-3.8-27b"
-    assert flash.cerebras_reasoning_effort == "xhigh"
+    assert flash.cerebras_reasoning_effort == "high"
+    assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
     assert ultra.name == "rose-1-ultra"
     from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
     from providers.rose.pools import PARAM_POPULATOR_MODEL
@@ -253,7 +254,7 @@ def test_pool_registry_lookup():
     assert browser_use.waterfall_reasoning_effort == "low"
     assert browser_use.direct_auth_enabled is False
     assert browser_use.cerebras_model == "qwen-3.8-27b"
-    assert browser_use.cerebras_reasoning_effort == "xhigh"
+    assert browser_use.cerebras_reasoning_effort == "high"
     assert ultra.waterfall_reasoning_effort is None
     assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
@@ -4689,7 +4690,7 @@ async def test_flash_skips_auth_and_hits_cerebras_qwen():
     assert seen["anthropic"] == 0
     assert seen["openrouter"] == 0
     assert seen["models"] == ["qwen-3.8-27b"]
-    assert seen["effort"] == ["xhigh"]
+    assert seen["effort"] == ["high"]
     assert any(c.kind == "content" and c.data.get("text") == "from-cerebras" for c in chunks)
 
 

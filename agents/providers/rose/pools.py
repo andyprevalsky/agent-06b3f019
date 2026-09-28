@@ -30,7 +30,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
         direct_auth_enabled = False
-        cerebras   = qwen-3.8-27b (xhigh)
+        cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
@@ -41,7 +41,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-browser-use:  (same rose-fast hop as flash)
         direct_auth_enabled = False
-        cerebras   = qwen-3.8-27b (xhigh)
+        cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
         waterfall effort = low
 
@@ -101,7 +101,7 @@ class PoolSpec:
     cerebras_reasoning_effort: str | None = None
     """Effort stamped on the direct Cerebras hop. Independent of the
     OpenRouter waterfall effort so the 1,500 tok/s Qwen point can stay
-    xhigh while Gemini fallback stays low."""
+    high (Cerebras max) while Gemini fallback stays low."""
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
@@ -130,7 +130,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         waterfall_reasoning_effort="low",
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
-        cerebras_reasoning_effort="xhigh",
+        cerebras_reasoning_effort="high",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
@@ -162,7 +162,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         waterfall_reasoning_effort="low",
         direct_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
-        cerebras_reasoning_effort="xhigh",
+        cerebras_reasoning_effort="high",
     ),
     # Open-weights only. Exists so one task can be pinned to a non-frontier,
     # open-source model -- currently the behavioral-biometrics benchmark, whose
