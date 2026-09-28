@@ -22880,7 +22880,7 @@ wait "$signaller"
     assert not list(scratch.iterdir())
 
 
-@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live", "unstarted-worker-absent", "unstarted-worker-live", "unstarted-worker-stage-launch", "unstarted-worker-owner-mismatch", "unstarted-worker-proof-mismatch"])
+@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live", "unstarted-worker-absent", "unstarted-worker-live", "unstarted-worker-stage-launch", "unstarted-worker-owner-mismatch", "unstarted-worker-proof-mismatch", "started-worker-absent", "started-worker-live", "started-worker-terminal-bad"])
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
     owner = "a" * 32
     run_id = "fixture-run"
@@ -22951,6 +22951,23 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         if fault == "unstarted-worker-stage-launch":
             stage += b"launch worker wrapper succeeded\n"
         (out / f"worker-{worker_machine}.stage.log").write_bytes(stage)
+    if fault.startswith("started-worker-"):
+        (audit / "fresh" / "started-worker").write_text(
+            f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+            f"clone_name=started-worker\nsource=fresh-clone\nsource_machine_id={machine}\n"
+            f"machine_id={worker_machine}\nvolume_id={worker_volume}\ndisposition=owned\n"
+        )
+        (registry / "clones" / "started-worker").write_text(
+            f"name=started-worker\nid={worker_machine}\nvolume_id={worker_volume}\n"
+        )
+        (out / "worker-runtime-evidence" / worker_machine).mkdir(parents=True)
+        (out / "worker-runtime-evidence" / worker_machine / "owner.json").write_text(json.dumps({
+            "version": 1, "machine_id": worker_machine,
+            "primary_machine_id": machine, "run_token": token,
+        }))
+        (out / "worker-ready.ids").write_text(worker_machine + "\n")
+        stage = b"launch worker wrapper succeeded\n"
+        (out / f"worker-{worker_machine}.stage.log").write_bytes(stage)
     (registry / "runtime-evidence-unconfirmed").touch()
     (out / ".cid").write_text(f"run {machine}\n")
     (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
@@ -22965,6 +22982,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         "repo/.context/cloudbench/logs/worker.log": b"original worker log\n",
     }
     worker_proof = None
+    started_files = None
     if fault.startswith("unstarted-worker-"):
         worker_proof = json.dumps({
             "version": 1, "machine_id": worker_machine, "run_token": token,
@@ -22973,6 +22991,19 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             "worker_helper_present": False, "worker_log_present": False,
             "worker_started_at_present": False,
         }).encode()
+    if fault.startswith("started-worker-"):
+        worker_identity = {"machine_id": worker_machine, "run_token": token}
+        terminal = {**worker_identity, "worker_started": True, "quiescent": True,
+                    "stop_requested": True, "children_reaped": True,
+                    "streams_closed": fault != "started-worker-terminal-bad", "exit_code": 0}
+        started_files = {
+            "cloudbench-worker-evidence/owner.json": json.dumps(worker_identity).encode(),
+            "cloudbench-worker-evidence/terminal.json": json.dumps(terminal).encode(),
+            "cloudbench-worker-evidence/stop.json": json.dumps(worker_identity).encode(),
+            "cloudbench-worker-evidence/child.json": json.dumps(worker_identity).encode(),
+            "worker.log": b"original worker output\n",
+            "worker.started-at": b"2026-09-28T22:00:00Z\n",
+        }
     archive = run / "_forensic/originals.tar.gz"
     with tarfile.open(archive, "w:gz") as stream:
         for relative, content in originals.items():
@@ -22983,11 +23014,17 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             info = tarfile.TarInfo(f"_unstarted_workers/{worker_machine}/worker-original.json")
             info.size = len(worker_proof)
             stream.addfile(info, io.BytesIO(worker_proof))
+        if started_files is not None:
+            for relative, content in started_files.items():
+                info = tarfile.TarInfo(f"_started_workers/{worker_machine}/{relative}")
+                info.size = len(content)
+                stream.addfile(info, io.BytesIO(content))
     manifest = {
         "schema": "cloudbench-forensic-retirement-v1", "owner": owner,
         "run_id": run_id, "proof_credit": 0, "archive_bytes": archive.stat().st_size,
         "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-        "uncompressed_bytes": sum(map(len, originals.values())) + (len(worker_proof) if worker_proof else 0),
+        "uncompressed_bytes": sum(map(len, originals.values())) + (len(worker_proof) if worker_proof else 0)
+        + (sum(map(len, started_files.values())) if started_files else 0),
         "tasks": [{"task": task, "ordinal": 0, "machine_id": machine,
                    "volume_id": volume, "run_token": token, "proof_credit": 0,
                    "runtime_evidence_complete": False, "services_status": "running",
@@ -23004,6 +23041,16 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
             "files": {"worker-original.json": {"bytes": len(worker_proof),
                       "sha256": hashlib.sha256(worker_proof).hexdigest()}},
         }]
+    if started_files is not None:
+        manifest["started_workers"] = [{
+            "machine_id": worker_machine, "volume_id": worker_volume,
+            "primary_machine_id": machine, "task": task, "run_token": token,
+            "proof_credit": 0, "worker_started": True,
+            "stage_log_sha256": hashlib.sha256(stage).hexdigest(),
+            "missing": [],
+            "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                      for relative, content in started_files.items()},
+        }]
     manifest_path = run / "_forensic/manifest.json"
     manifest_path.write_text(json.dumps(manifest))
     machines = tmp_path / "machines.json"
@@ -23011,6 +23058,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     machines.write_text(json.dumps(
         [{"id": machine}] if fault == "live-machine" else
         [{"id": worker_machine}] if fault == "unstarted-worker-live" else
+        [{"id": worker_machine}] if fault == "started-worker-live" else
         [{"id": "c" * 14, "name": "unallocated"}] if fault == "unallocated-name-live" else []
     ))
     volumes.write_text(json.dumps(
@@ -23036,12 +23084,13 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
                "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
                "--machines", str(machines), "--volumes", str(volumes)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent"):
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["proof_credit"] == 0
         assert json.loads(result.stdout)["unadmitted_clones"] == (fault == "unadmitted-absent")
         assert json.loads(result.stdout)["unallocated_attempts"] == (fault == "unallocated-absent")
         assert json.loads(result.stdout)["unstarted_workers"] == (fault == "unstarted-worker-absent")
+        assert json.loads(result.stdout)["started_workers"] == (fault == "started-worker-absent")
     else:
         assert result.returncode != 0, f"unsafe {fault} was accepted"
     assert (out / "runtime-evidence.pending").exists() == (fault not in ("pending", "collected", "collected-mismatch"))
@@ -23067,13 +23116,14 @@ fly_with_timeout() {{
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 '''
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent"):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
         assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
         assert receipt["unadmitted_clones"] == (fault == "unadmitted-absent")
         assert receipt["unallocated_attempts"] == (fault == "unallocated-absent")
         assert receipt["unstarted_workers"] == (fault == "unstarted-worker-absent")
+        assert receipt["started_workers"] == (fault == "started-worker-absent")
         assert not (registry / "runtime-evidence-unconfirmed").exists()
         assert (out / "runtime-evidence.pending").exists() == (fault != "collected")
     else:

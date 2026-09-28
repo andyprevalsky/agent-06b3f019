@@ -83,6 +83,12 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     unstarted_workers = manifest.get("unstarted_workers", [])
     assert isinstance(unstarted_workers, list)
     assert len({row["machine_id"] for row in unstarted_workers}) == len(unstarted_workers)
+    started_workers = manifest.get("started_workers", [])
+    assert isinstance(started_workers, list)
+    assert len({row["machine_id"] for row in started_workers}) == len(started_workers)
+    assert not {row["machine_id"] for row in started_workers}.intersection(
+        row["machine_id"] for row in unstarted_workers
+    )
     fresh_dir = audit / "fresh"
     clone_dir = registry / "clones"
     assert fresh_dir.is_dir() and not fresh_dir.is_symlink()
@@ -93,7 +99,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     allocated = [row for row in fresh if row.get("volume_id")]
     assert len({row["volume_id"] for row in allocated}) == len(allocated)
     by_machine = {row["machine_id"]: row for row in fresh if row.get("machine_id")}
-    assert len(by_machine) == len(rows) + len(unstarted_workers)
+    assert len(by_machine) == len(rows) + len(unstarted_workers) + len(started_workers)
     by_clone = {row["name"]: row for row in clones}
     assert len(by_clone) == len(clones)
     unadmitted = []
@@ -213,12 +219,55 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         member = f"_unstarted_workers/{machine}/worker-original.json"
         expected_members[member] = info
         expected_total += info["bytes"]
+    required_worker_files = {
+        "cloudbench-worker-evidence/owner.json",
+        "cloudbench-worker-evidence/terminal.json",
+        "cloudbench-worker-evidence/stop.json",
+        "cloudbench-worker-evidence/child.json",
+        "worker.log",
+        "worker.started-at",
+    }
+    for row in started_workers:
+        machine = row["machine_id"]
+        assert re.fullmatch(r"[0-9a-f]+", machine) and machine not in primary_by_machine
+        parent = primary_by_machine[row["primary_machine_id"]]
+        assert row["task"] == parent["task"] and row["run_token"] == parent["run_token"]
+        assert row["proof_credit"] == 0 and row["worker_started"] is True
+        original = by_machine[machine]
+        assert original["fleet_owner_token"] == owner
+        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
+        assert original["source_machine_id"] == row["primary_machine_id"]
+        assert original["volume_id"] == row["volume_id"] and original["disposition"] == "owned"
+        assert by_clone[original["clone_name"]] == {
+            "name": original["clone_name"], "id": machine, "volume_id": row["volume_id"]}
+        out = run / row["task"]
+        assert machine in regular_bytes(out / "worker-ready.ids", 65536).decode().splitlines()
+        worker_owner = object_file(out / "worker-runtime-evidence" / machine / "owner.json")
+        assert all(worker_owner[k] == v for k, v in {
+            "version": 1, "machine_id": machine,
+            "primary_machine_id": row["primary_machine_id"],
+            "run_token": row["run_token"]}.items())
+        stage = regular_bytes(out / f"worker-{machine}.stage.log", 16 * 1024 * 1024)
+        assert hashlib.sha256(stage).hexdigest() == row["stage_log_sha256"]
+        assert b"launch worker wrapper succeeded" in stage
+        files = row["files"]
+        assert isinstance(files, dict) and required_worker_files <= set(files)
+        assert row.get("missing", []) == []
+        for relative, info in files.items():
+            assert safe_name(relative)
+            assert type(info["bytes"]) is int and 0 <= info["bytes"] <= 512 * 1024 * 1024
+            assert re.fullmatch(r"[0-9a-f]{64}", info["sha256"])
+            member = f"_started_workers/{machine}/{relative}"
+            assert member not in expected_members
+            expected_members[member] = info
+            expected_total += info["bytes"]
     assert expected_total == manifest["uncompressed_bytes"]
     assert archive_path.stat().st_size == manifest["archive_bytes"]
     assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
     seen = set()
     archived_services = {}
     archived_unstarted = {}
+    archived_started = {}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_members and member.name not in seen
@@ -239,6 +288,11 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
                     archived_services[task_name] = archived_services.get(task_name, b"") + block
                 if member.name.startswith("_unstarted_workers/"):
                     archived_unstarted[member.name] = archived_unstarted.get(member.name, b"") + block
+                if member.name.startswith("_started_workers/") and member.name.endswith(
+                    ("/owner.json", "/terminal.json", "/stop.json", "/child.json")
+                ):
+                    assert member.size <= 1048576
+                    archived_started[member.name] = archived_started.get(member.name, b"") + block
             assert digest.hexdigest() == info["sha256"]
             seen.add(member.name)
     assert seen == set(expected_members)
@@ -259,6 +313,18 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             "worker_helper_present": False, "worker_log_present": False,
             "worker_started_at_present": False,
         }
+    for row in started_workers:
+        machine = row["machine_id"]
+        prefix = f"_started_workers/{machine}/cloudbench-worker-evidence/"
+        originals = {name: json.loads(archived_started[prefix + name + ".json"])
+                     for name in ("owner", "terminal", "stop", "child")}
+        for name, value in originals.items():
+            assert value["machine_id"] == machine and value["run_token"] == row["run_token"]
+        terminal = originals["terminal"]
+        assert terminal["worker_started"] is True
+        assert terminal["quiescent"] is True and terminal["stop_requested"] is True
+        assert terminal["children_reaped"] is True and terminal["streams_closed"] is True
+        assert terminal["exit_code"] == 0
     machines = object_file(machines_path, 128 * 1024 * 1024)
     volumes = object_file(volumes_path, 128 * 1024 * 1024)
     assert isinstance(machines, list) and isinstance(volumes, list)
@@ -271,6 +337,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
             "owner": owner, "run_id": meta["run_id"], "tasks": len(rows),
             "incomplete_tasks": incomplete, "unadmitted_clones": len(unadmitted),
             "unstarted_workers": len(unstarted_workers),
+            "started_workers": len(started_workers),
             "unallocated_attempts": len(unallocated),
             "files": len(seen),
             "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
