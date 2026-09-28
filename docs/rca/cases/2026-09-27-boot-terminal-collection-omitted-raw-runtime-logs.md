@@ -456,6 +456,50 @@ new live gate, timeout, workload or benchmark criterion is introduced. The
 combined committed full gate and actual 100-benchmark proof remain separate
 requirements.
 
+### Proof24 seal race, transfer deadline, and worker-loop shutdown recurrence
+
+Proof24's first live ten-task slice at `46c29a4` earned zero credit. The guest
+announced `::CLOUDBENCH-DONE::` before its EXIT trap completed; the controller's
+first authenticated `/runtime-evidence` read received HTTP 409 because the exact
+stack was not sealed. Other collectors reached sealed guests but expired while
+transferring multi-megabyte raw logs: they had inherited the 30-second child
+termination grace as their entire collection deadline. Five task outcomes were
+collected, but a task verdict alone cannot authorize source deletion or slice
+credit. The ten exact failed machines were stopped and their original volumes
+retained. The source-bound plan and native inventory are under
+`.context/acceptance/proof24-retained-plan.json` and the private proof24
+snapshot directory. Archive searches used the literal `exact runtime is not
+sealed` and `terminal runtime evidence deadline expired`, then behavioral
+`DONE before cleanup raw log capture` and `worker stopped but process alive`.
+
+The first bad collector boundary was interpreting DONE as the exited seal and
+using a process-termination deadline for bulk evidence transfer. The collector
+now retries only HTTP 409 before the *first* manifest, within one bounded
+seal-plus-transfer deadline. Any later manifest mutation, identity mismatch,
+authentication error, missing file or short read still fails closed. Normal
+collection is bounded by 7,200 seconds; the explicitly temporary proof uses
+300 seconds. The raw files and complete manifest remain mandatory. A real
+status-server regression reproduces 409-to-seal and slow transfer; it also
+proves perpetual 409 expires and grants no complete manifest. The existing
+26-case owning collector fixture passed after its extracted shell environment
+was given a three-second test deadline; the fixture's 15-second process limit
+is not a production collection deadline.
+
+The stopped fork of `polar-bu-032` exposed a separate upstream cleanup blocker.
+Its worker log recorded a bounded terminal CDP disconnect timeout, recording
+upload and browser cleanup, then `Worker stopped`; the Python worker nevertheless
+remained alive until forced machine recovery. The stack therefore never wrote
+its clean receipt or driver ACK. `asyncio.run()` waits indefinitely for a CDP
+task that ignores cancellation after browser terminal I/O has already timed
+out. A local subprocess reproduction ran the same terminal disconnect path:
+with `asyncio.run()` it exceeded its two-second process bound after the bounded
+call returned; with the worker's bounded event-loop shutdown it exited after
+the explicit worker cleanup. The checked-in worker blackbox now reproduces
+that behavior and rejects unrelated uncancellable tasks. The worker and browser
+blackbox domains passed. No task, prompt, model, evaluator, LLM-call count or
+benchmark pass criterion changed. The actual 100-task infrastructure proof is
+still required; this causal repair does not award proof24 credit.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures

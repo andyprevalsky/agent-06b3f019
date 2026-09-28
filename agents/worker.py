@@ -116,6 +116,7 @@ from helpers import (
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
+from helpers.worker_event_loop import run_worker_event_loop
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -1464,4 +1465,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_worker_event_loop(main())

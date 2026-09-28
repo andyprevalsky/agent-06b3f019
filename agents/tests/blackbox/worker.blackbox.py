@@ -18,6 +18,72 @@ from _test_utils import BlackboxResult, teardown_mock
 WORKER_PATH = Path(__file__).resolve().parents[2] / "worker.py"
 
 
+def test_worker_event_loop_closes_after_terminal_browser_io_times_out():
+    """A cancellation-resistant CDP call cannot strand a cleaned worker."""
+    script = r'''
+import asyncio
+from unittest.mock import patch
+from domains.spawn_browser_agent_v3 import handler
+from helpers.worker_event_loop import run_worker_event_loop
+
+async def main():
+    class StubbornCDP:
+        async def disconnect(self):
+            event = asyncio.Event()
+            while True:
+                try:
+                    await event.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    async def capture():
+        pass
+
+    with patch.object(handler, "BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS", 0.05):
+        try:
+            await handler.disconnect_browser_after_passkey_capture(StubbornCDP(), capture)
+        except TimeoutError:
+            print("terminal-timeout", flush=True)
+    print("cleanup-complete", flush=True)
+
+run_worker_event_loop(main())
+print("process-exited", flush=True)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
+        capture_output=True, text=True, timeout=6,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert "terminal-timeout\ncleanup-complete\n" in result.stdout
+    assert result.stdout.rstrip().endswith("process-exited")
+
+
+def test_worker_event_loop_rejects_unrelated_pending_work():
+    script = r'''
+import asyncio
+from helpers.worker_event_loop import run_worker_event_loop
+
+async def main():
+    async def unrelated():
+        event = asyncio.Event()
+        while True:
+            try:
+                await event.wait()
+            except asyncio.CancelledError:
+                continue
+    asyncio.create_task(unrelated(), name="unrelated-work")
+    await asyncio.sleep(0)
+
+run_worker_event_loop(main())
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
+        capture_output=True, text=True, timeout=6,
+    )
+    assert result.returncode != 0
+    assert "Worker shutdown left unrelated tasks pending: unrelated-work" in result.stderr
+
+
 def _worker_tree() -> ast.Module:
     return ast.parse(WORKER_PATH.read_text())
 
@@ -962,6 +1028,8 @@ async def run_all_tests():
     r.record("dynamic_worker_metrics_bind_race", test_dynamic_worker_metrics_retry_only_address_collisions)
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
     r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
+    r.record("worker_terminal_browser_io_cannot_strand_cleanup", test_worker_event_loop_closes_after_terminal_browser_io_times_out)
+    r.record("worker_loop_rejects_unrelated_pending_work", test_worker_event_loop_rejects_unrelated_pending_work)
     r.record("worker_cancellation_heartbeat_cadence", test_worker_cancellation_uses_application_heartbeat_cadence)
     await r.record_async(
         "worker_metrics_stop_prevents_later_fleet_requests",

@@ -176,6 +176,11 @@ case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
     ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
 [ "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" -gt 0 ] || exit 2
+CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS="${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS}"
+case "$CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS" -gt 0 ] || exit 2
 DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
 # Per-workspace default so concurrent workspaces get non-colliding dashboards
 # (CONDUCTOR_PORT=3001 → 8765, the historical default).
@@ -3236,6 +3241,8 @@ import re
 import signal
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -3269,7 +3276,18 @@ def manifest():
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
         return json.loads(data)
-expected = manifest()
+# DONE is emitted before the guest's EXIT trap drains the worker and seals the
+# runtime. A 409 at this boundary means the exact guest is still cleaning up;
+# it is not an immutable artifact failure. The alarm bounds seal wait and the
+# complete transfer together. Once sealed, any changed manifest still fails.
+while True:
+    try:
+        expected = manifest()
+        break
+    except urllib.error.HTTPError as error:
+        if error.code != 409:
+            raise
+        time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
 required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
@@ -5085,7 +5103,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_tea
     # through the existing data plane, before the EXIT trap destroys the guest.
     # Agent-filtered run JSON rows are capped and cannot replace these files.
     if ! cloudbench_collect_runtime_evidence "$OUT_DIR/remote-logs" "$LOCAL_STATUS_PORT" \
-        "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}"
+        "$RUN_LOG_TOKEN" "${FLEET_MACHINE_ID:-$mid}" \
+        "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS:-7200}}"
     then
         echo "❌ complete terminal runtime evidence could not be verified -- infrastructure failure" >&2
         exit 70

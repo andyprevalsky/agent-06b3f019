@@ -19656,6 +19656,7 @@ raise SystemExit(module.main())
 OUT_DIR={shlex.quote(str(output))}
 SSH_LOG={shlex.quote(str(driver))}
 CLOUDBENCH_BOOT_LAUNCH=1
+CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS=3
 CLOUDBENCH_INFRA_PROBE={int(fault == 'infra-probe')}
 CLOUDBENCH_SKIP_AUTOSCALER={int(fault == 'held-demo')}
 TIMED_OUT=0

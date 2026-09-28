@@ -341,7 +341,7 @@ BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS = 10.0
 
 async def _bounded_browser_terminal_io(operation: Any, step: str) -> Any:
     """Bound a CDP teardown call even when it ignores task cancellation."""
-    task = asyncio.create_task(operation)
+    task = asyncio.create_task(operation, name=f"browser-terminal-io:{step}")
     try:
         done, _ = await asyncio.wait({task}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
         if done:
