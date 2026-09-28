@@ -384,6 +384,78 @@ the canonical full multi-workstream fixture selected by `/deploy` and
 Remaining scenarios and the full final controller gate retain their own
 outcomes and are not credited by this focused result.
 
+### Extracted cleanup fixtures omitted the real evidence dependency
+
+The full r5 controller at `8600f487` reached the owning Python selection after
+all shell scenarios passed, then failed three lifecycle cases with
+`cloudbench_collect_remaining_runtime_evidence: command not found`. The
+lifecycle registry-retirement test and both EXIT-cleanup variants of the volume
+migration test extracted `cleanup()` without its newly required evidence
+collector. The direct migration variant, which does not call `cleanup()`, passed.
+This is another fixture rollout omission after raw evidence became mandatory;
+production cleanup correctly refused to verify teardown when collection could
+not execute.
+
+Archive searches were `cloudbench_collect_remaining_runtime_evidence command
+not found` and `extracted shell fixture dependency closure missing helper`.
+The recovery-bootstrap and moved-helper cases are relatives; the first bad
+boundary here is the same raw-evidence rollout's incomplete isolated cleanup
+fixture. The original r5 failure remains preserved.
+
+The focused command selects
+`fleet_lifecycle_receipt_requires_final_registry_retirement or
+migrated_registry_reaps_seals_audit_and_retires_lock_directory` from
+`agents/benchmarks/cloudbench_dependency_sync_test.py`. The unchanged tracked
+baseline reproduced **3 failed, 1 passed** in 0.90 seconds on macOS. The private
+candidate extracts the actual `cloudbench_collect_remaining_runtime_evidence`
+and `cloudbench_fsync_directory` implementations and supplies the controller's
+empty `CHILD_OUT` and `CHILD_MACHINE` arrays. These fixtures admit no benchmark
+child; the migration fixture is provisioning a pool clone. No collector success
+stub, invented capture, or production exception is added.
+
+Both fixtures now begin with a real `runtime-evidence-unconfirmed` latch and
+assert that actual collection removes it. The strengthened assertions were run
+unchanged with only the missing dependency/bootstrap bindings removed, producing
+**3 failed, 1 passed** in 1.95 seconds; restoring those bindings produced
+**4 passed** in 2.18 seconds. Every pre-existing assertion remains unchanged,
+including registry retirement, audit sealing, migration history, snapshot
+retirement, and native exit 0/143. Full-controller revalidation on the eventual
+combined candidate remains pending. No production, benchmark, timeout,
+concurrency, or 10,000-agent resource behavior changes.
+
+Evidence, the private patch, identical-assertion checks, and exact command/log
+hashes are under `.context/acceptance/proof21-lifecycle-fixture-rca/`. The private
+copied module uses a collection hook only to restore its repository `ROOT` and
+`FLEET_SCRIPT` globals; that relocation hook is not part of the tracked repair.
+
+### Extracted transport fixture omitted admission preparation
+
+The same full r5 gate also failed
+`test_fleet_shared_patch_remains_authoritative_until_transport_selection` with
+`cloudbench_prepare_runtime_evidence: command not found`, exiting 70 before its
+patch-authority assertions. Its isolated pre-transport block now calls a real
+helper defined earlier in `run-bench-cloud`; that definition was absent from
+the fixture. This shares the incomplete extracted-dependency boundary above.
+The full owning selection retained four failures, 132 passes and 440 deselected
+cases. Its native exit was 1 and its terminal process audit was verified empty;
+passing all multi-workstream scenarios did not grant full-controller credit.
+
+The fixture now extracts the actual preparation helper and explicitly sets its
+existing non-boot mode: no guest has been admitted by this transport-only
+fixture. It does not stub the helper or bypass an admitted guest's evidence
+ownership. The original payload identity, digest, marker and fleet-owned patch
+retention assertions remain unchanged. An exact extracted reproduction failed
+with the missing-helper error before the repair and passed with the dependency
+present. Both use the committed runtime source; no production source changed.
+
+Private paired source/log receipts are under
+`.context/acceptance/proof21-extracted-evidence-closure-rca/root/`, and the
+independent combined candidate review is in its parent directory. These owning
+fixtures are already selected by the existing `/deploy` controller gate; no
+new live gate, timeout, workload or benchmark criterion is introduced. The
+combined committed full gate and actual 100-benchmark proof remain separate
+requirements.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures

@@ -2491,6 +2491,9 @@ source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 ROOT_DIR={shlex.quote(str(repo))}
 LOCAL_DASH_PORT=8765
 claim_local_port() {{ :; }}
+# This isolated transport fixture has not admitted a boot guest.
+CLOUDBENCH_BOOT_LAUNCH=0
+{_extract_fleet_function(cloud, "cloudbench_prepare_runtime_evidence() {")}
 CLOUDBENCH_LOCAL_PATCH_SOURCE={shlex.quote(str(payload))}
 CLOUDBENCH_LOCAL_PATCH_SHA256={shlex.quote(digest)}
 {pre_transport}
@@ -7265,11 +7268,16 @@ exit 99
 
 def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Path) -> None:
     """A sealed provider audit is insufficient if recovery authority remains."""
-    cleanup = _extract_fleet_function(FLEET_SCRIPT.read_text(), "cleanup() {")
+    fleet_source = FLEET_SCRIPT.read_text()
+    cleanup = "\n".join(_extract_fleet_function(fleet_source, signature) for signature in (
+        "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {", "cleanup() {",
+    ))
     for removal in ("removed", "failed", "retained"):
         fleet = tmp_path / removal
         (fleet / "_batch").mkdir(parents=True)
         (fleet / "registry").mkdir()
+        evidence_latch = fleet / "registry/runtime-evidence-unconfirmed"
+        evidence_latch.touch()
         (fleet / "teardown-ownership").mkdir()
         (fleet / "teardown-ownership/source-audit").write_text("sha256=" + "a" * 64 + "\n")
         script = f"""set -uo pipefail
@@ -7290,6 +7298,9 @@ AUTOSCALER_PORT_LEASE_HELPER=/dev/null
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
+# This registry-retirement fixture admits no benchmark child.
+CHILD_OUT=()
+CHILD_MACHINE=()
 for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait \\
     cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown \\
     cloudbench_terminate_and_wait record_tainted_claimed_pool_machines \\
@@ -7311,6 +7322,7 @@ trap cleanup EXIT
 exit 0
 """
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        assert not evidence_latch.exists(), "real no-child evidence collection did not release its latch"
         receipt = json.loads((fleet / "_batch/lifecycle.json").read_text())
         assert receipt["status"] == ("verified" if removal == "removed" else "failed"), result.stderr
         assert receipt["fleet_owner_token"] == "a" * 32
@@ -21229,6 +21241,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(tmp_path
         "fleet_audit_update_registry_clone() {", "fleet_registry_remove_if_empty() {",
         "fleet_audit_finalize_provider_teardown() {", "reap_machine() {",
         "reap_volume() {", "volume_inventory_contains_id() {", "cleanup() {",
+        "cloudbench_fsync_directory() {", "cloudbench_collect_remaining_runtime_evidence() {",
     ))
     workspace = tmp_path / "workspace"
     runs = workspace / ".context/fleet/runs"
@@ -21280,6 +21293,8 @@ fleet_registry_remove_if_empty "$REGISTRY" || exit 85
 [ ! -e "$REGISTRY" ] || exit 86
 '''
     if cleanup_exit is not None:
+        evidence_latch = registry / "runtime-evidence-unconfirmed"
+        evidence_latch.touch()
         snapshot = tmp_path / "owned-snapshot"
         snapshot.mkdir()
         shutil.copy2(ROOT / "scripts/cloudbench-volume-migration.py", snapshot)
@@ -21299,6 +21314,9 @@ AUTOSCALER_PORT_LEASE_HELPER=/dev/null
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
+# Pool provisioning owns clones but admits no benchmark child.
+CHILD_OUT=()
+CHILD_MACHINE=()
 mkdir -p "$FLEET_DIR/_batch"
 for helper in release_cleanup_disk_reserve cloudbench_terminate_tree_and_wait  cloudbench_confirm_guest_shutdowns fleet_registry_confirm_guest_teardown  cloudbench_terminate_and_wait record_tainted_claimed_pool_machines  reconcile_current_pool_transfer_claims reconcile_current_pool_claims  capacity_release_owner_reservations finalize_terminal_projection  cloudbench_controller_lock_release; do
     eval "$helper() {{{{ return 0; }}}}"
@@ -21311,6 +21329,7 @@ trap 'exit 143' TERM
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=20)
     assert result.returncode == (cleanup_exit or 0), result.stderr + result.stdout
     if cleanup_exit is not None:
+        assert not evidence_latch.exists(), "real no-child evidence collection did not release its latch"
         assert not snapshot.exists(), "owned snapshot was retained after its final consumer"
         assert not registry.exists(), "verified migration left recovery authority behind"
         lifecycle = json.loads((runs / "fixture-run/_batch/lifecycle.json").read_text())
