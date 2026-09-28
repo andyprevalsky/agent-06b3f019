@@ -3,6 +3,7 @@ import gzip
 import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 import random
@@ -14,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from contextlib import ExitStack
@@ -61,6 +63,7 @@ STACK_SCRIPT = ROOT / "scripts" / "run.sh"
 SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
+FORENSIC_RETIREMENT_SCRIPT = ROOT / "scripts" / "cloudbench-forensic-retirement.py"
 
 
 def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "same") -> None:
@@ -814,7 +817,7 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
 
 def test_predeploy_cloud_runner_selects_via_predeploy_selector() -> None:
     """Cloud --list must match select_predeploy_benches(surface=cloud)."""
-    from benchmarks.select_predeploy_benches import select_predeploy_benches
+    from benchmarks.select_predeploy_benches import discover_changed_files, select_predeploy_benches
 
     result = subprocess.run(
         ["bash", str(PREDEPLOY_SCRIPT), "--list"],
@@ -826,7 +829,7 @@ def test_predeploy_cloud_runner_selects_via_predeploy_selector() -> None:
     assert result.returncode == 0, result.stderr
     expected = select_predeploy_benches(
         catalog=TASKS_JSON,
-        changed_files=[],
+        changed_files=discover_changed_files(ROOT),
         surface="cloud",
         cap=20,
         repo_root=ROOT,
@@ -959,7 +962,7 @@ def test_cloud_hub_poller_supervises_fleet_until_final_bundle(tmp_path: Path) ->
 
 def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
     """Local --list must match select_predeploy_benches(surface=local)."""
-    from benchmarks.select_predeploy_benches import select_predeploy_benches
+    from benchmarks.select_predeploy_benches import discover_changed_files, select_predeploy_benches
 
     result = subprocess.run(
         ["bash", str(PREDEPLOY_LOCAL_SCRIPT), "--list"],
@@ -971,7 +974,7 @@ def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
     assert result.returncode == 0, result.stderr
     expected = select_predeploy_benches(
         catalog=TASKS_JSON,
-        changed_files=[],
+        changed_files=discover_changed_files(ROOT),
         surface="local",
         cap=20,
         repo_root=ROOT,
@@ -3998,12 +4001,14 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
     assert f"generation={first_generation.name}" in (index / "current/health").read_text()
     assert (index / "current/machines/machine-1").read_text().splitlines() == [
         "state=created",
+        "instance_id=",
         "private_ip=fdaa::1",
         "storage_ready=0",
         "storage_failed=1",
     ]
     assert (index / "current/machines/machine-2").read_text().splitlines() == [
         "state=stopped",
+        "instance_id=",
         "private_ip=fdaa::2",
         "storage_ready=1",
         "storage_failed=0",
@@ -13396,8 +13401,9 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     assert "_refresh_inventory_snapshot_unlocked" in refresh
     # Autoscaler liveness is an O(1) record-existence check, and a missing/stale
     # keyed record now fails closed instead of silently ending the autoscaler.
-    assert 'if ! inventory_machine_exists "$cid"; then' in fleet
+    assert 'inventory_machine_exists "$cid" || inventory_status=$?' in fleet
     assert "primary disappeared from provider inventory before child completion" in fleet
+    assert "shared provider inventory is unhealthy during the run" in fleet
 
     # mutation-verification paths stay LIVE (a 5s-stale snapshot would make
     # reap retry against ghosts and claims race)
@@ -13490,6 +13496,40 @@ test ! -e "$FLEET_DIR/machines-refresh.lock"
         check=False,
     )
     assert lock_result.returncode == 0, lock_result.stderr
+
+
+def test_inventory_refresh_failure_preserves_provider_phase_and_private_response(tmp_path: Path) -> None:
+    """A stale index must leave the original failed Fly response for RCA."""
+    fleet = FLEET_SCRIPT.read_text()
+    diagnostic = (
+        _extract_fleet_function(fleet, "inventory_refresh_diagnostic() {")
+        if "inventory_refresh_diagnostic() {" in fleet else ""
+    )
+    refresh = _extract_fleet_function(fleet, "_refresh_inventory_snapshot_unlocked() {")
+    script = f'''set -uo pipefail
+FLEET_DIR="$ROOT"
+INVENTORY_INDEX="$ROOT/inventory"
+MACHINES_SNAPSHOT="$ROOT/machines.json"
+VOLUMES_SNAPSHOT="$ROOT/volumes.json"
+MACHINE_READINESS_SCRIPT="$ROOT/readiness.py"
+SNAPSHOT_REFRESH_TIMEOUT=30
+APP=fixture-app
+SNAPSHOT_LOOP_TOKEN=fixture-token
+fly_with_timeout() {{ printf 'synthetic Fly rate limit\\n'; return 42; }}
+{diagnostic}
+{refresh}
+_refresh_inventory_snapshot_unlocked
+'''
+    result = subprocess.run(["bash", "-c", script], env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
+                            text=True, capture_output=True, check=False)
+    assert result.returncode == 1 and result.stdout == "", result.stdout + result.stderr
+    diagnostics = tmp_path / "inventory-refresh-diagnostics"
+    latest = dict(line.split("=", 1) for line in (diagnostics / "latest").read_text().splitlines())
+    assert latest["phase"] == "machines-list" and latest["status"] == "42"
+    private = diagnostics / "failure.raw.private"
+    assert private.read_text() == "synthetic Fly rate limit\n"
+    assert private.stat().st_mode & 0o077 == 0
+    assert not list(tmp_path.glob("machines.json.tmp.*"))
 
 
 def test_inventory_publishers_share_one_recoverable_atomic_lock(tmp_path: Path) -> None:
@@ -13907,6 +13947,35 @@ if inventory_machine_field machine-1 state; then exit 9; fi
         capture_output=True,
         check=False,
     )
+    assert result.returncode == 0, result.stderr
+
+
+def test_inventory_existence_distinguishes_missing_machine_from_unhealthy_index(tmp_path: Path) -> None:
+    """A stale shared index cannot testify that an owned primary vanished."""
+    fleet = FLEET_SCRIPT.read_text()
+    health = _extract_fleet_function(fleet, "inventory_index_healthy() {")
+    path = _extract_fleet_function(fleet, "inventory_machine_record_path() {")
+    exists = _extract_fleet_function(fleet, "inventory_machine_exists() {")
+    index = tmp_path / "inventory/current"
+    (index / "machines").mkdir(parents=True)
+    (index / "machines/owned-primary").write_text("state=started\n")
+    (index / "health").write_text(f"publisher_token=test-token\nvalid_until={int(time.time()) + 60}\n")
+    script = f'''set -uo pipefail
+INVENTORY_INDEX="$ROOT/inventory"
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+SNAPSHOT_LOOP_PID=$$
+SNAPSHOT_LOOP_TOKEN=test-token
+{health}
+{path}
+{exists}
+inventory_machine_exists owned-primary; test "$?" -eq 0
+inventory_machine_exists missing-primary; test "$?" -eq 1
+printf 'publisher_token=test-token\\nvalid_until=%s\\n' "$((INVENTORY_CLOCK_EPOCH - 1))" > "$INVENTORY_INDEX/current/health"
+inventory_machine_exists owned-primary; test "$?" -eq 2
+'''
+    result = subprocess.run(["bash", "-c", script], env={"ROOT": str(tmp_path), "PATH": os.environ["PATH"]},
+                            text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr
 
 
@@ -19649,6 +19718,88 @@ candidate_run="$OUT_DIR/candidate.json"
                 process.wait(timeout=5)
 
 
+def test_controller_term_collects_original_runtime_evidence_before_proxy_retirement(tmp_path: Path) -> None:
+    """TERM after a real guest result must retain raw files through the data plane."""
+    guest = tmp_path / "guest"
+    context = guest / "repo/.context/cloudbench"
+    logs = context / "logs"
+    logs.mkdir(parents=True)
+    (context / "services.json").write_text(json.dumps({"status": "stopped", "env": {"worker_processes": 2}}))
+    (context / "run.json").write_text(json.dumps({"run_id": "fixture", "tasks": [{"name": "fixture", "benchmark_status": "FAILED", "passed": False}]}))
+    (context / "stack.log").write_text("stack stopped\n")
+    (context / "cloudbench-stack-cleanup-run-token.status").write_text("state=clean\ntoken=run-token\n")
+    (guest / "cloudbench-driver-clean-run-token.ack").write_text("run-token\n")
+    (guest / "cloudbench-driver.state").write_text("exited\n")
+    original = {"backend.log": b"backend complete\n", "worker.log": b"worker complete\n", "worker.1.log": b"second worker complete\n"}
+    for name, data in original.items():
+        (logs / name).write_bytes(data)
+    output = tmp_path / "out"
+    output.mkdir()
+    driver = tmp_path / "driver.log"
+    driver.write_text("original driver transcript\n")
+    ready = tmp_path / "port"
+    environment = {**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "fixture-secret", "FLY_MACHINE_ID": "fixture-machine"}
+    with (tmp_path / "status.log").open("w") as status_log:
+        server = subprocess.Popen(
+            [sys.executable, str(STATUS_SERVER_SCRIPT), "--directory", str(guest), "--port", "0",
+             "--bind", "127.0.0.1", "--run-token", "run-token", "--ready-file", str(ready)],
+            env=environment, stdout=status_log, stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                assert server.poll() is None, "fixture status server exited"
+                assert time.monotonic() < deadline, "fixture status server did not bind"
+                time.sleep(0.01)
+            cloud = CLOUD_SCRIPT.read_text()
+            script = f'''set -euo pipefail
+OUT_DIR={shlex.quote(str(output))}
+SSH_LOG={shlex.quote(str(driver))}
+CLOUDBENCH_BOOT_LAUNCH=1
+CLOUDBENCH_INFRA_PROBE=0
+CLOUDBENCH_SKIP_AUTOSCALER=0
+CLOUDBENCH_CHILD_TERM_SECONDS=10
+RUN_LOG_TOKEN=run-token
+FLEET_MACHINE_ID=fixture-machine
+mid=fixture-machine
+LOCAL_STATUS_PORT={int(ready.read_text())}
+export CLOUDBENCH_BARRIER_TOKEN=fixture-secret
+{_extract_fleet_function(cloud, 'cloudbench_skip_held_driver_teardown_race() {')}
+{_extract_fleet_function(cloud, 'cloudbench_collect_runtime_evidence() {')}
+{_extract_fleet_function(cloud, 'cloudbench_prepare_runtime_evidence() {')}
+cloudbench_prepare_runtime_evidence
+{_extract_fleet_function(cloud, 'stop_on_exit() {')}
+release_boot_config_update_slot() {{ :; }}
+confirm_guest_shutdown() {{ return 0; }}
+stop_proxy() {{ kill -TERM {server.pid}; printf '%s\\n' retired > "$OUT_DIR/proxy-retired"; }}
+release_local_port_leases() {{ :; }}
+stop_live_archive_frontend() {{ :; }}
+stop_all_local_viewers() {{ :; }}
+STOP_DONE=0
+trap stop_on_exit EXIT
+trap 'exit 143' TERM
+kill -TERM "$$"
+'''
+            result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=15)
+            assert result.returncode == 143, result.stderr
+            assert (output / "proxy-retired").is_file()
+            assert (output / "remote-logs/cloudbench-driver.log").read_bytes() == driver.read_bytes()
+            root = output / "remote-logs/runtime-evidence"
+            manifest = json.loads((root / "manifest.json").read_text())
+            assert manifest["run_token"] == "run-token" and manifest["machine_id"] == "fixture-machine"
+            for name, data in original.items():
+                assert (root / "logs" / name).read_bytes() == data
+                assert manifest["files"]["logs/" + name] == {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            assert json.loads((root / "run.json").read_text())["tasks"][0]["benchmark_status"] == "FAILED"
+            assert json.loads((output / "runtime-evidence.pending").read_text()) == {
+                "version": 1, "run_token": "run-token", "machine_id": "fixture-machine",
+            }
+        finally:
+            if server.poll() is None:
+                server.terminate()
+            server.wait(timeout=5)
+
+
 @pytest.mark.parametrize("prior", ["none", "foreign", "symlink", "foreign-owner", "symlink-owner"])
 def test_boot_terminal_runtime_evidence_admission_precedes_guest_start(tmp_path: Path, prior: str) -> None:
     cloud = CLOUD_SCRIPT.read_text()
@@ -22693,3 +22844,125 @@ wait "$signaller"
     )
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert not list(scratch.iterdir())
+
+
+@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "shutdown", "audit"])
+def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
+    owner = "a" * 32
+    run_id = "fixture-run"
+    task = "fixture-task"
+    machine = "b" * 14
+    volume = "vol_fixture123"
+    token = f"{owner}-0"
+    run = tmp_path / "runs" / run_id
+    out = run / task
+    out.mkdir(parents=True)
+    registry = tmp_path / "registries" / owner
+    audit = tmp_path / "audits" / owner
+    (registry / "clones").mkdir(parents=True)
+    (audit / "fresh").mkdir(parents=True)
+    (run / "_batch").mkdir()
+    (run / "_forensic").mkdir()
+    (run / "_batch/benches.json").write_text(json.dumps([{"name": task}]))
+    (run / "_batch/lifecycle.json").write_text(json.dumps({
+        "version": 1, "status": "failed", "fleet_owner_token": owner,
+        "run_id": run_id, "controller_exit_code": 1,
+    }))
+    (registry / "meta").write_text(
+        f"version=2\nfleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n"
+        f"runs_root={run.parent}\naudit_dir={audit}\ncleanup_policy=reap\n"
+    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n")
+    (audit / "fresh" / "clone").write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\nclone_name=clone\n"
+        f"machine_id={machine}\nvolume_id={volume}\ndisposition=owned\n"
+    )
+    (registry / "clones" / "clone").write_text(f"name=clone\nid={machine}\nvolume_id={volume}\n")
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (out / ".cid").write_text(f"run {machine}\n")
+    (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
+    evidence_owner = {"version": 1, "machine_id": machine, "run_token": token}
+    (out / "runtime-evidence.owner.json").write_text(json.dumps(evidence_owner))
+    (out / "runtime-evidence.pending").write_text(json.dumps(evidence_owner))
+    originals = {
+        "bench.log": b"original partial benchmark log\n",
+        "repo/.context/cloudbench/services.json": json.dumps({"status": "running", "env": {"worker_processes": 1}}).encode(),
+        "repo/.context/cloudbench/stack.log": b"original stack log\n",
+        "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
+        "repo/.context/cloudbench/logs/worker.log": b"original worker log\n",
+    }
+    archive = run / "_forensic/originals.tar.gz"
+    with tarfile.open(archive, "w:gz") as stream:
+        for relative, content in originals.items():
+            info = tarfile.TarInfo(f"{task}/{relative}")
+            info.size = len(content)
+            stream.addfile(info, io.BytesIO(content))
+    manifest = {
+        "schema": "cloudbench-forensic-retirement-v1", "owner": owner,
+        "run_id": run_id, "proof_credit": 0, "archive_bytes": archive.stat().st_size,
+        "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "uncompressed_bytes": sum(map(len, originals.values())),
+        "tasks": [{"task": task, "ordinal": 0, "machine_id": machine,
+                   "volume_id": volume, "run_token": token, "proof_credit": 0,
+                   "runtime_evidence_complete": False, "services_status": "running",
+                   "missing": [f"cloudbench-driver-clean-{token}.ack", "repo/.context/cloudbench/run.json"],
+                   "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+                             for relative, content in originals.items()}}],
+    }
+    manifest_path = run / "_forensic/manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    machines = tmp_path / "machines.json"
+    volumes = tmp_path / "volumes.json"
+    machines.write_text(json.dumps([{"id": machine}] if fault == "live-machine" else []))
+    volumes.write_text(json.dumps([{"id": volume}] if fault == "live-volume" else []))
+    if fault == "archive":
+        archive.write_bytes(archive.read_bytes() + b"corrupt")
+    elif fault == "pending":
+        (out / "runtime-evidence.pending").unlink()
+    elif fault == "shutdown":
+        (out / "guest-shutdown.confirmed").write_text("foreign-run\n")
+    elif fault == "audit":
+        (audit / "fresh" / "clone").write_text((audit / "fresh" / "clone").read_text().replace(volume, "vol_foreign"))
+    command = [sys.executable, str(FORENSIC_RETIREMENT_SCRIPT), "--registry", str(registry),
+               "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
+               "--machines", str(machines), "--volumes", str(volumes)]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    if fault == "none":
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["proof_credit"] == 0
+    else:
+        assert result.returncode != 0, f"unsafe {fault} was accepted"
+    assert (out / "runtime-evidence.pending").exists() == (fault != "pending")
+    assert (registry / "runtime-evidence-unconfirmed").exists()
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
+        "registry_meta_value() {", "fleet_recovery_confirm_forensic_retirement() {",
+    ))
+    script = f'''set -u
+APP=bench-app
+FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
+MACHINES_FIXTURE={shlex.quote(str(machines))}
+VOLUMES_FIXTURE={shlex.quote(str(volumes))}
+{functions}
+cloudbench_fsync_directory() {{ :; }}
+fly_with_timeout() {{
+    case "$2" in
+        machines) cat "$MACHINES_FIXTURE" ;;
+        volumes) cat "$VOLUMES_FIXTURE" ;;
+        *) return 90 ;;
+    esac
+}}
+fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
+'''
+    recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    if fault == "none":
+        assert recovery.returncode == 0, recovery.stderr
+        receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
+        assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
+        assert not (registry / "runtime-evidence-unconfirmed").exists()
+        assert (out / "runtime-evidence.pending").exists()
+    else:
+        assert recovery.returncode != 0, f"unsafe {fault} cleared the owner latch"
+        assert (registry / "runtime-evidence-unconfirmed").exists()
+        assert not (run / "_forensic/retirement-verified.json").exists()
+    assert 'fleet_recovery_confirm_forensic_retirement "$registry"' in fleet

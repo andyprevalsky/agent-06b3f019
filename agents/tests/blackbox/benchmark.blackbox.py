@@ -400,6 +400,8 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q",
          suite + "::test_boot_terminal_runtime_evidence_collects_complete_logs",
+         suite + "::test_controller_term_collects_original_runtime_evidence_before_proxy_retirement",
+         suite + "::test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence",
          suite + "::test_boot_terminal_runtime_evidence_admission_precedes_guest_start",
          str(repo_root / "agents/benchmarks/cloudbench_runtime_retention_test.py"),
          str(repo_root / "agents/benchmarks/cloudbench_worker_evidence_test.py")],

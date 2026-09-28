@@ -680,6 +680,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
+       "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
@@ -733,6 +734,7 @@ CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_result.py"
 EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-session-cleanup.py"
 GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
 VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
+FORENSIC_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-forensic-retirement.py"
 STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
 STALE_OWNER_RECOVERY_PLAN_FILE=""
@@ -1365,30 +1367,72 @@ INVENTORY_MAX_STALE_SECONDS="${CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS:-$((SNAPSH
 INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 
+inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-output> <started-SECONDS>
+    local phase="$1" status="$2" raw="${3:-}" started="${4:-$SECONDS}"
+    local directory="$FLEET_DIR/inventory-refresh-diagnostics" temporary private_tmp
+    [ -d "$directory" ] || mkdir -m 700 "$directory" || return 1
+    [ ! -L "$directory" ] || return 1
+    temporary="$(mktemp "$directory/.latest.XXXXXX")" || return 1
+    {
+        printf 'phase=%s\nstatus=%s\nepoch=%s\nelapsed_seconds=%s\npid=%s\n' \
+            "$phase" "$status" "$(date +%s)" "$((SECONDS - started))" "${BASHPID:-$$}"
+        printf 'publisher_token=%s\n' "${SNAPSHOT_LOOP_TOKEN:-}"
+    } > "$temporary" || { rm -f "$temporary"; return 1; }
+    chmod 600 "$temporary" && mv "$temporary" "$directory/latest" || return 1
+    case "$status" in pending|0) return 0 ;; esac
+    private_tmp="$(mktemp "$directory/.failure.XXXXXX")" || return 1
+    if [ -f "$raw" ] && [ ! -L "$raw" ]; then
+        cp "$raw" "$private_tmp" || { rm -f "$private_tmp"; return 1; }
+    fi
+    chmod 600 "$private_tmp" && mv "$private_tmp" "$directory/failure.raw.private"
+}
+
 _refresh_inventory_snapshot_unlocked() {
-    local suffix machines_tmp volumes_tmp
+    local suffix machines_tmp volumes_tmp publish_tmp started status=0
+    # Native Machine JSON can contain configured env and files. Keep even
+    # short-lived snapshots private before any diagnostic copy is made.
+    umask 077
+    started=$SECONDS
     suffix="${BASHPID:-$$}.$RANDOM"
     machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
     volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
-    if ! fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-            machines list -a "$APP" --json > "$machines_tmp" \
-        || [ ! -s "$machines_tmp" ]; then
+    publish_tmp="$FLEET_DIR/inventory-publish.tmp.$suffix"
+    inventory_refresh_diagnostic machines-list pending "" "$started" || true
+    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+        machines list -a "$APP" --json > "$machines_tmp" || status=$?
+    if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
+        [ "$status" -ne 0 ] || status=1
+        inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
     fi
-    if ! fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
-            volumes list -a "$APP" --json > "$volumes_tmp" \
-        || [ ! -s "$volumes_tmp" ]; then
+    inventory_refresh_diagnostic volumes-list pending "" "$started" || true
+    status=0
+    fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+        volumes list -a "$APP" --json > "$volumes_tmp" || status=$?
+    if [ "$status" -ne 0 ] || [ ! -s "$volumes_tmp" ]; then
+        [ "$status" -ne 0 ] || status=1
+        inventory_refresh_diagnostic volumes-list "$status" "$volumes_tmp" "$started" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
     fi
-    if ! python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
-            "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX"; then
+    inventory_refresh_diagnostic publish-index pending "" "$started" || true
+    status=0
+    python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
+        "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX" > "$publish_tmp" 2>&1 || status=$?
+    if [ "$status" -ne 0 ]; then
+        inventory_refresh_diagnostic publish-index "$status" "$publish_tmp" "$started" || true
+        rm -f "$machines_tmp" "$volumes_tmp" "$publish_tmp"
+        return 1
+    fi
+    rm -f "$publish_tmp"
+    if ! mv "$machines_tmp" "$MACHINES_SNAPSHOT" \
+        || ! mv "$volumes_tmp" "$VOLUMES_SNAPSHOT"; then
+        inventory_refresh_diagnostic snapshot-files 1 "" "$started" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
     fi
-    mv "$machines_tmp" "$MACHINES_SNAPSHOT"
-    mv "$volumes_tmp" "$VOLUMES_SNAPSHOT"
+    inventory_refresh_diagnostic complete 0 "" "$started" || true
 }
 
 inventory_refresh_wait_tick() {
@@ -1638,8 +1682,10 @@ inventory_machine_field() {  # inventory_machine_field <id> <field>
 
 inventory_machine_exists() {
     local path
-    inventory_index_healthy || return 1
-    path="$(inventory_machine_record_path "$1")" || return 1
+    # A stale publisher cannot establish Machine absence. Preserve that
+    # distinction for autoscaler diagnostics and exact-owner recovery.
+    inventory_index_healthy || return 2
+    path="$(inventory_machine_record_path "$1")" || return 2
     [ -s "$path" ]
 }
 
@@ -7449,12 +7495,65 @@ PY
     printf '%s %s\n' "$source_id" "$volume_id"
 }
 
+fleet_recovery_confirm_forensic_retirement() {  # <exact failed dead-owner registry>
+    local registry="$1" run archive manifest machines volumes receipt result previous
+    local meta="$registry/meta"
+    run="$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"
+    manifest="$run/_forensic/manifest.json"
+    archive="$run/_forensic/originals.tar.gz"
+    receipt="$run/_forensic/retirement-verified.json"
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+        && [ -f "$archive" ] && [ ! -L "$archive" ] || return 1
+    machines="$(mktemp)" || return 1
+    volumes="$(mktemp)" || { rm -f "$machines"; return 1; }
+    chmod 600 "$machines" "$volumes" || { rm -f "$machines" "$volumes"; return 1; }
+    if ! fly_with_timeout 30 machines list -a "$APP" --json > "$machines" \
+        || ! fly_with_timeout 30 volumes list -a "$APP" --json > "$volumes"; then
+        rm -f "$machines" "$volumes"
+        return 1
+    fi
+    result="$(python3 "$FORENSIC_RETIREMENT_HELPER" \
+        --registry "$registry" --run "$run" --manifest "$manifest" \
+        --archive "$archive" --machines "$machines" --volumes "$volumes")"
+    local status=$?
+    rm -f "$machines" "$volumes"
+    [ "$status" = "0" ] && [ -n "$result" ] || return 1
+    if [ -e "$receipt" ] || [ -L "$receipt" ]; then
+        [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+        previous="$(cat "$receipt")" || return 1
+        [ "$previous" = "$result" ] || return 1
+    else
+        python3 - "$receipt" "$result" <<'PY' || return 1
+import os, sys
+path, result = sys.argv[1:]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    stream.write(result + '\n')
+    stream.flush()
+    os.fsync(stream.fileno())
+directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+    fi
+    # Preserve every original pending marker and the failed proof verdict. This
+    # only releases an ownership latch after exact archival and native absence.
+    rm -f "$registry/runtime-evidence-unconfirmed" \
+        && cloudbench_fsync_directory "$registry"
+}
+
 fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; verified copies only
     local registry="$1" mapping index out machine bench mode status=0
     local FLEET_REGISTRY_DIR="$1" FLEET_REGISTRY_PUBLISHED=1
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
     local -a CHILD_OUT=() CHILD_MACHINE=()
     FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
+    if [ -e "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" ]; then
+        fleet_recovery_confirm_forensic_retirement "$registry"
+        return $?
+    fi
     mapping="$(mktemp)" || return 1
     if ! python3 - "$registry" "$FLEET_AUDIT_ROOT" "$CLOUDBENCH_SCRIPT_SNAPSHOT" > "$mapping" <<'PY'
 import json, re, runpy, sys
@@ -11184,7 +11283,7 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     local runtime_run_token="${7:-}"
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
-    local ready_reconcile_rc=0
+    local ready_reconcile_rc=0 inventory_status=0
     local scale_down_target="" scale_down_since="" scale_down_now=""
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
@@ -11412,11 +11511,16 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             complete_autoscaler_after_child
             return $?
         fi
-        if ! inventory_machine_exists "$cid"; then
-            printf '%s\n' "primary disappeared from provider inventory before child completion" > "$out/autoscaler.failed"
-            echo "  ❌ [$bench] mandatory autoscaler: primary inventory disappeared during proxy startup" >&2
+        inventory_machine_exists "$cid" || inventory_status=$?
+        if [ "$inventory_status" -ne 0 ]; then
+            if [ "$inventory_status" -eq 2 ]; then
+                fail_autoscaler "shared provider inventory is unhealthy during proxy startup"
+            else
+                fail_autoscaler "primary disappeared from provider inventory before child completion"
+            fi
             return 1
         fi
+        inventory_status=0
         echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable before first desired count; retrying" >&2
         sleep 2
     done
@@ -11443,15 +11547,20 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
             fail_autoscaler "could not reconcile worker readiness outcomes"
             return 1
         fi
-        if ! inventory_machine_exists "$cid"; then
+        inventory_machine_exists "$cid" || inventory_status=$?
+        if [ "$inventory_status" -ne 0 ]; then
             if [ -e "$out/benchmark-child.finished" ]; then
                 complete_autoscaler_after_child
                 return $?
             fi
-            printf '%s\n' "primary disappeared from provider inventory before child completion" > "$out/autoscaler.failed"
-            echo "  ❌ [$bench] mandatory autoscaler: primary inventory disappeared during the run" >&2
+            if [ "$inventory_status" -eq 2 ]; then
+                fail_autoscaler "shared provider inventory is unhealthy during the run"
+            else
+                fail_autoscaler "primary disappeared from provider inventory before child completion"
+            fi
             return 1
         fi
+        inventory_status=0
         if [ -s "$out/autoscaler.failed" ]; then
             return 1
         fi
