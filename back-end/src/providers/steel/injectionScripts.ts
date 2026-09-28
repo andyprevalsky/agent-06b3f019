@@ -144,6 +144,22 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                     return String(u);
                   }
                 };
+                // Read blob:/data: (and http) script bodies while the URL is
+                // still alive. FCaptcha PoW does createObjectURL → new Worker
+                // → revokeObjectURL immediately; importScripts(originalBlob)
+                // then throws NetworkError and the page shows
+                // "Verification unavailable" (agent b08b5bd4).
+                const _readScriptSync = (url) => {
+                  try {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('GET', url, false);
+                    xhr.send(null);
+                    if (xhr.status === 200 || xhr.status === 0) {
+                      return String(xhr.responseText || '');
+                    }
+                  } catch (e) {}
+                  return null;
+                };
                 const _wrapWorkerCtor = (Native, name) => {
                   if (typeof Native !== 'function') return Native;
                   const Wrapped = function (...args) {
@@ -157,16 +173,27 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                         (typeof URL !== 'undefined' && scriptURL instanceof URL)
                           ? _absUrl(scriptURL)
                           : String(scriptURL);
-                      // Classic workers (incl. blob:/data: PoW workers): preamble
-                      // then importScripts the original URL. Module workers use
-                      // static import. Never sync-XHR the body — blob XHR is
-                      // flaky and falls back to the unpatched Native worker.
-                      const wrappedSrc = isModule
-                        ? _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';'
-                        : _workerNavPreamble +
+                      const isBlobOrData =
+                        url.startsWith('blob:') || url.startsWith('data:');
+                      let wrappedSrc;
+                      if (isBlobOrData) {
+                        // Inline the body into our preamble blob so a post-
+                        // construct revokeObjectURL cannot break the worker.
+                        const body = _readScriptSync(url);
+                        if (body == null) {
+                          return new Native(...args);
+                        }
+                        wrappedSrc = _workerNavPreamble + '\\n' + body;
+                      } else if (isModule) {
+                        wrappedSrc =
+                          _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';';
+                      } else {
+                        wrappedSrc =
+                          _workerNavPreamble +
                           '\\nimportScripts(' +
                           JSON.stringify(url) +
                           ');';
+                      }
                       const blobUrl = _blobUrl(wrappedSrc);
                       const worker = new Native(blobUrl, options);
                       try {
