@@ -4724,14 +4724,17 @@ busy_registry="$(find "$SANDBOX/.git/cloudbench-fleet-ownership" -mindepth 1 -ma
 [ -n "$busy_registry" ] || fail "busy orphan lost its durable owner registry"
 # Scenario 2-cancel and scenario 5 cover the pre-ack sentinel. This scenario
 # targets the next independent safety gate, so model an owner whose guest
-# cleanup was already confirmed and which is now eligible for stale recovery.
+# cleanup and complete runtime evidence were already confirmed, making this
+# exact owner eligible for stale recovery. Unconfirmed evidence is exercised
+# separately by the cancellation and pre-ack quarantine scenarios.
 awk '
     /^cleanup_policy=/ { print "cleanup_policy=reap"; next }
     { print }
 ' "$busy_registry/meta" > "$busy_registry/meta.tmp" \
     && mv "$busy_registry/meta.tmp" "$busy_registry/meta" \
     || fail "could not establish post-confirmation stale-owner fixture"
-rm -f "$busy_registry/guest-cleanup-unconfirmed"
+rm -f "$busy_registry/guest-cleanup-unconfirmed" \
+    "$busy_registry/runtime-evidence-unconfirmed"
 reset_test_workspace_fleet_roots "$WS_A"
 rm -rf "$FAKE_DIR/markers"
 mkdir -p "$FAKE_DIR/markers"

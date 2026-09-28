@@ -331,6 +331,59 @@ The complete committed controller suite and live acceptance remain pending.
 A rejected oversized private transfer created no remote files or processes
 and is preserved separately from the actual focused execution.
 
+### Post-confirmation fixture retained the independent evidence latch
+
+The unchanged remaining-scenario replay at `fb30bc4c` plus the separately
+reviewed native-command completion fix passed scenarios 3–5, then failed
+scenario 6: `active-runner stale ownership must fail closed (exit=0)`.
+The old source registry remained present and the successor admitted a new task
+without ever logging stale recovery or the expected runner-count refusal.
+The overall replay exited 1 in 110.41 seconds with an empty terminal process
+audit. This was an offline fake-provider fixture, not a paid fleet run.
+
+Archive searches used `runtime-evidence-unconfirmed post-confirmation
+stale-owner fixture` and `quarantine evidence latch fixture recovery skipped`.
+This is another fixture-contract recurrence of the raw-evidence rollout.
+Scenario 6 explicitly models an owner whose cleanup is already confirmed,
+sets `cleanup_policy=reap`, and removes `guest-cleanup-unconfirmed`. It had not
+been updated to remove the independent `runtime-evidence-unconfirmed` latch.
+Both the original retained registry and an unchanged focused reproduction
+contained that second latch. Executing the real `fleet_registry_cleanup_state`
+against each returned `quarantined`, so reconciliation correctly skipped the
+owner before the runner-count gate the test intended to exercise.
+
+A passive native-state observer inside `registry_owner_alive` was never reached
+in the failing focused reproduction. An initial owner-liveness hypothesis was
+therefore rejected; the original historical process had already disappeared
+when inspected, and no zombie state was established for that incident. The
+focused original case exited 1 in 49.53 seconds with the same assertion. No
+production process-identity or recovery predicate was changed.
+
+The fixture now removes both exact confirmation latches only at its explicitly
+modeled post-confirmation transition. Cancellation and pre-ack quarantine
+scenarios keep their incomplete-evidence flags and original retention
+assertions. No other scenario has the same one-latch removal pattern; manually
+constructed dead-owner fixtures create neither latch. The candidate keeps all
+scenario 6 assertions byte-identical, including native refusal status, exact
+registry/audit identity binding, runner count 1, no machine destruction and no
+new provisioning. It adds no timeout, retry, provider call or benchmark change.
+
+The paired focused case passed in 31.60 seconds with native exit 0 and a verified
+empty terminal process audit. The real owner check was reached after the fixture
+transition; it observed an absent controller, then the active-runner guard
+refused recovery as expected. The diagnostic runtime differs between the two
+replays only in the passive observer's output path. Source fixture hashes were
+`344490607289f88e1440f4b1e0a7ede88bfab3da1d1ad9a2549a65ec96f35947`
+before and
+`f577d4d1100eee73bb4ab009d3a03f21be58f3ea3df79305dbd7c340513713cc`
+after. Complete private receipts, native-state observations, retained latch
+hashes and original logs are under
+`.context/acceptance/proof21-stale-runner-rca/`. The owning case already runs in
+the canonical full multi-workstream fixture selected by `/deploy` and
+`scripts/test.sh`; no duplicate selection or runtime abstraction was added.
+Remaining scenarios and the full final controller gate retain their own
+outcomes and are not credited by this focused result.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures
