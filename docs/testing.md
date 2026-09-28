@@ -108,6 +108,23 @@ Set `TZ=UTC` before detaching the controller and keep it for recovery, so legacy
 `ps lstart` ownership strings are rendered consistently. Do not rewrite an
 existing ownership record to work around a timezone change.
 
+At ten-bench width, a Fly-hosted controller needs dedicated performance CPU
+(at least `performance-2x` with 8 GB RAM). A `shared-cpu-4x`/8 GB controller
+showed about 92% CPU steal while running ten stacks and their data-plane
+proxies: the same app-wide Fly inventory call completed in about 2 seconds from
+an external host but exceeded 90 seconds on the controller, invalidating the
+autoscalers. Check the controller VM shape before the proof and sample
+`/proc/stat` steal when inventory refreshes lag. Change its VM shape only after
+the active fleet's exact ownership and evidence are closed; restarting a live
+controller does not transfer its cleanup authority. This requirement is for
+the controller, not a change to benchmark guest, harness, prompt or grading.
+
+Cloud bench volumes fork from one complete warm-donor snapshot. Snapshot
+creation is a dependency-refresh operation, not a per-bench upload. Each bench
+still needs its own isolated restored volume, and those restores run in
+parallel within a slice. Avoid recopying a large donor or refreshing its
+snapshot unless dependency manifests or the donor contents actually changed.
+
 PR #1299's infrastructure acceptance is ten consecutive slices of ten actual
 benchmarks. Each benchmark must have at least three successful, correlated LLM
 provider responses in its own agent tree, a trustworthy native evaluation,

@@ -310,7 +310,10 @@ of truth; do not duplicate them into other files.
 - **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
   `python3` may be newer). A few suites also need `ruby` + `rsync` installed
   (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not
-found` / `rsync: command not found`.
+  found` / `rsync: command not found`.
+- **Cloud fleet controller:** Follow the long cloud fleet proof guidance in
+  `docs/testing.md` for the dedicated-CPU controller requirement, exact-owner
+  recovery, and warm snapshot reuse before starting width-10 validation.
 - **Skip `mac-app` on Cloud/Linux — tests AND `dev`.** It is macOS-only (Electron
   - `darwin`-only native deps such as `node-mac-contacts`); its `npm install`,
     `npm run dev`, and blackbox suite cannot run on Linux. `run.sh` and the husky
