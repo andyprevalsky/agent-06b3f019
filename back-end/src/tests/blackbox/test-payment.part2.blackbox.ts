@@ -150,7 +150,9 @@ const tests: Array<[string, () => Promise<void>]> = [
                     // Captured AgentCard sandbox response after a successful $43.96 checkout:
                     // this mutable counter had fallen by the $12.00 first line item.
                     transferred_cents: 3196,
-                    released_cents: 0,
+                    // AgentCard sandbox (2026-09-28) also echoes a cumulative
+                    // authorization-release counter on consumed rows.
+                    released_cents: 3721,
                     card_id: 'card-text',
                     livemode: false,
                   },
@@ -163,6 +165,10 @@ const tests: Array<[string, () => Promise<void>]> = [
 
       assert(result.orgTransfer?.id === 'transfer-text', 'expected the text-envelope transfer id');
       assert(result.orgTransfer?.transferredCents === 4396, 'expected the transferred amount');
+      assert(
+        result.orgTransfer?.releasedCents === 0,
+        'consumed leftover echo is unused leftover 0'
+      );
       assert(result.agentCard?.status === 'CLOSED', 'expected the closed card summary');
     },
   ],

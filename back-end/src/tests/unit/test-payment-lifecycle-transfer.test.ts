@@ -163,6 +163,30 @@ async function main(): Promise<void> {
     assert.equal(mapped, null);
   });
 
+  await test('mapOrgTransfer zeroes releasedCents on consumed transfers with leftover echo', async () => {
+    const mapped = mapOrgTransfer({ cardId: 'card-consumed-echo' }, [
+      {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-consumed-echo',
+              status: 'consumed',
+              amount_cents: 4396,
+              transferred_cents: 4396,
+              released_cents: 3721,
+              card_id: 'card-consumed-echo',
+              livemode: false,
+            },
+          ],
+        },
+      },
+    ]);
+    assert.equal(mapped?.status, 'consumed');
+    assert.equal(mapped?.amountCents, 4396);
+    assert.equal(mapped?.transferredCents, 4396);
+    assert.equal(mapped?.releasedCents, 0);
+  });
+
   await test('mapOrgTransfer ignores non-integer released_cents when sorting', async () => {
     const mapped = mapOrgTransfer({ cardId: 'card-1' }, [
       {

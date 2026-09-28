@@ -47,6 +47,17 @@ function mapTransferredCents(transfer: Record<string, unknown>): number {
   return integerField(transfer, 'transferred_cents');
 }
 
+/**
+ * Unused leftover after consume is 0. AgentCard sandbox (observed 2026-09-28
+ * on `agent-payment-test-shop` / `agent-payment-setup-resume`) still echoes a
+ * cumulative authorization-release counter on consumed rows (`3721` after a
+ * full $43.96 checkout). Reclaim rows keep the provider `released_cents`.
+ */
+function mapReleasedCents(transfer: Record<string, unknown>): number {
+  if (transfer.status === 'consumed') return 0;
+  return integerField(transfer, 'released_cents');
+}
+
 export function mapOrgTransfer(
   purchase: PurchaseCardRef,
   transferResults: unknown[]
@@ -69,7 +80,7 @@ export function mapOrgTransfer(
     status: stringField(transfer, 'status'),
     amountCents: integerField(transfer, 'amount_cents'),
     transferredCents: mapTransferredCents(transfer),
-    releasedCents: integerField(transfer, 'released_cents'),
+    releasedCents: mapReleasedCents(transfer),
     cardId: typeof transfer.card_id === 'string' ? transfer.card_id : null,
     livemode: transfer.livemode === true,
   };
