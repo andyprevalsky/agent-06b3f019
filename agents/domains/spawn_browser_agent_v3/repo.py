@@ -494,21 +494,33 @@ async def init_browser_session(
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Initialize a browser session via backend. Returns session data dict."""
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(
-            f"{config.backend.api_url}/api/browser-session/init",
-            headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                    **workflow_generation_headers(),
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/browser-session/init",
+                headers={
+                        "x-api-key": config.backend.api_key or "",
+                        "Content-Type": "application/json",
+                        **workflow_generation_headers(),
+                    },
+                json={
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "start_url": start_url,
+                    **({"task_id": task_id} if task_id else {}),
                 },
-            json={
-                "user_id": user_id,
-                "agent_id": agent_id,
-                "start_url": start_url,
-                **({"task_id": task_id} if task_id else {}),
-            },
-        )
+            )
+    except httpx.TimeoutException as exc:
+        # Worker-side ReadTimeout / ConnectTimeout while the backend is still
+        # allocating Kernel (profile create + browsers.create). Treat as the
+        # same class of infra hiccup as a 5xx so the init loop retries with a
+        # fresh allocation instead of failing the activity and forcing the
+        # root agent to spawn a second empty browser (webdecoy smoke 2a421e78).
+        return {
+            "transient_init_failure": True,
+            "status_code": 0,
+            "detail": f"browser-session init {type(exc).__name__}",
+        }
     if response.status_code in [200, 201]:
         return response.json()
     if response.status_code == 429:

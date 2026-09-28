@@ -30,6 +30,7 @@ import {
   benchmarkIsolatedBrowserProfilesEnabled,
   cleanupBenchmarkKernelProfiles as cleanupIsolatedKernelProfiles,
   getOrCreateBenchmarkKernelProfile,
+  markBenchmarkKernelProfileBound,
 } from './benchmarkProfileIsolation';
 import {
   providerProfileData,
@@ -352,13 +353,13 @@ async function createRemoteSession(
   };
 
   try {
+    let remote;
     if (options.omitManagedProxy) {
-      return await createValidatedSession({
+      remote = await createValidatedSession({
         proxySource: stealth ? 'kernel_stealth' : 'none',
         proxyLocation,
       });
-    }
-    if (options.exactManagedProxy !== undefined) {
+    } else if (options.exactManagedProxy !== undefined) {
       const exact = kernelProxyCandidates(proxyLocation, options.exactManagedProxy.type).find(
         (candidate) => candidate.source.endsWith(`_${options.exactManagedProxy?.specificity}`)
       );
@@ -367,29 +368,36 @@ async function createRemoteSession(
           `Kernel ${options.exactManagedProxy.type} ${options.exactManagedProxy.specificity} proxy is unavailable for the requested location`
         );
       }
-      return await createWithManagedProxy([exact], 0);
-    }
-    if (options.forceManagedProxyType !== undefined) {
-      return await createWithManagedProxy(
+      remote = await createWithManagedProxy([exact], 0);
+    } else if (options.forceManagedProxyType !== undefined) {
+      remote = await createWithManagedProxy(
         kernelProxyCandidates(proxyLocation, options.forceManagedProxyType),
         0
       );
+    } else {
+      const proxyMode = resolveKernelProxyMode();
+      if (proxyMode.kind === 'explicit') {
+        remote = await createValidatedSession({
+          proxyId: proxyMode.proxyId,
+          proxySource: 'kernel_configured',
+          proxyLocation,
+        });
+      } else if (!browserProviderEnabled('KERNEL_PROXY_ENABLED', true)) {
+        remote = await createValidatedSession({
+          proxySource: stealth ? 'kernel_stealth' : 'none',
+          proxyLocation,
+        });
+      } else {
+        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+      }
     }
-    const proxyMode = resolveKernelProxyMode();
-    if (proxyMode.kind === 'explicit') {
-      return await createValidatedSession({
-        proxyId: proxyMode.proxyId,
-        proxySource: 'kernel_configured',
-        proxyLocation,
-      });
+    // Only after a live Kernel session is up. A prior timed-out init that only
+    // reserved the in-memory profile must not flip later retries to
+    // user_persistent (breaks webdecoy isolation metadata proofs).
+    if (!options.omitProfile && remote.profileId !== null) {
+      markBenchmarkKernelProfileBound(agentId);
     }
-    if (!browserProviderEnabled('KERNEL_PROXY_ENABLED', true)) {
-      return await createValidatedSession({
-        proxySource: stealth ? 'kernel_stealth' : 'none',
-        proxyLocation,
-      });
-    }
-    return await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+    return remote;
   } catch (error) {
     if (error instanceof RateLimitError) {
       throw new BrowserProviderRateLimitError('kernel', error.message);

@@ -6501,6 +6501,38 @@ async def test_init_browser_session_transient_failure_returns_retryable():
     assert out["status_code"] == 400
 
 
+async def test_init_browser_session_timeout_returns_retryable():
+    """Worker httpx ReadTimeout on /init must be transient, not ActivityError.
+
+    Prod webdecoy 2a421e78: Kernel allocate hung past the 180s client timeout,
+    the activity failed closed, and the root agent spawned a second browser.
+    Retrying inside the init loop keeps one browser instance and avoids the
+    empty first trajectory + user_persistent metadata poison.
+    """
+    import httpx
+    from domains.spawn_browser_agent_v3.repo import init_browser_session
+
+    class _TimeoutClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ReadTimeout("")
+
+    cfg = _fake_config()
+    with patch("domains.spawn_browser_agent_v3.repo.httpx.AsyncClient", _TimeoutClient):
+        out = await init_browser_session(cfg, "u", "a", "https://example.com")
+    assert out["transient_init_failure"] is True
+    assert out["status_code"] == 0
+    assert "ReadTimeout" in out["detail"]
+
+
 async def test_init_browser_session_unique_constraint_is_not_transient():
     """A P2002 on the preallocated BrowserSession.id is never a proxy hiccup.
 
@@ -20735,6 +20767,10 @@ async def run_all_tests():
     await r.record_async(
         "init_browser_session_transient_retryable",
         test_init_browser_session_transient_failure_returns_retryable,
+    )
+    await r.record_async(
+        "init_browser_session_timeout_retryable",
+        test_init_browser_session_timeout_returns_retryable,
     )
     await r.record_async(
         "init_browser_session_unique_constraint_not_transient",

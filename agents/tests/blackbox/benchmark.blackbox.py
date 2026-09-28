@@ -16290,6 +16290,133 @@ def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
     assert "recorded 0 trajectory step(s)" in reason
 
 
+def test_browser_min_steps_ignores_init_timeout_retry_before_session():
+    """A ReadTimeout init that never reached session_init must not fail min_steps.
+
+    Mirrors webdecoy 2a421e78: first browser task_id died during initialization
+    (0 steps, no session metadata); the retry completed with a full trajectory.
+    """
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    failed_task = "14184300-1f13-5a2b-a0ef-9aef1cf004b2"
+    ok_task = "b0c386f7-f95a-51ac-9066-d1acb2d23c9b"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "browser", "tool_call_id": "spawn_agent:0"},
+                    {"tool": "spawn_agent", "type": "browser", "tool_call_id": "spawn_agent:1"},
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "**Status**: ❌ FAILED\n\n**Outcome**: ReadTimeout",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "spawn_agent:0",
+                "toolStatus": "ERROR",
+                "task_id": failed_task,
+                "action_type": "task_complete",
+                "browser_last_action": "initialization",
+                "browser_error_type": "ReadTimeout",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Browser session connected and ready.",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "session-ready",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "session_init",
+                "browser_session_metadata": {
+                    "provider": "kernel",
+                    "profile_source": "new_user_persistent",
+                    "auth_source": "none",
+                    "cookies_injected": False,
+                    "cookies_count": 0,
+                },
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Navigated",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "goto-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "goto",
+                "steps_taken": 1,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Clicked",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "click-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "click",
+                "steps_taken": 2,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Typed",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "type-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "input_text",
+                "steps_taken": 3,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Submitted",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "click-2",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "click",
+                "steps_taken": 4,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Done",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "wait-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "wait",
+                "steps_taken": 5,
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert failed_task not in counts.get("browser", {})
+    assert counts["browser"][ok_task] >= 5
+    assert _validate_agent_class_min_steps({"browser": 5}, counts) is None
+
 
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
     """Non-orchestration code-agent evidence chips must produce step_count > 0.
@@ -19166,6 +19293,10 @@ async def run_all_tests():
     r.record(
         "browser_min_steps_rejects_terminal_claim",
         test_browser_min_steps_rejects_terminal_claim_without_trajectory,
+    )
+    r.record(
+        "browser_min_steps_ignores_init_timeout_retry",
+        test_browser_min_steps_ignores_init_timeout_retry_before_session,
     )
     r.record(
         "browser_min_steps_per_instance",

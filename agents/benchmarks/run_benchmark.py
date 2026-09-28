@@ -10173,7 +10173,69 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         explicit_count = len(grouped_explicit.get(root, set()))
         leaf_count = len(grouped_leaf.get(root, set()))
         counts.setdefault(agent_class, {})[instance_id] = explicit_count if explicit_count else leaf_count
+
+    # Browser agents that die during session init (provider ReadTimeout before
+    # session_init / browser_session_metadata) leave a 0-step instance. When the
+    # root agent retries with a later spawn, counting the dead attempt as a
+    # min_steps subject fails isolation benches even though the successful
+    # browser did the work (webdecoy agent 2a421e78 / task 14184300). Keep the
+    # empty instance when it is the only browser evidence so min_steps still
+    # fails closed on "browser never started".
+    browser_counts = counts.get("browser")
+    if browser_counts:
+        session_reached_ids = _browser_session_reached_ids(messages)
+        session_reached_roots = {
+            find(("browser", instance_id))
+            for instance_id in session_reached_ids
+            if ("browser", instance_id) in parents
+        }
+        has_live_browser = any(
+            actual > 0 or find(("browser", instance_id)) in session_reached_roots
+            for instance_id, actual in browser_counts.items()
+        )
+        if has_live_browser:
+            for instance_id, actual in list(browser_counts.items()):
+                root = find(("browser", instance_id))
+                if actual > 0 or root in session_reached_roots:
+                    continue
+                browser_counts.pop(instance_id, None)
+            if not browser_counts:
+                counts.pop("browser", None)
+
     return counts
+
+
+def _browser_session_reached_ids(messages: list) -> set[str]:
+    """Ids for browser instances that published live session evidence."""
+    reached: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            has_session_meta = isinstance(candidate.get("browser_session_metadata"), dict)
+            session_ready = action_type == "session_init" and status == "FINISHED"
+            if not has_session_meta and not session_ready:
+                continue
+            for key in (
+                "task_id",
+                "taskId",
+                "subAgentId",
+                "sub_agent_id",
+                "toolCallId",
+                "tool_call_id",
+            ):
+                value = candidate.get(key)
+                if value:
+                    reached.add(str(value))
+    return reached
 
 
 def _validate_agent_class_min_steps(
