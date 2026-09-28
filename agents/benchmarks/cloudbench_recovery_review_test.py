@@ -151,17 +151,76 @@ def test_runless_zero_session_guest_needs_complete_deleted_root(cleanup, tmp_pat
     assert manifest["sessions"] == {"kernel": [], "steel": []}
     assert manifest["evidence"]["allocation_event_count"] == 0
     assert manifest["evidence"]["browser_session_mutation_count"] == 0
+    assert manifest["evidence"]["root_delete_count"] == 1
+
+    # A failed isolated DB can leave only a local root behind. The complete
+    # backend log proves no external allocation; the recovery receipt still
+    # requires an exact stopped-Machine proof before the volume can be reaped.
+    backend.write_text(prefix + terminal)
+    assert cleanup.active_provider_manifest(args)["evidence"]["root_delete_count"] == 0
+    backend.write_text(prefix + terminal + terminal)
+    assert cleanup.active_provider_manifest(args)["evidence"]["root_delete_count"] == 0
 
     for incomplete in (
-        prefix + terminal,
         prefix + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 500\n" + terminal,
         prefix + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n",
+        prefix + terminal + "[HTTP] GET /health -> 200\n",
         prefix + "[Prisma] model=BrowserSession operation=create status=ok\n"
         + f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n" + terminal,
+        prefix + "[Prisma] model=Purchase operation=create status=ok\n" + terminal,
     ):
         backend.write_text(incomplete)
         with pytest.raises(cleanup.CleanupEvidenceError):
             cleanup.active_provider_manifest(args)
+
+
+def test_sealed_zero_session_run_allows_exact_cleanup_after_archive_timeout(cleanup, tmp_path, monkeypatch):
+    output = tmp_path / "exact-output"
+    output.mkdir()
+    run = tmp_path / "run.json"
+    backend = tmp_path / "backend.log"
+    backend.write_text(
+        "[Server] Server started mode=fixture port=3001\n"
+        "[HTTP] POST /api/agents -> 201\n"
+        f"agent_id={ROOT_AGENT}\n"
+        f"[HTTP] DELETE /api/agents/{ROOT_AGENT} -> 204\n"
+        "[Server] SIGTERM received, closing server...\n"
+    )
+    before = {
+        "root_exists": True, "root_deleted": False,
+        "tree_agent_ids": [ROOT_AGENT], "unsealed_tree_agent_ids": [ROOT_AGENT],
+        "browser_sessions": [], "purchase_cleanup": [],
+    }
+    after = {**before, "root_deleted": True, "unsealed_tree_agent_ids": []}
+    logs = {
+        "cloud_cleanup_evidence": {
+            "root_agent_id": ROOT_AGENT, "before": before, "after": after,
+            "final": after, "errors": ["archive: TimeoutError"],
+        },
+        "cloud_provider_cleanup": {
+            "root_agent_id": ROOT_AGENT, "root_deleted": True,
+            "tree_sealed": True, "provider_receipts": [],
+        },
+        "cloud_payment_cleanup": {"root_agent_id": ROOT_AGENT, "purchases": []},
+    }
+    run.write_text(json.dumps({"tasks": [{"name": "fixture", "agent_id": ROOT_AGENT, "logs": logs}]}))
+    args = SimpleNamespace(
+        owner="a" * 32, fleet_run_id="fixture-run", bench="fixture",
+        machine_id="deadbeef000019", output_dir=str(output),
+        guest_run_token="fixture-run-0", run_json=run, backend_log=backend,
+        quiescence_receipt=tmp_path / "quiescence.json",
+    )
+    monkeypatch.setattr(cleanup, "validate_quiescence", lambda *_: "d" * 64)
+    assert cleanup.provider_manifest(args)["sessions"] == {"kernel": [], "steel": []}
+
+    for invalid_logs in (
+        {**logs, "cloud_provider_cleanup": {}},
+        {**logs, "cloud_cleanup_evidence": {**logs["cloud_cleanup_evidence"], "after": before}},
+        {**logs, "cloud_payment_cleanup": {"root_agent_id": ROOT_AGENT, "purchases": [{}]}},
+    ):
+        run.write_text(json.dumps({"tasks": [{"name": "fixture", "agent_id": ROOT_AGENT, "logs": invalid_logs}]}))
+        with pytest.raises(cleanup.CleanupEvidenceError, match="no exact provider session"):
+            cleanup.provider_manifest(args)
 
 
 def test_stopped_machine_status_accepts_fly_colorized_section_headers(cleanup, tmp_path):

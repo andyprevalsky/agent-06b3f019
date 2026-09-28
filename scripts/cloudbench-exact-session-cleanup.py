@@ -488,6 +488,55 @@ def root_snapshot_sessions(path: Path, root_agent_id: str, run_sha: str) -> dict
     return sessions
 
 
+def sealed_zero_session_run(path: Path, root_agent_id: str, run_sha: str) -> bool:
+    """Accept a failed archive only when exact DB snapshots prove cleanup finished.
+
+    A browser task can fail before its provider session is allocated. Its run
+    record then has no session ID to release, even though root deletion and
+    payment cleanup succeeded. The complete, root-bound before/after/final
+    snapshots are stronger evidence than inventing a provider session.
+    """
+    payload = read_bytes(path)
+    if sha256_bytes(payload) != run_sha:
+        raise CleanupEvidenceError("run evidence changed during zero-session verification")
+    logs = json.loads(payload)["tasks"][0].get("logs") or {}
+    evidence = logs.get("cloud_cleanup_evidence") or {}
+    if evidence.get("root_agent_id") != root_agent_id:
+        return False
+    for phase in ("before", "after", "final"):
+        snapshot = evidence.get(phase)
+        if not isinstance(snapshot, dict) or snapshot.get("root_exists") is not True:
+            return False
+        tree = snapshot.get("tree_agent_ids")
+        if not isinstance(tree, list) or root_agent_id not in tree:
+            return False
+        if snapshot.get("browser_sessions") != [] or snapshot.get("purchase_cleanup") != []:
+            return False
+        if phase != "before" and (
+            snapshot.get("root_deleted") is not True
+            or snapshot.get("unsealed_tree_agent_ids") != []
+        ):
+            return False
+    provider = logs.get("cloud_provider_cleanup") or {}
+    payment = logs.get("cloud_payment_cleanup") or {}
+    return (
+        provider.get("root_agent_id") == root_agent_id
+        and provider.get("root_deleted") is True
+        and provider.get("tree_sealed") is True
+        and provider.get("provider_receipts") == []
+        and payment.get("root_agent_id") == root_agent_id
+        and payment.get("purchases") == []
+    )
+
+
+def payment_mutation_count(text: str) -> int:
+    return len(re.findall(
+        r"\bmodel=(?:Purchase|AgentCardPurchase|AgentPayment)\b[^\n]*"
+        r"\boperation=(?:create|update|updateMany|upsert|delete|deleteMany)\b",
+        text,
+    ))
+
+
 def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
     root_agent_id, run_sha = parse_run_identity(Path(args.run_json), args.bench)
@@ -496,7 +545,22 @@ def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     snapshots = root_snapshot_sessions(Path(args.run_json), root_agent_id, run_sha)
     sessions = {provider: sorted(set(logged_sessions[provider]) | snapshots[provider]) for provider in snapshots}
     if not any(sessions.values()):
-        raise CleanupEvidenceError("durable evidence contains no exact provider session identity")
+        if not sealed_zero_session_run(Path(args.run_json), root_agent_id, run_sha):
+            raise CleanupEvidenceError("durable evidence contains no exact provider session identity")
+        validate_complete_backend_lifecycle(text)
+        logged_sessions, allocation_count, mutation_count = collect_session_evidence(text)
+        root_deletes = re.findall(
+            rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
+            text,
+        )
+        if (
+            any(logged_sessions.values())
+            or allocation_count != 0
+            or mutation_count != 0
+            or len(root_deletes) != 1
+            or payment_mutation_count(text) != 0
+        ):
+            raise CleanupEvidenceError("zero-session run has unretired external ownership")
     quiescence_sha = validate_quiescence(
         Path(args.quiescence_receipt),
         args.machine_id,
@@ -536,28 +600,29 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
         raise CleanupEvidenceError("backend log is not UTF-8") from error
     root_agent_id = parse_active_root_agent(text)
     sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
+    root_deletes = re.findall(
+        rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
+        text,
+    )
     if not sessions["kernel"] and not sessions["steel"]:
         # An interrupted runner can exit after evaluating a task but before it
         # saves run.json. A task that never opened a browser has no positive
         # provider identity to release. Accept that case only from the complete
-        # single-server log, after the exact root DELETE succeeded, with no
-        # allocation, BrowserSession write, or payment write. The subsequent
-        # stopped-Machine proof fences any further provider creation.
+        # single-server log, with no allocation, BrowserSession write, or
+        # payment write. If the isolated DB died before DELETE, the subsequent
+        # exact stopped-Machine proof fences the local-only root permanently.
         validate_complete_backend_lifecycle(text)
-        root_deletes = re.findall(
-            rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
+        all_root_deletes = re.findall(
+            rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> \d+\b",
             text,
         )
         if (
             text.count("[HTTP] POST /api/agents -> 201") != 1
-            or len(root_deletes) != 1
+            or len(root_deletes) > 1
+            or len(all_root_deletes) != len(root_deletes)
             or allocation_event_count != 0
             or mutation_count != 0
-            or re.search(
-                r"\bmodel=(?:Purchase|AgentCardPurchase|AgentPayment)\b[^\n]*"
-                r"\boperation=(?:create|update|updateMany|upsert|delete|deleteMany)\b",
-                text,
-            )
+            or payment_mutation_count(text) != 0
         ):
             raise CleanupEvidenceError(
                 "runless zero-session evidence lacks exact terminal cleanup"
@@ -573,6 +638,7 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "backend_log_sha256": sha256_bytes(payload),
             "allocation_event_count": allocation_event_count,
             "browser_session_mutation_count": mutation_count,
+            "root_delete_count": len(root_deletes),
         },
     }
 
@@ -698,11 +764,14 @@ def validate_complete_backend_lifecycle(text: str) -> None:
         for index, line in enumerate(lines)
         if "[Server] SIGTERM received, closing server..." in line
     ]
+    # A second SIGTERM can be logged while the same server is already closing.
+    # Accept only a terminal suffix of shutdown lines; no ordinary event may
+    # follow the first shutdown, and there must still be one server start.
     if (
         len(starts) != 1
-        or len(shutdowns) != 1
+        or not shutdowns
         or starts[0] >= shutdowns[0]
-        or shutdowns[0] != len(lines) - 1
+        or shutdowns != list(range(shutdowns[0], len(lines)))
     ):
         raise CleanupEvidenceError(
             "backend evidence has no complete single-server lifecycle boundary"

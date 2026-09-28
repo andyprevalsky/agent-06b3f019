@@ -758,10 +758,11 @@ case "$VOLUME_NAME" in ''|*[!a-z0-9_]*) echo "Invalid warm volume name" >&2; exi
 FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 # A small subset of benchmarks runs the test-payment frontend bundled inside
-# the primary VM. The Vite production build exceeds the default 4GB guest's
-# physical memory during chunk rendering, so only those primaries use a larger
-# shape. Keep the stopped pool at the capacity-safe default; bundled-frontend
-# tasks bypass the pool and clone fresh with this shape.
+# the primary VM. Browser tasks can also copy a large production credential
+# graph while esbuild is active; on a 4GB guest this OOM-killed PostgreSQL during
+# browser-biometrics-webdecoy's IndexedDB COPY. Give both workloads an 8GB
+# primary. Keep the stopped pool at the capacity-safe default; these tasks
+# bypass the 4GB pool and clone fresh with this shape.
 FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
@@ -803,9 +804,9 @@ CENTRAL_HUB_OWNER_FILE=""
 BENCHES=()
 SIM_ON_CSV=""
 
-bench_needs_bundled_frontend_primary() {  # bench_needs_bundled_frontend_primary <task>
+bench_needs_large_primary() {  # bench_needs_large_primary <task>
     case "$1" in
-        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
             return 0
             ;;
     esac
@@ -813,7 +814,7 @@ bench_needs_bundled_frontend_primary() {  # bench_needs_bundled_frontend_primary
 }
 
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
-    if bench_needs_bundled_frontend_primary "$1"; then
+    if bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_SIZE"
@@ -821,7 +822,7 @@ primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
 }
 
 primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
-    if bench_needs_bundled_frontend_primary "$1"; then
+    if bench_needs_large_primary "$1"; then
         printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
     else
         printf '%s\n' "$FLEET_PRIMARY_VM_MEMORY"
@@ -10286,7 +10287,7 @@ enforce_app_capacity_guard() {
                 ;;
             esac
             requested_shared=$(( requested_shared + bench_shared_units ))
-            if ! bench_needs_bundled_frontend_primary "$bench"; then
+            if ! bench_needs_large_primary "$bench"; then
                 requested_pool_eligible_machines=$(( requested_pool_eligible_machines + 1 ))
             fi
         done
@@ -11849,10 +11850,9 @@ for bench in "${BENCHES[@]}"; do
         # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
         # fall back to cloning fresh (bounded + retried) if the pool is empty.
         #
-        # Bundled-frontend tasks need a larger primary for the Vite production
-        # build, so they cannot safely claim the default 4GB stopped pool.
-        if bench_needs_bundled_frontend_primary "$bench"; then
-            echo "  ↪️  [$bench] using bundled frontend primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
+        # Large-memory tasks cannot safely claim the default 4GB stopped pool.
+        if bench_needs_large_primary "$bench"; then
+            echo "  ↪️  [$bench] using large primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
         else
             pcid="$(claim_pool_machine)"
         fi
