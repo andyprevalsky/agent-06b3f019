@@ -7,12 +7,28 @@ import pytest
 
 from providers.rose import foundry
 from providers.rose.errors import RoseRateLimitError, RoseServerError
+from providers.rose.gpt_auth import _openai_credit_error, build_codex_responses_body
 from providers.rose.pools import get_pool
 from providers.rose.pricing import get_model_pricing
 
 
 def _sse(*events: dict) -> str:
     return "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_usage_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+    ],
+)
+def test_openai_credit_codes_are_distinct_from_rate_limits(code):
+    assert _openai_credit_error(json.dumps({"error": {"code": code}}))
+    assert not _openai_credit_error(json.dumps({"error": {"code": "rate_limit_exceeded"}}))
 
 
 def _call():
@@ -45,6 +61,76 @@ def _install_http(monkeypatch, handler):
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "test-key")
     foundry._cooldown_until.clear()
     foundry._auth_cooldown_until = 0
+
+
+@pytest.mark.asyncio
+async def test_foundry_outbound_payload_matches_gpt_compute_payload(monkeypatch):
+    """The actual Azure POST must carry the GPT compute request body unchanged."""
+    captured = []
+
+    def handler(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, text=_sse({"type": "response.output_text.delta", "delta": "ok"}))
+
+    _install_http(monkeypatch, handler)
+    monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol")
+    pool = get_pool("rose-1-ultra")
+    messages = [
+        {"role": "system", "content": "Follow the supplied response contract."},
+        {"role": "user", "content": "Return the result."},
+    ]
+    schema = {
+        "json_schema": {
+            "name": "result",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        }
+    }
+    tools = [
+        {
+            "name": "answer",
+            "description": "Return the result",
+            "parameters": schema["json_schema"]["schema"],
+            "strict": True,
+        }
+    ]
+    for name, response_format, selected_tools, tool_choice, fast in (
+        ("strict-json", schema, None, None, True),
+        ("forced-tool", None, tools, {"name": "answer"}, False),
+    ):
+        options = dict(
+            pool_spec=pool,
+            messages=messages,
+            response_format=response_format,
+            tools=selected_tools,
+            context_tools=None,
+            tool_choice=tool_choice,
+            temperature=0.7,
+            effort="xhigh",
+            provider_fast_mode=fast,
+            request_id=f"parity-{name}",
+            cache_namespace="agent-parity",
+        )
+        chunks = [
+            chunk
+            async for chunk in foundry.foundry_complete(
+                **options,
+                route_key="agent-parity",
+                agent_id="agent-parity",
+                call_site="parity-test",
+                ttft_timeout_s=2,
+                idle_timeout_s=2,
+            )
+        ]
+        assert any(chunk.kind == "content" for chunk in chunks)
+        expected = build_codex_responses_body(**options, model_override="gpt-6-sol")
+        assert captured[-1] == expected
+        assert "temperature" not in captured[-1]  # GPT compute also omits it.
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ import path from 'node:path';
 
 import {
   __resetAnthropicApiKeyCooldown,
+  __resetGptApiKeyCooldown,
   buildOpenAiResponseFormat,
   createStreamingCompletion,
   getPool,
@@ -1699,6 +1700,7 @@ async function testFlash_cerebrasFailureFallsToOpenRouterQwen() {
 }
 
 async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
   process.env.OPENROUTER_API_KEY = 'or-test-key';
@@ -1743,10 +1745,12 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     restoreFetch();
+    await __resetGptApiKeyCooldown();
   }
 }
 
 async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-test-key';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test-key';
   process.env.OPENROUTER_API_KEY = 'or-test-key';
@@ -1785,11 +1789,60 @@ async function testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter()
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     await __resetAnthropicApiKeyCooldown();
+    await __resetGptApiKeyCooldown();
     restoreFetch();
   }
 }
 
+async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() {
+  await __resetGptApiKeyCooldown();
+  process.env.GPT_API_KEY = 'sk-proj-test-key';
+  process.env.ANTHROPIC_API_KEY = '';
+  process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  const seen = { openai: 0, foundry: 0, openrouter: 0 };
+  installFetchStub((url) => {
+    if (url === OPENAI_RESPONSES_API_URL) {
+      seen.openai++;
+      return errorResponse(
+        429,
+        JSON.stringify({ error: { code: 'credit_balance_exhausted', type: 'insufficient_quota' } })
+      );
+    }
+    if (url === 'https://a-4989-resource.openai.azure.com/openai/v1/responses') {
+      seen.foundry++;
+      return sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) seen.openrouter++;
+    throw new Error(`Unexpected provider URL: ${url}`);
+  });
+  try {
+    for (let i = 0; i < 2; i++) {
+      const chunks = await collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [{ role: 'user', content: 'hi' }],
+        })
+      );
+      assert(chunks[0].actual_model.endsWith('-foundry'), 'Foundry served completion');
+    }
+    assertEqual(seen.openai, 1, 'exhausted GPT key only attempted once');
+    assertEqual(seen.foundry, 2, 'Foundry served both requests');
+    assertEqual(seen.openrouter, 0, 'OpenRouter not reached');
+  } finally {
+    restoreFetch();
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.AZURE_FOUNDRY_ENDPOINT;
+    delete process.env.AZURE_FOUNDRY_API_KEY;
+    delete process.env.AZURE_FOUNDRY_DEPLOYMENTS;
+    await __resetGptApiKeyCooldown();
+  }
+}
+
 async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-router-priority';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
   process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
@@ -1891,6 +1944,7 @@ async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProvide
 }
 
 async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbackCalls() {
+  await __resetGptApiKeyCooldown();
   process.env.GPT_API_KEY = 'sk-proj-invalid';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-must-not-run';
   process.env.OPENROUTER_API_KEY = 'sk-or-must-not-run';
@@ -1930,6 +1984,7 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
     delete process.env.GPT_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    await __resetGptApiKeyCooldown();
   }
 }
 
@@ -3915,6 +3970,10 @@ async function main(): Promise<void> {
     {
       name: 'openai api-key / failure falls through to Anthropic before OpenRouter',
       fn: testOpenAiApiKey_failureFallsThroughToAnthropicBeforeOpenRouter,
+    },
+    {
+      name: 'openai api-key / insufficient quota cools later requests before Foundry',
+      fn: testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry,
     },
     {
       name: 'shared OpenAI priority / exclusive route preserves router config',

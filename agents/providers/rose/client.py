@@ -40,6 +40,7 @@ from providers.rose.browser_use import (
     normalize_browser_use_response,
     normalize_browser_use_tool_calls,
 )
+from providers.rose.cerebras import cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
@@ -75,7 +76,6 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
-from providers.rose.cerebras import cerebras_complete
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -208,6 +208,63 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
             )
     except Exception:
         logger.warning("rose.anthropic_apikey.cooldown_mark_failed", reason=reason)
+
+
+# The shared GPT_API_KEY uses the same cross-worker DB cooldown as Anthropic,
+# with its own row so one provider cannot suppress the other.
+_gpt_api_key_cooldown_skip_until = 0.0
+_gpt_api_key_cooldown_last_check = 0.0
+
+
+def _reset_gpt_api_key_cooldown_cache() -> None:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    _gpt_api_key_cooldown_skip_until = 0.0
+    _gpt_api_key_cooldown_last_check = 0.0
+
+
+async def _gpt_api_key_on_cooldown() -> bool:
+    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
+    now = time.monotonic()
+    if now < _gpt_api_key_cooldown_skip_until:
+        return True
+    if now - _gpt_api_key_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+        return False
+    _gpt_api_key_cooldown_last_check = now
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(
+                f"{base}/api/integrations/compute-code/gpt-key/cooldown",
+                headers={"X-API-Key": cfg.backend.api_key or ""},
+            )
+            if resp.status_code == 200 and resp.json().get("onCooldown") is True:
+                _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
+                return True
+    except Exception:
+        return False
+    return False
+
+
+async def _mark_gpt_api_key_cooldown(reason: str) -> None:
+    global _gpt_api_key_cooldown_skip_until
+    _gpt_api_key_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    cfg = load_config()
+    base = (cfg.backend.api_url or "").rstrip("/")
+    if not base:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{base}/api/integrations/compute-code/token/rate-limited",
+                headers={"X-API-Key": cfg.backend.api_key or "", "Content-Type": "application/json"},
+                json={"type": "gpt_api_key", "source": "pool", "failureReason": reason},
+            )
+            resp.raise_for_status()
+    except Exception:
+        logger.warning("rose.gpt_apikey.cooldown_mark_failed", reason=reason)
 
 
 def _single_attempt_auth(auth: ComputeAuthContext) -> ComputeAuthContext:
@@ -1474,7 +1531,7 @@ class RoseClient:
             # API keys either -- gating only the OAuth routes left this hole,
             # through which a pinned run could still be served by gpt_auth_model.
             openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""
-            if openai_api_key:
+            if openai_api_key and not await _gpt_api_key_on_cooldown():
                 active_route = "openai_apikey"
                 openai_yielded_any = False
                 try:
@@ -1533,6 +1590,8 @@ class RoseClient:
                     if openai_yielded_any:
                         raise
                     cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    if isinstance(cause, (RosePaymentRequiredError, RoseAuthError)):
+                        await _mark_gpt_api_key_cooldown(type(cause).__name__)
                     logger.info(
                         "rose.complete.openai_apikey.fall_through",
                         request_id=rid,

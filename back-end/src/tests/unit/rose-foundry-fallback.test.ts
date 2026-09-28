@@ -4,7 +4,10 @@ import assert from 'node:assert/strict';
 
 import { createStreamingCompletion } from '../../providers/rose';
 import { foundryComplete, orderedFoundryDeployments } from '../../providers/rose/foundry';
+import { buildCodexResponsesBody, openAiApiKeyComplete } from '../../providers/rose/gptAuth';
+import { RosePaymentRequiredError, RoseRateLimitError } from '../../providers/rose/errors';
 import { POOL_REGISTRY } from '../../providers/rose/pools';
+import type { CompletionMessage, ResponseFormat } from '../../providers/rose/types';
 
 const sse = (text: string): string =>
   `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: text })}\n\n` +
@@ -64,6 +67,81 @@ async function main(): Promise<void> {
       'gpt-6-sol-b',
     ]);
     process.stdout.write('Foundry fallback: 429 spill, Responses shape and provenance passed\n');
+
+    // Compare the complete HTTP body against the GPT compute-token builder,
+    // including instructions, input, cache key, tools/JSON, effort and tier.
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-parity';
+    const poolSpec = POOL_REGISTRY['rose-1-ultra'];
+    const messages: CompletionMessage[] = [
+      { role: 'system', content: 'Follow the supplied response contract.' },
+      { role: 'user', content: 'Return the result.' },
+    ];
+    const schema: ResponseFormat = {
+      type: 'json_schema',
+      json_schema: {
+        name: 'result',
+        strict: true,
+        schema: {
+          type: 'object',
+          properties: { value: { type: 'string' } },
+          required: ['value'],
+          additionalProperties: false,
+        },
+      },
+    };
+    const tools = [
+      {
+        name: 'answer',
+        description: 'Return the result',
+        parameters: schema.json_schema?.schema,
+        strict: true,
+      },
+    ];
+    for (const scenario of [
+      {
+        name: 'strict-json',
+        responseFormat: schema,
+        tools: undefined,
+        toolChoice: undefined,
+        fast: true,
+      },
+      {
+        name: 'forced-tool',
+        responseFormat: undefined,
+        tools,
+        toolChoice: { type: 'function', name: 'answer' },
+        fast: false,
+      },
+    ]) {
+      let captured: Record<string, unknown> | undefined;
+      globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+        captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(sse('ok'), { status: 200 });
+      }) as typeof fetch;
+      const requestId = `parity-${scenario.name}`;
+      const opts = {
+        poolSpec,
+        messages,
+        responseFormat: scenario.responseFormat,
+        tools: scenario.tools,
+        toolChoice: scenario.toolChoice,
+        temperature: 0.7,
+        effort: 'xhigh',
+        providerFastMode: scenario.fast,
+        requestId,
+        routeKey: 'agent-parity',
+      };
+      for await (const _chunk of foundryComplete(opts)) {
+        // Drain the stream so the HTTP request and parser finish.
+      }
+      assert(captured);
+      assert.deepEqual(
+        captured,
+        buildCodexResponsesBody({ ...opts, modelOverride: 'gpt-6-sol-parity' })
+      );
+      assert(!('temperature' in captured), 'GPT compute also omits temperature');
+    }
+    process.stdout.write('Foundry payload: exact GPT compute body parity passed\n');
 
     process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-third';
     process.env.OPENROUTER_API_KEY = 'test-openrouter';
@@ -152,6 +230,49 @@ async function main(): Promise<void> {
     assert.equal(partialAttempts.length, 1);
     assert.equal(partialChunks.find((chunk) => chunk.kind === 'content')?.data.text, 'Partial');
     process.stdout.write('Foundry reader: post-content failure never splices deployments\n');
+
+    for (const code of [
+      'insufficient_quota',
+      'credit_balance_exhausted',
+      'organization_usage_limit_exceeded',
+      'organization_spend_limit_exceeded',
+      'project_spend_limit_exceeded',
+    ]) {
+      let calls = 0;
+      globalThis.fetch = (async () => {
+        calls++;
+        return new Response(JSON.stringify({ error: { code } }), { status: 429 });
+      }) as typeof fetch;
+      await assert.rejects(async () => {
+        for await (const _ of openAiApiKeyComplete({
+          poolSpec: POOL_REGISTRY['rose-1-ultra'],
+          model: 'gpt-6-sol',
+          messages: [{ role: 'user', content: 'hi' }],
+          openAiKey: 'test-key',
+          requestId: `credit-${code}`,
+        })) {
+          /* no content expected */
+        }
+      }, RosePaymentRequiredError);
+      assert.equal(calls, 1, `${code}: no retry`);
+    }
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
+        status: 429,
+        headers: { 'retry-after': '60' },
+      })) as typeof fetch;
+    await assert.rejects(async () => {
+      for await (const _ of openAiApiKeyComplete({
+        poolSpec: POOL_REGISTRY['rose-1-ultra'],
+        model: 'gpt-6-sol',
+        messages: [{ role: 'user', content: 'hi' }],
+        openAiKey: 'test-key',
+        requestId: 'ordinary-rate-limit',
+      })) {
+        /* no content expected */
+      }
+    }, RoseRateLimitError);
+    process.stdout.write('GPT key: credit 429s cool; ordinary 429 stays transient\n');
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(originalEnv)) {

@@ -22,6 +22,7 @@ from providers.rose.errors import (
     RoseAuthError,
     RoseError,
     RoseInvalidRequest,
+    RosePaymentRequiredError,
     RoseRateLimitError,
     RoseServerError,
     RoseStallError,
@@ -38,6 +39,28 @@ _MAX_ATTEMPTS_PER_TOKEN = 3
 _BACKOFF_CAP_S = 5.0
 _DEFAULT_TTFT_TIMEOUT_S = 60.0
 _DEFAULT_CODEX_INSTRUCTIONS = "You are a helpful assistant."
+_OPENAI_CREDIT_ERROR_CODES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_usage_limit_exceeded",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+    }
+)
+
+
+def _openai_credit_error(error_body: str) -> bool:
+    """Distinguish long-lived credit/spend 429s from transient rate limits."""
+    try:
+        error = json.loads(error_body).get("error", {})
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    return (isinstance(code, str) and code in _OPENAI_CREDIT_ERROR_CODES) or error.get("type") == "insufficient_quota"
+
 
 # Codex 429 bodies look like:
 #   {"error":{"type":"usage_limit_reached","plan_type":"pro",
@@ -626,6 +649,9 @@ async def openai_api_key_complete(
                     return
 
                 error_body = get_error_body(response)
+
+                if status == 402 or (status == 429 and _openai_credit_error(error_body)):
+                    raise RosePaymentRequiredError(f"OpenAI {status}: {error_body[:2000]}", status=status)
 
                 if status == 429:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:

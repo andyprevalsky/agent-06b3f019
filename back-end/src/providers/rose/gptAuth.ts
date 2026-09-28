@@ -18,7 +18,13 @@
 import { createHash } from 'node:crypto';
 
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
-import { RoseAuthError, RoseInvalidRequest, RoseRateLimitError, RoseServerError } from './errors';
+import {
+  RoseAuthError,
+  RoseInvalidRequest,
+  RosePaymentRequiredError,
+  RoseRateLimitError,
+  RoseServerError,
+} from './errors';
 import type { PoolSpec } from './pools';
 import {
   boundedRateLimitBackoffMs,
@@ -33,6 +39,26 @@ const MAX_ATTEMPTS = 3;
 const BACKOFF_CAP_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_CODEX_INSTRUCTIONS = 'You are a helpful assistant.';
+const OPENAI_CREDIT_ERROR_CODES = new Set([
+  'insufficient_quota',
+  'credit_balance_exhausted',
+  'organization_usage_limit_exceeded',
+  'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded',
+]);
+
+function isOpenAiCreditError(errorBody: string): boolean {
+  try {
+    const parsed = JSON.parse(errorBody) as { error?: { code?: unknown; type?: unknown } };
+    return (
+      (typeof parsed.error?.code === 'string' &&
+        OPENAI_CREDIT_ERROR_CODES.has(parsed.error.code)) ||
+      parsed.error?.type === 'insufficient_quota'
+    );
+  } catch {
+    return false;
+  }
+}
 
 interface BuildBodyOptions {
   poolSpec: PoolSpec;
@@ -522,6 +548,13 @@ export async function* openAiApiKeyComplete(
     }
 
     const errorBody = response.errorBody ?? '';
+
+    if (status === 402 || (status === 429 && isOpenAiCreditError(errorBody))) {
+      throw new RosePaymentRequiredError(
+        `OpenAI ${status}: ${errorBody.substring(0, 200)}`,
+        status
+      );
+    }
 
     if (status === 429) {
       const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;

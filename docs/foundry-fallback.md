@@ -11,8 +11,8 @@ browser-use and open-weights pools keep their existing routes.
 flowchart LR
   A[rose-1-ultra request] --> B[Claude compute token]
   B --> C[GPT compute token: gpt-6-sol]
-  C --> D[GPT_API_KEY: gpt-6-sol]
-  D --> E[ANTHROPIC_API_KEY: Opus 5.5]
+  C --> D[GPT_API_KEY: gpt-6-sol, unless cooled]
+  D --> E[ANTHROPIC_API_KEY: Opus 5.5, unless cooled]
   E --> F[Foundry: gpt-6-sol]
   F --> G[OpenRouter: gpt-6-sol]
   G --> H[OpenRouter: kimi-k3]
@@ -21,6 +21,14 @@ flowchart LR
 Each arrow means the previous route was unavailable or failed before any
 caller-visible output. A stream that fails after content starts is surfaced as
 an error; mixing output from two deployments would corrupt tool calls.
+Each new request starts at the top and stops after the first successful route.
+Compute credentials rotate or cool on provider failures. Both shared API keys
+use separate DB-backed 30-minute cooldowns across users, backend instances,
+and agents after credit exhaustion or authentication failure. For GPT_API_KEY,
+`429 insufficient_quota`, credit exhaustion, spend-limit codes, and 402 count
+as exhausted credits; an ordinary 429 remains a short rate limit. Agents
+refresh the shared key status through the
+backend, with a 15-second local cache, before deciding whether to skip a key.
 
 The Foundry route reuses the GPT compute-token Responses body and parser:
 reasoning effort, instructions, tool choice, structured output, stateless
@@ -28,6 +36,12 @@ reasoning items, prompt cache key, and the caller's Fast Mode choice. Fast
 Mode sends `service_tier=priority`, as it does for GPT compute tokens;
 Microsoft supports request-level priority for GPT-6 Sol Global Standard.
 The deployment name substitutes for the GPT model ID in the request body.
+The exact outbound JSON body is compared against the GPT compute builder in
+both code paths. The live contract tests also confirm Azure accepts xhigh
+reasoning, forced tool calls, strict JSON schema, streaming, and Priority.
+`temperature` and `max_tokens` are omitted by the GPT compute builder for
+this model, so Foundry omits them too; an accepted `store=false` or cache key
+does not itself prove server-side retention or cache hit behavior.
 
 ## Configure and verify
 

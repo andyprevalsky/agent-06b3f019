@@ -4198,6 +4198,71 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
     rc._reset_anthropic_api_key_cooldown_cache()
 
 
+async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry():
+    """A 429 insufficient_quota is tried once, then Foundry serves later calls."""
+    import providers.rose.client as rc
+
+    rc._reset_gpt_api_key_cooldown_cache()
+    seen = {"openai": 0, "foundry": 0, "cooldown_post": 0, "openrouter": 0}
+    shared_cooldown = {"active": False}
+    foundry_sse = "\n".join(
+        [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"Foundry works"}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":2,"total_tokens":4}}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
+
+    def handler(req):
+        if str(req.url) == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            return httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+        if req.url.host == "a-4989-resource.openai.azure.com":
+            seen["foundry"] += 1
+            return httpx.Response(200, text=foundry_sse)
+        if req.url.path.endswith("/gpt-key/cooldown"):
+            return httpx.Response(200, json={"onCooldown": shared_cooldown["active"]})
+        if req.url.path.endswith("/token/rate-limited"):
+            assert json.loads(req.content)["type"] == "gpt_api_key"
+            seen["cooldown_post"] += 1
+            shared_cooldown["active"] = True
+            return httpx.Response(200, json={"ok": True})
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(
+        os.environ,
+        {
+            "GPT_API_KEY": "sk-proj-test",
+            "ANTHROPIC_API_KEY": "",
+            "AZURE_FOUNDRY_ENDPOINT": "https://a-4989-resource.openai.azure.com",
+            "AZURE_FOUNDRY_API_KEY": "foundry-test-key",
+            "AZURE_FOUNDRY_DEPLOYMENTS": "gpt-6-sol",
+        },
+    ):
+        try:
+            for attempt in range(2):
+                if attempt == 1:
+                    # Simulate a different Fly worker with a cold process cache.
+                    rc._reset_gpt_api_key_cooldown_cache()
+                chunks = await _drain(
+                    RoseClient(openrouter_key="ork-x").complete(
+                        pool="rose-1-ultra",
+                        messages=[{"role": "user", "content": "hi"}],
+                    )
+                )
+                assert any(c.kind == "content" for c in chunks)
+        finally:
+            rc._reset_gpt_api_key_cooldown_cache()
+    assert seen == {"openai": 1, "foundry": 2, "cooldown_post": 1, "openrouter": 0}
+
+
 async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     lines = [
         "event: response.output_text.delta",
@@ -4312,6 +4377,9 @@ async def test_client_openai_api_key_preserves_tools_without_gpt_auth():
 
 
 async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter():
+    import providers.rose.client as rc
+
+    rc._reset_gpt_api_key_cooldown_cache()
     lines = [
         "event: content_block_delta",
         'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"anthropic"}}',
@@ -4361,6 +4429,7 @@ async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_o
             os.environ.pop("ANTHROPIC_API_KEY", None)
         else:
             os.environ["ANTHROPIC_API_KEY"] = prev_anthropic
+        rc._reset_gpt_api_key_cooldown_cache()
 
     assert seen == {"openai": 1, "anthropic": 1, "openrouter": 0}
     meta = next((c for c in chunks if c.kind == "metadata"), None)
@@ -7066,6 +7135,10 @@ async def run_all_tests():
     )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
+    await r.record_async(
+        "gpt_apikey_credit_cooldown_to_foundry",
+        test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry,
+    )
     await r.record_async(
         "openai_apikey_before_anthropic_openrouter",
         test_client_openai_api_key_serves_before_anthropic_and_openrouter,
