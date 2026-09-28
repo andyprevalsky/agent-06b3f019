@@ -13,6 +13,7 @@ import logging
 import math
 import random
 import re
+import time
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -544,6 +545,10 @@ class DOMService:
         self._passkey_seeded_by_target: Dict[str, set] = {}
         self._held_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
         self._passkey_seed_counts: Dict[str, int] = {}
+        # Monotonic timestamp of the last successful seed/readback per target.
+        # Used to grace mid-ceremony getCredentials flaps without rebuilding
+        # (rebuild = WebAuthn.enable gap → Amazon "No passkeys available").
+        self._passkey_seeded_at_by_target: Dict[str, float] = {}
         self._captcha_indicator_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
@@ -753,6 +758,7 @@ class DOMService:
                 self._passkey_seeded_by_target.clear()
                 self._held_passkeys_by_credential_id.clear()
                 self._passkey_seed_counts.clear()
+                self._passkey_seeded_at_by_target.clear()
                 logger.info("🔌 Disconnected from browser")
 
     async def _send_cdp_command(
@@ -1123,6 +1129,38 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
+    def invalidate_passkey_state_for_live_target(self) -> None:
+        """Forget cached authenticator state on the focused target.
+
+        Kernel/Chrome can leave ``WebAuthn.getCredentials`` succeeding briefly
+        after a navigation while the virtual-authenticator environment is already
+        dying. Agent f380ca3c (browser-amazon-return 2026-09-28): ``after start
+        navigation`` logged ``seeded 0`` (health check trusted the stale id), then
+        ~6s later reported ``environment has not been enabled`` — so Amazon's
+        sign-in page probed an empty authenticator and disabled the passkey CTA.
+        Callers that know a navigation/target boundary just happened must
+        invalidate before syncing rather than trust that health check.
+        """
+        session = self._session
+        target_id = getattr(session, "agent_focus_target_id", None) if session is not None else None
+        if not target_id:
+            return
+        had_state = (
+            target_id in self._passkey_authenticator_by_target
+            or target_id in self._passkey_seeded_by_target
+            or target_id in self._armed_targets
+        )
+        self._passkey_authenticator_by_target.pop(target_id, None)
+        self._passkey_seeded_by_target.pop(target_id, None)
+        self._passkey_seeded_at_by_target.pop(target_id, None)
+        # Drop armed so `_arm_target` re-issues WebAuthn.enable on the next sync.
+        self._armed_targets.discard(target_id)
+        if had_state:
+            logger.info(
+                "🔑 [passkey] invalidated cached authenticator state for live target "
+                f"(force rebuild on next sync) target={target_id[:12]}"
+            )
+
     async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
         """Record cloud-custody passkeys and seed them onto the live target.
 
@@ -1180,6 +1218,8 @@ class DOMService:
                     )
                     authenticator_id = None
                     seeded_ids.clear()
+                else:
+                    self._passkey_seeded_at_by_target[target_id] = time.monotonic()
             except Exception as e:
                 error = str(e).lower()
                 environment_was_reset = (
@@ -1191,32 +1231,46 @@ class DOMService:
                 # A relying-party ceremony can transiently make getCredentials fail.
                 # Rebuilding immediately (WebAuthn.enable + new authenticator) kills
                 # that in-flight assertion — Amazon then shows "No passkeys available"
-                # (agent f380ca3c). Retry once before declaring a real reset.
-                await asyncio.sleep(0.15)
-                try:
-                    result = await self._send_cdp_command(
-                        cdp_session,
-                        "WebAuthn.getCredentials",
-                        {"authenticatorId": authenticator_id},
-                    )
-                    observed_ids = {
-                        credential.get("credentialId")
-                        for credential in result.get("credentials", []) or []
-                        if credential.get("credentialId")
-                    }
-                    if seeded_ids.issubset(observed_ids):
-                        logger.info(
-                            "🔑 [passkey] authenticator recovered after transient getCredentials failure; "
-                            "skipping rebuild"
+                # (agent f380ca3c). Retry before declaring a real reset; stretch the
+                # window when we seeded very recently (ceremony grace).
+                seeded_at = self._passkey_seeded_at_by_target.get(target_id)
+                in_ceremony_grace = (
+                    seeded_at is not None and (time.monotonic() - seeded_at) < 5.0
+                )
+                retry_attempts = 5 if in_ceremony_grace else 1
+                recovered = False
+                for attempt in range(retry_attempts):
+                    await asyncio.sleep(0.2 if in_ceremony_grace else 0.15)
+                    try:
+                        result = await self._send_cdp_command(
+                            cdp_session,
+                            "WebAuthn.getCredentials",
+                            {"authenticatorId": authenticator_id},
                         )
-                    else:
+                        observed_ids = {
+                            credential.get("credentialId")
+                            for credential in result.get("credentials", []) or []
+                            if credential.get("credentialId")
+                        }
+                        if seeded_ids.issubset(observed_ids):
+                            logger.info(
+                                "🔑 [passkey] authenticator recovered after transient "
+                                f"getCredentials failure (attempt {attempt + 1}/"
+                                f"{retry_attempts}); skipping rebuild"
+                            )
+                            self._passkey_seeded_at_by_target[target_id] = time.monotonic()
+                            recovered = True
+                            break
                         logger.warning(
                             "⚠️ [passkey] virtual authenticator lost seeded credentials after retry; "
                             "rebuilding it"
                         )
                         authenticator_id = None
                         seeded_ids.clear()
-                except Exception:
+                        break
+                    except Exception:
+                        continue
+                if not recovered and authenticator_id is not None:
                     logger.warning(
                         "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
                     )
@@ -1306,6 +1360,7 @@ class DOMService:
                     raise RuntimeError(
                         f"Browser passkey readback is missing {len(missing)} injected credential(s)"
                     )
+            self._passkey_seeded_at_by_target[target_id] = time.monotonic()
         return seeded
 
     async def _read_signcounts_for_target(

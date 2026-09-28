@@ -5765,6 +5765,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         to re-seed the union onto the fresh authenticator. `inject_passkeys` dedups
         per target instance, so re-calling with the full union is idempotent on an
         existing target and a full restore on a new one.
+
+        Navigation / proxy-rotation boundaries MUST force-rebuild: Kernel can leave
+        ``WebAuthn.getCredentials`` succeeding briefly after a nav while the
+        virtual-authenticator environment is already dying. Agents f380ca3c /
+        c3b1ca09 (browser-amazon-return 2026-09-28): ``after start navigation``
+        logged ``seeded 0`` (health check trusted the stale id), then ~5–6s later
+        ``environment has not been enabled`` — Amazon's sign-in page probed an
+        empty authenticator, disabled the passkey CTA, and burned the write_lock
+        budget on password fallback. Invalidate before those syncs so we always
+        re-enable + re-seed rather than trust a dying health check.
         """
         if dom_service is None:
             return 0
@@ -5774,6 +5784,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 seeded_decrypted_passkeys_by_credential_id[credential_id] = pk
         if not seeded_decrypted_passkeys_by_credential_id:
             return 0
+        # Known target-boundary contexts: never trust cached authenticator health.
+        if context in ("after start navigation", "after proxy rotation"):
+            dom_service.invalidate_passkey_state_for_live_target()
         injected = await dom_service.inject_passkeys(list(seeded_decrypted_passkeys_by_credential_id.values()))
         logger.info(
             "Seeded cloud-custody passkeys onto browser virtual authenticator",
