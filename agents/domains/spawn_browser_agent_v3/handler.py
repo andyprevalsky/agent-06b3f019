@@ -336,15 +336,44 @@ async def record_used_passkey_credentials(
     return recorded_count
 
 
+BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS = 10.0
+
+
+async def _bounded_browser_terminal_io(operation: Any, step: str) -> Any:
+    """Bound a CDP teardown call even when it ignores task cancellation."""
+    task = asyncio.create_task(operation)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
+        if done:
+            return await task
+        task.cancel()
+
+        def consume_result(finished: asyncio.Task) -> None:
+            with contextlib.suppress(BaseException):
+                finished.result()
+
+        task.add_done_callback(consume_result)
+        logger.warning("Browser terminal I/O exceeded bound", step=step)
+        raise TimeoutError(f"Browser {step} exceeded terminal bound")
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        raise
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
 ) -> None:
-    """Capture credential evidence before a terminal browser disconnect."""
+    """Capture credential evidence, then bound terminal CDP disconnect.
+
+    A stalled CDP disconnect must not hold the activity ahead of its finally
+    block, where the browser replay is stopped and attached to durable evidence.
+    """
     try:
-        await capture_passkey_usage()
+        await _bounded_browser_terminal_io(capture_passkey_usage(), "passkey capture")
     finally:
-        await dom_service.disconnect()
+        await _bounded_browser_terminal_io(dom_service.disconnect(), "CDP disconnect")
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -4019,8 +4048,15 @@ def _schedule_browser_cleanup(
                     message="Browser session closed after teardown",
                 )
             if dom_service:
-                with contextlib.suppress(Exception):
-                    await dom_service.disconnect()
+                try:
+                    await _bounded_browser_terminal_io(dom_service.disconnect(), "cleanup CDP disconnect")
+                except Exception as disconnect_error:
+                    logger.warning(
+                        "Browser cleanup CDP disconnect failed",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        error=extract_error_message(disconnect_error),
+                    )
             await _stop_playwright_resources(
                 playwright_browser,
                 playwright_instance,

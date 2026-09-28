@@ -12829,6 +12829,33 @@ async def test_disconnect_browser_captures_passkey_usage_before_disconnect():
     assert events == ["credential_ref_saved", "disconnected"]
     dom_service.disconnect.assert_awaited_once()
 
+
+async def test_terminal_disconnect_stall_does_not_block_recording_cleanup():
+    from domains.spawn_browser_agent_v3 import handler
+
+    events = []
+
+    async def capture_usage():
+        events.append("credential_ref_saved")
+
+    async def stalled_disconnect():
+        events.append("disconnect_started")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            # A CDP library can ignore cancellation while its socket drains.
+            await asyncio.sleep(1)
+
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=stalled_disconnect))
+    started = time_module.monotonic()
+    with patch.object(handler, "BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS", 0.01):
+        with pytest.raises(TimeoutError):
+            await handler.disconnect_browser_after_passkey_capture(dom_service, capture_usage)
+
+    assert time_module.monotonic() - started < 0.5
+    assert events == ["credential_ref_saved", "disconnect_started"]
+    dom_service.disconnect.assert_awaited_once()
+
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
     import inspect
@@ -20145,6 +20172,10 @@ async def run_all_tests():
     await r.record_async(
         "passkey_usage_captured_before_disconnect",
         test_disconnect_browser_captures_passkey_usage_before_disconnect,
+    )
+    await r.record_async(
+        "terminal_disconnect_stall_does_not_block_recording_cleanup",
+        test_terminal_disconnect_stall_does_not_block_recording_cleanup,
     )
     r.record(
         "passkey_usage_sampled_before_terminal_disconnects",
