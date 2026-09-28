@@ -517,6 +517,14 @@ volume permits zero-credit retirement and a live one retains the latch. The
 proof24 clone must be retired by its exact native identity before recovery is
 retried; its registry and audit records remain for the production reaper.
 
+The next recovery check exposed mixed collector states within that failed
+slice: five tasks had already cleared `runtime-evidence.pending` after
+publishing their canonical result, while five still had pending markers. The
+forensic verifier now accepts either the exact pending owner marker or two
+matching copies of the collected result. A missing pending marker without
+those copies, or mismatched copies, still refuses recovery. The focused test
+includes both successful and rejected collected states.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures

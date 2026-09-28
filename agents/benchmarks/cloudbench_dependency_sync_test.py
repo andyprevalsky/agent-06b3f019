@@ -22847,7 +22847,7 @@ wait "$signaller"
     assert not list(scratch.iterdir())
 
 
-@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "shutdown", "audit", "unadmitted-absent", "unadmitted-live"])
+@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live"])
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
     owner = "a" * 32
     run_id = "fixture-run"
@@ -22933,6 +22933,13 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         archive.write_bytes(archive.read_bytes() + b"corrupt")
     elif fault == "pending":
         (out / "runtime-evidence.pending").unlink()
+    elif fault in ("collected", "collected-mismatch"):
+        (out / "runtime-evidence.pending").unlink()
+        (out / "remote-logs/runtime-evidence").mkdir(parents=True)
+        (out / "cloudbench-run.json").write_text(json.dumps({"task": task, "result": "failure"}))
+        (out / "remote-logs/runtime-evidence/run.json").write_text(json.dumps({
+            "task": task, "result": "failure" if fault == "collected" else "altered"
+        }))
     elif fault == "shutdown":
         (out / "guest-shutdown.confirmed").write_text("foreign-run\n")
     elif fault == "audit":
@@ -22941,13 +22948,13 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
                "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
                "--machines", str(machines), "--volumes", str(volumes)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent"):
+    if fault in ("none", "unadmitted-absent", "collected"):
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["proof_credit"] == 0
         assert json.loads(result.stdout)["unadmitted_clones"] == (fault == "unadmitted-absent")
     else:
         assert result.returncode != 0, f"unsafe {fault} was accepted"
-    assert (out / "runtime-evidence.pending").exists() == (fault != "pending")
+    assert (out / "runtime-evidence.pending").exists() == (fault not in ("pending", "collected", "collected-mismatch"))
     assert (registry / "runtime-evidence-unconfirmed").exists()
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(_extract_fleet_function(fleet, signature) for signature in (
@@ -22970,13 +22977,13 @@ fly_with_timeout() {{
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 '''
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent"):
+    if fault in ("none", "unadmitted-absent", "collected"):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
         assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
         assert receipt["unadmitted_clones"] == (fault == "unadmitted-absent")
         assert not (registry / "runtime-evidence-unconfirmed").exists()
-        assert (out / "runtime-evidence.pending").exists()
+        assert (out / "runtime-evidence.pending").exists() == (fault != "collected")
     else:
         assert recovery.returncode != 0, f"unsafe {fault} cleared the owner latch"
         assert (registry / "runtime-evidence-unconfirmed").exists()

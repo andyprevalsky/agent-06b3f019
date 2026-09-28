@@ -132,7 +132,14 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         assert regular_bytes(out / "guest-shutdown.confirmed", 256).decode().strip() == meta["run_id"]
         evidence_owner = {"version": 1, "machine_id": machine, "run_token": token}
         assert object_file(out / "runtime-evidence.owner.json") == evidence_owner
-        assert object_file(out / "runtime-evidence.pending") == evidence_owner
+        pending = out / "runtime-evidence.pending"
+        if pending.exists() or pending.is_symlink():
+            assert object_file(pending) == evidence_owner
+        else:
+            # The normal collector clears pending only after publishing the
+            # exact canonical result. A failed peer may still retain pending.
+            assert object_file(out / "cloudbench-run.json") == object_file(
+                out / "remote-logs/runtime-evidence/run.json")
         files = row["files"]
         missing = row["missing"]
         assert isinstance(files, dict) and isinstance(missing, list)
