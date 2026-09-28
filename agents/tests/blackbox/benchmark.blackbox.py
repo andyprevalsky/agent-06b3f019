@@ -639,6 +639,32 @@ def test_biometrics_fixture_stays_exclusive_under_isolated_profiles():
     ]
 
 
+def test_payment_setup_resume_stays_exclusive_beside_event_ticket():
+    """AgentCard reset must finish before siblings overlay shared-user integrations."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str):
+            self.name = name
+            self.requires_browser_agent = True
+            self.browser_auth_realm = None
+            self.browser_profile_mode = "persistent"
+            self.environment = {}
+
+    phases = bench._parallel_task_phases(
+        [
+            Task("browser-event-ticket"),
+            Task("agent-payment-setup-resume"),
+            Task("browser-smoke"),
+        ]
+    )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["agent-payment-setup-resume"]),
+        ("parallel", ["browser-event-ticket", "browser-smoke"]),
+    ]
+
+
 def test_biometrics_fixture_stays_exclusive_beside_shared_auth_task():
     """A saved-auth benchmark must not observe WebDecoy's temporary DB clearing."""
     from benchmarks import run_benchmark as bench
@@ -2406,6 +2432,12 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     ]
     assert setup.agentcard_setup_action == "complete"
     assert setup.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    from benchmarks import run_benchmark as bench
+
+    assert setup.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
+        "setup-resume mutates the shared-user AgentCard Integration fixture and must "
+        "not overlap siblings whose live overlays could race that reset"
+    )
 
     production = get_task_by_name("agent-payment-production-abandonment")
     assert production.production_only is True

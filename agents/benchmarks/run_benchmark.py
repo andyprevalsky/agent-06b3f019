@@ -195,12 +195,17 @@ _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 #   and the agent burns the 420s cap retrying a rejected checkbox instead of
 #   completing. Isolated browser profiles protect cookie/DB state but not this
 #   CPU/LLM contention class — keep webdecoy exclusive even then.
+# - agent-payment-setup-resume: resets the shared-user AgentCard Integration to
+#   connect_required, then expects onboarding attention. A concurrent sibling's
+#   live-fixture overlay must not race that fixture (even after compute-token
+#   sync stopped rewriting agentcard rows).
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
+    "agent-payment-setup-resume",
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"

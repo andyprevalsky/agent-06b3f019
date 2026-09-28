@@ -264,7 +264,7 @@ test('every seed mode hydrates the selected user before dependent writes', async
 
 test('compute-token cleanup cannot delete integrations owned by unrelated local users', async () => {
   const source = readSeedLocalSource();
-  const helperStart = source.indexOf('async function syncIntegrations()');
+  const helperStart = source.indexOf('async function syncIntegrations(');
   const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
   const helper = source.slice(helperStart, helperEnd);
 
@@ -276,6 +276,45 @@ test('compute-token cleanup cannot delete integrations owned by unrelated local 
   assert(
     /\{\s*userId:\s*\{\s*in:\s*poolUserIds\s*\},\s*poolingEnabled:\s*true\s*\}/.test(helper),
     'expected stale cleanup to target only active pool owners among imported pool users'
+  );
+});
+
+test('compute-token overlay must not restore AgentCard setup fixtures', async () => {
+  // RCA: sibling live-fixture compute-token refresh rewrote production agentcard
+  // CONNECTED over agent-payment-setup-resume's local reset, skipping onboarding.
+  const source = readSeedLocalSource();
+  const helperStart = source.indexOf('async function syncIntegrations(');
+  const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  const computeRetry = source.indexOf('async function syncComputeTokensWithRetries');
+  const syncCallIdx = source.indexOf(
+    'await syncIntegrations({ computeTokensOnly: true })',
+    computeRetry
+  );
+  const computeBody = source.slice(computeRetry, source.indexOf('\n}\n', syncCallIdx));
+  const computeBranch = helper.match(
+    /computeTokensOnly\s*\?\s*(\{[\s\S]*?\})\s*:\s*(\{[\s\S]*?\})/
+  );
+
+  assert(helperStart > 0 && helperEnd > helperStart, 'expected syncIntegrations helper');
+  assert(computeRetry > 0, 'expected compute-token retry helper');
+  assert(syncCallIdx > computeRetry, 'compute-token refresh must opt into computeTokensOnly');
+  assert(
+    computeBody.includes('syncIntegrations({ computeTokensOnly: true })'),
+    'compute-token refresh must opt into computeTokensOnly'
+  );
+  assert(computeBranch !== null, 'expected computeTokensOnly ternary on userIntegrations fetch');
+  assert(
+    /name:\s*\{\s*in:\s*\[\.\.\.COMPUTE_INTEGRATION_NAMES\]\s*\}/.test(computeBranch?.[1] ?? ''),
+    'computeTokensOnly branch must filter to claude_code/gpt_code'
+  );
+  assert(
+    !/name:\s*\{/.test(computeBranch?.[2] ?? ''),
+    'full-seed branch may still import every Integration (including agentcard)'
+  );
+  assert(
+    helper.includes('agentcard-setup') || helper.includes('AgentCard'),
+    'helper comment must document why agentcard is excluded from compute overlays'
   );
 });
 
@@ -571,7 +610,10 @@ test('synthetic benchmark compute access uses the isolated pool without changing
   const ownerBoundary = source.indexOf('userId: SEED_USER_ID', helper);
   const requiredNames = source.indexOf('COMPUTE_TOKEN_REQUIRED_TYPES', helper);
   const poolUpdate = source.indexOf('data: { poolingEnabled: true }', helper);
-  const syncCall = source.indexOf('const count = await syncIntegrations()', helper);
+  const syncCall = source.indexOf(
+    'const count = await syncIntegrations({ computeTokensOnly: true })',
+    helper
+  );
   const poolCall = source.indexOf(
     'await poolRequiredDevComputeTokensForSyntheticUsers()',
     syncCall
