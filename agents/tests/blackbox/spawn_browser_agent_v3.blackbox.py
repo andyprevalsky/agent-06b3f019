@@ -7329,6 +7329,28 @@ def test_passkey_usage_readback_does_not_rebuild_authenticator():
     assert 'context="before passkey usage readback"' not in source
 
 
+def test_passkeys_rearmed_before_each_step_state_observe():
+    """Kernel drops VA ~5s after seed; re-arm before every step state fetch.
+
+    Agent c1ebd389: usage readback logged environment-not-enabled between
+    ceremony-capable actions while Amazon's disabled passkey CTA stayed dead.
+    Step-start ``ensure_browser_overlays_suppressed`` keeps the authenticator
+    alive across LLM think time so Conditional UI / CTA probes succeed.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    # The live loop's state observe (not the simulated path) must re-arm first.
+    marker = "Step {iteration} - resolving page state"
+    start = source.index(marker)
+    window = source[start : start + 800]
+    assert "ensure_browser_overlays_suppressed()" in window
+    assert window.index("ensure_browser_overlays_suppressed()") < window.index(
+        "get_browser_state("
+    )
+
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
     from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
 
@@ -20867,6 +20889,10 @@ async def run_all_tests():
     r.record(
         "passkey_boundary_syncs_force_invalidate_before_inject",
         test_passkey_boundary_syncs_force_invalidate_before_inject,
+    )
+    r.record(
+        "passkeys_rearmed_before_each_step_state_observe",
+        test_passkeys_rearmed_before_each_step_state_observe,
     )
     r.record(
         "passkey_usage_readback_does_not_rebuild_authenticator",

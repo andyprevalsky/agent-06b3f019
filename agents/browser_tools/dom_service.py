@@ -541,6 +541,11 @@ class DOMService:
         # actually exercised the passkey. It is cross-target on purpose: the
         # ceremony may happen on any target we armed.
         self._armed_targets: set = set()
+        # CDP session_id we last issued WebAuthn.enable on, per target. Kernel
+        # can replace the pooled session under the same target id; WebAuthn is
+        # per-session, so a stale session_id means the environment is gone even
+        # when our authenticator cache still looks healthy.
+        self._passkey_armed_session_by_target: Dict[str, str] = {}
         self._passkey_authenticator_by_target: Dict[str, str] = {}
         self._passkey_seeded_by_target: Dict[str, set] = {}
         self._held_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
@@ -549,6 +554,11 @@ class DOMService:
         # Used to grace mid-ceremony getCredentials flaps without rebuilding
         # (rebuild = WebAuthn.enable gap → Amazon "No passkeys available").
         self._passkey_seeded_at_by_target: Dict[str, float] = {}
+        # Cooldown so auth-page reload after environment-loss rebuild cannot loop.
+        self._passkey_auth_reload_at_by_target: Dict[str, float] = {}
+        # Targets that must reload an auth document after the next successful
+        # VA rebuild (environment loss / CDP session swap).
+        self._passkey_pending_auth_reload_targets: set = set()
         self._captcha_indicator_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> None:
@@ -759,6 +769,9 @@ class DOMService:
                 self._held_passkeys_by_credential_id.clear()
                 self._passkey_seed_counts.clear()
                 self._passkey_seeded_at_by_target.clear()
+                self._passkey_armed_session_by_target.clear()
+                self._passkey_auth_reload_at_by_target.clear()
+                self._passkey_pending_auth_reload_targets.clear()
                 logger.info("🔌 Disconnected from browser")
 
     async def _send_cdp_command(
@@ -837,7 +850,29 @@ class DOMService:
 
         The single place any of this is armed. Returns credentials newly seeded.
         """
-        newly_armed = target_id not in self._armed_targets
+        session_id = getattr(cdp_session, "session_id", None)
+        armed_session_id = self._passkey_armed_session_by_target.get(target_id)
+        # Kernel can hand us a fresh CDP session for the same target id while our
+        # cache still thinks WebAuthn is armed. WebAuthn.enable is per-session
+        # ("environment has not been enabled for this session" — agent
+        # c1ebd389), so a session_id change must re-issue enable + rebuild.
+        session_changed = (
+            session_id is not None
+            and armed_session_id is not None
+            and session_id != armed_session_id
+        )
+        newly_armed = target_id not in self._armed_targets or session_changed
+        if session_changed:
+            logger.warning(
+                "⚠️ [passkey] CDP session changed under live target; "
+                f"re-arming WebAuthn target={target_id[:12]} "
+                f"was={str(armed_session_id)[:12]} now={str(session_id)[:12]}"
+            )
+            self._passkey_authenticator_by_target.pop(target_id, None)
+            self._passkey_seeded_by_target.pop(target_id, None)
+            self._passkey_seeded_at_by_target.pop(target_id, None)
+            self._armed_targets.discard(target_id)
+            self._passkey_pending_auth_reload_targets.add(target_id)
 
         # 1. WebAuthn: suppress the native passkey/credential popup on a new
         # target. Do NOT reissue WebAuthn.enable on an already-healthy target:
@@ -848,6 +883,8 @@ class DOMService:
         if newly_armed:
             await self._send_cdp_command(cdp_session, "WebAuthn.enable", {"enableUI": False})
             self._armed_targets.add(target_id)
+            if session_id is not None:
+                self._passkey_armed_session_by_target[target_id] = session_id
             logger.info(
                 "🛡️ [overlay-suppress] WebAuthn native UI disabled "
                 f"(passkey popups suppressed) target={target_id[:12]}"
@@ -1198,10 +1235,12 @@ class DOMService:
         self._passkey_authenticator_by_target.pop(target_id, None)
         self._passkey_seeded_by_target.pop(target_id, None)
         self._passkey_seeded_at_by_target.pop(target_id, None)
-        if not removed:
-            # Environment may have been disabled above, or we never had a live
-            # remove — next sync must re-issue WebAuthn.enable.
-            self._armed_targets.discard(target_id)
+        self._passkey_armed_session_by_target.pop(target_id, None)
+        # Always drop armed so `_arm_target` re-issues WebAuthn.enable. Keeping
+        # armed after a successful remove (prior 0ec3092c2 path) skipped enable
+        # on the next sync; Kernel then dropped the half-armed environment
+        # ~5s later (agent c1ebd389: environment-not-enabled median 5.6s).
+        self._armed_targets.discard(target_id)
         if had_state:
             logger.info(
                 "🔑 [passkey] invalidated cached authenticator state for live target "
@@ -1265,6 +1304,9 @@ class DOMService:
                     )
                     authenticator_id = None
                     seeded_ids.clear()
+                    self._armed_targets.discard(target_id)
+                    self._passkey_armed_session_by_target.pop(target_id, None)
+                    self._passkey_pending_auth_reload_targets.add(target_id)
                 else:
                     self._passkey_seeded_at_by_target[target_id] = time.monotonic()
             except Exception as e:
@@ -1275,67 +1317,101 @@ class DOMService:
                 )
                 if not environment_was_reset:
                     raise RuntimeError("Failed to verify the browser passkey authenticator") from e
-                # A relying-party ceremony can transiently make getCredentials fail.
-                # Rebuilding immediately (WebAuthn.enable + new authenticator) kills
-                # that in-flight assertion — Amazon then shows "No passkeys available"
-                # (agent f380ca3c). Retry before declaring a real reset; stretch the
-                # window when we seeded very recently (ceremony grace).
-                seeded_at = self._passkey_seeded_at_by_target.get(target_id)
-                in_ceremony_grace = (
-                    seeded_at is not None and (time.monotonic() - seeded_at) < 5.0
+                # "environment has not been enabled for this session" is a HARD
+                # reset on Kernel (agent c1ebd389: dies ~5.6s after every seed and
+                # never recovers on retry). Ceremony-grace retries only delay the
+                # rebuild while Amazon's sign-in page probes an empty authenticator
+                # and disables the passkey CTA. Keep grace solely for the
+                # authenticator-id flap that can happen mid-assertion.
+                missing_environment = (
+                    "virtual authenticator environment has not been enabled" in error
                 )
-                retry_attempts = 5 if in_ceremony_grace else 1
-                recovered = False
-                for attempt in range(retry_attempts):
-                    await asyncio.sleep(0.2 if in_ceremony_grace else 0.15)
-                    try:
-                        result = await self._send_cdp_command(
-                            cdp_session,
-                            "WebAuthn.getCredentials",
-                            {"authenticatorId": authenticator_id},
-                        )
-                        observed_ids = {
-                            credential.get("credentialId")
-                            for credential in result.get("credentials", []) or []
-                            if credential.get("credentialId")
-                        }
-                        if seeded_ids.issubset(observed_ids):
-                            logger.info(
-                                "🔑 [passkey] authenticator recovered after transient "
-                                f"getCredentials failure (attempt {attempt + 1}/"
-                                f"{retry_attempts}); skipping rebuild"
-                            )
-                            self._passkey_seeded_at_by_target[target_id] = time.monotonic()
-                            recovered = True
-                            break
-                        logger.warning(
-                            "⚠️ [passkey] virtual authenticator lost seeded credentials after retry; "
-                            "rebuilding it"
-                        )
-                        authenticator_id = None
-                        seeded_ids.clear()
-                        break
-                    except Exception:
-                        continue
-                if not recovered and authenticator_id is not None:
+                if missing_environment:
                     logger.warning(
                         "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
                     )
                     authenticator_id = None
                     seeded_ids.clear()
+                    self._armed_targets.discard(target_id)
+                    self._passkey_armed_session_by_target.pop(target_id, None)
+                    self._passkey_pending_auth_reload_targets.add(target_id)
+                else:
+                    # Mid-ceremony authenticator-id flap: retry before rebuild so
+                    # we do not kill an in-flight assertion (agent f380ca3c).
+                    seeded_at = self._passkey_seeded_at_by_target.get(target_id)
+                    in_ceremony_grace = (
+                        seeded_at is not None and (time.monotonic() - seeded_at) < 5.0
+                    )
+                    retry_attempts = 5 if in_ceremony_grace else 1
+                    recovered = False
+                    for attempt in range(retry_attempts):
+                        await asyncio.sleep(0.2 if in_ceremony_grace else 0.15)
+                        try:
+                            result = await self._send_cdp_command(
+                                cdp_session,
+                                "WebAuthn.getCredentials",
+                                {"authenticatorId": authenticator_id},
+                            )
+                            observed_ids = {
+                                credential.get("credentialId")
+                                for credential in result.get("credentials", []) or []
+                                if credential.get("credentialId")
+                            }
+                            if seeded_ids.issubset(observed_ids):
+                                logger.info(
+                                    "🔑 [passkey] authenticator recovered after transient "
+                                    f"getCredentials failure (attempt {attempt + 1}/"
+                                    f"{retry_attempts}); skipping rebuild"
+                                )
+                                self._passkey_seeded_at_by_target[target_id] = time.monotonic()
+                                recovered = True
+                                break
+                            logger.warning(
+                                "⚠️ [passkey] virtual authenticator lost seeded credentials after retry; "
+                                "rebuilding it"
+                            )
+                            authenticator_id = None
+                            seeded_ids.clear()
+                            self._armed_targets.discard(target_id)
+                            self._passkey_armed_session_by_target.pop(target_id, None)
+                            self._passkey_pending_auth_reload_targets.add(target_id)
+                            break
+                        except Exception:
+                            continue
+                    if not recovered and authenticator_id is not None:
+                        logger.warning(
+                            "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
+                        )
+                        authenticator_id = None
+                        seeded_ids.clear()
+                        # Authenticator-id errors after a full environment wipe
+                        # (Chrome deletes authenticators when WebAuthn is
+                        # disabled) still leave `_armed_targets` set — discard
+                        # so the create path re-issues WebAuthn.enable.
+                        self._armed_targets.discard(target_id)
+                        self._passkey_armed_session_by_target.pop(target_id, None)
+                        self._passkey_pending_auth_reload_targets.add(target_id)
 
+        rebuilt_environment = False
         if authenticator_id is None:
             try:
-                # A new target was enabled by _arm_target. A reset target gets
-                # here after getCredentials returned the exact missing-
-                # environment/authenticator error, so restore suppression before
-                # creating its replacement authenticator.
-                if target_id in self._passkey_authenticator_by_target:
+                # Re-enable only when this target is not already armed. `_arm_target`
+                # enables on first arm / session change; a mid-sync environment
+                # reset discards `_armed_targets` above so we re-enable here.
+                # Always-enable used to double-fire after `_arm_target` and also
+                # skip enable entirely after invalidate-with-remove left armed set
+                # (agent c1ebd389).
+                if target_id not in self._armed_targets:
                     await self._send_cdp_command(
                         cdp_session,
                         "WebAuthn.enable",
                         {"enableUI": False},
                     )
+                    rebuilt_environment = True
+                    self._armed_targets.add(target_id)
+                    session_id = getattr(cdp_session, "session_id", None)
+                    if session_id is not None:
+                        self._passkey_armed_session_by_target[target_id] = session_id
                 result = await self._send_cdp_command(
                     cdp_session,
                     "WebAuthn.addVirtualAuthenticator",
@@ -1380,6 +1456,9 @@ class DOMService:
                             {"enableUI": False},
                         )
                         self._armed_targets.add(target_id)
+                        session_id = getattr(cdp_session, "session_id", None)
+                        if session_id is not None:
+                            self._passkey_armed_session_by_target[target_id] = session_id
                     result = await self._send_cdp_command(
                         cdp_session,
                         "WebAuthn.addVirtualAuthenticator",
@@ -1395,6 +1474,7 @@ class DOMService:
                         },
                     )
                     authenticator_id = result.get("authenticatorId")
+                    rebuilt_environment = True
                 except Exception as retry_error:
                     raise RuntimeError(
                         "Failed to create the browser passkey authenticator"
@@ -1454,7 +1534,66 @@ class DOMService:
                         f"Browser passkey readback is missing {len(missing)} injected credential(s)"
                     )
             self._passkey_seeded_at_by_target[target_id] = time.monotonic()
+        # Amazon (and similar) probe Conditional UI / platform-authenticator
+        # availability once on document load. If Kernel dropped the VA before
+        # that probe, the passkey CTA stays disabled even after we rebuild.
+        # Reload the auth document once while the VA is fresh so the page
+        # re-probes (agent c1ebd389: disabled "Sign in with a passkey" burned
+        # the write_lock budget on password → WAF CAPTCHA).
+        if (
+            target_id in self._passkey_pending_auth_reload_targets
+            and self._held_passkeys_by_credential_id
+            and (rebuilt_environment or seeded)
+        ):
+            await self._reload_auth_page_after_passkey_rebuild(target_id, cdp_session)
+            self._passkey_pending_auth_reload_targets.discard(target_id)
         return seeded
+
+    async def _reload_auth_page_after_passkey_rebuild(
+        self, target_id: str, cdp_session: Any
+    ) -> None:
+        """Reload sign-in documents after VA environment rebuild (cooldown-gated)."""
+        last = self._passkey_auth_reload_at_by_target.get(target_id)
+        if last is not None and (time.monotonic() - last) < 8.0:
+            return
+        try:
+            result = await self._send_cdp_command(
+                cdp_session,
+                "Runtime.evaluate",
+                {
+                    "expression": "location.href",
+                    "returnByValue": True,
+                },
+            )
+            href = (
+                ((result or {}).get("result") or {}).get("value")
+                if isinstance(result, dict)
+                else None
+            )
+            if not isinstance(href, str) or not href:
+                return
+            lower = href.lower()
+            auth_markers = (
+                "/ap/signin",
+                "/ap/cvf",
+                "/ap/mfa",
+                "/aaut/verify",
+                "signin",
+                "/login",
+                "passport",
+            )
+            if not any(marker in lower for marker in auth_markers):
+                return
+            await self._send_cdp_command(cdp_session, "Page.reload", {"ignoreCache": True})
+            self._passkey_auth_reload_at_by_target[target_id] = time.monotonic()
+            logger.info(
+                "🔑 [passkey] reloaded auth page after VA environment rebuild "
+                f"so relying party can re-probe passkeys url={href[:120]}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [passkey] auth-page reload after VA rebuild failed: {e}"
+            )
 
     async def _read_signcounts_for_target(
         self, target_id: str, cdp_session: Any

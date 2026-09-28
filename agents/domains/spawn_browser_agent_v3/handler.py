@@ -7010,6 +7010,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
             try:
+                # Kernel drops the WebAuthn VA environment ~5s after seed (agent
+                # c1ebd389 median 5.6s). Re-arm before every state observe so the
+                # passkey CTA Amazon already rendered — or is about to probe —
+                # sees a live authenticator, not the dead environment usage
+                # readback keeps logging between ceremony-capable actions.
+                await dom_service.ensure_browser_overlays_suppressed()
                 observe_page_state = await asyncio.wait_for(
                     dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
