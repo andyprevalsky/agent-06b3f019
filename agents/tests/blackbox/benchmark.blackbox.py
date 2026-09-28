@@ -12497,6 +12497,25 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
 
 
+def test_dotenv_fast_mode_cache_falls_back_to_database_url():
+    """Cloud .env often has prod DATABASE_URL but no FAST_MODE_CACHE_* key."""
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / "back-end" / ".env"
+        env_path.parent.mkdir(parents=True)
+        env_path.write_text('DATABASE_URL="postgresql://prod.example.test:6543/postgres"\n')
+        original_root = local_bench.REPO_ROOT
+        try:
+            local_bench.REPO_ROOT = Path(tmp)
+            assert (
+                local_bench._dotenv_fast_mode_cache_database_url()
+                == "postgresql://prod.example.test:6543/postgres"
+            )
+        finally:
+            local_bench.REPO_ROOT = original_root
+
+
 def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
     """test-mass-agent-run-0 must read the July cache without Andy write-through."""
     from unittest.mock import patch
@@ -18191,6 +18210,10 @@ async def run_all_tests():
         test_canonical_base_cache_token_is_revisioned_not_daily,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "dotenv_fast_mode_cache_falls_back_to_database_url",
+        test_dotenv_fast_mode_cache_falls_back_to_database_url,
+    )
     r.record(
         "local_isolated_july_cache_read_only",
         test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,
