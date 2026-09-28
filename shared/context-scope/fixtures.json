@@ -1,6 +1,6 @@
 {
   "contract_version": 1,
-  "description": "Cross-language contract for is_internal_subagent_message / isInternalSubagentMessage. Agent loop and chat mode must agree: drop child work streams, keep parent-visible spawn results (task_complete / spawn FINISHED omit subAgentId on purpose).",
+  "contract_note": "Cross-language contract for is_internal_subagent_message / isInternalSubagentMessage. Agent loop and chat mode must agree: drop child work streams, keep parent-visible spawn results (task_complete / spawn FINISHED omit subAgentId on purpose).",
   "cases": [
     {
       "name": "parent_spawn_finished_result_kept",
