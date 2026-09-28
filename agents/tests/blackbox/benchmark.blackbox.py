@@ -372,6 +372,17 @@ def test_private_fleet_source_behavior_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_fly_native_completion_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
+         "-k", "fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone"],
+        cwd=repo_root, text=True, capture_output=True, check=False, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_autoscaler_runtime_handoff_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
@@ -18187,6 +18198,10 @@ async def run_all_tests():
     r.record(
         "private_fleet_source_permanent_gate",
         test_private_fleet_source_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "fly_native_completion_permanent_gate",
+        test_fly_native_completion_is_in_permanent_gate,
     )
     r.record(
         "autoscaler_runtime_handoff_permanent_gate",

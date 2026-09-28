@@ -7690,29 +7690,67 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
 # Run `FLY <args>` under a hard wall-clock ceiling, echoing its combined output.
 # `flyctl machine clone` has been observed to hang indefinitely on a stalled Fly
 # API call (even with --detach), which freezes the whole sequential provisioning
-# loop and starves the synchronized barrier. Backgrounding FLY (a function → its
-# flyctl child is a grandchild of this subshell) lets a watchdog reap the child
-# by parent (pkill -P) on timeout; returns 142 so the caller's retry loop treats
-# a hang exactly like any other transient clone failure. Portable (no `timeout`).
+# loop and starves the synchronized barrier. Modern Bash waits for native child
+# EOF with a deadline, so completed calls do not each pay a polling interval.
+# The existing TERM/grace/KILL cleanup returns 142 on timeout for clone retries;
+# no separate watchdog process or external `timeout` command is needed.
 fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     local secs="$1"; shift
-    local out; out="$(mktemp)"
-    FLY "$@" >"$out" 2>&1 &
-    local pid=$! waited=0 rc
-    while kill -0 "$pid" 2>/dev/null; do
-        if [ "$waited" -ge "$secs" ]; then
+    case "$secs" in ''|*[!0-9]*) return 2 ;; esac
+    while [ "${secs#0}" != "$secs" ]; do secs="${secs#0}"; done
+    [ -n "$secs" ] || return 142
+    local out notify_fd read_fd pid rc read_status=0 completed running
+    out="$(mktemp)" || return 1
+    if ! mkfifo -m 600 "$out.done"; then
+        rm -f "$out"
+        return 1
+    fi
+    # The controller already requires modern Bash. A timed FIFO read blocks
+    # until the owning shell exits, including its EXIT handlers, without a
+    # polling sleeper or an independently owned watchdog.
+    if ! exec {notify_fd}<> "$out.done"; then
+        rm -f "$out.done" "$out"
+        return 1
+    fi
+    if ! exec {read_fd}< "$out.done"; then
+        exec {notify_fd}>&-
+        rm -f "$out.done" "$out"
+        return 1
+    fi
+    rm -f "$out.done"
+    (
+        exec {read_fd}<&-
+        # Keep the writer through native exec and EXIT handlers. Production
+        # FLY owns a foreground flyctl; detached writers fail at the deadline.
+        if FLY "$@" >"$out" 2>&1; then rc=0; else rc=$?; fi
+        exit "$rc"
+    ) &
+    pid=$!
+    exec {notify_fd}>&-
+    IFS= read -r -t "$secs" -u "$read_fd" completed || read_status=$?
+    exec {read_fd}<&-
+    if [ "$read_status" -ne 1 ]; then
+        # Only EOF establishes completion. Deadline, interrupted read, and
+        # invalid/read-error statuses must never fall through to an unbounded
+        # successful wait. A shell job check avoids signalling a reused PID if
+        # an unsupported detached descendant retained a FIFO descriptor.
+        running="$(jobs -pr)"
+        if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
             pkill -TERM -P "$pid" 2>/dev/null || true
             kill -TERM "$pid" 2>/dev/null || true
             sleep 2
-            pkill -KILL -P "$pid" 2>/dev/null || true
-            kill -KILL "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            cat "$out"; rm -f "$out"
-            return 142
+            running="$(jobs -pr)"
+            if [[ $'\n'"$running"$'\n' == *$'\n'"$pid"$'\n'* ]]; then
+                pkill -KILL -P "$pid" 2>/dev/null || true
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
         fi
-        sleep 1; waited=$((waited + 1))
-    done
-    wait "$pid"; rc=$?
+        wait "$pid" 2>/dev/null || true
+        cat "$out"; rm -f "$out"
+        [ "$read_status" -gt 128 ] && return 142
+        return 1
+    fi
+    if wait "$pid"; then rc=0; else rc=$?; fi
     cat "$out"; rm -f "$out"
     return "$rc"
 }

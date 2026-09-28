@@ -8300,6 +8300,7 @@ clone_machine_target "$LEDGER"
     result = subprocess.run(
         ["bash", "-c", script],
         env={
+            "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
             "MACHINES_FILE": str(machines_file),
             "LEDGER": str(ledger),
@@ -8359,7 +8360,11 @@ clone_machine_target "$LEDGER"
 
     result = subprocess.run(
         ["bash", "-c", script],
-        env={"ATTEMPT_FILE": str(attempt_file), "LEDGER": str(ledger)},
+        env={
+            "PATH": os.environ["PATH"],
+            "ATTEMPT_FILE": str(attempt_file),
+            "LEDGER": str(ledger),
+        },
         text=True,
         capture_output=True,
         check=False,
@@ -8427,6 +8432,7 @@ clone_machine_target "$LEDGER"
     result = subprocess.run(
         ["bash", "-c", script],
         env={
+            "PATH": os.environ["PATH"],
             "ATTEMPT_FILE": str(attempt_file),
             "MACHINES_FILE": str(machines_file),
             "LEDGER": str(ledger),
@@ -22445,3 +22451,226 @@ def test_autoscaler_runtime_handoff_fixture_cleanup_survives_faults(tmp_path, mo
     assert child.terminated == 1 and child.joined == 1
     if fault != "second_spawn":
         assert scaler.terminated == 1 and scaler.joined == 1
+
+def _fly_with_timeout_test_source():
+    return 'mktemp() { command mktemp "$TMPDIR/timeout.XXXXXXXX"; }\n' + _extract_fleet_function(
+        FLEET_SCRIPT.read_text(), "fly_with_timeout() {"
+    )
+
+
+@pytest.mark.parametrize("mode,code", [("success", 0), ("nonzero", 17), ("exit", 23)])
+def test_fly_with_timeout_completed_native_child_does_not_pay_poll_interval(tmp_path, mode, code):
+    action = "return " + str(code) if mode != "exit" else "exit " + str(code)
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + '\nFLY() { printf "complete-output\\n"; '
+        + action
+        + "; }\nfly_with_timeout 5\n"
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env={**os.environ, "TMPDIR": str(tmp_path)}, timeout=8
+    )
+    elapsed = time.monotonic() - start
+    assert r.returncode == code, (r.stdout, r.stderr)
+    assert r.stdout == "complete-output\n"
+    assert not list(tmp_path.iterdir())
+    assert elapsed < 0.5, f"native child completed immediately but wrapper took {elapsed:.3f}s"
+
+
+@pytest.mark.parametrize("budget", ["0", "1"])
+def test_fly_with_timeout_hung_child_keeps_native_timeout_and_is_joined(tmp_path, budget):
+    pidfile = tmp_path / "pid"
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + '\nFLY() { printf "%s\\n" "$BASHPID" > "$PIDFILE"; printf "partial-output\\n"; sleep 30; }\nfly_with_timeout '
+        + budget
+        + "\n"
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TMPDIR": str(scratch), "PIDFILE": str(pidfile)},
+        timeout=8,
+    )
+    elapsed = time.monotonic() - start
+    assert r.returncode == 142, (r.stdout, r.stderr)
+    assert elapsed < 5
+    if pidfile.exists():
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pidfile.read_text()), 0)
+    assert not list(scratch.iterdir())
+
+
+@pytest.mark.parametrize("boundary", ["mktemp", "mkfifo"])
+def test_fly_with_timeout_setup_failure_does_not_launch_child(tmp_path, boundary):
+    script = (
+        "set -eu\n"
+        + _fly_with_timeout_test_source()
+        + "\n"
+        + boundary
+        + '() { return 1; }\nFLY() { touch "$STARTED"; }\nif fly_with_timeout 5; then exit 90; fi\n[ -z "$(jobs -pr)" ]\n'
+    )
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TMPDIR": str(tmp_path), "STARTED": str(tmp_path / "started")},
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert not list(tmp_path.iterdir())
+
+
+def test_fly_with_timeout_completion_preserves_combined_bytes_fds_and_caller_trap(tmp_path):
+    script = (
+        "set -eu\n"
+        + _fly_with_timeout_test_source()
+        + """
+trap 'printf caller-trap' TERM
+before_trap="$(trap -p TERM)"
+fds() { for path in /dev/fd/*; do printf '%s\n' "${path##*/}"; done; }
+before_fds="$(fds)"
+FLY() { printf 'stdout\n'; printf 'stderr\n' >&2; return 17; }
+for i in 1 2 3; do
+ rc=0; fly_with_timeout 5 > "$OUTPUT" || rc=$?
+ [ "$rc" = 17 ] || exit 91
+done
+[ "$before_trap" = "$(trap -p TERM)" ]
+[ "$before_fds" = "$(fds)" ]
+"""
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    output = tmp_path / "output"
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TMPDIR": str(scratch), "OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert output.read_bytes() == b"stdout\nstderr\n"
+    assert not list(scratch.iterdir())
+
+
+def test_fly_with_timeout_dead_child_without_completion_notification_is_joined(tmp_path):
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + '\nFLY() { printf "before-signal\\n"; kill -KILL "$BASHPID"; }\nfly_with_timeout 5\n'
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)}, capture_output=True, text=True, timeout=3
+    )
+    assert r.returncode == 137, (r.stdout, r.stderr)
+    assert r.stdout == "before-signal\n"
+    assert time.monotonic() - start < 0.5
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("action", ["trap 'sleep 2' EXIT; return 0", "trap 'sleep 2' EXIT; exit 0", "exec sleep 2"])
+def test_fly_with_timeout_deadline_includes_exit_handler_and_exec_lifetime(tmp_path, action):
+    script = "set -u\n" + _fly_with_timeout_test_source() + "\nFLY() { " + action + "; }\nfly_with_timeout 1\n"
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)}, capture_output=True, text=True, timeout=6
+    )
+    assert r.returncode == 142, (r.stdout, r.stderr, time.monotonic() - start)
+    assert time.monotonic() - start < 5
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("budget", ["invalid", "-1", "1.5", "", "0", "00", "000"])
+def test_fly_with_timeout_invalid_or_zero_deadline_never_admits_child(tmp_path, budget):
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + '\nFLY() { touch "$STARTED"; sleep 2; }\nfly_with_timeout "$BUDGET"\n'
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TMPDIR": str(tmp_path), "STARTED": str(tmp_path / "started"), "BUDGET": budget},
+        capture_output=True,
+        text=True,
+        timeout=4,
+    )
+    assert r.returncode == (142 if budget and set(budget) == {"0"} else 2), (r.stdout, r.stderr)
+    assert time.monotonic() - start < 0.5
+    assert not list(tmp_path.iterdir())
+
+
+def test_fly_with_timeout_read_error_fails_and_joins_owned_child(tmp_path):
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + '\nread() { return 2; }\nFLY() { sleep 2; }\nrc=0; fly_with_timeout 5 || rc=$?\n[ "$rc" != 0 ] && [ -z "$(jobs -pr)" ]\n'
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)}, capture_output=True, text=True, timeout=5
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert time.monotonic() - start < 4
+    assert not list(tmp_path.iterdir())
+
+
+def test_fly_with_timeout_descendant_held_writer_is_bounded_without_signalling_completed_root(tmp_path):
+    # FLY's supported foreground lifetime cannot detach a writer. For an injected
+    # detached writer, reject at the deadline and never signal its reaped root PID.
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + """
+kill() { printf 'unexpected signal\n' >&2; return 97; }
+pkill() { printf 'unexpected tree signal\n' >&2; return 97; }
+FLY() { sleep 2 & return 0; }
+fly_with_timeout 1
+"""
+    )
+    start = time.monotonic()
+    r = subprocess.run(
+        ["bash", "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)}, capture_output=True, text=True, timeout=4
+    )
+    assert r.returncode == 142, (r.stdout, r.stderr)
+    assert time.monotonic() - start < 1.8
+    assert "unexpected" not in r.stderr
+    assert not list(tmp_path.iterdir())
+    # Finite injected descendant has its own bounded lifetime and no provider work.
+    time.sleep(1.2)
+
+
+def test_fly_with_timeout_caller_signal_trap_remains_authoritative(tmp_path):
+    script = (
+        "set -u\n"
+        + _fly_with_timeout_test_source()
+        + """
+trap 'printf trap-seen > "$MARKER"' TERM
+FLY() { sleep 30; }
+(sleep 0.1; kill -TERM $$) &
+signaller=$!
+rc=0; fly_with_timeout 1 || rc=$?
+wait "$signaller"
+[ "$rc" = 142 ] && [ -z "$(jobs -pr)" ] && [ "$(cat "$MARKER")" = trap-seen ]
+"""
+    )
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "TMPDIR": str(scratch), "MARKER": str(tmp_path / "marker")},
+        capture_output=True,
+        text=True,
+        timeout=6,
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert not list(scratch.iterdir())
