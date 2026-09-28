@@ -13066,8 +13066,10 @@ rc=$?
 [ "$rc" = "0" ] || exit "$rc"
 if find "$REG/clones" -type f | grep -q .; then exit 90; fi
 """
+    script_path = tmp_path / "legacy-absence.sh"
+    script_path.write_text(script)
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", str(script_path)],
         text=True,
         capture_output=True,
         check=False,
@@ -13168,8 +13170,10 @@ rc=$?
 [ "$rc" = "1" ] || exit 91
 [ "$(find "$REG/clones" -type f | wc -l | tr -d ' ')" = {record_count} ] || exit 92
 """
+        script_path = tmp_path / case_name / "legacy-absence.sh"
+        script_path.write_text(script)
         result = subprocess.run(
-            ["bash", "-c", script],
+            ["bash", str(script_path)],
             text=True,
             capture_output=True,
             check=False,
