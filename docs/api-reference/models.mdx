@@ -7,7 +7,7 @@ description: "Available models and pricing"
 
 Rose offers two model tiers for agents:
 
-### rose-1-lite
+### rose-1-flash
 
 **Best for**: Fast tasks, simple research, web searches, basic automation
 
@@ -47,19 +47,19 @@ curl -X POST "https://navi-j9a9.onrender.com/api/agents" \
   -H "x-api-key: YOUR_API_KEY" \
   -d '{
     "goal": "Research quantum computing startups",
-    "model": "rose-1-lite"
+    "model": "rose-1-flash"
   }'
 ```
 
-If no model is specified, `rose-1-lite` is used by default.
+If no model is specified, `rose-1-flash` is used by default.
 
 ## Choosing the Right Model
 
 | If you need... | Use |
 |----------------|-----|
-| Fast, cheap results | `rose-1-lite` |
+| Fast, cheap results | `rose-1-flash` |
 | High quality output | `rose-1-ultra` |
-| Simple lookups | `rose-1-lite` |
+| Simple lookups | `rose-1-flash` |
 | Complex analysis | `rose-1-ultra` |
 
 ## Token Usage

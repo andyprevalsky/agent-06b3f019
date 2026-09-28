@@ -5,7 +5,7 @@ The vendored `wmh.providers.anthropic.AnthropicProvider` calls Anthropic directl
 drop-in replacement — `RoseWMHProvider` — that routes the WMH's per-step LLM call
 through the EXISTING agent-side Rose machinery instead:
 
-    WMH step  ->  RoseWMHProvider.complete()  ->  RoseClient.collect(pool="rose-1-lite")
+    WMH step  ->  RoseWMHProvider.complete()  ->  RoseClient.collect(pool="rose-1-flash")
                      |                                    |
                      |                                    +-- claudeAuth / gptAuth direct
                      |                                        compute-token routing + rotation
@@ -164,7 +164,7 @@ class RoseWMHProvider:
     def __init__(
         self,
         *,
-        pool: "PoolName" = "rose-1-lite",
+        pool: "PoolName" = "rose-1-flash",
         user_id: Optional[str] = None,
         model_label: Optional[str] = None,
         client: Optional[RoseClient] = None,
@@ -174,7 +174,7 @@ class RoseWMHProvider:
         self._user_id = _resolve_user_id(user_id)
         # `config.model` is a metering label only (no model resolution happens here —
         # the pool decides the real model). Default to the pool name so the metered
-        # rows read e.g. "rose-1-lite".
+        # rows read e.g. "rose-1-flash".
         self.config = _RoseProviderConfig(model_label or pool)
         self._client = client or RoseClient()
         # Cumulative Rose inference cost/tokens across every step this served WMH runs.
@@ -196,7 +196,7 @@ class RoseWMHProvider:
 
         Sync entrypoint (called from the FastAPI threadpool). Bridges to the async
         Rose client with `asyncio.run`. `temperature` is accepted for protocol parity
-        but not forwarded: rose-1-lite's claudeAuth path (Anthropic) rejects sampling
+        but not forwarded: rose-1-flash's claudeAuth path (Anthropic) rejects sampling
         params, matching the vendored AnthropicProvider's behavior.
         """
         return asyncio.run(self._complete_async(system, messages, max_tokens=max_tokens))

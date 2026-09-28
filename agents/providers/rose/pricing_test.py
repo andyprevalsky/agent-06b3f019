@@ -21,6 +21,7 @@ def test_direct_claude_suffix_always_free():
         "claude-haiku-4-5-claude",  # absent from the explicit direct list
         "claude-fable-5-claude",
         "claude-fable-5-1-claude",
+        "claude-opus-5-5-claude",
     ):
         p = get_model_pricing(m)
         assert p == {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0}, m
@@ -51,7 +52,14 @@ def test_paid_anthropic_direct_still_priced():
 
 
 def test_pool_pricing_resolves():
-    p = get_pool_pricing("rose-1-lite")
+    p = get_pool_pricing("rose-1-flash")
     assert p is not None
     assert p["input_cents_per_1k"] > 0
     assert p["output_cents_per_1k"] > 0
+
+
+def test_cerebras_qwen_uses_list_price_not_openrouter():
+    cerebras = get_model_pricing("qwen-3.8-27b")
+    openrouter = get_model_pricing("qwen/qwen3.8-27b")
+    assert cerebras == {"input_cents_per_1k": 0.099, "output_cents_per_1k": 0.149}
+    assert openrouter == {"input_cents_per_1k": 0.015, "output_cents_per_1k": 0.08}

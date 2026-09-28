@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 
   const projected = await ensureChatContextWithinBudget({
     agentId: PROD_CHAT_COMPACTION_AGENT_ID,
-    requestedModel: 'rose-labs/rose-1-lite',
+    requestedModel: 'rose-labs/rose-1-flash',
     rawMessages,
   });
 
@@ -86,7 +86,7 @@ async function main(): Promise<void> {
   const startupMessages = await loadChatModelMessages(
     {
       agentId: PROD_CHAT_COMPACTION_AGENT_ID,
-      requestedModel: 'rose-labs/rose-1-lite',
+      requestedModel: 'rose-labs/rose-1-flash',
     },
     {
       findMessages: async () =>

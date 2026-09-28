@@ -27,7 +27,7 @@ status: fixed
 
 ## Problem
 
-Prod agent `847adea5` (2026-07-24, "nopa fish… order now", rose-1-lite, MAC_APP) ran a
+Prod agent `847adea5` (2026-07-24, "nopa fish… order now", rose-1-flash, MAC_APP) ran a
 browser sub-agent ordering fish & chips on `order.toasttab.com`. It hung for about
 1m40s with no visible progress, then reported "Task Incomplete - Max Steps Reached" and
 logged "Max iterations reached: 50" — while the real iteration count was about 16, and

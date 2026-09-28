@@ -1330,7 +1330,7 @@ def test_root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_e
                     "agent_id": child_agent_id,
                     "span_id": "child-span",
                     "dump_id": "child-dump",
-                    "model": "rose-1-lite",
+                    "model": "rose-1-flash",
                     "messages": [],
                     "output": {
                         "tool_calls": [

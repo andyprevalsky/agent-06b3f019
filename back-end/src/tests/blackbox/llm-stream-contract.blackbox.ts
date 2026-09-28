@@ -128,9 +128,15 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
   assert(testCase);
   const originalFetch = global.fetch;
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  const originalGptKey = process.env.GPT_API_KEY;
   const originalAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  const originalCerebrasKey = process.env.CEREBRAS_API_KEY;
+  // rose-fast skips funded OpenAI/Anthropic keys and hops Cerebras first.
+  // Provenance through the Responses API is an Ultra / direct-auth contract.
   process.env.OPENAI_API_KEY = 'test-openai-key';
+  process.env.GPT_API_KEY = 'test-openai-key';
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.CEREBRAS_API_KEY;
   global.fetch = async (input) => {
     assert.equal(String(input), OPENAI_RESPONSES_API_URL);
     return new Response(sseBody(testCase.sse_lines), {
@@ -142,7 +148,7 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
   try {
     await __resetAnthropicApiKeyCooldown();
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-ultra',
       messages: [{ role: 'user', content: 'Return structured output' }],
       response_format: {
         type: 'json_schema',
@@ -165,8 +171,12 @@ async function testCompletionClientPreservesItemProvenance(): Promise<void> {
     global.fetch = originalFetch;
     if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalOpenAiKey;
+    if (originalGptKey === undefined) delete process.env.GPT_API_KEY;
+    else process.env.GPT_API_KEY = originalGptKey;
     if (originalAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = originalAnthropicKey;
+    if (originalCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = originalCerebrasKey;
   }
 }
 

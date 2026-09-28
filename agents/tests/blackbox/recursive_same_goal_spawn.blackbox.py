@@ -264,10 +264,10 @@ def score_response(resp: Any, *, parent_goal: str, bad_spawn_goal: str) -> dict:
 
 
 def normalize_pool(pool: str) -> str:
-    p = (pool or "rose-1-lite").strip()
+    p = (pool or "rose-1-flash").strip()
     return {
-        "rose-1-lite": "rose-1-lite",
-        "rose_1_lite": "rose-1-lite",
+        "rose-1-flash": "rose-1-flash",
+        "rose_1_lite": "rose-1-flash",
         "rose-1-ultra": "rose-1-ultra",
         "rose_1_ultra": "rose-1-ultra",
     }.get(p, p)
@@ -343,7 +343,7 @@ async def replay_one(
             "error": "spawn_rule_bullet_not_found_in_messages",
         }
 
-    pool = normalize_pool(meta.get("pool") or "rose-1-lite")
+    pool = normalize_pool(meta.get("pool") or "rose-1-flash")
     params = meta.get("requested_params") or {}
     temperature = params.get("temperature", 1.0)
     max_tokens = int(params.get("max_tokens") or 8192)

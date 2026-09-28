@@ -271,7 +271,7 @@ describe('Terminal page', () => {
             agent: {
               agent_id: params.agentId,
               goal: 'Test agent',
-              model: 'rose-1-lite',
+              model: 'rose-1-flash',
               source: 'WEB',
               status: 'ACTIVE',
               temporal_workflow_id: 'wf-001',
@@ -352,7 +352,7 @@ describe('Terminal page', () => {
             agent: {
               agent_id: params.agentId,
               goal: 'Gate test agent',
-              model: 'rose-1-lite',
+              model: 'rose-1-flash',
               source: 'WEB',
               reasoning_effort: 'medium',
               progress: 50,

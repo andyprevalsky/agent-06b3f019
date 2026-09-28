@@ -1082,7 +1082,7 @@ class SpawnAgentManager(ToolManager):
         # Wait for un-pause before spawning (parents pause cascades to children).
         await workflow.wait_condition(lambda: not workflow_instance.is_paused)
 
-        parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
+        parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
         parent_source = getattr(workflow_instance, "agent_source", "WEB")
         group_id = spawn_group_id(tool_call_id, tool_call.get("_spawn_group_id"))
 

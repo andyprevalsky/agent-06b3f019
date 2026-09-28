@@ -3,7 +3,7 @@
   "baseline_status": "FAIL",
   "route": "gpt_auth",
   "actual_model": "gpt-5.6-terra-gpt",
-  "pool": "rose-1-lite",
+  "pool": "rose-1-flash",
   "parent_goal": "Download the YouTube video https://www.youtube.com/watch?v=JVm7ij7WcCU as an MP4 video file using permitted tools/services. Verify it is nonempty and playable (e.g. ffprobe). Return the downloaded file as a file_pointer and the exact source video title. This is user-authorized download of a URL they supplied.",
   "bad_spawn_goal": "Execute this narrow task end-to-end: Download the user-authorized YouTube URL https://www.youtube.com/watch?v=JVm7ij7WcCU as a local MP4 via permitted download tools/services. Obtain exact title from metadata. Run ffprobe to verify nonzero file size, container and playable video/audio streams, including duration. Attach/export the final MP4 as a file_pointer in your structured result. Do not ask questions. Return only when all artifacts are real and accessible.",
   "prior_fail_in_context": true,

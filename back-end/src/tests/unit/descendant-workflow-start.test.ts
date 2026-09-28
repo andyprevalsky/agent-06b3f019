@@ -583,7 +583,7 @@ async function main(): Promise<void> {
               depth: 1,
               busId: fixture.rootId,
               goal: 'late child',
-              model: 'rose-labs/rose-1-lite',
+              model: 'rose-labs/rose-1-flash',
               reasoningMaxTokens: 256,
               source: 'WEB',
               tokenInPriceMicrodollars: null,

@@ -2319,7 +2319,12 @@ async def create_agent(
     # A task may pin its root agent to a specific Rose pool. Used when the
     # default pool's primary declines the task's prompt outright, which is a
     # model-policy outcome no retry can change.
-    if task.model:
+    model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
+    # Fast Mode trees (mass-agent) were recorded against Ultra. Retargeting
+    # them to a speed pool invalidates the July cache (missing title / tools).
+    if model_override and task.fast_cache != "on":
+        body["model"] = model_override
+    elif task.model:
         body["model"] = task.model
 
     if task.start_phase:
@@ -12998,7 +13003,7 @@ async def _warmup_edge_functions(base_url: str):
         return
 
     payload = {
-        "model": "rose-labs/rose-1-lite",
+        "model": "rose-labs/rose-1-flash",
         "messages": [{"role": "user", "content": "Say hi"}],
         "max_tokens": 5,
         "stream": False,

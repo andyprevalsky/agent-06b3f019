@@ -41,7 +41,7 @@ function installUsageHandlers(overrides?: {
         overrides?.statsData ?? {
           totalTokens: 150000,
           topModels: [
-            { model: 'rose-1-lite', tokens: 100000, percentage: 67 },
+            { model: 'rose-1-flash', tokens: 100000, percentage: 67 },
             { model: 'rose-1-ultra', tokens: 50000, percentage: 33 },
           ],
         },
@@ -158,7 +158,7 @@ describe('Usage page', () => {
     it('renders each model with rank, name, and token count', async () => {
       renderWithProviders(<Usage />);
       await waitFor(() => {
-        expect(screen.getByText('rose-1-lite')).toBeInTheDocument();
+        expect(screen.getByText('rose-1-flash')).toBeInTheDocument();
       });
       expect(screen.getByText('#1')).toBeInTheDocument();
       expect(screen.getByText('100,000 tokens (67%)')).toBeInTheDocument();
@@ -171,7 +171,7 @@ describe('Usage page', () => {
     it('renders model progress bars with correct width percentages', async () => {
       renderWithProviders(<Usage />);
       await waitFor(() => {
-        expect(screen.getByText('rose-1-lite')).toBeInTheDocument();
+        expect(screen.getByText('rose-1-flash')).toBeInTheDocument();
       });
       const modelBars = document.querySelectorAll('.bg-primary.h-2.rounded-full');
       expect(modelBars).toHaveLength(2);
@@ -433,7 +433,7 @@ describe('Usage page', () => {
           topModels: [
             { model: 'claude-3-opus', tokens: 200000, percentage: 40 },
             { model: 'rose-1-ultra', tokens: 150000, percentage: 30 },
-            { model: 'rose-1-lite', tokens: 80000, percentage: 16 },
+            { model: 'rose-1-flash', tokens: 80000, percentage: 16 },
             { model: 'gpt-4o', tokens: 50000, percentage: 10 },
             { model: 'claude-3-haiku', tokens: 20000, percentage: 4 },
           ],

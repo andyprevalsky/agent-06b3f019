@@ -4,7 +4,7 @@
  * Mirrors agents/providers/rose/client.py (slim chat-only port). One entry
  * point, `createStreamingCompletion(options)`, that:
  *
- *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-lite`, etc).
+ *   1. Resolves the pool from `options.model` (`rose-labs/rose-1-flash`, etc).
  *   2. When explicitly selected, routes exclusively through either the pool's
  *      OpenRouter waterfall or shared OpenAI priority, failing closed on config.
  *   3. Tries claudeAuth (direct Anthropic) when `options.claude_token` is set,
@@ -40,10 +40,12 @@ import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { exclusiveCerebrasCompletion, POOL_CEREBRAS_IDLE_TIMEOUT_MS } from './cerebrasRoute';
 import {
   runCerebrasChatWithWaterfallFallback,
   selectExclusiveCerebrasChatRoute,
 } from './exclusiveCerebrasChatRoute';
+import { createStreamAccumulator, dumpDisplayModel, emitRoseChunk } from './completionChunks';
 
 const log = createLogger('Rose');
 
@@ -74,13 +76,6 @@ function openAiApiKey(): string | undefined {
   return process.env[GPT_API_KEY_ENV];
 }
 
-function dumpDisplayModel(actualModel: string): string {
-  if (actualModel.endsWith('-claude')) return actualModel.slice(0, -'-claude'.length);
-  if (actualModel.endsWith('-gpt')) return actualModel.slice(0, -'-gpt'.length);
-  if (actualModel.endsWith('-openai')) return actualModel.slice(0, -'-openai'.length);
-  return actualModel;
-}
-
 /**
  * Drop-in replacement for the deleted Supabase edge-function client.
  * Same function signature, same CompletionChunk shape — chat callers
@@ -94,7 +89,7 @@ export async function createStreamingCompletion(
   if (!pool) {
     throw new Error(
       `Rose: unknown model ${options.model} (expected rose-labs/rose-1-mini, ` +
-        `rose-labs/rose-1-lite, rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
+        `rose-labs/rose-1-flash, rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
     );
   }
   if (options.response_format && options.response_model) {
@@ -147,16 +142,8 @@ interface WrapOptions {
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
-  const outputParts: string[] = [];
-  const reasoningParts: string[] = [];
-  const toolCalls: Array<Record<string, unknown>> = [];
-  let finishReason: string | null = null;
+  const acc = createStreamAccumulator();
   let dumpPath: string | null = null;
-
-  let metadata: { actual_model: string; pool_name: string } = {
-    actual_model: '',
-    pool_name: '',
-  };
 
   if (opts.options.dump_context) {
     dumpPath = dumpLlmContext({
@@ -197,135 +184,30 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   }
 
-  const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null => {
-    if (chunk.kind === 'metadata') {
-      metadata = {
-        actual_model: chunk.data.actual_model ?? '',
-        pool_name: chunk.data.pool_name ?? '',
-      };
-      // Caller doesn't need a dedicated metadata chunk — every CompletionChunk
-      // we emit carries actual_model + pool_name inline (parity with the
-      // deleted edge function's behavior).
-      return null;
-    }
-    if (chunk.kind === 'content') {
-      outputParts.push(chunk.data.text);
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              content: chunk.data.text,
-              item_id: chunk.data.item_id,
-              output_index: chunk.data.output_index,
-              content_index: chunk.data.content_index,
-              phase: chunk.data.phase,
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'reasoning') {
-      reasoningParts.push(chunk.data.text);
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              reasoning: chunk.data.text,
-              item_id: chunk.data.item_id,
-              output_index: chunk.data.output_index,
-              content_index: chunk.data.content_index,
-              phase: chunk.data.phase,
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'usage') {
-      finishReason = chunk.data.finish_reason ?? 'stop';
-      return {
-        choices: [{ index: 0, delta: {}, finish_reason: chunk.data.finish_reason ?? 'stop' }],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-        usage: {
-          prompt_tokens: chunk.data.prompt_tokens ?? 0,
-          completion_tokens: chunk.data.completion_tokens ?? 0,
-          total_tokens: chunk.data.total_tokens ?? 0,
-          cache_creation_input_tokens: chunk.data.cache_creation_input_tokens,
-          cache_read_input_tokens: chunk.data.cache_read_input_tokens,
-        },
-      };
-    }
-    if (chunk.kind === 'tool_call') {
-      toolCalls.push({
-        id: chunk.data.id,
-        name: chunk.data.name,
-        arguments: chunk.data.arguments,
-      });
-      return {
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  id: chunk.data.id,
-                  type: 'function',
-                  function: { name: chunk.data.name, arguments: chunk.data.arguments },
-                },
-              ],
-            },
-            finish_reason: null,
-          },
-        ],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-      };
-    }
-    if (chunk.kind === 'codex_reasoning_item') {
-      return {
-        choices: [{ index: 0, delta: {}, finish_reason: null }],
-        requested_model: opts.options.model,
-        actual_model: metadata.actual_model,
-        pool_name: metadata.pool_name,
-        pool_size: poolSpec.waterfall.length,
-        codex_reasoning_item: chunk.data,
-      };
-    }
-    return null;
-  };
+  const emitChunk = (chunk: RoseStreamChunk): CompletionChunk | null =>
+    emitRoseChunk({
+      chunk,
+      options: opts.options,
+      poolSize: poolSpec.waterfall.length,
+      acc,
+    });
 
   const finalizeDump = (error?: unknown) => {
     if (!dumpPath) return;
-    const actualModelRaw = metadata.actual_model || '';
+    const actualModelRaw = acc.metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
     updateLlmDump(dumpPath, {
       model: actualModel ?? opts.options.model,
       config: {
         actual_model: actualModel,
         actual_model_raw: actualModelRaw || null,
-        pool_name: metadata.pool_name || null,
-        finish_reason: finishReason,
+        pool_name: acc.metadata.pool_name || null,
+        finish_reason: acc.finishReason,
       },
       extra: {
-        output: outputParts.join(''),
-        reasoning: reasoningParts.join(''),
-        tool_calls: toolCalls,
+        output: acc.outputParts.join(''),
+        reasoning: acc.reasoningParts.join(''),
+        tool_calls: acc.toolCalls,
         error:
           error instanceof Error
             ? { name: error.name, message: error.message, stack: error.stack }
@@ -452,10 +334,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
 
   // 1. claudeAuth attempt (with fall-through buffering)
+  const allowDirectAuth = poolSpec.directAuthEnabled !== false;
   let claudeAuthFailed: RoseError | null = null;
   let gptAuthFailed: RoseError | null = null;
   let openAiApiKeyFailed: RoseError | null = null;
-  if (opts.options.claude_token) {
+  if (allowDirectAuth && opts.options.claude_token) {
     const failure = yield* attemptClaudeAuthWithRecovery({
       poolSpec,
       options: opts.options,
@@ -481,7 +364,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
 
   // 2. gptAuth attempt (with fall-through buffering)
-  if (opts.options.gpt_token) {
+  if (allowDirectAuth && opts.options.gpt_token) {
     try {
       yield* runWithFallThrough({
         produce: () =>
@@ -526,7 +409,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
   // when no compute token served (or it fell through), before Anthropic and
   // OpenRouter. Force provider fast mode for this funded route.
-  const sharedOpenAiKey = openAiApiKey();
+  const sharedOpenAiKey = allowDirectAuth ? openAiApiKey() : undefined;
   if (sharedOpenAiKey) {
     try {
       yield* runWithFallThrough({
@@ -584,7 +467,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       request_id: opts.requestId,
     });
   }
-  if (anthropicApiKey && !apiKeyOnCooldown) {
+  if (allowDirectAuth && anthropicApiKey && !apiKeyOnCooldown) {
     try {
       yield* runWithFallThrough({
         produce: () =>
@@ -637,6 +520,44 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   // 3. Waterfall — this is the terminal pipeline; unwrap the internal
   // fall-through sentinel so callers continue to see typed RoseError
   // subclasses (their `instanceof RoseError` checks depend on it).
+  const cerebrasKey = process.env.CEREBRAS_API_KEY;
+  if (poolSpec.cerebrasModel && cerebrasKey) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          exclusiveCerebrasCompletion({
+            options: opts.options,
+            cerebrasKey,
+            requestId: opts.requestId,
+            callSite: opts.callSite,
+            model: poolSpec.cerebrasModel,
+            reasoningEffort: poolSpec.cerebrasReasoningEffort,
+            idleTimeoutMs: POOL_CEREBRAS_IDLE_TIMEOUT_MS,
+          }),
+        emit: emitChunk,
+      });
+      log.info('cerebras.done', {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        model: poolSpec.cerebrasModel,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      finalizeDump();
+      return;
+    } catch (err) {
+      if (err instanceof PreContentFallThroughError) {
+        log.info('fall_through_from_cerebras', {
+          request_id: opts.requestId,
+          reason: err.cause.name,
+          model: poolSpec.cerebrasModel,
+        });
+      } else {
+        finalizeDump(err);
+        throw err;
+      }
+    }
+  }
+
   if (opts.options.disable_waterfall) {
     const error =
       anthropicApiKeyFailed ??

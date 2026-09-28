@@ -58,7 +58,7 @@ function makeAgent(overrides: Record<string, unknown> = {}) {
   return {
     agent_id: 'agent-001',
     goal: 'test goal',
-    model: 'rose-1-lite',
+    model: 'rose-1-flash',
     source: 'WEB',
     reasoning_effort: 'medium',
     progress: 0.5,
@@ -238,7 +238,7 @@ describe('useAgentProvider', () => {
       result.current.stagePendingAgentCreation({
         agentId: 'pending-agent',
         goal: 'instant goal',
-        model: 'rose-1-lite',
+        model: 'rose-1-flash',
         source: 'WEB',
         priceLimitCents: 500,
       });
@@ -295,7 +295,7 @@ describe('useAgentProvider', () => {
       result.current.stagePendingAgentCreation({
         agentId: 'pending-agent',
         goal: 'instant goal',
-        model: 'rose-1-lite',
+        model: 'rose-1-flash',
         source: 'WEB',
         priceLimitCents: 500,
       });
@@ -309,7 +309,7 @@ describe('useAgentProvider', () => {
       result.current.stagePendingAgentCreation({
         agentId: 'second-pending-agent',
         goal: 'retryable goal',
-        model: 'rose-1-lite',
+        model: 'rose-1-flash',
         source: 'WEB',
         priceLimitCents: 500,
       });

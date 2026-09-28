@@ -32,13 +32,20 @@ from providers.rose.types import ClaudeAuthContext, GptAuthContext
 # preserve that lookup here so call sites don't have to change strings.
 _MODEL_TO_POOL: dict[str, PoolName] = {
     "rose-labs/rose-1-mini": "rose-1-mini",
-    "rose-labs/rose-1-lite": "rose-1-lite",
+    "rose-labs/rose-1-flash": "rose-1-flash",
+    # Legacy lite → flash (persisted agents / older clients).
+    "rose-labs/rose-1-lite": "rose-1-flash",
     "rose-labs/rose-1-ultra": "rose-1-ultra",
     "rose-labs/rose-1-browser-use": "rose-1-browser-use",
     "rose-labs/rose-1-oss": "rose-1-oss",
-    "rose": "rose-1-lite",
+    "rose": "rose-1-flash",
+    "rose-flash": "rose-1-flash",
+    "rose-fast": "rose-1-flash",
+    "rose-lite": "rose-1-flash",
     "rose-mini": "rose-1-mini",
     "rose-ultra": "rose-1-ultra",
+    "rose-1-flash": "rose-1-flash",
+    "rose-1-lite": "rose-1-flash",
 }
 
 
@@ -60,7 +67,7 @@ def pool_for_model(model: str) -> Optional[PoolName]:
     lowered = model.lower()
     if lowered in _MODEL_TO_POOL:
         return _MODEL_TO_POOL[lowered]
-    # Fuzzy fall-back: "rose-labs/..." with anything after mini/lite/ultra.
+    # Fuzzy fall-back: "rose-labs/..." with anything after mini/flash/lite/ultra.
     if "rose-labs" in lowered:
         if "browser-use" in lowered:
             return "rose-1-browser-use"
@@ -70,7 +77,9 @@ def pool_for_model(model: str) -> Optional[PoolName]:
             return "rose-1-ultra"
         if "mini" in lowered:
             return "rose-1-mini"
-        return "rose-1-lite"
+        if "flash" in lowered or "lite" in lowered:
+            return "rose-1-flash"
+        return "rose-1-flash"
     return None
 
 

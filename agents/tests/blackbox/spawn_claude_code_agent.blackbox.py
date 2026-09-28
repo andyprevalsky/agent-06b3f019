@@ -615,7 +615,7 @@ def test_build_usage_items_both_llm_and_service():
     items = build_usage_items(
         total_input_tokens=1000,
         total_output_tokens=500,
-        model="rose-1-lite",
+        model="rose-1-flash",
         model_pricing=pricing,
         execution_time_ms=10_000,
         claude_code_usage={
@@ -629,7 +629,7 @@ def test_build_usage_items_both_llm_and_service():
     assert len(items) == 3
     llm = items[0]
     assert llm["type"] == "llm"
-    assert llm["model"] == "rose-1-lite"
+    assert llm["model"] == "rose-1-flash"
     assert llm["input_tokens"] == 1000
     # 1000/1000 * 0.3 + 500/1000 * 1.5 = 0.3 + 0.75 = 1.05
     assert abs(llm["cost_cents"] - 1.05) < 1e-6
@@ -1313,7 +1313,7 @@ async def test_run_verifier_happy_path():
             agent_id="a",
             task_id="t",
             goal="g",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=["a1"],
             output_schema={"fields": []},
@@ -1358,7 +1358,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 agent_id="a",
                 task_id="t",
                 goal="g",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 terminal=terminal,
                 action_summary=["wrote output"],
                 output_schema={"fields": [{"name": "summary", "type": "string"}]},
@@ -1379,7 +1379,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 agent_id="a",
                 task_id="t",
                 goal="g",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 terminal=terminal,
                 action_summary=["wrote output", "fetched github repos"],
                 output_schema={"fields": []},
@@ -1403,7 +1403,7 @@ async def test_run_verifier_disabled_by_env_flag():
                 agent_id="a",
                 task_id="t",
                 goal="g",
-                model="rose-labs/rose-1-lite",
+                model="rose-labs/rose-1-flash",
                 terminal=terminal,
                 action_summary=["process failed after writing"],
                 output_schema={"fields": []},
@@ -1463,7 +1463,7 @@ async def test_run_verifier_disabled_rejects_schema_incomplete_artifacts():
             agent_id="agent-partial-output",
             task_id="task-partial-output",
             goal="Write both requested output files",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=["wrote only one requested file"],
             output_schema={
@@ -1584,7 +1584,7 @@ async def test_run_verifier_exception_fallback():
             agent_id="a",
             task_id="t",
             goal="g",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=[],
             output_schema={"fields": []},
@@ -1627,7 +1627,7 @@ async def test_run_verifier_uses_code_event_json_for_codex_context():
             agent_id="a",
             task_id="t",
             goal="Compute Collatz from 3",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=[],
             output_schema={
@@ -1695,7 +1695,7 @@ async def test_run_verifier_truncation_override_promotes_to_pass():
             agent_id="a",
             task_id="t",
             goal="Compute Collatz from 27",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=["Parent LLM signaled task completion"],
             output_schema={"fields": [{"name": "sequence_output", "type": "string"}]},
@@ -1733,7 +1733,7 @@ async def test_run_verifier_no_override_when_no_truncation():
             agent_id="a",
             task_id="t",
             goal="g",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=[],
             output_schema={"fields": []},
@@ -1769,7 +1769,7 @@ async def test_run_verifier_no_override_when_attempt_completion_false():
             agent_id="a",
             task_id="t",
             goal="g",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=[],
             output_schema={"fields": []},
@@ -1805,7 +1805,7 @@ async def test_run_verifier_no_override_when_already_passing():
             agent_id="a",
             task_id="t",
             goal="g",
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             terminal=terminal,
             action_summary=[],
             output_schema={"fields": []},
@@ -1878,7 +1878,7 @@ async def test_run_agentic_loop_exit_zero_completes():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=[],
             tool_call_id="tc",
@@ -1959,7 +1959,7 @@ async def test_run_agentic_loop_sdk_idle_timeout_breaks():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2019,7 +2019,7 @@ async def test_run_agentic_loop_wait_tool_extends_sdk_idle_timeout():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2083,7 +2083,7 @@ async def test_run_agentic_loop_in_flight_bash_extends_sdk_idle_timeout():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2156,7 +2156,7 @@ async def test_run_agentic_loop_bash_tool_result_keeps_stretched_sdk_idle():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2255,7 +2255,7 @@ async def test_run_agentic_loop_sdk_result_blocks_stretch_rearm():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2324,7 +2324,7 @@ async def test_run_agentic_loop_post_result_exit_grace_breaks():
             goal="g",
             ws_url="wss://x",
             terminal=terminal,
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             claude_token=None,
             action_summary=summary,
             tool_call_id="tc",
@@ -2534,7 +2534,7 @@ async def test_spawn_activity_happy_path_end_to_end():
             tool_call_id="tc",
             output_schema={"fields": [{"name": "out", "type": "file_pointer"}]},
             attachments=[{"id": "att-1"}],
-            model="rose-labs/rose-1-lite",
+            model="rose-labs/rose-1-flash",
             github_repo_url="https://github.com/o/r",
             fast_mode_cache_enabled=True,
         )
@@ -2992,7 +2992,7 @@ class _FakeCCWorkflowInstance:
     def __init__(self, is_paused=False):
         self.user_id = "u-1"
         self.agent_id = "agent-cc"
-        self.model = "rose-labs/rose-1-lite"
+        self.model = "rose-labs/rose-1-flash"
         self.claude_max_token = None
         self.is_paused = is_paused
 

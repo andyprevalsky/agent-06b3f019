@@ -230,7 +230,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
         code_provider = "unknown"
         try:
-            model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
+            model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
             gpt_token = (
                 active_gpt_token()

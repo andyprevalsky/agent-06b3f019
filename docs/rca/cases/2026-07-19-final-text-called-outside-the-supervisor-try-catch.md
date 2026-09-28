@@ -14,7 +14,7 @@ symptoms:
 tags:
   - sms-supervisor
   - structured-output
-  - rose-1-lite
+  - rose-1-flash
   - error-handling
   - prod-incident
 sources:
@@ -34,7 +34,7 @@ was committed either time.
 
 ## Diagnosis
 
-`callSupervisorLlm` consumes the `rose-1-lite` stream. When the model emits
+`callSupervisorLlm` consumes the `rose-1-flash` stream. When the model emits
 neither native `tool_calls` nor any emittable content item — a reasoning-only or
 empty structured response, which is a known transient signature — the handler
 called `StructuredOutputAccumulator.finalText()` _outside_ the try/catch that

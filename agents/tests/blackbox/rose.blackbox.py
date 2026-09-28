@@ -90,6 +90,10 @@ from providers.rose.transforms import (
 from providers.rose.waterfall import build_openrouter_body, waterfall_complete
 from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 
+# Speed-pool tests opt back in with patch.dict. A live CEREBRAS_API_KEY would
+# make every flash complete() hit Cerebras before OpenRouter.
+os.environ.pop("CEREBRAS_API_KEY", None)
+
 
 # =====================================================================
 # legacy_adapter
@@ -99,7 +103,8 @@ from utils.tool_schemas import ALL_PHASE_TOOLS, create_agent_action_model
 def test_is_rose_model_variants():
     assert is_rose_model("rose")
     assert is_rose_model("rose-ultra")
-    assert is_rose_model("rose-labs/rose-1-lite")
+    assert is_rose_model("rose-fast")
+    assert is_rose_model("rose-labs/rose-1-flash")
     assert is_rose_model("rose-labs/rose-1-ultra")
     assert is_rose_model("rose-labs/rose-1-browser-use")
     assert is_rose_model("ROSE-LABS/ROSE-1-LITE")  # case-insensitive
@@ -110,10 +115,14 @@ def test_is_rose_model_variants():
 
 def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/rose-1-mini") == "rose-1-mini"
-    assert pool_for_model("rose-labs/rose-1-lite") == "rose-1-lite"
+    assert pool_for_model("rose-labs/rose-1-flash") == "rose-1-flash"
+    assert pool_for_model("rose-labs/rose-1-lite") == "rose-1-flash"
+    assert pool_for_model("rose-1-lite") == "rose-1-flash"
     assert pool_for_model("rose-labs/rose-1-ultra") == "rose-1-ultra"
     assert pool_for_model("rose-labs/rose-1-browser-use") == "rose-1-browser-use"
-    assert pool_for_model("rose") == "rose-1-lite"
+    assert pool_for_model("rose") == "rose-1-flash"
+    assert pool_for_model("rose-flash") == "rose-1-flash"
+    assert pool_for_model("rose-fast") == "rose-1-flash"
     assert pool_for_model("rose-mini") == "rose-1-mini"
     assert pool_for_model("rose-ultra") == "rose-1-ultra"
     # Fuzzy fallback for unknown rose-labs/* strings
@@ -122,7 +131,7 @@ def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/new-browser-use") == "rose-1-browser-use"
     assert pool_for_model("rose-labs/rose-1-oss") == "rose-1-oss"
     assert pool_for_model("rose-labs/something-oss") == "rose-1-oss"
-    assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
+    assert pool_for_model("rose-labs/something-else") == "rose-1-flash"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
 
@@ -139,9 +148,12 @@ def test_oss_pool_is_open_weights_only():
     assert oss.direct_auth_enabled is False
     assert oss.waterfall == ("moonshotai/kimi-k3",)
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
-    # Every other pool keeps direct-token routing.
+    # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
     for name, spec in POOL_REGISTRY.items():
-        if name != "rose-1-oss":
+        if name in auth_skipped:
+            assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
+        else:
             assert spec.direct_auth_enabled is True, f"{name} lost direct auth"
 
     # EVERY proprietary route must consult the flag -- not just the OAuth ones.
@@ -206,33 +218,110 @@ def test_classify_claude_token_error_each_branch():
 
 def test_pool_registry_lookup():
     mini = get_pool("rose-1-mini")
-    lite = get_pool("rose-1-lite")
+    flash = get_pool("rose-1-flash")
     ultra = get_pool("rose-1-ultra")
     browser_use = get_pool("rose-1-browser-use")
     assert mini.gpt_auth_model == "gpt-5.6-luna"
-    assert lite.name == "rose-1-lite"
-    assert lite.claude_auth_model.startswith("claude-")
-    assert lite.gpt_auth_model == "gpt-5.6-terra"
-    assert len(lite.waterfall) >= 1
+    assert mini.waterfall == (
+        "anthropic/claude-haiku-4.5",
+        "z-ai/glm-5.3-flash",
+    )
+    assert mini.waterfall_reasoning_effort == "low"
+    assert flash.name == "rose-1-flash"
+    assert flash.claude_auth_model.startswith("claude-")
+    assert flash.gpt_auth_model == "gpt-5.6-luna"
+    assert flash.waterfall == ("qwen/qwen3.8-27b", "google/gemini-3.8-flash")
+    assert flash.waterfall_reasoning_effort == "low"
+    assert flash.direct_auth_enabled is False
+    assert flash.cerebras_model == "qwen-3.8-27b"
+    assert flash.cerebras_reasoning_effort == "high"
+    assert flash.cerebras_reasoning_effort in {"none", "low", "medium", "high"}
     assert ultra.name == "rose-1-ultra"
     from domains.param_populator.config import PARAM_POPULATOR_MODEL as DOMAIN_PARAM_POPULATOR_MODEL
     from providers.rose.pools import PARAM_POPULATOR_MODEL
 
     assert PARAM_POPULATOR_MODEL == "rose-labs/rose-1-ultra"
     assert DOMAIN_PARAM_POPULATOR_MODEL == PARAM_POPULATOR_MODEL
-    assert ultra.claude_auth_model == "claude-fable-5-1"
-    assert ultra.gpt_auth_model == "gpt-5.6-sol"
-    # OpenRouter fable 5.1 is $10/$50 per M vs sol $2/$10, so the paid
-    # waterfall stays sol -> kimi. claudeAuth is the only fable 5.1 hop.
-    assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert ultra.claude_auth_model == "claude-opus-5-5"
+    assert ultra.gpt_auth_model == "gpt-6-sol"
+    # Opus 5.5 is claudeAuth (index 58, $4/$20). Paid waterfall is gpt-6-sol
+    # (index 48, $2/$10) then kimi-k3. Fable is not on the paid path.
+    assert ultra.waterfall == ("openai/gpt-6-sol", "moonshotai/kimi-k3")
     assert "anthropic/claude-fable-5.1" not in ultra.waterfall
-    assert browser_use.claude_auth_model == "claude-fable-5-1"
-    assert browser_use.gpt_auth_model == "gpt-5.6-sol"
-    assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert browser_use.claude_auth_model == "claude-sonnet-5"
+    assert browser_use.gpt_auth_model == "gpt-5.6-luna"
+    assert browser_use.waterfall == ("qwen/qwen3.8-27b", "google/gemini-3.8-flash")
+    assert browser_use.waterfall_reasoning_effort == "low"
+    assert browser_use.direct_auth_enabled is False
+    assert browser_use.cerebras_model == "qwen-3.8-27b"
+    assert browser_use.cerebras_reasoning_effort == "high"
+    assert ultra.waterfall_reasoning_effort is None
     assert "anthropic/claude-fable-5.1" not in browser_use.waterfall
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
     assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
-    assert lite.waterfall != ultra.waterfall
+    assert flash.waterfall != ultra.waterfall
+    assert get_model_pricing("qwen-3.8-27b") == {
+        "input_cents_per_1k": 0.099,
+        "output_cents_per_1k": 0.149,
+    }
+    assert get_model_pricing("qwen/qwen3.8-27b") == {
+        "input_cents_per_1k": 0.015,
+        "output_cents_per_1k": 0.08,
+    }
+
+
+def test_build_cerebras_body_strips_cache_control():
+    """Cerebras 400s Anthropic/OpenRouter cache_control on system parts.
+
+    Live hop 2026-09-28: qwen-3.8-27b rejected
+    ``messages.0.system.content.list[...].text.cache_control`` as unsupported
+    and fell through to OpenRouter. The body must keep text/image parts and
+    drop every cache_control key.
+    """
+    from providers.rose.cerebras import build_cerebras_body
+
+    body = build_cerebras_body(
+        model="qwen-3.8-27b",
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "you are helpful",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"type": "text", "text": "phase rules"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look", "cache_control": {"type": "ephemeral"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aaa"},
+                    },
+                ],
+            },
+        ],
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        effort="high",
+    )
+    dumped = json.dumps(body)
+    assert "cache_control" not in dumped
+    assert body["model"] == "qwen-3.8-27b"
+    assert body["reasoning_effort"] == "high"
+    system = body["messages"][0]["content"]
+    assert isinstance(system, list)
+    assert system[0]["type"] == "text"
+    assert system[0]["text"] == "you are helpful"
+    user = body["messages"][1]["content"]
+    assert any(part.get("type") == "image_url" for part in user)
 
 
 def test_every_waterfall_model_is_vision_capable():
@@ -259,7 +348,7 @@ def test_every_waterfall_model_is_vision_capable():
 def test_all_pool_names_matches_registry():
     names = set(all_pool_names())
     assert names == set(POOL_REGISTRY.keys())
-    assert "rose-1-lite" in names
+    assert "rose-1-flash" in names
     assert "rose-1-ultra" in names
 
 
@@ -907,17 +996,16 @@ def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-5.6-luna")
     assert is_vision_capable("openai/gpt-5.6-terra")
     assert is_vision_capable("openai/gpt-5.6-sol")
+    assert is_vision_capable("openai/gpt-6-luna")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
-    # Every live waterfall layer must be vision-capable. gemini-3-flash-preview
-    # was previously asserted NON-vision here while sitting in rose-1-mini's
-    # waterfall — OpenRouter reports it as text+image+file+audio+video->text,
-    # so the old assertion was stale and that layer silently dropped screenshots.
-    assert is_vision_capable("google/gemini-3-flash-preview")
-    assert is_vision_capable("google/gemini-3.6-flash")
+    # Every live waterfall layer must be vision-capable.
+    assert is_vision_capable("google/gemini-3.5-flash-lite")
+    assert is_vision_capable("google/gemini-3.1-flash-lite")
+    assert is_vision_capable("google/gemini-3.8-flash")
     assert is_vision_capable("moonshotai/kimi-k3")
     # gpt-oss-20b is genuinely text->text on OpenRouter.
     assert not is_vision_capable("openai/gpt-oss-20b")
-    assert not is_vision_capable("rose-labs/rose-1-lite")
+    assert not is_vision_capable("rose-labs/rose-1-flash")
 
 
 def test_has_screenshot_markers_detection():
@@ -1165,7 +1253,7 @@ def _count_cache_control_blocks(body):
 
 
 def test_build_anthropic_body_identity_and_cache_block():
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -1198,10 +1286,20 @@ _SPAWN_AGENT_TOOL = [
 ]
 
 
+def _fable_pool() -> PoolSpec:
+    """Fable is no longer ultra, but it still 400s on forced tool_choice."""
+    return PoolSpec(
+        name="rose-1-ultra",
+        claude_auth_model="claude-fable-5-1",
+        gpt_auth_model="gpt-6-sol",
+        waterfall=("openai/gpt-6-sol", "moonshotai/kimi-k3"),
+    )
+
+
 def test_fable_5_1_downgrades_named_tool_choice_to_auto():
     """claude-fable-5-1 400s on tool_choice type tool/any (Anthropic docs)."""
     body = build_anthropic_body(
-        pool_spec=get_pool("rose-1-ultra"),
+        pool_spec=_fable_pool(),
         messages=[{"role": "user", "content": "fill params"}],
         tools=_SPAWN_AGENT_TOOL,
         tool_choice={"name": "spawn_agent"},
@@ -1215,9 +1313,23 @@ def test_fable_5_1_downgrades_named_tool_choice_to_auto():
     }
 
 
+def test_opus_5_5_downgrades_forced_tool_choice_until_confirmed():
+    """Opus is ultra. Forced tool_choice stays downgraded until a credited call proves it."""
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-ultra"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-opus-5-5"
+    assert body["tool_choice"] == {"type": "auto"}
+
+
 def test_fable_5_1_downgrades_any_tool_choice_to_auto():
     body = build_anthropic_body(
-        pool_spec=get_pool("rose-1-browser-use"),
+        pool_spec=_fable_pool(),
         messages=[{"role": "user", "content": "fill params"}],
         tools=_SPAWN_AGENT_TOOL,
         tool_choice="any",
@@ -1228,9 +1340,22 @@ def test_fable_5_1_downgrades_any_tool_choice_to_auto():
     assert body["tool_choice"] == {"type": "auto"}
 
 
+def test_browser_use_pool_uses_speed_tier_claude_auth():
+    body = build_anthropic_body(
+        pool_spec=get_pool("rose-1-browser-use"),
+        messages=[{"role": "user", "content": "fill params"}],
+        tools=_SPAWN_AGENT_TOOL,
+        tool_choice="any",
+        response_format=None,
+        max_tokens=128,
+    )
+    assert body["model"] == "claude-sonnet-5"
+    assert body["tool_choice"]["type"] == "any"
+
+
 def test_sonnet_and_legacy_fable_5_keep_named_tool_choice():
     sonnet = build_anthropic_body(
-        pool_spec=get_pool("rose-1-lite"),
+        pool_spec=get_pool("rose-1-flash"),
         messages=[{"role": "user", "content": "fill params"}],
         tools=_SPAWN_AGENT_TOOL,
         tool_choice={"name": "spawn_agent"},
@@ -1299,7 +1424,7 @@ def test_anthropic_fast_mode_transport_adds_beta_header():
 def test_build_anthropic_body_static_dynamic_split():
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     system_content = f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}Current time: April 28"
     body = build_anthropic_body(
         pool_spec=spec,
@@ -1327,7 +1452,7 @@ def test_build_anthropic_body_static_dynamic_split():
 def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     system_content = (
         f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
         f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
@@ -1355,7 +1480,7 @@ def test_build_anthropic_body_multi_boundary_system_blocks_are_cached():
 def test_build_anthropic_body_caps_anthropic_cache_control_blocks():
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     system_content = (
         f"static instructions{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
         f"user context{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}"
@@ -1401,7 +1526,7 @@ def test_param_populator_bodies_share_cached_conversation_prefix():
 
     def build(task_prompt):
         return build_anthropic_body(
-            pool_spec=get_pool("rose-1-lite"),
+            pool_spec=get_pool("rose-1-flash"),
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": "original request"},
@@ -1437,7 +1562,7 @@ def test_param_populator_bodies_share_cached_conversation_prefix():
 
 
 def test_build_anthropic_body_message_cache_breakpoint():
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -1470,7 +1595,7 @@ def test_build_anthropic_body_message_cache_breakpoint():
 
 
 def test_build_anthropic_body_skip_cache_write_keeps_system_markers():
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -1523,7 +1648,7 @@ async def test_claude_auth_400_raises_invalid_request_no_rotation():
 
     set_mock_handler(handler)
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=3)
     raised = False
     try:
@@ -1552,7 +1677,7 @@ async def test_claude_auth_5xx_retries_then_raises_server_error():
 
     set_mock_handler(handler)
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     auth = ClaudeAuthContext(token="t", source="user", user_id="", max_rotations=0)
     raised = False
     try:
@@ -1588,7 +1713,7 @@ async def test_claude_auth_401_rotates_and_exhausts():
 
     set_mock_handler(handler)
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     auth = ClaudeAuthContext(
         token="t",
         source="user",
@@ -1695,7 +1820,7 @@ async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token(
     )
     chunks = await _drain(
         claude_auth_complete(
-            pool_spec=get_pool("rose-1-lite"),
+            pool_spec=get_pool("rose-1-flash"),
             messages=[{"role": "user", "content": "hi"}],
             auth=auth,
             request_id="r-rotate-429",
@@ -1745,7 +1870,7 @@ async def test_claude_auth_429_transient_retries_before_rotating():
         try:
             await _drain(
                 claude_auth_complete(
-                    pool_spec=get_pool("rose-1-lite"),
+                    pool_spec=get_pool("rose-1-flash"),
                     messages=[{"role": "user", "content": "hi"}],
                     auth=auth,
                     request_id="r-transient-429",
@@ -1789,7 +1914,7 @@ async def test_claude_auth_403_usage_limit_marks_body_reset_time():
     try:
         await _drain(
             claude_auth_complete(
-                pool_spec=get_pool("rose-1-lite"),
+                pool_spec=get_pool("rose-1-flash"),
                 messages=[{"role": "user", "content": "hi"}],
                 auth=auth,
                 request_id="r-usage-limit",
@@ -2204,7 +2329,7 @@ async def test_parse_openai_sse_content_and_finish_reason():
         parse_openai_sse(
             _FakeStream(_openai_sse(payloads)),
             actual_model="g",
-            pool_name="rose-1-lite",
+            pool_name="rose-1-flash",
             request_id="r-or-1",
         )
     )
@@ -2467,7 +2592,7 @@ async def test_parse_responses_sse_failed_context_length_is_invalid_request():
 
 
 def test_build_codex_responses_body_contract():
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
         pool_spec=pool,
         messages=[
@@ -2811,7 +2936,7 @@ async def test_rose_client_routes_and_emits_one_cache_sequence_identity():
     with patch("providers.rose.client._try_gpt_auth", fake_gpt_route):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=auth,
                 call_site="explore_agent",
@@ -2826,7 +2951,7 @@ async def test_rose_client_routes_and_emits_one_cache_sequence_identity():
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
         pool_spec=pool,
         messages=[
@@ -2882,7 +3007,7 @@ def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
 
 
 def test_build_codex_responses_body_converts_orphan_tool_rows_to_context():
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
         pool_spec=pool,
         messages=[
@@ -2948,7 +3073,7 @@ def test_openrouter_response_format_preserves_nested_required_properties():
 
 
 def test_claude_auth_output_config_preserves_nested_required_properties():
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "score cart state"}],
@@ -2965,7 +3090,7 @@ def test_claude_auth_output_config_preserves_nested_required_properties():
 
 
 def test_gpt_auth_text_format_preserves_nested_required_properties():
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
         pool_spec=pool,
         messages=[{"role": "user", "content": "score cart state"}],
@@ -3451,7 +3576,7 @@ def test_waterfall_body_builders_always_stamp_effort_xhigh_by_default():
 
     assert CLAUDE_DEFAULT == GPT_DEFAULT == OR_DEFAULT == "xhigh"
 
-    pool = get_pool("rose-1-lite")
+    pool = get_pool("rose-1-flash")
     msgs = [
         {"role": "system", "content": "be helpful"},
         {"role": "user", "content": "hi"},
@@ -3648,10 +3773,13 @@ async def test_waterfall_falls_through_then_succeeds():
     )
     state = {"i": 0}
 
+    efforts: list[str] = []
+
     def handler(req):
         call_log.append(str(req.url))
         body = json.loads(req.content.decode())
         model = body.get("model", "")
+        efforts.append(body.get("reasoning", {}).get("effort"))
         i = state["i"]
         state["i"] += 1
         if i == 0:
@@ -3659,7 +3787,7 @@ async def test_waterfall_falls_through_then_succeeds():
         return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     chunks = await _drain(
         waterfall_complete(
             pool_spec=spec,
@@ -3671,8 +3799,9 @@ async def test_waterfall_falls_through_then_succeeds():
     kinds = [c.kind for c in chunks]
     assert "content" in kinds
     assert kinds[-1] == "done"
-    # Both steps were called
+    # Both steps were called, and the speed pool pins waterfall effort low.
     assert state["i"] == 2
+    assert efforts == ["low", "low"]
 
 
 async def test_waterfall_skips_anthropic_for_response_format():
@@ -3706,7 +3835,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3-flash-preview"]
+    assert models_seen == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3801,7 +3930,7 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3-flash-preview"]
+    assert models_seen == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3856,7 +3985,7 @@ async def test_waterfall_all_failed_raises_with_step_errors():
         return httpx.Response(503, text="upstream down")
 
     set_mock_handler(handler)
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     raised = False
     try:
         await _drain(
@@ -3908,7 +4037,7 @@ async def test_waterfall_reports_cache_metrics_from_openrouter():
         return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
 
     set_mock_handler(handler)
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     chunks = await _drain(
         waterfall_complete(
             pool_spec=spec,
@@ -3958,7 +4087,7 @@ async def test_anthropic_api_key_complete_402_raises_payment_required():
     try:
         await _drain(
             anthropic_api_key_complete(
-                pool_spec=get_pool("rose-1-lite"),
+                pool_spec=get_pool("rose-1-flash"),
                 messages=[{"role": "user", "content": "hi"}],
                 api_key="sk-ant-api03-test",
                 request_id="r-apikey-402",
@@ -3999,7 +4128,7 @@ async def test_anthropic_api_key_complete_400_credit_balance_raises_payment_requ
     try:
         await _drain(
             anthropic_api_key_complete(
-                pool_spec=get_pool("rose-1-lite"),
+                pool_spec=get_pool("rose-1-flash"),
                 messages=[{"role": "user", "content": "hi"}],
                 api_key="sk-ant-api03-test",
                 request_id="r-apikey-400-credit",
@@ -4038,7 +4167,7 @@ async def test_anthropic_api_key_complete_sets_anthropic_suffix():
     set_mock_handler(handler)
     chunks = await _drain(
         anthropic_api_key_complete(
-            pool_spec=get_pool("rose-1-lite"),
+            pool_spec=get_pool("rose-1-flash"),
             messages=[{"role": "user", "content": "hi"}],
             api_key="sk-ant-api03-test",
             request_id="r-apikey-suffix",
@@ -4105,7 +4234,7 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     try:
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
             )
         )
@@ -4123,7 +4252,7 @@ async def test_client_openai_api_key_serves_before_anthropic_and_openrouter():
     assert isinstance(body, dict)
     assert seen == {"openai": 1, "anthropic": 0, "openrouter": 0}
     assert captured["authorization"] == "Bearer sk-proj-test"
-    assert body.get("model") == "gpt-5.6-terra"
+    assert body.get("model") == "gpt-6-sol"
     assert body.get("service_tier") == "priority"
     meta = next((c for c in chunks if c.kind == "metadata"), None)
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-openai")
@@ -4164,7 +4293,7 @@ async def test_client_openai_api_key_preserves_tools_without_gpt_auth():
     try:
         await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "use a tool"}],
                 tools=tools,
             )
@@ -4219,7 +4348,7 @@ async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_o
     try:
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
             )
         )
@@ -4289,7 +4418,7 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
         with patch("providers.rose.gpt_auth.asyncio.sleep", new=AsyncMock(return_value=None)):
             chunks = await _drain(
                 RoseClient(openrouter_key="ork-x").complete(
-                    pool="rose-1-lite",
+                    pool="rose-1-ultra",
                     messages=[{"role": "user", "content": "hi"}],
                     gpt_auth=gpt_auth_from_token("exhausted-codex-token", "acct_123"),
                     call_site="test-gpt-usage-limit-openai-fallback",
@@ -4309,7 +4438,7 @@ async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
     assert captured["authorization"] == "Bearer sk-proj-test"
     body = captured["body"]
     assert isinstance(body, dict)
-    assert body.get("model") == "gpt-5.6-terra"
+    assert body.get("model") == "gpt-6-sol"
 
     content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
     assert content == "served by openai key"
@@ -4359,7 +4488,7 @@ async def test_client_codex_404_falls_through_to_waterfall():
     try:
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=gpt_auth_from_token("blocked-codex-token", "acct_404"),
                 call_site="test-codex-404-waterfall",
@@ -4421,7 +4550,7 @@ async def test_client_api_key_tier_402_falls_through_to_waterfall():
     try:
         chunks = await _drain(
             RoseClient().complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
             )
         )
@@ -4486,7 +4615,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
+    assert seen["openrouter_models"] == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4537,7 +4666,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
+    assert seen["openrouter_models"] == ["z-ai/glm-5.3-flash"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4561,14 +4690,111 @@ async def test_client_collect_waterfall_only_path():
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
-    resp = await client.collect(
-        pool="rose-1-lite",
-        messages=[{"role": "user", "content": "hi"}],
-        call_site="test-collect",
-    )
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": ""}, clear=False):
+        os.environ.pop("CEREBRAS_API_KEY", None)
+        resp = await client.collect(
+            pool="rose-1-flash",
+            messages=[{"role": "user", "content": "hi"}],
+            call_site="test-collect",
+        )
     assert resp.content == "hello"
-    assert resp.actual_model == get_pool("rose-1-lite").waterfall[0]
+    assert resp.actual_model == get_pool("rose-1-flash").waterfall[0]
     assert resp.usage.get("total_tokens") == 6
+
+
+async def test_flash_skips_auth_and_hits_cerebras_qwen():
+    """rose-fast goes Cerebras qwen-3.8-27b even when Claude/GPT tokens are set."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "from-cerebras"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}},
+            ]
+        )
+    )
+    seen = {"cerebras": 0, "anthropic": 0, "openrouter": 0, "models": [], "effort": []}
+
+    def handler(req):
+        host = req.url.host
+        body = json.loads(req.content.decode()) if req.content else {}
+        if host == "api.cerebras.ai":
+            seen["cerebras"] += 1
+            seen["models"].append(body.get("model"))
+            seen["effort"].append(body.get("reasoning_effort"))
+            assert "cache_control" not in json.dumps(body)
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        if host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(500, text="auth must be skipped")
+        if host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(500, text="waterfall must not run")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-flash",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "you are helpful",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "hi"},
+                ],
+                claude_auth=ClaudeAuthContext(token="sk-ant-oat01-test", source="user", user_id="u"),
+                gpt_auth=gpt_auth_from_token("gt-test", "acct"),
+            )
+        )
+    assert seen["cerebras"] == 1
+    assert seen["anthropic"] == 0
+    assert seen["openrouter"] == 0
+    assert seen["models"] == ["qwen-3.8-27b"]
+    assert seen["effort"] == ["high"]
+    assert any(c.kind == "content" and c.data.get("text") == "from-cerebras" for c in chunks)
+
+
+async def test_flash_cerebras_failure_falls_to_openrouter_qwen():
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "from-or"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}},
+            ]
+        )
+    )
+    seen = {"cerebras": 0, "openrouter_models": []}
+
+    def handler(req):
+        host = req.url.host
+        body = json.loads(req.content.decode()) if req.content else {}
+        if host == "api.cerebras.ai":
+            seen["cerebras"] += 1
+            return httpx.Response(503, text="cerebras down")
+        if host == "openrouter.ai":
+            seen["openrouter_models"].append(body.get("model"))
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": "csk-test"}, clear=False):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-flash",
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=ClaudeAuthContext(token="sk-ant-oat01-test", source="user", user_id="u"),
+            )
+        )
+    assert seen["cerebras"] == 1
+    assert seen["openrouter_models"][0] == "qwen/qwen3.8-27b"
+    assert any(c.kind == "content" for c in chunks)
 
 
 async def test_client_collect_preserves_multiple_unstructured_text_items():
@@ -4598,7 +4824,7 @@ async def test_client_collect_preserves_multiple_unstructured_text_items():
     client = RoseClient(openrouter_key="ork-x")
     client.complete = complete
     response = await client.collect(
-        pool="rose-1-lite",
+        pool="rose-1-flash",
         messages=[{"role": "user", "content": "hi"}],
         call_site="test-collect-multiple-items",
     )
@@ -4638,7 +4864,7 @@ async def test_client_collect_selects_final_structured_output_item():
     client = RoseClient(openrouter_key="ork-x")
     client.complete = complete
     response = await client.collect(
-        pool="rose-1-lite",
+        pool="rose-1-flash",
         messages=[{"role": "user", "content": "hi"}],
         response_model=Answer,
         call_site="test-collect-structured-items",
@@ -4669,7 +4895,7 @@ async def test_client_collect_emits_common_rose_timing_logs():
     client = RoseClient(openrouter_key="ork-x")
     with patch("providers.rose.client.logger.info", side_effect=capture_info):
         resp = await client.collect(
-            pool="rose-1-lite",
+            pool="rose-1-flash",
             messages=[{"role": "user", "content": "hi"}],
             call_site="test-collect-logging",
         )
@@ -4719,7 +4945,7 @@ async def test_client_falls_through_from_claude_auth_to_waterfall():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "hi"}],
         claude_auth=claude_auth_from_token("expired-token"),
         call_site="test-fallthrough",
@@ -4737,7 +4963,7 @@ async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
         yield StreamChunk(kind="content", data={"text": "too late"})
 
     async def waterfall_ok(**kwargs):
-        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-lite"})
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-flash"})
         yield StreamChunk(kind="content", data={"text": "fallback ok"})
         yield StreamChunk(
             kind="usage",
@@ -4745,7 +4971,7 @@ async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
                 "prompt_tokens": 1,
                 "completion_tokens": 1,
                 "actual_model": "fallback-model",
-                "pool_name": "rose-1-lite",
+                "pool_name": "rose-1-flash",
                 "finish_reason": "stop",
             },
         )
@@ -4758,7 +4984,7 @@ async def test_client_direct_auth_ttft_falls_through_before_first_chunk():
     ):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=claude_auth_from_token("ct"),
                 call_site="test-direct-ttft-fallthrough",
@@ -4789,7 +5015,7 @@ async def test_client_direct_auth_stall_falls_through_immediately():
         yield StreamChunk(kind="metadata", data={"actual_model": "claude-x-claude"})
 
     async def waterfall_ok(**kwargs):
-        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-lite"})
+        yield StreamChunk(kind="metadata", data={"actual_model": "fallback-model", "pool_name": "rose-1-flash"})
         yield StreamChunk(kind="content", data={"text": "fallback"})
         yield StreamChunk(
             kind="usage",
@@ -4809,7 +5035,7 @@ async def test_client_direct_auth_stall_falls_through_immediately():
     ):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=claude_auth_from_token("ct"),
                 call_site="test-stall-fallthrough",
@@ -4880,7 +5106,7 @@ async def test_client_direct_auth_stall_marks_token_before_rotation():
     with patch("providers.rose.client._try_gpt_auth", first_token_stalls_then_fresh_succeeds):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=auth,
                 call_site="test-stall-cooldown",
@@ -4955,7 +5181,7 @@ async def test_client_direct_auth_internal_idle_timeout_marks_and_rotates():
     with patch("providers.rose.client._try_gpt_auth", first_token_idles_then_fresh_succeeds):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 gpt_auth=auth,
                 call_site="test-timeout-stall-cooldown",
@@ -5030,7 +5256,7 @@ async def test_client_direct_auth_outer_deadline_marks_without_burning_next_toke
         try:
             await _drain(
                 client.complete(
-                    pool="rose-1-lite",
+                    pool="rose-1-ultra",
                     messages=[{"role": "user", "content": "hi"}],
                     gpt_auth=auth,
                     call_site="test-deadline-stall-cooldown",
@@ -5110,7 +5336,7 @@ async def test_client_reproduces_rotated_gpt_direct_auth_deadline():
     ):
         try:
             async for _ in client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "repro final explore synthesis"}],
                 gpt_auth=auth,
                 call_site="explore_agent",
@@ -5154,7 +5380,7 @@ async def test_client_does_not_use_supplied_gpt_auth_as_fallback():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
     response = await client.collect(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "hi"}],
         claude_auth=claude_auth_from_token("expired-token"),
         gpt_auth=gpt_auth_from_token("valid-gpt-token", "acct_123"),
@@ -5215,7 +5441,7 @@ async def test_client_rotates_compute_token_across_providers_before_waterfall():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "hi"}],
         claude_auth=ClaudeAuthContext(
             token="expired-claude",
@@ -5290,7 +5516,7 @@ async def test_client_rotation_preserves_native_tool_contract_across_provider_ty
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "Use the browser child"}],
                 response_model=AgentAction,
                 claude_auth=auth,
@@ -5408,7 +5634,7 @@ async def test_client_splits_pydantic_model_to_claude_native_tools():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "wait until the package ships"}],
         response_model=AgentAction,
         claude_auth=claude_auth_from_token("valid-token"),
@@ -5478,7 +5704,7 @@ async def test_client_splits_pydantic_model_to_gpt_native_tools():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "wait until the package ships"}],
         response_model=AgentAction,
         gpt_auth=gpt_auth_from_token("valid-token", "acct_123"),
@@ -5558,7 +5784,7 @@ async def test_client_plain_pydantic_model_uses_claude_output_config():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "score progress"}],
         response_model=ProgressScore,
         claude_auth=claude_auth_from_token("valid-token"),
@@ -5616,7 +5842,7 @@ async def test_client_plain_pydantic_model_uses_gpt_text_format():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[{"role": "user", "content": "score progress"}],
         response_model=ProgressScore,
         gpt_auth=gpt_auth_from_token("valid-token", "acct_123"),
@@ -5653,7 +5879,7 @@ async def test_client_deadline_enforced():
     raised = False
     try:
         async for _ in client.complete(
-            pool="rose-1-lite",
+            pool="rose-1-flash",
             messages=[{"role": "user", "content": "hi"}],
             call_site="test-deadline",
             deadline_s=0.5,
@@ -5677,7 +5903,7 @@ async def test_client_ttft_timeout_waits_for_first_productive_chunk():
     with patch("providers.rose.client.waterfall_complete", slow_first_productive_chunk):
         try:
             async for _ in client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-flash",
                 messages=[{"role": "user", "content": "hi"}],
                 call_site="test-ttft",
                 ttft_timeout_s=0.01,
@@ -5717,7 +5943,7 @@ async def test_client_heartbeats_during_ttft_wait():
     ):
         texts = []
         async for chunk in client.complete(
-            pool="rose-1-lite",
+            pool="rose-1-flash",
             messages=[{"role": "user", "content": "hi"}],
             call_site="test-ttft-heartbeat",
             ttft_timeout_s=2.0,
@@ -5742,7 +5968,7 @@ async def test_client_allows_idle_gap_within_idle_window_after_first_chunk():
     chunks = []
     with patch("providers.rose.client.waterfall_complete", slow_second_chunk):
         async for chunk in client.complete(
-            pool="rose-1-lite",
+            pool="rose-1-flash",
             messages=[{"role": "user", "content": "hi"}],
             call_site="test-idle",
             ttft_timeout_s=0.5,
@@ -5770,7 +5996,7 @@ async def test_client_enforces_idle_timeout_after_first_productive_chunk():
     with patch("providers.rose.client.waterfall_complete", stall_after_first):
         try:
             async for _ in client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-flash",
                 messages=[{"role": "user", "content": "hi"}],
                 call_site="test-idle-stall",
                 ttft_timeout_s=0.5,
@@ -5866,7 +6092,7 @@ async def test_client_normalizes_inclusive_cache_usage_for_downstream_costing():
     ):
         chunks = await _drain(
             client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "captured cache accounting"}],
                 call_site="cache-accounting-repro",
             )
@@ -5975,7 +6201,7 @@ async def test_claude_auth_stream_reports_cache_hit_rate():
     """
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
 
     # Simulate a second-turn call where most of the prompt is cached.
     # 500 input tokens, 4500 cache_read, 100 cache_creation → 90% hit rate.
@@ -6052,7 +6278,7 @@ async def test_claude_auth_stream_reports_cache_hit_rate():
     client = RoseClient(openrouter_key="ork-x")
     chunks = []
     async for chunk in client.complete(
-        pool="rose-1-lite",
+        pool="rose-1-ultra",
         messages=[
             {"role": "system", "content": system_content},
             {"role": "user", "content": "first message"},
@@ -6084,7 +6310,7 @@ def test_build_anthropic_body_cache_structure_from_real_prompt():
     global cache markers, and the last message gets a breakpoint."""
     from utils.prompts import build_system_prompt
 
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     system_text = build_system_prompt(
         phase="EXECUTE",
         enabled_tools=["web_search", "attempt_completion"],
@@ -6137,7 +6363,7 @@ def test_build_anthropic_body_native_tools_force_any_with_parallel():
     force tool_use AND keep parallel tool calls enabled. Anthropic's default
     flips disable_parallel_tool_use=True under tool_choice=any/tool, which
     would silently break DAG fan-outs (multi web_search, multi web_fetch)."""
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -6171,7 +6397,7 @@ def test_build_anthropic_body_never_sets_thinking_by_default():
     400s on claude-haiku-4-5 ('adaptive thinking is not supported on this model'),
     hangs Anthropic streams on Opus with effort=max, and is rejected with forced
     tool_choice. A caller that genuinely needs thinking can pass it explicitly."""
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -6195,7 +6421,7 @@ def test_build_anthropic_body_never_sets_thinking_by_default():
 def test_build_anthropic_body_honors_explicit_thinking():
     """If a caller explicitly passes `thinking`, honor it. We only forbid the
     default-on behavior — explicit opt-in is fine."""
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     body = build_anthropic_body(
         pool_spec=spec,
         messages=[
@@ -6218,7 +6444,7 @@ def test_build_anthropic_body_response_format_only_forces_any_with_parallel():
     """The response_format-only path (no explicit tools) must also synthesize
     tools, force tool_choice=any, and keep parallel enabled. This is the
     documented MEMORY.md `response_format` workaround — it must not regress."""
-    spec = get_pool("rose-1-lite")
+    spec = get_pool("rose-1-flash")
     response_format = {
         "type": "json_schema",
         "json_schema": {
@@ -6321,7 +6547,7 @@ async def test_rose_client_synthesizes_force_any_for_response_model():
         )
         try:
             async for _ in client.complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "hi"}],
                 response_model=_ExploreAction,
                 claude_auth=auth,
@@ -6386,7 +6612,7 @@ async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
     try:
         try:
             async for _ in RoseClient().complete(
-                pool="rose-1-lite",
+                pool="rose-1-ultra",
                 messages=[{"role": "user", "content": "browse"}],
                 response_model=_ExploreAction,
             ):
@@ -6542,6 +6768,7 @@ async def run_all_tests():
     r.record("classify_claude_token_error", test_classify_claude_token_error_each_branch)
 
     r.record("pool_registry_lookup", test_pool_registry_lookup)
+    r.record("cerebras_body_strips_cache_control", test_build_cerebras_body_strips_cache_control)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
     r.record(
@@ -6824,6 +7051,11 @@ async def run_all_tests():
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)
+    await r.record_async("flash_skips_auth_hits_cerebras_qwen", test_flash_skips_auth_and_hits_cerebras_qwen)
+    await r.record_async(
+        "flash_cerebras_failure_falls_to_openrouter_qwen",
+        test_flash_cerebras_failure_falls_to_openrouter_qwen,
+    )
     await r.record_async(
         "client_collect_multiple_unstructured_items",
         test_client_collect_preserves_multiple_unstructured_text_items,
@@ -6919,6 +7151,14 @@ async def run_all_tests():
     r.record(
         "fable_5_1_downgrades_any_tool_choice_to_auto",
         test_fable_5_1_downgrades_any_tool_choice_to_auto,
+    )
+    r.record(
+        "opus_5_5_downgrades_forced_tool_choice_until_confirmed",
+        test_opus_5_5_downgrades_forced_tool_choice_until_confirmed,
+    )
+    r.record(
+        "browser_use_pool_uses_speed_tier_claude_auth",
+        test_browser_use_pool_uses_speed_tier_claude_auth,
     )
     r.record(
         "sonnet_and_legacy_fable_5_keep_named_tool_choice",

@@ -184,7 +184,7 @@ describe('useTerminalAgents Fast Mode bridge', () => {
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {
     const agentDetail = {
       agent_id: 'agent-loaded',
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       fast_mode_cache_enabled: false,
     };
 

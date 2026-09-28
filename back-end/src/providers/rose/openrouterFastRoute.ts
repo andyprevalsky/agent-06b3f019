@@ -1,7 +1,7 @@
 /**
  * Fast paid OpenRouter fallback for latency-sensitive synchronous Chat.
  *
- * The normal Rose Lite waterfall intentionally keeps its higher-capability
+ * The normal Rose Flash waterfall intentionally keeps its higher-capability
  * models. This narrow route is only armed after Cerebras stays silent, and
  * preserves the same strict JSON-schema/tool-call contract.
  */
@@ -21,7 +21,7 @@ import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_FAST_CHAT_MODEL = 'google/gemini-2.5-flash-lite';
+export const OPENROUTER_FAST_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
 export const DEFAULT_OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS = 2_000;
 

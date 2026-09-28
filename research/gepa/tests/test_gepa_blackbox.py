@@ -19,8 +19,8 @@ Domain surface:
 External boundaries (LLM API calls):
   - evaluators/*.py -> call_llm_structured_streaming (rose-1-ultra)
   - pipelines/decomposer.py -> call_llm_structured_streaming (rose-1-ultra)
-  - pipelines/clarifar.py -> call_llm_structured_streaming (rose-1-lite) + httpx (web_search, web_fetch)
-  - pipelines/simulate_user.py -> httpx (rose-1-lite completions)
+  - pipelines/clarifar.py -> call_llm_structured_streaming (rose-1-flash) + httpx (web_search, web_fetch)
+  - pipelines/simulate_user.py -> httpx (rose-1-flash completions)
   - pipelines/synthetic_pairs.py -> call_llm_structured_streaming (rose-1-ultra)
   - critic.py -> modal.Function (train/score on GPU)
   - embeddings.py -> OpenAI embeddings API

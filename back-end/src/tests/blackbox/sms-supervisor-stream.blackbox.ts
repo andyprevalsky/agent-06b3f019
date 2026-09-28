@@ -3,12 +3,12 @@
  * SMS Supervisor stream-finalization regression suite.
  *
  * Owning boundary: providers/smsSupervisor/supervisorHandler.ts →
- * finalizeSupervisorResponse (the step that shapes a consumed rose-1-lite
+ * finalizeSupervisorResponse (the step that shapes a consumed rose-1-flash
  * stream into a SupervisorResponse).
  *
  * Regression under test (prod incident 2026-07-19, user 5824c58c texting
  * "where can I get chicken wings near me"):
- *   rose-1-lite returned a reasoning-only / empty structured response — zero
+ *   rose-1-flash returned a reasoning-only / empty structured response — zero
  *   native tool_calls AND zero emittable content items. The handler called
  *   StructuredOutputAccumulator.finalText() OUTSIDE its own "never send raw
  *   garbage to the user" try/catch, so a StructuredOutputCardinalityError

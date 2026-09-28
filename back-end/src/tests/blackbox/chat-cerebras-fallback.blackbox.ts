@@ -115,7 +115,7 @@ async function run(): Promise<void> {
   let thrown: unknown = null;
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       messages: [
         { role: 'system', content: 'You are Rose.' },
         { role: 'user', content: 'follow-up to a completed agent' },
@@ -210,7 +210,7 @@ async function runEmptyCerebrasStream(): Promise<void> {
   let thrown: unknown = null;
   try {
     const stream = await createStreamingCompletion({
-      model: 'rose-labs/rose-1-lite',
+      model: 'rose-labs/rose-1-flash',
       messages: [
         { role: 'system', content: 'You are Rose.' },
         { role: 'user', content: 'follow-up after an empty Cerebras stream' },

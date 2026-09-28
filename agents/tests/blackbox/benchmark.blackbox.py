@@ -11568,6 +11568,69 @@ async def test_create_agent_uses_goal_override_when_env_set():
     assert "model" not in bodies[0]
 
 
+async def test_create_agent_uses_model_override_when_env_set():
+    """Smoke a speed pool without editing task definitions."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class FakeResponse:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-123"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_env = os.environ.get("BENCHMARK_MODEL")
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        os.environ["BENCHMARK_MODEL"] = "rose-labs/rose-1-flash"
+
+        await bench.create_agent("http://localhost:55120", get_task_by_name("browser-agent"))
+        await bench.create_agent("http://localhost:55120", get_task_by_name("browser-biometrics-webdecoy"))
+        await bench.create_agent("http://localhost:55120", get_task_by_name("test-mass-agent-run-0"))
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        if original_env is None:
+            os.environ.pop("BENCHMARK_MODEL", None)
+        else:
+            os.environ["BENCHMARK_MODEL"] = original_env
+
+    assert bodies[0]["model"] == "rose-labs/rose-1-flash"
+    # Explicit operator override wins over a catalog pin so a speed-pool
+    # smoke can retarget every tagged task, including oss-pinned ones.
+    assert bodies[1]["model"] == "rose-labs/rose-1-flash"
+    # Fast Mode mass-agent stays on the catalog/default Ultra pool so the
+    # July cache is not invalidated by BENCHMARK_MODEL.
+    assert bodies[2].get("model") != "rose-labs/rose-1-flash"
+    assert bodies[2].get("fast_mode_cache_enabled") is True
+
+
 async def test_create_agent_sends_task_response_schema():
     """Lifecycle tasks can prevent an inferred verifier schema from contradicting the prompt."""
     import benchmarks.run_benchmark as bench
@@ -12437,6 +12500,25 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ.pop("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", None)
         else:
             os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
+
+
+def test_dotenv_fast_mode_cache_falls_back_to_database_url():
+    """Cloud .env often has prod DATABASE_URL but no FAST_MODE_CACHE_* key."""
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / "back-end" / ".env"
+        env_path.parent.mkdir(parents=True)
+        env_path.write_text('DATABASE_URL="postgresql://prod.example.test:6543/postgres"\n')
+        original_root = local_bench.REPO_ROOT
+        try:
+            local_bench.REPO_ROOT = Path(tmp)
+            assert (
+                local_bench._dotenv_fast_mode_cache_database_url()
+                == "postgresql://prod.example.test:6543/postgres"
+            )
+        finally:
+            local_bench.REPO_ROOT = original_root
 
 
 def test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only():
@@ -18080,6 +18162,7 @@ async def run_all_tests():
     )
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
+    await r.record_async("create_agent_model_override", test_create_agent_uses_model_override_when_env_set)
     await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
@@ -18132,6 +18215,10 @@ async def run_all_tests():
         test_canonical_base_cache_token_is_revisioned_not_daily,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "dotenv_fast_mode_cache_falls_back_to_database_url",
+        test_dotenv_fast_mode_cache_falls_back_to_database_url,
+    )
     r.record(
         "local_isolated_july_cache_read_only",
         test_local_isolated_fast_cache_on_keeps_shared_july_cache_read_only,

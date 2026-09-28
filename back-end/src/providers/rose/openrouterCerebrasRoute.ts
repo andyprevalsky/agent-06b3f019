@@ -1,14 +1,15 @@
 /**
- * Exclusive OpenRouter -> Cerebras boundary for synchronous Chat.
+ * Exclusive OpenRouter -> Cerebras/Groq boundary for synchronous Chat.
  *
  * The provider constraint is part of the request body, so OpenRouter cannot
  * silently serve the chat model from another host. Provider and model
- * fallbacks are both disabled; any pre-content failure is surfaced to the
- * caller.
+ * fallbacks are both disabled on the exclusive path; any pre-content failure
+ * is surfaced to the caller.
  *
- * Model note (2026-08-20): OpenRouter no longer has a Cerebras endpoint for
- * `z-ai/glm-4.7` (direct Cerebras also archived that id). Pin the spill to
- * `google/gemma-4-31b-it`, which Cerebras still serves via OpenRouter.
+ * Model note (2026-09): Align with direct Cerebras chat (`gpt-oss-120b`).
+ * OpenRouter serves `openai/gpt-oss-120b` on Cerebras (~3k t/s) and Groq
+ * (~500 t/s). Prefer Cerebras; on org rate-cap fallover, prefer Cerebras then
+ * Groq before any other host of the same model.
  */
 
 import {
@@ -24,7 +25,7 @@ import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_CEREBRAS_MODEL = 'google/gemma-4-31b-it';
+export const OPENROUTER_CEREBRAS_MODEL = 'openai/gpt-oss-120b';
 export const OPENROUTER_CEREBRAS_POOL = 'openrouter-cerebras';
 
 export function buildOpenRouterCerebrasBody(
@@ -36,15 +37,16 @@ export function buildOpenRouterCerebrasBody(
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
-    reasoning: { effort: 'none', exclude: true },
+    // gpt-oss-120b rejects reasoning effort `none` (only low/medium/high).
+    reasoning: { effort: 'low', exclude: true },
     // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
     // serve the chat model from another host. Fallback mode
-    // (`allowProviderFallback`): still PREFER Cerebras (`order`), but let
-    // OpenRouter spill to another host of the same model when Cerebras hits
-    // its org rate cap. Same model, just not stuck on the capped provider —
+    // (`allowProviderFallback`): prefer Cerebras then Groq (`order`), but let
+    // OpenRouter spill to another host of the same model when both hit their
+    // org rate cap. Same model, just not stuck on the capped provider —
     // never a generic waterfall model.
     provider: opts.allowProviderFallback
-      ? { order: ['cerebras'], allow_fallbacks: true, require_parameters: true }
+      ? { order: ['cerebras', 'groq'], allow_fallbacks: true, require_parameters: true }
       : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),

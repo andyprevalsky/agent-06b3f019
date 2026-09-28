@@ -257,7 +257,7 @@ class WebFetchManager(ToolManager):
                 summarizer_llm_item = {
                     "tokens_in": haiku_usage.get("prompt_tokens", 0),
                     "tokens_out": haiku_usage.get("completion_tokens", 0),
-                    "model": haiku_usage.get("actual_model", "rose-labs/rose-1-lite"),
+                    "model": haiku_usage.get("actual_model", "rose-labs/rose-1-flash"),
                     "provider": "Rose (summarize_web_fetch)",
                     "cache_read_input_tokens": haiku_usage.get("cache_read_input_tokens", 0),
                     "cache_creation_input_tokens": haiku_usage.get("cache_creation_input_tokens", 0),

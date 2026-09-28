@@ -34,7 +34,7 @@ Six work surfaces. Each maps to sections below.
 11. **Minted account** — used only when zero user credentials exist for the realm.
 12. **SSO** — skipped entirely.
 13. **Back-prop via post-run hook** — reads existing Message rows + Agent.status; no per-call outcome tool, no separate diagnostic table.
-14. **Failure classifier** — `rose-1-lite` on failed runs only, text-only last-10-messages.
+14. **Failure classifier** — `rose-1-flash` on failed runs only, text-only last-10-messages.
 15. **Auth-realm canonicalization** — hardcoded map in code (`*.amazon.com → amazon.com` except `aws.amazon.com`, passthrough otherwise).
 16. **No passkey table** — passkeys are unexportable; nothing to store.
 
@@ -471,7 +471,7 @@ One intentional crossover: **when a sync brings genuinely changed cookie content
 
 ### Failure classifier LLM
 
-- Model: `rose-1-lite`, structured output.
+- Model: `rose-1-flash`, structured output.
 - Input: task goal + last 10 Messages (text-only) + final status.
 - Output enum: `auth_exhausted | nav_exhausted | site_rotation_exhausted | captcha_blocked | antibot_blocked | account_locked | rate_limited | user_declined | task_level | crashed | unknown`.
 - Failure runs only.

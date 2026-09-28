@@ -12,12 +12,12 @@ logger = structlog.get_logger()
 # (they route in-process via Rose), so we seed them with the underlying
 # Anthropic Sonnet 4.6 window (200k, no `context-1m-2025-08-07` beta).
 _ROSE_POOL_CONTEXT_WINDOWS = {
-    "rose-labs/rose-1-lite": 200_000,
+    "rose-labs/rose-1-flash": 200_000,
     "rose-labs/rose-1-ultra": 200_000,
     "rose-labs/rose-1-browser-use": 200_000,
     "rose": 200_000,
     "rose-ultra": 200_000,
-    "rose-lite": 200_000,
+    "rose-flash": 200_000,
 }
 
 # In-memory cache for model context windows (avoid repeated API calls)

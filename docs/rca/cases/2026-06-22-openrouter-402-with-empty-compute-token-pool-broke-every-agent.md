@@ -6,7 +6,7 @@ surface: back-end
 component: rose-client
 classification: third-party-failure
 problem_class: fixture-environment-data-mismatch
-first_bad_boundary: OpenRouter returned HTTP 402 "Insufficient credits" for every model in pool rose-1-lite, and compute-token rotation ended with no usable token
+first_bad_boundary: OpenRouter returned HTTP 402 "Insufficient credits" for every model in pool rose-1-flash, and compute-token rotation ended with no usable token
 symptoms:
   - "402 Insufficient credits"
   - "No chat compute token available after rotation; allowing waterfall"
@@ -35,7 +35,7 @@ were healthy. A full prod benchmark run (`runs/20260622_204613_all.json`) scored
 
 Render logs from the `RoseWaterfall` and `ChatComputeRotation` components showed
 two stacked failures. OpenRouter returned HTTP 402 "Insufficient credits" for
-every model in pool `rose-1-lite`
+every model in pool `rose-1-flash`
 (`google/gemini-3-flash-preview`, `moonshotai/kimi-k2.5`) — present since at
 least 2026-06-19. Meanwhile compute tokens failed and rotated to empty: the test
 user's Claude token was served then rotated away on 401/403, the GPT token also

@@ -74,6 +74,7 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
+from providers.rose.cerebras import cerebras_complete
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -122,6 +123,10 @@ _STALL_TTFT_MULTIPLIERS: tuple[float, ...] = ()
 
 def _openai_api_key() -> str:
     return (os.getenv("GPT_API_KEY") or "").strip()
+
+
+def _cerebras_api_key() -> str:
+    return (os.getenv("CEREBRAS_API_KEY") or "").strip()
 
 
 def _is_synthetic_output_toolset(tools: Optional[List[Dict[str, Any]]]) -> bool:
@@ -1611,6 +1616,70 @@ class RoseClient:
                         agent_id=agent_id,
                         call_site=call_site,
                         reason=type(cause).__name__ if cause else "unknown",
+                    )
+
+            cerebras_key = _cerebras_api_key() if pool_spec.cerebras_model else ""
+            if cerebras_key:
+                active_route = "cerebras"
+                cerebras_yielded_any = False
+                try:
+                    async for chunk in _guarded(
+                        cerebras_complete(
+                            pool_spec=pool_spec,
+                            messages=messages,
+                            tools=waterfall_tools,
+                            tool_choice=waterfall_tool_choice,
+                            response_format=None if waterfall_tools else openrouter_response_format,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            cerebras_key=cerebras_key,
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            per_step_timeout_s=ttft_timeout_s,
+                            idle_timeout_s=idle_timeout_s,
+                        )
+                    ):
+                        chunk = _with_timing_if_done(chunk)
+                        cerebras_yielded_any = True
+                        if chunk.kind == "metadata":
+                            metadata = dict(chunk.data)
+                            if claude_token_error is not None:
+                                metadata["claude_token_error"] = claude_token_error
+                            if gpt_token_error is not None:
+                                metadata["gpt_token_error"] = gpt_token_error
+                            chunk = StreamChunk(kind="metadata", data=metadata)
+                            if chunk.data.get("actual_model"):
+                                _seen_actual_model = chunk.data["actual_model"]
+                        elif chunk.kind == "usage":
+                            _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
+                        chunk = _with_cache_sequence(chunk)
+                        _record_dump_chunk(chunk)
+                        yield chunk
+                    logger.info(
+                        "rose.complete.cerebras.done",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        elapsed_s=round(time.monotonic() - started, 3),
+                        **_observability_fields(),  # pragma: allowlist secret
+                    )
+                    _finalize_dump()
+                    return
+                except (_FallThrough, RoseStallError, RoseError) as exc:
+                    if cerebras_yielded_any:
+                        raise
+                    cause = exc.__cause__ if isinstance(exc, _FallThrough) else exc
+                    logger.info(
+                        "rose.complete.cerebras.fall_through",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        reason=type(cause).__name__ if cause else type(exc).__name__,
                     )
 
             active_route = "waterfall"

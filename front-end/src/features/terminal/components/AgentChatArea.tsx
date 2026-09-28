@@ -258,7 +258,11 @@ function ChatQueryInputBox({
         simulatorMode={a.simulatorMode}
         onSimulatorModeChange={a.setSimulatorMode}
         availableModels={models.filter(
-          (m) => m.id === 'rose-labs/rose-1-lite' || m.id === 'rose-labs/rose-1-ultra',
+          (m) =>
+            m.id === 'rose-labs/rose-1-flash' ||
+            m.id === 'rose-labs/rose-fast' ||
+            m.id === 'rose-labs/rose-1-lite' ||
+            m.id === 'rose-labs/rose-1-ultra',
         )}
         modelsLoading={modelsLoading}
         contextPercentage={a.agentDetail ? getContextPercentage(a.agentDetail, models) : 0}
