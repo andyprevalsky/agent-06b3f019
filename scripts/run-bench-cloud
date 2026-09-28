@@ -107,6 +107,7 @@ CLOUDBENCH_RUNTIME_SCRIPT_ROOT="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}
     || CLOUDBENCH_RUNTIME_LIB_ROOT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT"
 CLOUDBENCH_GUEST_BOOT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot.sh"
 CLOUDBENCH_GUEST_BOOT_PAYLOAD_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-boot-payload.py"
+CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-codex-auth.py"
 CLOUDBENCH_GUEST_RUN_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-run.sh"
 CLOUDBENCH_GUEST_FETCH_REF_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-fetch-ref.sh"
 CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-sync-deps.sh"
@@ -3133,7 +3134,7 @@ confirm_guest_shutdown() {
     # deadline and flip a clean PASS into exit 125 + KEEP_CLONES. Skip the
     # browser-cleanup handshake and record the same confirmation marker fleet
     # teardown expects.
-    if cloudbench_skip_held_driver_teardown_race; then
+    if [ -z "${CODEX_AUTH_SHA256:-}" ] && cloudbench_skip_held_driver_teardown_race; then
         marker_tmp="$OUT_DIR/guest-shutdown.confirmed.tmp.$$"
         printf '%s\n' "${RUN_LOG_TOKEN:-probe-or-demo}" > "$marker_tmp" \
             && mv "$marker_tmp" "$OUT_DIR/guest-shutdown.confirmed"
@@ -3381,6 +3382,51 @@ cleanup_staged_local_files() {
         [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
     done
 }
+# Explicit auth stays out of machine config.files and durable run artifacts.
+CODEX_AUTH_SOURCE=""
+CODEX_AUTH_SHA256=""
+if [ -n "${CODEX_AUTH_PATH:-}" ]; then
+    CODEX_AUTH_SOURCE="$(mktemp /tmp/rose-cloudbench-codex-auth.XXXXXXXX)" || exit 1
+    STAGED_LOCAL_FILES+=("$CODEX_AUTH_SOURCE")
+    rm -f "$CODEX_AUTH_SOURCE"
+    CODEX_AUTH_SHA256="$(python3 "$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT" prepare \
+        --source "$CODEX_AUTH_PATH" --output "$CODEX_AUTH_SOURCE")" || exit 1
+fi
+
+stage_explicit_codex_auth() {  # <controller-staged guest helper>
+    [ -n "$CODEX_AUTH_SOURCE" ] || return 0
+    local helper="$1" deadline=$((SECONDS + 270)) remaining command staged=0 stage_log stage_reply stage_status
+    case "$RUN_LOG_TOKEN" in ''|*[!a-zA-Z0-9._-]*) return 1 ;; esac
+    [[ "$mid" =~ ^[0-9a-f]{14,16}$ ]] || return 1
+    stage_log="$OUT_DIR/cloudbench-codex-stage.log"
+    : > "$stage_log"
+    stage_reply="$OUT_DIR/cloudbench-codex-stage-reply.log"
+    command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper stage --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        remaining=$((deadline - SECONDS))
+        [ "$remaining" -le 5 ] || remaining=5
+        if _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
+            -C "bash -lc $(printf '%q' "$command")" > "$stage_reply" 2>&1; then
+            cat "$stage_reply" >> "$stage_log"
+            stage_status="$(tail -n 1 "$stage_reply")"
+            [ "$stage_status" != already-ready ] || return 0
+            [ "$stage_status" = stage-ready ] || return 1
+            staged=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$staged" = 1 ] || return 1
+    remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ] || return 1
+    _with_timeout "$remaining" flyctl ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+        "$CODEX_AUTH_SOURCE" "/tmp/rose-cloudbench-codex/$RUN_LOG_TOKEN-$mid/auth.pending" \
+        >> "$stage_log" 2>&1 || return 1
+    remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ] || return 1
+    command="test \"\$(head -n 1 /data/bench.log)\" = RUNSTAMP-$RUN_LOG_TOKEN && export CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN && python3 $helper publish --run-token $RUN_LOG_TOKEN --machine-id $mid --sha256 $CODEX_AUTH_SHA256"
+    _with_timeout "$remaining" flyctl ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc $(printf '%q' "$command")" >> "$stage_log" 2>&1
+}
+
 LOCAL_PATCH_FILE=""
 LOCAL_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
@@ -3482,6 +3528,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env CODEX_AUTH_PATH=
+        --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
+        --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
+        --env "CLOUDBENCH_CODEX_AUTH_MACHINE_ID=$mid"
         --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
         --env CLOUDBENCH_FETCH_REF_SCRIPT=/cloudbench-fetch-ref.sh
         --env CLOUDBENCH_SYNC_DEPS_SCRIPT=/cloudbench-sync-deps.sh
@@ -3523,6 +3573,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     _boot_file_args=(
         --file-local "/cloudbench-boot.sh=$CLOUDBENCH_GUEST_BOOT_SCRIPT"
         --file-local "/cloudbench-run.sh=$CLOUDBENCH_GUEST_RUN_SCRIPT"
+        --file-local "/cloudbench-codex-auth.py=$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT"
         --file-local "/cloudbench-fetch-ref.sh=$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT"
         --file-local "/cloudbench-sync-deps.sh=$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT"
         --file-local "/cloudbench-sync-prisma-client.sh=$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT"
@@ -3749,6 +3800,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
     mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
     rm -f "$_start_log"
+    stage_explicit_codex_auth /cloudbench-codex-auth.py || {
+        echo "❌ explicit Codex auth staging failed before benchmark setup" >&2
+        exit 1
+    }
     echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
@@ -3888,6 +3943,10 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
         echo "export CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0"
     fi
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
+    echo "unset CODEX_AUTH_PATH"
+    echo "export CLOUDBENCH_CODEX_AUTH_HELPER=/data/cloudbench-codex-auth.py"
+    echo "export CLOUDBENCH_CODEX_AUTH_SHA256=$(printf '%q' "$CODEX_AUTH_SHA256")"
+    echo "export CLOUDBENCH_CODEX_AUTH_MACHINE_ID=$(printf '%q' "$mid")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export CLOUDBENCH_BARRIER_TOKEN=$(printf '%q' "${CLOUDBENCH_BARRIER_TOKEN:-}")"
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
@@ -3977,6 +4036,7 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     fi
     if [ "$provenance_stage_ok" = "1" ] \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RUN_SCRIPT" /data/cloudbench-run.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_CODEX_AUTH_SCRIPT" /data/cloudbench-codex-auth.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_FETCH_REF_SCRIPT" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_DEPS_SCRIPT" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SYNC_PRISMA_SCRIPT" /data/cloudbench-sync-prisma-client.sh >>"$stage_err" 2>&1 \
@@ -4043,6 +4103,11 @@ for _la in $(seq 1 "$launch_attempts"); do
     fi
 done
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive after $launch_attempts attempts; polling anyway (the poll loop will detect a dead driver)."; fi
+stage_explicit_codex_auth /data/cloudbench-codex-auth.py || {
+    echo "❌ explicit Codex auth staging failed before benchmark launch" >&2
+    exit 1
+}
+
 fi  # end launch: boot-launch vs legacy ssh path
 
 # Bring up the DATA-PLANE status proxy: one flyctl proxy (WireGuard tunnel) whose

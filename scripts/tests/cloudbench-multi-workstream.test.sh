@@ -948,6 +948,8 @@ def run_fake_driver(mdir):
             time.sleep(0.5)
         if exit_code == 0:
             log(f"synchronized start barrier released: {barrier}")
+    benchmark_started = exit_code == 0
+    result_stamped = False
     # Keep the launched-but-unready regression on the boundary it intends to
     # exercise. Without this handshake the intentionally tiny fake benchmark
     # can finish before the asynchronous provisioner has issued its launch
@@ -1040,28 +1042,32 @@ def run_fake_driver(mdir):
         if not held:
             log("FATAL: autoscaler never reached the ready-capacity hold boundary")
             exit_code = 1
-    if exit_code == 0:
+    # A failed admitted benchmark still owns a terminal result and raw logs.
+    # Pre-admission cancellation and invalid provenance remain unsealed.
+    if benchmark_started:
         context = os.path.join(mdir, "data", "repo", ".context", "cloudbench")
         os.makedirs(context, exist_ok=True)
         agent_id = "fake-agent-" + os.path.basename(mdir)
         task = {
-            "name": bench, "passed": True, "agent_id": agent_id,
+            "name": bench, "passed": exit_code == 0, "agent_id": agent_id,
             "duration_seconds": 1.0, "cost_cents": 0,
             "world_model_mode": "real", "code_ref": ref,
         }
+        if exit_code != 0:
+            task.update(benchmark_status="ERROR", error="fake driver failed after benchmark admission")
         card = {
             "run_id": "fake", "elapsed_s": 1.0, "world_model_mode": "real",
             "cost": {"agents_llm_usd": 0, "wmh_grounding_usd": 0,
                      "infra_usd": 0, "total_usd": 0},
             "metadata": {"tokens_in": 0, "tokens_out": 0},
-            "per_task": [{"name": bench, "status": "passed",
+            "per_task": [{"name": bench, "status": "passed" if exit_code == 0 else "failed",
                           "duration_s": 1.0, "cost_usd": 0,
                           "tokens_in": 0, "tokens_out": 0,
                           "world_model_mode": "real", "agent_url": None}],
         }
         run = {
-            "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
-                        "pass_rate": 1.0, "total_duration_seconds": 1.0,
+            "summary": {"total": 1, "passed": int(exit_code == 0), "failed": int(exit_code != 0), "skipped": 0,
+                        "pass_rate": float(exit_code == 0), "total_duration_seconds": 1.0,
                         "total_cost_cents": 0},
             "tasks": [task],
             "code_ref": ref,
@@ -1109,7 +1115,8 @@ def run_fake_driver(mdir):
             log(json.dumps(run, separators=(",", ":")))
             log(f"::CLOUDBENCH-RESULT-END:: token={token}")
             log("benchmark complete")
-    if exit_code == 0:
+            result_stamped = True
+    if result_stamped:
         # Model the same stopped-stack filesystem that the real status server
         # seals. Keep two worker files so the fixture proves complete inventory
         # collection, not just a primary-worker shortcut.
@@ -1802,6 +1809,128 @@ for host_root in ("/var/tmp/fake-machine", "/data/controller-tmp/fake-machine", 
 PY_PATH_CONTRACT
 [ "$?" -eq 0 ] || fail "fake guest paths must be translated exactly once"
 echo "PASS: guest path translation preserves host paths containing /data"
+
+python3 - "$FAKE_DIR/flyctl.py" "$ROOT_DIR" <<'PY_TERMINAL_CONTRACT'
+import ast
+import base64
+import glob
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import runpy
+import shutil
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+
+fake_source, root = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+module = ast.parse(fake_source.read_text())
+functions = [node for node in module.body if isinstance(node, ast.FunctionDef)
+             and node.name in {"rb_export", "run_fake_driver"}]
+assert len(functions) == 2
+provenance = runpy.run_path(str(root / "scripts/cloudbench_execution_provenance.py"))
+status = runpy.run_path(str(root / "scripts/cloudbench-status-server.py"))
+previous_workspace = os.environ.get("CLOUDBENCH_FAKE_CONTROLLER_WS")
+failures = []
+try:
+    with tempfile.TemporaryDirectory(prefix="fake-terminal-contract-") as temporary:
+        temporary = Path(temporary).resolve()
+        snapshot = temporary / "snapshot"
+        snapshot.mkdir()
+        (snapshot / "fixture").write_text("owned terminal fixture\n")
+        expected = provenance["build_provenance"](
+            base_sha="a" * 40, workspace_patch_sha256="none",
+            snapshot_manifest=provenance["build_snapshot_manifest"](snapshot),
+            config=provenance["build_config"](provenance["CONFIG_SCHEMA_VERSION"], ["app=fixture"]),
+        )
+        for mode in ("successful", "post-admission-error", "pre-admission-cancel", "invalid-provenance"):
+            try:
+                case = temporary / mode
+                machine = case / "machine"
+                data = machine / "data"
+                tmp = machine / "tmp"
+                tmp.mkdir(parents=True)
+                data.mkdir()
+                token = "terminal-fixture-" + mode
+                barrier = "fixture-barrier"
+                (tmp / "rb.sh").write_text(
+                    f"export CLOUDBENCH_RUN_TOKEN={token}\n"
+                    f"export CLOUDBENCH_START_BARRIER={barrier}\n"
+                    f"export REF={'a' * 40}\n"
+                    f"export BENCH_TASKS_B64={base64.b64encode(b'terminal-fixture').decode()}\n"
+                )
+                (machine / "driver.started").touch()
+                if mode == "pre-admission-cancel":
+                    (machine / "guest-cleanup.ack").touch()
+                else:
+                    (data / f"cloudbench-start-{barrier}.release").touch()
+                if mode == "post-admission-error":
+                    (case / "fail-worker-destroy-once").touch()
+                shutil.copyfile(root / "scripts/cloudbench_execution_provenance.py",
+                                machine / "cloudbench-execution-provenance.py")
+                (machine / "cloudbench-execution-provenance.json").write_text(
+                    "{}" if mode == "invalid-provenance" else json.dumps(expected)
+                )
+                os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"] = str(case / "controller")
+                ticks = iter((0, 0, 31))
+                # Enter the actual fixture's unchanged 30s error branch without
+                # waiting. Only this fixture clock is replaced; its producer,
+                # provenance stamper and evidence manifest are the real code.
+                clock = SimpleNamespace(time=lambda: next(ticks), sleep=lambda _: None)
+                namespace = dict(globals(), FAKE_DIR=str(case), MARKERS=str(case / "markers"), time=clock)
+                exec(compile(ast.Module(body=functions, type_ignores=[]), str(fake_source), "exec"), namespace)
+                namespace["run_fake_driver"](str(machine))
+                log = (data / "bench.log").read_text()
+                assert (data / "cloudbench-driver.state").read_text() == "exited\n"
+                assert not (machine / "driver.started").exists()
+                if mode in {"pre-admission-cancel", "invalid-provenance"}:
+                    assert f"::CLOUDBENCH-DONE:: token={token} exit=1" in log
+                    assert not (data / f"cloudbench-driver-clean-{token}.ack").exists()
+                    try:
+                        status["runtime_evidence_manifest"](data, token, machine.name)
+                    except (FileNotFoundError, ValueError):
+                        pass
+                    else:
+                        raise AssertionError("unadmitted or invalid-provenance work must remain unsealed")
+                else:
+                    context = data / "repo/.context/cloudbench"
+                    run = json.loads((context / "run.json").read_text())
+                    assert provenance["validate_run_provenance"](run, expected) == []
+                    passed = mode == "successful"
+                    assert run["tasks"][0]["passed"] is passed
+                    assert run["summary"]["passed"] == int(passed)
+                    assert run["summary"]["failed"] == int(not passed)
+                    assert f"::CLOUDBENCH-DONE:: token={token} exit={int(not passed)}" in log
+                    assert (data / f"cloudbench-driver-clean-{token}.ack").read_text() == token + "\n"
+                    marker = f"::CLOUDBENCH-RESULT-BEGIN:: token={token}\n"
+                    assert json.loads(log.split(marker, 1)[1].splitlines()[0]) == run
+                    if not passed:
+                        assert run["tasks"][0]["benchmark_status"] == "ERROR"
+                        assert "FATAL: worker scale-down never published its fail-closed result" in log
+                    manifest = status["runtime_evidence_manifest"](data, token, machine.name)
+                    assert set(manifest["files"]) == {
+                        "services.json", "run.json", "stack.log",
+                        f"cloudbench-stack-cleanup-{token}.status",
+                        "logs/backend.log", "logs/worker.log", "logs/worker.1.log",
+                    }
+                    for name, row in manifest["files"].items():
+                        contents = (context / name).read_bytes()
+                        assert row == {"bytes": len(contents), "sha256": hashlib.sha256(contents).hexdigest()}
+                print("PASS: fake terminal contract", mode)
+            except Exception as error:
+                failures.append((mode, type(error).__name__))
+                print("FAIL: fake terminal contract", mode, type(error).__name__)
+finally:
+    if previous_workspace is None:
+        os.environ.pop("CLOUDBENCH_FAKE_CONTROLLER_WS", None)
+    else:
+        os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"] = previous_workspace
+assert not failures, failures
+PY_TERMINAL_CONTRACT
+[ "$?" -eq 0 ] || fail "fake admitted outcomes must preserve terminal evidence independently of success"
 
 cat > "$FAKE_BIN/flyctl" <<SH
 #!/usr/bin/env bash

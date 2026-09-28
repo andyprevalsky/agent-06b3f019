@@ -56,6 +56,25 @@ cd back-end && npm run test:blackbox                # all domains
 cd back-end && bash scripts/run-blackbox-tests.sh auth  # single domain
 ```
 
+When a Fly machine hosts local backend tests, remove its production identity
+from the test child before imports: `env -u FLY_APP_NAME npm run test:coverage`.
+The dump writer intentionally disables local files whenever that variable is
+defined, even as an empty string. Keep the parent controller's Fly identity for
+ownership checks. Use the complete authoritative env and a private
+`CODEX_AUTH_PATH` when the local Codex credential is fresher than the seeded
+integration; the existing runner imports it into the isolated database. Set
+`E2B_CODEX_CODE_TEMPLATE_ID` to the template being used and verify that its
+matching `e2b-templates/<template-id>/ws-server.mjs` exists and is applied.
+These local test settings do not propagate credentials to separate cloud
+benchmark guests.
+
+Keep the prescribed test concurrency and provision enough host memory for
+Postgres plus simultaneous Node coverage processes. A successful isolated
+domain does not prove that the full coverage workload fits. Check kernel OOM
+and Postgres recovery evidence after a lost database connection. After any test
+runner exits, verify that its owned backend descendants and listener also
+retired before reusing the database or ports.
+
 ### Frontend Blackbox (`front-end/src/tests/blackbox/`)
 
 Vitest-based tests that exercise frontend components and logic in jsdom.

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -46,3 +47,14 @@ assert.match(
 );
 
 process.stdout.write('coverage script part 2 contracts passed\n');
+
+// Exercise the actual isolated-backend launch/trap boundary without DB or providers.
+execFileSync(
+  'python3',
+  [
+    join(process.cwd(), '..', 'scripts', 'tests', 'blackbox-process-cleanup.test.py'),
+    join(process.cwd(), '..'),
+    join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
+  ],
+  { stdio: 'inherit', timeout: 60_000 }
+);

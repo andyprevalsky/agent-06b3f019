@@ -273,6 +273,64 @@ skipped required Hub setup are preserved as setup failures, not path-repair
 outcomes. The full corrected controller gate and live fleet acceptance remain
 pending; the focused result gives neither full-suite nor live acceptance credit.
 
+### Admitted fake errors omitted terminal evidence
+
+The unchanged `f94858c8` full Linux controller gate later passed scenarios
+through 2g, then exited 1 after 826.47 seconds at 2h:
+`destroy-failure cleanup leaked machines`. Its retained fixture contained the
+exact primary and worker ownership records plus `runtime-evidence-unconfirmed`.
+The worker capture was complete; the primary collector returned HTTP 409,
+`exact runtime is not sealed`, and exit 70. Keeping both original volumes was
+the production controller's correct response to incomplete evidence.
+
+The recorded timeline separates the expected provider failure from the broken
+fixture protocol. Primary admission occurred at 23:21:51.571 UTC. Worker staging
+finished at 23:22:06.355 and its complete capture at 23:22:17.659. The fake
+primary's existing 30-second wait emitted its fatal result at 23:22:21.795;
+the five provider destroy attempts finished at 23:22:33.675 and the autoscaler
+published its failure at 23:22:33.691. No deadline or retry count was changed.
+The first bad boundary was the fake driver guarding both its result and stopped
+stack evidence with `exit_code == 0`. An admitted error therefore omitted the
+terminal artifacts that the real driver preserves, preventing safe cleanup.
+
+Archive searches for `destroy-failure cleanup leaked machines could not
+reconcile worker failure outcomes` and `scale-down destroy failure worker
+runtime evidence retained original volumes` identified this as a recurrence
+of the incomplete fixture evidence contract. Earlier success and worker-error
+controls had not exercised a failed admitted primary outcome.
+
+The fixture now remembers whether benchmark admission succeeded, records an
+admitted failure as `benchmark_status: ERROR` with `passed: false`, and seals
+complete stopped-stack files only after the real provenance stamper succeeds.
+Native exit 1 and the original fatal text remain intact. Pre-admission
+cancellation and invalid provenance still produce no trusted capture. Four
+permanent controls run the actual fake driver, production provenance builder
+and stamper, and production runtime-evidence manifest validator. The old
+producer failed the admitted-error control while the other three passed; all
+four pass unchanged after the repair. The control replaces only its local
+fixture clock to enter the existing 30-second failure branch immediately.
+These controls are inside the existing multi-workstream fixture already run by
+`scripts/test.sh`, `/deploy`, and the canonical controller lane.
+
+Causal artifacts and immutable source hashes are under
+`.context/acceptance/proof21-destroy-failure-rca/`. `source-before.sh` is the
+original `7466ce4e` fixture. The private candidate `668ee7a8` changed only this
+fixture over clean remote `f94858c8`, with all production runtime hashes
+unchanged. The exact original 2h body, including nonzero fleet status, crossing
+the provider destroy boundary, the stable scale-down failure reason and zero
+owned machines, is byte-identical (SHA256
+`8839c0fbac1212882873ef02f2050d2193238993992dd1f68d1a4aeea61df938`).
+The focused original 2h body then passed with the complete existing setup
+prefix in 94.463 seconds, native exit 0. Its log SHA256 is
+`6ef5629efd7828045407ef136b21da92d34d57136f1ac5e27c29029ba645fc57`;
+`focused-after.json` pins the native receipt, command and complete output.
+Both exact wrapper and command PIDs were independently observed absent. The
+final proposed fixture `34449060` differs from the executed `668ee7a8` only by
+a comment spacing correction; producer bytes and control AST are identical.
+The complete committed controller suite and live acceptance remain pending.
+A rejected oversized private transfer created no remote files or processes
+and is preserved separately from the actual focused execution.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures

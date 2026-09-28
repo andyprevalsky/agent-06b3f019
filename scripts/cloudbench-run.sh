@@ -152,6 +152,9 @@ STACK_CLEANUP_STATUS_FILE="$CONTEXT_DIR/cloudbench-stack-cleanup-${CLOUDBENCH_RU
 ACTIVE_COMMAND_PID=""
 ACTIVE_COMMAND_SIGNALLED=0
 ACTIVE_COMMAND_STARTING=0
+ACTIVE_COMMAND_SHUTDOWN_PENDING=0
+CODEX_AUTH_ADMISSION_TOKEN=""
+CODEX_AUTH_HELPER="${CLOUDBENCH_CODEX_AUTH_HELPER:-$CONTROL_DIR/cloudbench-codex-auth.py}"
 HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
 TAIL_PID=""
@@ -215,6 +218,15 @@ cleanup_stack() {
     elif [ -n "$STACK_PID" ]; then
         wait "$STACK_PID" 2>/dev/null || true
     fi
+    if [ -n "${CODEX_AUTH_ADMISSION_TOKEN:-}" ]; then
+        if ! python3 "$CODEX_AUTH_HELPER" retire --run-token "$CLOUDBENCH_RUN_TOKEN" \
+            --machine-id "${CLOUDBENCH_CODEX_AUTH_MACHINE_ID:-}" --sha256 "$CLOUDBENCH_CODEX_AUTH_SHA256" --user "$APP_USER" \
+            --admission-token "$CODEX_AUTH_ADMISSION_TOKEN"; then
+            log "FATAL: exact credential retirement was not confirmed"
+            [ "$original_rc" -ne 0 ] || original_rc=1
+            exit "$original_rc"
+        fi
+    fi
     if ! publish_cleanup_ack; then
         log "FATAL: could not publish guest cleanup acknowledgement"
         [ "$original_rc" -ne 0 ] || original_rc=1
@@ -225,6 +237,7 @@ trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
+    ACTIVE_COMMAND_SHUTDOWN_PENDING=1
     log "guest shutdown requested; draining benchmark root before stack teardown"
     if [ -n "$ACTIVE_COMMAND_PID" ] && kill -0 "$ACTIVE_COMMAND_PID" 2>/dev/null; then
         if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
@@ -289,15 +302,15 @@ run_with_heartbeat() {
     # ignored, and that disposition survives exec into Python. Briefly enabling
     # monitor mode gives the benchmark the normal asyncio SIGINT cancellation
     # path while keeping heartbeat supervision in this shell.
+    ACTIVE_COMMAND_SIGNALLED=0
     ACTIVE_COMMAND_STARTING=1
     set -m
     "$@" &
     command_pid=$!
     set +m
     ACTIVE_COMMAND_PID="$command_pid"
-    ACTIVE_COMMAND_SIGNALLED=0
     ACTIVE_COMMAND_STARTING=0
-    if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+    if [ -e "$SHUTDOWN_REQUEST_FILE" ] || [ "$ACTIVE_COMMAND_SHUTDOWN_PENDING" = 1 ]; then
         request_graceful_shutdown
     fi
     while kill -0 "$command_pid" 2>/dev/null; do
@@ -318,7 +331,12 @@ run_with_heartbeat() {
     if [ "$ACTIVE_COMMAND_SIGNALLED" != "1" ]; then
         wait "$command_pid" 2>/dev/null || command_rc=$?
     fi
-    ACTIVE_COMMAND_PID=""
+    if [ "$label" = benchmark ]; then
+        ACTIVE_COMMAND_PID=""
+    else
+        ACTIVE_COMMAND_PID="" ACTIVE_COMMAND_SIGNALLED=0
+        [ "$ACTIVE_COMMAND_SHUTDOWN_PENDING" != 1 ] || command_rc=143
+    fi
     return "$command_rc"
 }
 
@@ -533,6 +551,25 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
             finish 1
             ;;
     esac
+fi
+
+# A configured controller authority is installed atomically over exact-machine
+# SFTP. No envelope enters provider config, script payloads or runtime artifacts.
+unset CODEX_AUTH_PATH
+if [ -n "${CLOUDBENCH_CODEX_AUTH_SHA256:-}" ]; then
+    CODEX_AUTH_ADMISSION_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(32))')" || finish 1
+    if CLOUDBENCH_HEARTBEAT_SECONDS=1 run_with_heartbeat credential-handoff \
+        python3 "$CODEX_AUTH_HELPER" wait --run-token "$CLOUDBENCH_RUN_TOKEN" \
+        --machine-id "${CLOUDBENCH_CODEX_AUTH_MACHINE_ID:-}" \
+        --sha256 "$CLOUDBENCH_CODEX_AUTH_SHA256" --user "$APP_USER" \
+        --admission-token "$CODEX_AUTH_ADMISSION_TOKEN"; then
+        :
+    else
+        codex_auth_rc=$?
+        log "FATAL: explicit Codex auth handoff failed before benchmark setup"
+        finish "$codex_auth_rc"
+    fi
+    export CODEX_AUTH_PATH="/tmp/rose-cloudbench-codex/$CLOUDBENCH_RUN_TOKEN-$CLOUDBENCH_CODEX_AUTH_MACHINE_ID/auth.json"
 fi
 
 # ── 0. Sanity: the volume + repo checkout must exist (created at box setup) ──

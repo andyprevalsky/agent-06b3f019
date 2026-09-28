@@ -6459,6 +6459,13 @@ def _sync_compute_tokens(
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
         return False
+    explicit_codex_auth = bool(os.environ.get("CODEX_AUTH_PATH"))
+    if explicit_codex_auth and (urlparse(database_url).hostname or "").lower() not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise RuntimeError("Explicit Codex auth requires an isolated loopback database")
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -6507,6 +6514,8 @@ def _sync_compute_tokens(
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
     print(f"    🔑 Refreshed compute tokens from {source_label}")
+    if explicit_codex_auth and not _refresh_local_gpt_token_from_codex_auth(database_url):
+        raise RuntimeError("Benchmark sync could not refresh GPT credentials from explicit Codex auth")
     return True
 
 
@@ -6556,7 +6565,7 @@ def _local_codex_auth_path() -> Path:
 
 
 def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
-    """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
+    """Overlay explicit local or this Mac's ChatGPT/Codex token onto the isolated DB.
 
     The shared workspace copy can still look connected after OpenAI has
     invalidated its access token. Local Codex owns the freshest renewable auth
@@ -6564,9 +6573,26 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     before agents start. The row stays owned by the dev user and is made
     pool-eligible only inside the isolated benchmark database.
     """
-    if sys.platform != "darwin":
+    explicit_auth = bool(os.environ.get("CODEX_AUTH_PATH"))
+    if sys.platform != "darwin" and not explicit_auth:
         return False
     auth_path = _local_codex_auth_path()
+    if explicit_auth:
+        import stat
+
+        if (urlparse(database_url).hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"}:
+            raise RuntimeError("Explicit Codex auth requires an isolated loopback database")
+        try:
+            metadata = auth_path.lstat()
+            if (
+                metadata.st_uid != os.geteuid()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_mode & 0o077
+                or not 0 < metadata.st_size <= 65536
+            ):
+                raise ValueError("invalid private auth file")
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Explicit Codex auth must be a nonempty private regular file") from exc
     if not auth_path.is_file():
         print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
         return False
@@ -7212,7 +7238,11 @@ async def _refresh_local_compute_tokens_for_run(
         #
         # A codex auth file that EXISTS but cannot be overlaid is still fatal:
         # that is the stale/rotated-token signal this overlay was built to catch.
-        if _local_codex_auth_path().is_file() and not _refresh_local_gpt_token_from_codex_auth(database_url):
+        if (
+            not os.environ.get("CODEX_AUTH_PATH")
+            and _local_codex_auth_path().is_file()
+            and not _refresh_local_gpt_token_from_codex_auth(database_url)
+        ):
             raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         _assert_require_compute_tokens_satisfied()
         return

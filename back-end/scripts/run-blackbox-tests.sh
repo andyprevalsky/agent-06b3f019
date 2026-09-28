@@ -416,22 +416,43 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
+# npm/tsx can leave the server below a launcher process. Snapshot and drain
+# the owned descendants before terminating that launcher, then join its PID.
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+BACKEND_PID=""
+cleanup() {
+  local result=$? cleaned=1
+  trap - EXIT INT TERM
+  if [[ -n "$BACKEND_PID" ]]; then
+    if cloudbench_terminate_tree_and_wait 5 "$BACKEND_PID"; then
+      wait "$BACKEND_PID" 2>/dev/null || true
+    else
+      echo "❌ Could not verify isolated backend process-tree cleanup" >&2
+      result=1
+      cleaned=0
+    fi
+  fi
+
+  if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
+    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
+# Defer cancellation only across the background-child ownership handoff.
+BACKEND_PENDING_SIGNAL=0
+trap 'BACKEND_PENDING_SIGNAL=130' INT
+trap 'BACKEND_PENDING_SIGNAL=143' TERM
+
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
 npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
-
-cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
-
-  if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
-    rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ "$BACKEND_PENDING_SIGNAL" != 0 ]]; then
+  exit "$BACKEND_PENDING_SIGNAL"
+fi
 
 READY=0
 for _ in $(seq 1 120); do

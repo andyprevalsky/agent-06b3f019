@@ -657,6 +657,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-run.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
+       "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-prisma-client.sh" \
