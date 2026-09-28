@@ -2320,7 +2320,9 @@ async def create_agent(
     # default pool's primary declines the task's prompt outright, which is a
     # model-policy outcome no retry can change.
     model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
-    if model_override:
+    # Fast Mode trees (mass-agent) were recorded against Ultra. Retargeting
+    # them to a speed pool invalidates the July cache (missing title / tools).
+    if model_override and task.fast_cache != "on":
         body["model"] = model_override
     elif task.model:
         body["model"] = task.model

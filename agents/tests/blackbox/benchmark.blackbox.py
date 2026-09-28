@@ -11612,6 +11612,7 @@ async def test_create_agent_uses_model_override_when_env_set():
 
         await bench.create_agent("http://localhost:55120", get_task_by_name("browser-agent"))
         await bench.create_agent("http://localhost:55120", get_task_by_name("browser-biometrics-webdecoy"))
+        await bench.create_agent("http://localhost:55120", get_task_by_name("test-mass-agent-run-0"))
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -11624,6 +11625,10 @@ async def test_create_agent_uses_model_override_when_env_set():
     # Explicit operator override wins over a catalog pin so a speed-pool
     # smoke can retarget every tagged task, including oss-pinned ones.
     assert bodies[1]["model"] == "rose-labs/rose-1-flash"
+    # Fast Mode mass-agent stays on the catalog/default Ultra pool so the
+    # July cache is not invalidated by BENCHMARK_MODEL.
+    assert bodies[2].get("model") != "rose-labs/rose-1-flash"
+    assert bodies[2].get("fast_mode_cache_enabled") is True
 
 
 async def test_create_agent_sends_task_response_schema():
