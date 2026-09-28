@@ -500,6 +500,23 @@ blackbox domains passed. No task, prompt, model, evaluator, LLM-call count or
 benchmark pass criterion changed. The actual 100-task infrastructure proof is
 still required; this causal repair does not award proof24 credit.
 
+### Failed-owner recovery with an unadmitted volume clone
+
+After all ten proof24 benchmark guests were archived and their machines and
+volumes were natively retired, exact forensic recovery refused the owner. Its
+registry held eleven owned fresh clones: the ten admitted benchmark machines
+and an earlier source-volume clone whose machine ID was empty. The extra clone
+never acquired a benchmark slot or guest, but its volume still existed. The
+forensic verifier had assumed every clone was an admitted benchmark machine.
+
+The verifier now recognizes only a precisely bound `fresh-clone` record with
+an empty machine ID as unadmitted. It still requires one archived original per
+admitted task and native absence of **every** owned volume, including the
+unadmitted clone. The focused recovery fixture proves an absent unadmitted
+volume permits zero-credit retirement and a live one retains the latch. The
+proof24 clone must be retired by its exact native identity before recovery is
+retried; its registry and audit records remain for the production reaper.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures
