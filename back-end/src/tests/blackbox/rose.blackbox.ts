@@ -479,7 +479,7 @@ async function testGptAuth_happyPathUsesCodexResponses() {
       'stable prompt cache key present'
     );
     const samePromptDifferentRequest = buildCodexResponsesBody({
-      poolSpec: getPool('rose-1-flash'),
+      poolSpec: getPool('rose-1-ultra'),
       messages: [
         { role: 'system', content: 'be exact' },
         { role: 'user', content: 'different live input' },

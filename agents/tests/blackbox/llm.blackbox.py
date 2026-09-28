@@ -6974,7 +6974,7 @@ async def test_call_llm_structured_streaming_gpt_native_streams_reasoning_to_chu
 
     response, usage, detected = await call_llm_structured_streaming(
         messages=[{"role": "user", "content": "q"}],
-        model="rose",
+        model="rose-labs/rose-1-ultra",
         temperature=0.7,
         max_tokens=512,
         response_model=AgentAction,

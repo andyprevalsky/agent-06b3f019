@@ -1666,7 +1666,7 @@ class RoseClient:
                         agent_id=agent_id,
                         call_site=call_site,
                         elapsed_s=round(time.monotonic() - started, 3),
-                        **_[REDACTED]_fields(),
+                        **_observability_fields(),  # pragma: allowlist secret
                     )
                     _finalize_dump()
                     return
