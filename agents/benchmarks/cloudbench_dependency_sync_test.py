@@ -1546,6 +1546,7 @@ def test_boot_payload_fixture_cleanup_rejects_reused_identity(tmp_path: Path, mo
                 _terminate_boot_fixture_tree(boot)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="driver ownership requires Linux /proc")
 def test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack(
     tmp_path: Path,
 ) -> None:
@@ -6134,7 +6135,13 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
-    clone_function = _worker_ledger_lock_bundle(fleet) + "\n" + fleet[function_start:function_end]
+    clone_function = _worker_ledger_lock_bundle(fleet) + "\n" + "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "clone_failure_definitively_unallocated() {",
+            "clone_failure_owned_volume_id() {",
+        )
+    ) + "\n" + fleet[function_start:function_end]
     source_id = "6834251fe05798"
     target_id = "d895d2efe7d418"
 
@@ -6177,11 +6184,14 @@ FLY() {{
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 fleet_registry_record_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
+fleet_registry_release_name() {{ return 0; }}
+fleet_audit_update_fresh_clone() {{ return 0; }}
 machine_volume_id() {{ printf 'vol-owned-target'; }}
 machine_storage_ready() {{ return 0; }}
 machine_storage_failed() {{ return 1; }}
 {_clone_index_adapter_fixture()}
 {clone_function}
+fly_with_timeout() {{ shift; FLY "$@"; }}
 clone_machine_target "$LEDGER"
 """,
             ],
@@ -6270,7 +6280,6 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
     boot barrier turns one bad volume into an all-benchmark timeout."""
 
     fleet = FLEET_SCRIPT.read_text()
-    watchdog = _extract_fleet_function(fleet, "fly_with_timeout() {")
     cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned.ids"
     clone_count = tmp_path / "clone-count"
@@ -6303,8 +6312,8 @@ fleet_registry_release_id() {{ return 0; }}
 machine_storage_ready() {{ [ "$1" = feedface000002 ]; }}
 machine_storage_failed() {{ [ "$1" = deadbeef000001 ]; }}
 reap_machine() {{ printf '%s\n' "$1" >> "$REAPED"; }}
-{watchdog}
 {cloner}
+fly_with_timeout() {{ shift; FLY "$@"; }}
 clone_machine_target "$LEDGER"
 """,
         ],
@@ -8116,7 +8125,7 @@ def _fleet_primary_shape_helpers(source: str) -> str:
     return "".join(
         _extract_fleet_function(source, signature)
         for signature in (
-            "bench_needs_bundled_frontend_primary() {",
+            "bench_needs_large_primary() {",
             "primary_vm_size_for_bench() {",
             "primary_vm_memory_for_bench() {",
             "shared_cpu_units_for_vm_size() {",
@@ -8499,12 +8508,12 @@ def test_fleet_provisions_clones_concurrently() -> None:
     assert "reap_registry_clones" in fleet
 
 
-def test_bundled_frontend_primary_provisioning_bypasses_default_pool() -> None:
+def test_large_primary_provisioning_bypasses_default_pool() -> None:
     """A 4GB stopped pool Machine must not be assigned to a bundled Vite build."""
     fleet = FLEET_SCRIPT.read_text()
     assert 'FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"' in fleet
     assert 'FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"' in fleet
-    classifier = _extract_fleet_function(fleet, "bench_needs_bundled_frontend_primary() {")
+    classifier = _extract_fleet_function(fleet, "bench_needs_large_primary() {")
     for task in (
         "agent-payment-test-shop",
         "agent-payment-idempotent-abandonment",
@@ -8512,16 +8521,17 @@ def test_bundled_frontend_primary_provisioning_bypasses_default_pool() -> None:
         "agent-payment-setup-resume",
         "gate-subscription-card-mint",
         "gate-kyc-card-mint",
+        "browser-*",
     ):
         assert task in classifier
 
     prov = fleet.index("# ── Phase 1:")
     wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
     phase1 = fleet[prov:wait_all]
-    assert 'bench_needs_bundled_frontend_primary "$bench"' in phase1
+    assert 'bench_needs_large_primary "$bench"' in phase1
     assert 'pcid="$(claim_pool_machine)"' in phase1
     assert 'clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory"' in phase1
-    assert phase1.index('bench_needs_bundled_frontend_primary "$bench"') < phase1.index('pcid="$(claim_pool_machine)"')
+    assert phase1.index('bench_needs_large_primary "$bench"') < phase1.index('pcid="$(claim_pool_machine)"')
 
 
 def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
@@ -11232,6 +11242,7 @@ def test_zero_allocated_receipt_rejects_incomplete_or_nonzero_evidence(
         assert not (case_root / "receipt.json").exists(), label
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="guest process proof requires Linux /proc")
 def test_exited_guest_quiescence_requires_stopped_services_and_seals_run_evidence(
     tmp_path: Path,
 ) -> None:
@@ -18740,6 +18751,56 @@ test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
 """
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_capacity_admission_retries_live_reservation_and_refreshes_inventory() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
+    script = f'''set -u
+APP=fixture-bench-app
+warm_json=old-inventory
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
+CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1
+attempts=0
+sleep_calls=0
+enforce_app_capacity_guard() {{
+    attempts=$((attempts + 1))
+    if [ "$attempts" -eq 1 ]; then
+        CAPACITY_ADMISSION_RETRYABLE=1
+        return 1
+    fi
+    [ "$warm_json" = new-inventory ] || return 1
+    CAPACITY_ADMISSION_RETRYABLE=0
+    return 0
+}}
+sleep() {{ sleep_calls=$((sleep_calls + 1)); }}
+FLY() {{ printf '%s' new-inventory; }}
+{wrapper}
+admit_app_capacity_with_wait
+printf 'attempts=%s sleeps=%s inventory=%s\\n' "$attempts" "$sleep_calls" "$warm_json"
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert "attempts=2 sleeps=1 inventory=new-inventory" in result.stdout
+
+
+def test_capacity_admission_does_not_retry_non_capacity_failure() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    wrapper = _extract_fleet_function(fleet, "admit_app_capacity_with_wait() {")
+    script = f'''set -u
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=30
+attempts=0
+enforce_app_capacity_guard() {{
+    attempts=$((attempts + 1))
+    CAPACITY_ADMISSION_RETRYABLE=0
+    return 1
+}}
+sleep() {{ exit 90; }}
+{wrapper}
+admit_app_capacity_with_wait
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1
 
 
 def test_capacity_guard_reserves_machine_slots_for_boot_config_replacements(tmp_path: Path) -> None:

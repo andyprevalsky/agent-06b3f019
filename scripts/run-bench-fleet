@@ -10239,6 +10239,8 @@ enforce_app_capacity_guard() {
     local running_machines stopped_machines total_machines projected_shared
     local projected_machines soft_line
 
+    CAPACITY_ADMISSION_RETRYABLE=0
+
     CAPACITY_RESERVATION_ROOT="${CAPACITY_RESERVATION_ROOT:-${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}}"
     CAPACITY_RESERVATION_TOKEN="${CAPACITY_RESERVATION_TOKEN:-$FLEET_OWNER_TOKEN-primary}"
     CAPACITY_RESERVATION_PUBLISHED="${CAPACITY_RESERVATION_PUBLISHED:-0}"
@@ -10348,6 +10350,7 @@ except Exception:
     if [ "$reservation_status" -ne 0 ]; then
         case "$reservation_outcome" in
             DENY_MACHINE)
+                CAPACITY_ADMISSION_RETRYABLE=1
                 echo "❌ Machine-count capacity admission denied: $total_machines app Machines" >&2
                 [ "${reserved_machines:-0}" -gt 0 ] \
                     && echo "   + $reserved_machines slots reserved by live workstreams" >&2
@@ -10357,6 +10360,7 @@ except Exception:
                 echo "   Wait for another workstream to drain or adjust this app allocation after the org reservation changes." >&2
                 ;;
             DENY_SHARED)
+                CAPACITY_ADMISSION_RETRYABLE=1
                 echo "❌ Shared-CPU capacity governor reached: $active_shared active shared units" >&2
                 [ "${reserved_shared:-0}" -gt 0 ] \
                     && echo "   + $reserved_shared units reserved by live workstreams" >&2
@@ -10398,7 +10402,37 @@ except Exception:
 
     return 0
 }
-enforce_app_capacity_guard || exit 1
+
+admit_app_capacity_with_wait() {
+    local deadline interval remaining
+    local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
+    case "$wait_seconds:$interval" in
+        *[!0-9:]*) echo "❌ capacity admission wait and retry seconds must be integers" >&2; return 2 ;;
+    esac
+    if [ "$wait_seconds" -lt 1 ] || [ "$interval" -lt 1 ]; then
+        echo "❌ capacity admission wait and retry seconds must be positive" >&2
+        return 2
+    fi
+    deadline=$((SECONDS + wait_seconds))
+    while :; do
+        enforce_app_capacity_guard && return 0
+        [ "$CAPACITY_ADMISSION_RETRYABLE" = 1 ] || return 1
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            echo "❌ capacity admission remained blocked for ${wait_seconds}s" >&2
+            return 1
+        fi
+        [ "$interval" -gt "$remaining" ] && interval="$remaining"
+        echo "⏳ capacity is reserved by live work; retrying provider admission in ${interval}s" >&2
+        sleep "$interval"
+        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+            echo "❌ App capacity guard could not refresh machine state during admission wait." >&2
+            return 1
+        }
+    done
+}
+admit_app_capacity_with_wait || exit 1
 
 release_capacity_reservation_after_primary_start_accounted() {
     # Replacement slots are no longer needed once every stopped boot config is
