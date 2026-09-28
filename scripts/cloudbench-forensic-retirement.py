@@ -268,6 +268,7 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     archived_services = {}
     archived_unstarted = {}
     archived_started = {}
+    archived_absence = {}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_members and member.name not in seen
@@ -286,6 +287,10 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
                     assert member.size <= 1048576
                     task_name = member.name.split("/", 1)[0]
                     archived_services[task_name] = archived_services.get(task_name, b"") + block
+                if member.name.endswith("/worker-log-absence-original.json"):
+                    assert member.size <= 1048576
+                    task_name = member.name.split("/", 1)[0]
+                    archived_absence[task_name] = archived_absence.get(task_name, b"") + block
                 if member.name.startswith("_unstarted_workers/"):
                     archived_unstarted[member.name] = archived_unstarted.get(member.name, b"") + block
                 if member.name.startswith("_started_workers/") and member.name.endswith(
@@ -301,8 +306,17 @@ def verify(registry: Path, run: Path, manifest_path: Path, archive_path: Path,
         assert services["status"] == row["services_status"]
         worker_count = services["env"]["worker_processes"]
         assert type(worker_count) is int and 1 <= worker_count <= 1024
+        absent_logs = []
         for number in range(1, worker_count):
-            assert f"repo/.context/cloudbench/logs/worker.{number}.log" in row["files"]
+            relative = f"repo/.context/cloudbench/logs/worker.{number}.log"
+            if relative not in row["files"]:
+                assert not row["runtime_evidence_complete"] and relative in row["missing"]
+                absent_logs.append(relative)
+        if absent_logs:
+            assert "worker-log-absence-original.json" in row["files"]
+            assert json.loads(archived_absence[row["task"]]) == {
+                "version": 1, "machine_id": row["machine_id"],
+                "services_status": row["services_status"], "missing": absent_logs}
     for row in unstarted_workers:
         member = f"_unstarted_workers/{row['machine_id']}/worker-original.json"
         proof = json.loads(archived_unstarted[member])

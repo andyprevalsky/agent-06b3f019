@@ -22880,7 +22880,7 @@ wait "$signaller"
     assert not list(scratch.iterdir())
 
 
-@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live", "unstarted-worker-absent", "unstarted-worker-live", "unstarted-worker-stage-launch", "unstarted-worker-owner-mismatch", "unstarted-worker-proof-mismatch", "started-worker-absent", "started-worker-live", "started-worker-terminal-bad"])
+@pytest.mark.parametrize("fault", ["none", "archive", "live-machine", "live-volume", "pending", "collected", "collected-mismatch", "shutdown", "audit", "unadmitted-absent", "unadmitted-live", "unallocated-absent", "unallocated-name-live", "unstarted-worker-absent", "unstarted-worker-live", "unstarted-worker-stage-launch", "unstarted-worker-owner-mismatch", "unstarted-worker-proof-mismatch", "started-worker-absent", "started-worker-live", "started-worker-terminal-bad", "missing-worker-log-verified", "missing-worker-log-unverified"])
 def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence(tmp_path: Path, fault: str) -> None:
     owner = "a" * 32
     run_id = "fixture-run"
@@ -22976,11 +22976,16 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
     (out / "runtime-evidence.pending").write_text(json.dumps(evidence_owner))
     originals = {
         "bench.log": b"original partial benchmark log\n",
-        "repo/.context/cloudbench/services.json": json.dumps({"status": "running", "env": {"worker_processes": 1}}).encode(),
+        "repo/.context/cloudbench/services.json": json.dumps({"status": "running", "env": {"worker_processes": 2 if fault.startswith("missing-worker-log-") else 1}}).encode(),
         "repo/.context/cloudbench/stack.log": b"original stack log\n",
         "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
         "repo/.context/cloudbench/logs/worker.log": b"original worker log\n",
     }
+    if fault == "missing-worker-log-verified":
+        originals["worker-log-absence-original.json"] = json.dumps({
+            "version": 1, "machine_id": machine, "services_status": "running",
+            "missing": ["repo/.context/cloudbench/logs/worker.1.log"],
+        }).encode()
     worker_proof = None
     started_files = None
     if fault.startswith("unstarted-worker-"):
@@ -23028,7 +23033,8 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
         "tasks": [{"task": task, "ordinal": 0, "machine_id": machine,
                    "volume_id": volume, "run_token": token, "proof_credit": 0,
                    "runtime_evidence_complete": False, "services_status": "running",
-                   "missing": [f"cloudbench-driver-clean-{token}.ack", "repo/.context/cloudbench/run.json"],
+                   "missing": [f"cloudbench-driver-clean-{token}.ack", "repo/.context/cloudbench/run.json"]
+                   + (["repo/.context/cloudbench/logs/worker.1.log"] if fault.startswith("missing-worker-log-") else []),
                    "files": {relative: {"bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
                              for relative, content in originals.items()}}],
     }
@@ -23084,7 +23090,7 @@ def test_failed_fleet_forensic_retirement_requires_originals_and_provider_absenc
                "--run", str(run), "--manifest", str(manifest_path), "--archive", str(archive),
                "--machines", str(machines), "--volumes", str(volumes)]
     result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent", "missing-worker-log-verified"):
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["proof_credit"] == 0
         assert json.loads(result.stdout)["unadmitted_clones"] == (fault == "unadmitted-absent")
@@ -23116,7 +23122,7 @@ fly_with_timeout() {{
 fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
 '''
     recovery = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
-    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent"):
+    if fault in ("none", "unadmitted-absent", "unallocated-absent", "collected", "unstarted-worker-absent", "started-worker-absent", "missing-worker-log-verified"):
         assert recovery.returncode == 0, recovery.stderr
         receipt = json.loads((run / "_forensic/retirement-verified.json").read_text())
         assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
