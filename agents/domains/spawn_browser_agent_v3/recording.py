@@ -2250,6 +2250,19 @@ def _url_looks_like_static_asset(url: str) -> bool:
     return any(path.endswith(suffix) for suffix in _STATIC_ASSET_SUFFIXES)
 
 
+def _resource_type_is_api_challenge_candidate(resource_type: str) -> bool:
+    resource = (resource_type or "").lower()
+    return not resource or resource in _API_CHALLENGE_RESOURCE_TYPES
+
+
+def _status_is_http_success(status: Any) -> bool:
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    return 200 <= code < 300
+
+
 def _is_api_challenge_html_response(
     *,
     status: Any,
@@ -2276,8 +2289,7 @@ def _is_api_challenge_html_response(
         return False
     if code != 403:
         return False
-    resource = (resource_type or "").lower()
-    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+    if not _resource_type_is_api_challenge_candidate(resource_type):
         return False
     if not (url or "").startswith("http"):
         return False
@@ -3444,50 +3456,83 @@ class BrowserNetworkRecorder:
                             task_id=self.task_id,
                             browser_generation=generation,
                         )
+            entry_url = str(entry.get("url") or "")
+            entry_resource_type = str(entry.get("resource_type") or "")
+            entry_mime_type = str(entry.get("mime_type") or "")
             if (
                 generation == current_generation
                 and generation not in rejected_generations
                 and _is_api_challenge_html_response(
                     status=entry.get("status"),
-                    url=str(entry.get("url") or ""),
-                    resource_type=str(entry.get("resource_type") or ""),
-                    mime_type=str(entry.get("mime_type") or ""),
+                    url=entry_url,
+                    resource_type=entry_resource_type,
+                    mime_type=entry_mime_type,
                     body_bytes=body_bytes,
                     document_url=entry.get("document_url"),
                 )
             ):
-                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
-                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
-                    logger.warning(
-                        "API challenge HTML provider-exit ignored: cap reached",
+                if self._same_origin_api_succeeded_after(
+                    entry_url,
+                    entry.get("response_ts_ms"),
+                ):
+                    # Delayed body capture of an earlier soft-block must not
+                    # rotate the browser after the same-origin API already
+                    # succeeded (AMC createOrder retry → live checkout).
+                    logger.info(
+                        "API challenge HTML provider-exit ignored: superseded by later same-origin success",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=generation,
-                        url=_redact_url_query(str(entry.get("url") or "")),
-                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
-                    )
-                else:
-                    rejected_generations.add(generation)
-                    self._rejected_network_generations = rejected_generations
-                    self._api_challenge_provider_exits = api_exits + 1
-                    rejections = getattr(self, "_provider_exit_rejections", [])
-                    rejections.append(
-                        {
-                            "reason": _API_CHALLENGE_HTML_REASON,
-                            "url": _redact_url_query(str(entry.get("url") or "")),
-                            "browser_generation": generation,
-                            "status": entry.get("status"),
-                        }
-                    )
-                    self._provider_exit_rejections = rejections
-                    logger.warning(
-                        "Browser provider exit rejected: API returned challenge HTML",
-                        agent_id=self.agent_id,
-                        task_id=self.task_id,
-                        browser_generation=generation,
-                        url=_redact_url_query(str(entry.get("url") or "")),
+                        url=_redact_url_query(entry_url),
                         status=entry.get("status"),
                     )
+                else:
+                    api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                    if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                        logger.warning(
+                            "API challenge HTML provider-exit ignored: cap reached",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                            url=_redact_url_query(entry_url),
+                            cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                        )
+                    else:
+                        rejected_generations.add(generation)
+                        self._rejected_network_generations = rejected_generations
+                        self._api_challenge_provider_exits = api_exits + 1
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _API_CHALLENGE_HTML_REASON,
+                                "url": _redact_url_query(entry_url),
+                                "browser_generation": generation,
+                                "status": entry.get("status"),
+                                "response_ts_ms": entry.get("response_ts_ms"),
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit rejected: API returned challenge HTML",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                            url=_redact_url_query(entry_url),
+                            status=entry.get("status"),
+                        )
+            elif (
+                _status_is_http_success(entry.get("status"))
+                and _resource_type_is_api_challenge_candidate(entry_resource_type)
+                and not _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=entry_url,
+                    resource_type=entry_resource_type,
+                    mime_type=entry_mime_type,
+                    body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
+                )
+            ):
+                self._clear_api_challenge_rejections_for_origin(entry_url)
 
             entry.update(
                 {
@@ -3532,12 +3577,105 @@ class BrowserNetworkRecorder:
                 error=str(exc),
             )
 
-    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
-        """Consume one explicit rejection verdict for the active browser exit."""
-        rejections = getattr(self, "_provider_exit_rejections", [])
+    def _same_origin_api_succeeded_after(
+        self,
+        url: str,
+        challenge_response_ts_ms: Any,
+    ) -> bool:
+        """True when a later same-origin XHR/fetch/document already returned 2xx."""
+        try:
+            challenge_ts = int(challenge_response_ts_ms) if challenge_response_ts_ms is not None else None
+        except (TypeError, ValueError):
+            challenge_ts = None
+        for other in (getattr(self, "entries", None) or {}).values():
+            if not isinstance(other, Mapping):
+                continue
+            other_url = str(other.get("url") or "")
+            if not other_url or not _same_origin(other_url, url):
+                continue
+            if not _resource_type_is_api_challenge_candidate(str(other.get("resource_type") or "")):
+                continue
+            if not _status_is_http_success(other.get("status")):
+                continue
+            other_ts = other.get("response_ts_ms")
+            if challenge_ts is not None and other_ts is not None:
+                try:
+                    if int(other_ts) <= challenge_ts:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            return True
+        return False
+
+    def _clear_api_challenge_rejections_for_origin(self, url: str) -> None:
+        """Drop pending API-challenge HTML exits once same-origin API traffic succeeds."""
+        rejections = list(getattr(self, "_provider_exit_rejections", []) or [])
         if not rejections:
-            return None
-        return rejections.pop(0)
+            return
+        kept: List[Dict[str, Any]] = []
+        cleared_generations: set[int] = set()
+        for rejection in rejections:
+            if not isinstance(rejection, Mapping):
+                continue
+            if str(rejection.get("reason") or "") != _API_CHALLENGE_HTML_REASON:
+                kept.append(dict(rejection))
+                continue
+            rejection_url = str(rejection.get("url") or "")
+            if rejection_url and _same_origin(rejection_url, url):
+                with contextlib.suppress(TypeError, ValueError):
+                    cleared_generations.add(int(rejection.get("browser_generation")))
+                continue
+            kept.append(dict(rejection))
+        if len(kept) == len(rejections):
+            return
+        self._provider_exit_rejections = kept
+        if cleared_generations:
+            rejected_generations = set(getattr(self, "_rejected_network_generations", set()) or set())
+            self._rejected_network_generations = rejected_generations - cleared_generations
+        logger.info(
+            "Cleared superseded API challenge HTML provider-exit rejection(s)",
+            agent_id=getattr(self, "agent_id", None),
+            task_id=getattr(self, "task_id", None),
+            url=_redact_url_query(url),
+            cleared=len(rejections) - len(kept),
+        )
+
+    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
+        """Consume one explicit rejection verdict for the active browser exit.
+
+        API-challenge HTML exits that were already superseded by a later
+        same-origin 2xx are dropped here too — the success clear can race the
+        next browser-loop ``pop`` after a soft-block retries cleanly.
+        """
+        rejections = getattr(self, "_provider_exit_rejections", [])
+        while rejections:
+            rejection = rejections.pop(0)
+            if (
+                isinstance(rejection, Mapping)
+                and str(rejection.get("reason") or "") == _API_CHALLENGE_HTML_REASON
+                and self._same_origin_api_succeeded_after(
+                    str(rejection.get("url") or ""),
+                    rejection.get("response_ts_ms"),
+                )
+            ):
+                with contextlib.suppress(TypeError, ValueError):
+                    generation = int(rejection.get("browser_generation"))
+                    rejected_generations = set(
+                        getattr(self, "_rejected_network_generations", set()) or set()
+                    )
+                    rejected_generations.discard(generation)
+                    self._rejected_network_generations = rejected_generations
+                logger.info(
+                    "Dropped superseded API challenge HTML provider-exit on pop",
+                    agent_id=getattr(self, "agent_id", None),
+                    task_id=getattr(self, "task_id", None),
+                    url=_redact_url_query(str(rejection.get("url") or "")),
+                )
+                continue
+            self._provider_exit_rejections = rejections
+            return rejection
+        self._provider_exit_rejections = rejections
+        return None
 
     def query_requests(  # noqa: C901
         self,

@@ -10031,6 +10031,227 @@ def test_network_recorder_redirect_location_survives_header_casing():
     assert rows[0]["redirects"][0]["location"] == "https://shop.test/2fa"
     assert isinstance(recorder, BrowserNetworkRecorder)
 
+async def test_api_challenge_html_triggers_provider_exit_rejection():
+    """403 challenge HTML on same-origin XHR must rotate exit (cookie GET probes miss it)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+        _is_api_challenge_html_response,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=200,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="image",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 100,
+        }
+    }
+
+    class _FakeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": _API_CHALLENGE_HTML_REASON,
+        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        "browser_generation": 1,
+        "status": 403,
+        "response_ts_ms": 100,
+    }
+
+
+async def test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success():
+    """AMC movie-page CF 403 document must not rotate after the page loads 200.
+
+    browser-event-ticket reached Confirm Purchase, opened digger-79125 for receipt
+    metadata, then a same-origin document/fetch 403 challenge-HTML body capture
+    queued provider-exit-recovery and destroyed the checkout tab / reservation
+    before request_payment_card. graph.amctheatres.com is cross-origin to www and
+    is intentionally excluded; the live failure was www document/fetch 403.
+    """
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Attention Required! "
+        b"<div id='cf-chl-widget'>Just a moment...</div>"
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    success_html = (
+        b"<!DOCTYPE html><html><body><h1>Digger movie showtimes at an AMC Theatre</h1>"
+        b"<p>Get Tickets</p></body></html>"
+    )
+    movie_url = "https://www.amctheatres.com/movies/digger-79125"
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    # Later success already recorded (page recovered after brief CF 403).
+    recorder.entries = {
+        "1:r-challenge": {
+            "browser_generation": 1,
+            "url": movie_url,
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 1000,
+            "document_url": movie_url,
+        },
+        "1:r-success": {
+            "browser_generation": 1,
+            "url": movie_url,
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 2500,
+            "document_url": movie_url,
+        },
+    }
+
+    class _ChallengeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._provider_exit_rejections == []
+
+    # Inverse race: challenge body lands first, then success clears / pop drops it.
+    recorder._network_generation = 2
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder.entries = {
+        "2:r-challenge": {
+            "browser_generation": 2,
+            "url": movie_url,
+            "resource_type": "Document",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 1000,
+            "document_url": movie_url,
+        }
+    }
+    await recorder._fetch_response_body("2:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    assert recorder._provider_exit_rejections
+    assert recorder._provider_exit_rejections[0]["reason"] == _API_CHALLENGE_HTML_REASON
+    recorder.entries["2:r-success"] = {
+        "browser_generation": 2,
+        "url": movie_url,
+        "resource_type": "document",
+        "mime_type": "text/html",
+        "status": 200,
+        "response_ts_ms": 2500,
+        "document_url": movie_url,
+    }
+
+    class _SuccessCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": success_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("2:r-success", "r-success", "cdp-1", _SuccessCdp())
+    assert recorder.pop_provider_exit_rejection() is None
+    assert 2 not in recorder._rejected_network_generations
+
+    # Pop-time race: queued exit still present, success only in entries table.
+    recorder._network_generation = 3
+    recorder._rejected_network_generations = {3}
+    recorder._api_challenge_provider_exits = 0
+    recorder._provider_exit_rejections = [
+        {
+            "reason": _API_CHALLENGE_HTML_REASON,
+            "url": movie_url,
+            "browser_generation": 3,
+            "status": 403,
+            "response_ts_ms": 1000,
+        }
+    ]
+    recorder.entries = {
+        "3:r-success": {
+            "browser_generation": 3,
+            "url": movie_url,
+            "resource_type": "fetch",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 2500,
+            "document_url": movie_url,
+        }
+    }
+    assert recorder.pop_provider_exit_rejection() is None
+    assert 3 not in recorder._rejected_network_generations
+
+
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
     """Finished and failed requests are terminal, not in flight. Repeated clears
     must not retain their IDs forever in the pre-clear ignore set."""
@@ -20895,6 +21116,14 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
+    )
+    await r.record_async(
+        "api_challenge_html_provider_exit",
+        test_api_challenge_html_triggers_provider_exit_rejection,
+    )
+    await r.record_async(
+        "stale_api_challenge_html_exit_superseded",
+        test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success,
     )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
