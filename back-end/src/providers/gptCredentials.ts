@@ -12,6 +12,15 @@ const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
 const GPT_API_KEY_COOLDOWN_MS = 30 * 60 * 1000;
 const GPT_API_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
 const GPT_API_KEY_COOLDOWN_NAME = 'gpt_api_key_cooldown';
+const GPT_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
+let cachedGptKeyCooldownUntilMs = 0;
+let lastGptKeyCooldownDbCheckMs = 0;
+
+/** Test-only: refresh the local cache without changing the persisted cooldown. */
+export function __clearGptApiKeyCooldownCache(): void {
+  cachedGptKeyCooldownUntilMs = 0;
+  lastGptKeyCooldownDbCheckMs = 0;
+}
 
 export interface GptCodeCredentialResult {
   accessToken: string;
@@ -272,6 +281,10 @@ export async function markGptIntegrationRateLimited(
 
 /** True when the shared funded GPT_API_KEY is currently backed off. */
 export async function isGptApiKeyOnCooldown(): Promise<boolean> {
+  const now = Date.now();
+  if (now < cachedGptKeyCooldownUntilMs) return true;
+  if (now - lastGptKeyCooldownDbCheckMs < GPT_API_KEY_COOLDOWN_DB_RECHECK_MS) return false;
+  lastGptKeyCooldownDbCheckMs = now;
   const row = await prisma.integration.findUnique({
     where: {
       userId_name_accountId: {
@@ -282,12 +295,14 @@ export async function isGptApiKeyOnCooldown(): Promise<boolean> {
     },
     select: { rateLimitedUntil: true },
   });
-  return row?.rateLimitedUntil !== null && (row?.rateLimitedUntil?.getTime() ?? 0) > Date.now();
+  cachedGptKeyCooldownUntilMs = row?.rateLimitedUntil?.getTime() ?? 0;
+  return now < cachedGptKeyCooldownUntilMs;
 }
 
 /** Back the shared funded GPT_API_KEY off after a provider quota response. */
 export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
   const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
+  cachedGptKeyCooldownUntilMs = until.getTime();
   await prisma.integration.upsert({
     where: {
       userId_name_accountId: {
@@ -307,6 +322,16 @@ export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
     update: { rateLimitedUntil: until, failureReason: reason },
   });
   log.warn('Funded GPT API key backed off', { reason, until: until.toISOString() });
+}
+
+export async function __resetGptApiKeyCooldown(): Promise<void> {
+  __clearGptApiKeyCooldownCache();
+  await prisma.integration.deleteMany({
+    where: {
+      userId: GPT_API_KEY_COOLDOWN_USER_ID,
+      name: GPT_API_KEY_COOLDOWN_NAME,
+    },
+  });
 }
 
 export async function markGptUserTokenRateLimited(

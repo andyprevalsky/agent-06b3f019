@@ -132,7 +132,7 @@ async function main(): Promise<void> {
         routeKey: 'agent-parity',
       };
       for await (const _chunk of foundryComplete(opts)) {
-        // Drain the stream so the HTTP request and parser finish.
+        void _chunk; // Drain the stream so the HTTP request and parser finish.
       }
       assert(captured);
       assert.deepEqual(
@@ -251,7 +251,7 @@ async function main(): Promise<void> {
           openAiKey: 'test-key',
           requestId: `credit-${code}`,
         })) {
-          /* no content expected */
+          void _;
         }
       }, RosePaymentRequiredError);
       assert.equal(calls, 1, `${code}: no retry`);
@@ -269,7 +269,7 @@ async function main(): Promise<void> {
         openAiKey: 'test-key',
         requestId: 'ordinary-rate-limit',
       })) {
-        /* no content expected */
+        void _;
       }
     }, RoseRateLimitError);
     process.stdout.write('GPT key: credit 429s cool; ordinary 429 stays transient\n');

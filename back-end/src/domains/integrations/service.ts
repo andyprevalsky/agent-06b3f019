@@ -10,6 +10,7 @@ import {
   getAdminPhone,
   isAnthropicApiKeyConfigured,
   isEmailProviderSlug,
+  isGptApiKeyConfigured,
   isOpenRouterApiKeyConfigured,
 } from './config';
 import {
@@ -790,7 +791,7 @@ export async function markComputeTokenRateLimited(
 
 export async function getGptApiKeyCooldown() {
   return {
-    configured: Boolean(process.env.GPT_API_KEY?.trim()),
+    configured: isGptApiKeyConfigured(),
     onCooldown: await isGptApiKeyOnCooldown(),
   };
 }
