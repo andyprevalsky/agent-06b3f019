@@ -1365,7 +1365,11 @@ FLY() { private_source_allows_provider_call "$@" && flyctl "$@"; }
 MACHINES_SNAPSHOT="$FLEET_DIR/machines.json"
 VOLUMES_SNAPSHOT="$FLEET_DIR/volumes.json"
 INVENTORY_INDEX="$FLEET_DIR/inventory"
-SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-5}"
+# The native app-wide list includes inline Machine files (~20 MB at width 10).
+# A five-second refresh cadence floods Fly with redundant transfer during
+# startup; readiness paths that need an immediate post-mutation view still use
+# the serialized explicit refresh below.
+SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-15}"
 SNAPSHOT_REFRESH_TIMEOUT="${CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS:-30}"
 INVENTORY_REFRESH_LOCK="$FLEET_DIR/machines-refresh.lock"
 INVENTORY_WAIT_FIFO="$FLEET_DIR/inventory-refresh.wait"
@@ -1586,7 +1590,7 @@ machines_snapshot_loop() {
         else
             # rate-limited/transient API failure: back off (bounded) and keep
             # serving the last good index rather than hammering the API.
-            backoff=$(( backoff < 30 ? backoff + SNAPSHOT_POLL : 30 ))
+            backoff=$(( backoff < 15 ? backoff + 5 : 15 ))
         fi
         sleep $(( SNAPSHOT_POLL + backoff + (RANDOM % 3) ))
     done
