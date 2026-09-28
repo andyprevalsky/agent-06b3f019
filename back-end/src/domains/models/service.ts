@@ -180,9 +180,10 @@ async function buildRoseModels(allModels: OpenRouterModel[]): Promise<SortedMode
   return [
     {
       id: 'rose-labs/rose-1-flash',
-      name: 'rose-1-flash',
+      name: 'rose-fast',
       provider: 'rose-labs',
-      description: 'Rose Labs flash model optimized for low latency (< 6s avg)',
+      description:
+        'Rose-fast: Cerebras Qwen 3.8 27B for execute and browser, OpenRouter Qwen then Gemini 3.8 Flash fallback. Planner stays Ultra.',
       contextLength: roseFastMetadata.contextLength,
       pricing: roseFastMetadata.pricing,
     },

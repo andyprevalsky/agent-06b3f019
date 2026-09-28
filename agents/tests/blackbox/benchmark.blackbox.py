@@ -11568,6 +11568,64 @@ async def test_create_agent_uses_goal_override_when_env_set():
     assert "model" not in bodies[0]
 
 
+async def test_create_agent_uses_model_override_when_env_set():
+    """Smoke a speed pool without editing task definitions."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class FakeResponse:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-123"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_env = os.environ.get("BENCHMARK_MODEL")
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        os.environ["BENCHMARK_MODEL"] = "rose-labs/rose-1-flash"
+
+        await bench.create_agent("http://localhost:55120", get_task_by_name("browser-agent"))
+        await bench.create_agent("http://localhost:55120", get_task_by_name("browser-biometrics-webdecoy"))
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        if original_env is None:
+            os.environ.pop("BENCHMARK_MODEL", None)
+        else:
+            os.environ["BENCHMARK_MODEL"] = original_env
+
+    assert bodies[0]["model"] == "rose-labs/rose-1-flash"
+    # Explicit operator override wins over a catalog pin so a speed-pool
+    # smoke can retarget every tagged task, including oss-pinned ones.
+    assert bodies[1]["model"] == "rose-labs/rose-1-flash"
+
+
 async def test_create_agent_sends_task_response_schema():
     """Lifecycle tasks can prevent an inferred verifier schema from contradicting the prompt."""
     import benchmarks.run_benchmark as bench
@@ -18080,6 +18138,7 @@ async def run_all_tests():
     )
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
+    await r.record_async("create_agent_model_override", test_create_agent_uses_model_override_when_env_set)
     await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)

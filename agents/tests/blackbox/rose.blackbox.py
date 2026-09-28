@@ -259,6 +259,14 @@ def test_pool_registry_lookup():
     assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
     assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
     assert flash.waterfall != ultra.waterfall
+    assert get_model_pricing("qwen-3.8-27b") == {
+        "input_cents_per_1k": 0.099,
+        "output_cents_per_1k": 0.149,
+    }
+    assert get_model_pricing("qwen/qwen3.8-27b") == {
+        "input_cents_per_1k": 0.015,
+        "output_cents_per_1k": 0.08,
+    }
 
 
 def test_every_waterfall_model_is_vision_capable():

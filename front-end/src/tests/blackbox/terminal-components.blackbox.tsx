@@ -180,7 +180,7 @@ describe('QueryInput (blackbox)', () => {
     availableModels: [
       {
         id: 'rose-labs/rose-1-flash',
-        name: 'rose-1-flash',
+        name: 'rose-fast',
         provider: 'rose-labs',
         description: 'fast',
       },
@@ -197,7 +197,7 @@ describe('QueryInput (blackbox)', () => {
     renderWithProviders(<QueryInput {...defaultProps} placeholder="Enter any goal" />);
 
     expect(screen.getByPlaceholderText('Enter any goal')).toBeInTheDocument();
-    expect(screen.getByText('rose-labs/rose-1-flash')).toBeInTheDocument();
+    expect(screen.getByText('rose-labs/rose-fast')).toBeInTheDocument();
   });
 
   it('typing updates value via onChange (controlled)', async () => {
@@ -356,12 +356,14 @@ describe('QueryInput (blackbox)', () => {
     );
 
     // Click the model chip button to open the popover
-    const chip = screen.getByText('rose-labs/rose-1-flash').closest('button')!;
+    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
     await user.click(chip);
 
     // Model picker shows both model options with their descriptions
     await waitFor(() => {
-      expect(screen.getByText('Fast and cost-effective for everyday tasks')).toBeInTheDocument();
+      expect(
+        screen.getByText('Cerebras Qwen 3.8 27B for execute and browser; planner stays Ultra'),
+      ).toBeInTheDocument();
     });
     expect(screen.getByText('Most capable for complex reasoning')).toBeInTheDocument();
   });
@@ -382,7 +384,7 @@ describe('QueryInput (blackbox)', () => {
       />,
     );
 
-    const chip = screen.getByText('rose-labs/rose-1-flash').closest('button')!;
+    const chip = screen.getByText('rose-labs/rose-fast').closest('button')!;
     await user.click(chip);
 
     await waitFor(() => {
@@ -428,8 +430,10 @@ describe('QueryInput (blackbox)', () => {
     const infoSvg = document.querySelector('svg path[d*="M13 16h-1v-4h-1"]');
     expect(infoSvg).toBeTruthy();
     const btn = (infoSvg as SVGElement)!.closest('button')!;
-    // Click toggles state — just assert it does not throw
     await user.click(btn);
+    expect(
+      screen.getByText(/Rose-fast runs execute and browser on Cerebras Qwen 3.8 27B/),
+    ).toBeInTheDocument();
   });
 
   it('drag over + drag leave cycle toggles the drop overlay class', async () => {

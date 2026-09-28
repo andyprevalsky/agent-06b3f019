@@ -105,7 +105,8 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'google/gemini-3.7-flash': openRouter(0.75, 3.75),
   'google/gemini-3.8-flash': openRouter(0.75, 3.75),
   'qwen/qwen3.8-27b': openRouter(0.15, 0.8),
-  'qwen-3.8-27b': uncached(0.15, 0.8),
+  // Cerebras direct hop. Official list 2026-09-25: $0.99 / $1.49 per million.
+  'qwen-3.8-27b': uncached(0.99, 1.49),
   'z-ai/glm-5.3-flash': openRouter(0.045, 0.14),
   'google/gemini-3.1-pro-preview': openRouter(2, 12),
   'moonshotai/kimi-k2.5': openRouter(0.57, 2.85),

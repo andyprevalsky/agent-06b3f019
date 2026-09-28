@@ -2319,7 +2319,10 @@ async def create_agent(
     # A task may pin its root agent to a specific Rose pool. Used when the
     # default pool's primary declines the task's prompt outright, which is a
     # model-policy outcome no retry can change.
-    if task.model:
+    model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
+    if model_override:
+        body["model"] = model_override
+    elif task.model:
         body["model"] = task.model
 
     if task.start_phase:

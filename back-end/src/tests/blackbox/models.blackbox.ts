@@ -247,6 +247,13 @@ async function testListModels_roseModelShape() {
     if (model.provider !== 'rose-labs')
       throw new Error(`${roseId} expected provider=rose-labs, got ${model.provider}`);
   }
+  const flash = body.models.find((m) => m.id === 'rose-labs/rose-1-flash');
+  if (!flash) throw new Error('rose-labs/rose-1-flash not found');
+  if (flash.name !== 'rose-fast')
+    throw new Error(`flash display name should be rose-fast, got ${flash.name}`);
+  if (!/cerebras/i.test(flash.description ?? '') || !/qwen/i.test(flash.description ?? '')) {
+    throw new Error(`flash description should mention Cerebras Qwen, got ${flash.description}`);
+  }
 }
 
 async function testListModels_roseModelsFirst() {

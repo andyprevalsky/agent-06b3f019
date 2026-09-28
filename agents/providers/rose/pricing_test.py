@@ -56,3 +56,10 @@ def test_pool_pricing_resolves():
     assert p is not None
     assert p["input_cents_per_1k"] > 0
     assert p["output_cents_per_1k"] > 0
+
+
+def test_cerebras_qwen_uses_list_price_not_openrouter():
+    cerebras = get_model_pricing("qwen-3.8-27b")
+    openrouter = get_model_pricing("qwen/qwen3.8-27b")
+    assert cerebras == {"input_cents_per_1k": 0.099, "output_cents_per_1k": 0.149}
+    assert openrouter == {"input_cents_per_1k": 0.015, "output_cents_per_1k": 0.08}
