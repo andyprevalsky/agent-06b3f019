@@ -151,6 +151,10 @@ from .visible_result_completion import (
     forced_visible_result_completion_action,
     should_force_visible_result_completion,
 )
+from .verifier_reject_circuit import (
+    next_identical_reject_streak,
+    should_soft_accept_identical_verifier_reject,
+)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
@@ -6675,6 +6679,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
+        identical_verifier_reject_fingerprint = ""
+        identical_verifier_reject_streak = 0
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         supervisor_recovery_count = 0
@@ -8656,6 +8662,49 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     v_reasoning = progress_result.get("reasoning", "")
                     if progress_result.get("structured_response") is not None:
                         latest_structured_response = progress_result["structured_response"]
+
+                    (
+                        identical_verifier_reject_fingerprint,
+                        identical_verifier_reject_streak,
+                    ) = next_identical_reject_streak(
+                        previous_fingerprint=identical_verifier_reject_fingerprint,
+                        previous_streak=identical_verifier_reject_streak,
+                        reasoning=v_reasoning,
+                        score=float(score or 0.0),
+                    )
+                    # Stuck 0.5 with a fully populated structured output is not
+                    # actionable "need more evidence" — soft-accept so the
+                    # browser agent completes instead of looping until hub pause
+                    # (browser-smoke 9f53aed4: identical H1-absent rejects ×4).
+                    if (
+                        float(score or 0.0) < 1.0
+                        and should_soft_accept_identical_verifier_reject(
+                            consecutive_identical=identical_verifier_reject_streak,
+                            structured_response=(
+                                progress_result.get("structured_response")
+                                or latest_structured_response
+                            ),
+                            response_schema=remote_session_schema,
+                        )
+                    ):
+                        logger.warning(
+                            "Soft-accepting browser attempt_completion after "
+                            f"{identical_verifier_reject_streak} identical "
+                            "verifier rejects with complete structured output",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            score=score,
+                        )
+                        score = 1.0
+                        v_reasoning = (
+                            "Identical verifier reject circuit: accepting "
+                            "completion with already-populated structured "
+                            f"output. Original score was "
+                            f"{progress_result.get('score', 0.0)}; "
+                            f"reasoning: {v_reasoning}"
+                        )
+                        identical_verifier_reject_fingerprint = ""
+                        identical_verifier_reject_streak = 0
 
                     await save_browser_action_message(
                         agent_id=agent_id,

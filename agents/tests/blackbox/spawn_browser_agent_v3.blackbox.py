@@ -520,6 +520,95 @@ def test_visible_result_completion_rewrites_post_submit_wait():
     assert "0.07" in forced["params"]["reasoning"]
 
 
+def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
+    """9f53aed4: identical 0.5 rejects with complete output must stop the loop.
+
+    Live example.com had no H1; verifier kept scoring 0.5 with the same
+    reasoning while already emitting main_heading + page_url. Soft-accept
+    after the streak so the browser agent completes instead of hub-pause.
+    """
+    from domains.spawn_browser_agent_v3.verifier_reject_circuit import (
+        next_identical_reject_streak,
+        should_soft_accept_identical_verifier_reject,
+    )
+
+    schema = {
+        "fields": [
+            {"name": "main_heading", "type": "str", "required": True},
+            {"name": "page_url", "type": "str", "required": True},
+        ]
+    }
+    output = {
+        "main_heading": "No H1 exists on the inspected page",
+        "page_url": "https://example.com/",
+    }
+    fingerprint = ""
+    streak = 0
+    reason = (
+        "The live-page checks found zero H1 elements; Example Domain is the "
+        "document title, not an H1."
+    )
+    for _ in range(3):
+        fingerprint, streak = next_identical_reject_streak(
+            previous_fingerprint=fingerprint,
+            previous_streak=streak,
+            reasoning=reason,
+            score=0.5,
+        )
+    assert streak == 3
+    assert should_soft_accept_identical_verifier_reject(
+        consecutive_identical=streak,
+        structured_response=output,
+        response_schema=schema,
+    )
+    assert not should_soft_accept_identical_verifier_reject(
+        consecutive_identical=2,
+        structured_response=output,
+        response_schema=schema,
+    )
+    assert not should_soft_accept_identical_verifier_reject(
+        consecutive_identical=3,
+        structured_response={"page_url": "https://example.com/"},
+        response_schema=schema,
+    )
+    # Different reason resets the streak.
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning="Need a screenshot of the cart total.",
+        score=0.5,
+    )
+    assert streak == 1
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning=reason,
+        score=1.0,
+    )
+    assert streak == 0
+
+
+def test_handler_wires_identical_verifier_reject_circuit():
+    """attempt_completion path must import and call the reject circuit helpers."""
+    import ast
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    tree = ast.parse(source)
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "domains.spawn_browser_agent_v3.verifier_reject_circuit":
+            imported.update(alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("verifier_reject_circuit"):
+            imported.update(alias.name for alias in node.names)
+    # Relative import inside the package
+    if "should_soft_accept_identical_verifier_reject" not in imported:
+        assert "from .verifier_reject_circuit import" in source
+        assert "should_soft_accept_identical_verifier_reject" in source
+        assert "next_identical_reject_streak" in source
+    assert "Soft-accepting browser attempt_completion after" in source
+
+
 def test_visible_result_completion_rewrites_post_submit_scroll():
     """b234cfa8 stated Risk Score 0.11 + bot verdict, then scrolled until 420s.
 
@@ -19888,6 +19977,14 @@ async def run_all_tests():
     r.record(
         "visible_result_completion_rewrites_post_submit_wait",
         test_visible_result_completion_rewrites_post_submit_wait,
+    )
+    r.record(
+        "identical_verifier_reject_circuit_soft_accepts",
+        test_identical_verifier_reject_circuit_soft_accepts_complete_output,
+    )
+    r.record(
+        "handler_wires_identical_verifier_reject_circuit",
+        test_handler_wires_identical_verifier_reject_circuit,
     )
     r.record(
         "visible_result_completion_rewrites_post_submit_scroll",

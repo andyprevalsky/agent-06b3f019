@@ -15907,7 +15907,7 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
                 "toolCallId": "browser-root",
                 "task_id": "browser-task",
                 "toolStatus": "FINISHED",
-                "structured_response": {"main_heading_text": "Example Domain"},
+                "structured_response": {"document_title": "Example Domain"},
             },
         },
     ]
@@ -15918,8 +15918,31 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
+def test_browser_smoke_prompt_targets_document_title_not_h1():
+    """Live example.com dropped its H1; smoke must ask for the stable <title>."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-smoke")
+    prompt = (task.prompt or "").lower()
+    assert "document title" in prompt or "<title>" in prompt
+    assert "main heading" not in prompt
+    assert "h1" not in prompt
+
+
+def test_cache_coverage_prompt_targets_document_title_not_h1():
+    """cache-coverage browser step must not require the removed example.com H1."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    prompt = (task.prompt or "").lower()
+    assert "document title" in prompt or "<title>" in prompt
+    assert "main heading" not in prompt
+    assert "browser_page_title" in prompt
+    assert "browser_heading_text" not in prompt
+
+
 def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
-    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    """cache-coverage's example.com title read is goto+evaluate; default min_steps=5 is wrong."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _agent_class_step_counts,
@@ -19063,6 +19086,14 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "browser_smoke_prompt_targets_document_title",
+        test_browser_smoke_prompt_targets_document_title_not_h1,
+    )
+    r.record(
+        "cache_coverage_prompt_targets_document_title",
+        test_cache_coverage_prompt_targets_document_title_not_h1,
     )
     r.record(
         "cache_coverage_two_step_browser_trajectory",
