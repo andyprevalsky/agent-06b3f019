@@ -660,6 +660,42 @@ def is_return_commit_url(url: str) -> bool:
     return any(pattern in path for pattern in RETURN_COMMIT_URL_PATH_PATTERNS)
 
 
+# Amazon self-service return dead-end copy. Agent 338f26c8 (2026-09-28
+# browser-amazon-return): after mis-selecting Barebells protein bars, Amazon
+# showed "Your return request needs to be reviewed. Please contact customer
+# service." The agent opened Contact Us, burned the remaining step budget,
+# never reached a return write_lock, and the root respawned a second browser
+# (exact count expected 1, got 2).
+AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS = (
+    "your return request needs to be reviewed",
+    "please contact customer service",
+)
+
+AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE = (
+    "Amazon self-service return is blocked for this item "
+    "(return request needs review / contact customer service). "
+    "Do not open Contact Us. Abandon this item and select the next "
+    "eligible non-excluded physical item, or report this exact blocker "
+    "if no other eligible item remains."
+)
+
+
+def detect_amazon_return_self_service_block(url: str, page_text: str) -> Optional[str]:
+    """Return a recovery note when Amazon blocks self-service return for an item.
+
+    Matches only on ``/spr/returns/`` pages so generic Help/Contact copy on
+    order-history does not fire.
+    """
+    if "/spr/returns/" not in (url or "").lower():
+        return None
+    text = (page_text or "").lower()
+    if not text:
+        return None
+    if all(marker in text for marker in AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS):
+        return AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    return None
+
+
 def is_return_button(element_text: str, url: str = "") -> bool:
     """Check if element text indicates a return/refund confirmation control.
 

@@ -13683,6 +13683,81 @@ def test_write_lock_return_continue_on_amazon_contract_url():
     assert is_return_button("Confirm your return", confirm)
 
 
+def test_amazon_return_self_service_block_detection_and_prompt():
+    """CS-review return wall must surface a recovery note; groceries exclude snacks.
+
+    RCA agent 338f26c8 (2026-09-28 browser-amazon-return): browser chose Barebells
+    protein bars (rationalized as non-grocery), hit Amazon's
+    "return request needs to be reviewed / contact customer service" wall,
+    opened Contact Us, burned max steps with no write_lock, then root spawned a
+    second browser (exact count expected 1, got 2). Zafit travel bottles were
+    already known eligible non-grocery.
+    """
+    from browser_tools.write_lock import (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE,
+        detect_amazon_return_self_service_block,
+    )
+    from providers.rose.browser_use import (
+        build_browser_use_system_prompt,
+        format_browser_state_for_tool,
+    )
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf?ref_=spr_itms_post"
+    )
+    cart = (
+        "https://www.amazon.com/spr/returns/cart"
+        "?itemId=jmshnrkrklsowmp&orderId=114-7740305-3601863"
+    )
+    blocked_copy = (
+        "How can we make it right?\n"
+        "Your return request needs to be reviewed. Please contact customer service."
+    )
+
+    assert detect_amazon_return_self_service_block(contract, blocked_copy) == (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    )
+    assert detect_amazon_return_self_service_block(cart, blocked_copy) == (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    )
+    assert detect_amazon_return_self_service_block(
+        "https://www.amazon.com/your-orders/orders", blocked_copy
+    ) is None
+    assert detect_amazon_return_self_service_block(contract, "Choose a refund method") is None
+    assert detect_amazon_return_self_service_block(contract, "") is None
+
+    formatted = format_browser_state_for_tool(
+        {
+            "url": contract,
+            "title": "Online Return Center",
+            "dom_tree": f"[1]<h1>{blocked_copy}</h1>\n[2]<a>Contact Us</a>",
+            "viewport": {"width": 1280, "height": 720},
+            "scroll_position": {"x": 0, "y": 0},
+        }
+    )
+    assert "Page Signal:" in formatted
+    assert "Do not open Contact Us" in formatted
+    assert "next eligible" in formatted.lower()
+
+    clean = format_browser_state_for_tool(
+        {
+            "url": cart,
+            "title": "Online Return Center",
+            "dom_tree": "[1]<h1>What's the reason for return?</h1>",
+            "viewport": {"width": 1280, "height": 720},
+            "scroll_position": {"x": 0, "y": 0},
+        }
+    )
+    assert "Page Signal:" not in clean
+
+    prompt = build_browser_use_system_prompt([])
+    assert "# Returns" in prompt
+    assert "protein bars" in prompt.lower()
+    assert "contact customer service" in prompt.lower()
+    assert "Do not open Contact Us" in prompt
+
+
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
     """Terms copy that quotes Buy Now must not trip the purchase write lock.
 
@@ -21478,6 +21553,10 @@ async def run_all_tests():
     r.record(
         "write_lock_return_continue_on_amazon_contract_url",
         test_write_lock_return_continue_on_amazon_contract_url,
+    )
+    r.record(
+        "amazon_return_self_service_block_detection_and_prompt",
+        test_amazon_return_self_service_block_detection_and_prompt,
     )
     r.record(
         "write_lock_purchase_button_excludes_terms_consent_prose",
