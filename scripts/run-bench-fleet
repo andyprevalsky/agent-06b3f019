@@ -1369,7 +1369,11 @@ SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-5}"
 SNAPSHOT_REFRESH_TIMEOUT="${CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS:-30}"
 INVENTORY_REFRESH_LOCK="$FLEET_DIR/machines-refresh.lock"
 INVENTORY_WAIT_FIFO="$FLEET_DIR/inventory-refresh.wait"
-INVENTORY_MAX_STALE_SECONDS="${CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 5 + 30))}"
+# A busy Fly API can stall several consecutive bounded list requests while a
+# width-10 fleet starts. Preserve the last successfully published inventory
+# through that burst; the live publisher PID/token fence and the finite expiry
+# still fail closed if the provider feed actually stops recovering.
+INVENTORY_MAX_STALE_SECONDS="${CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 20))}"
 INVENTORY_CLOCK_EPOCH="$(date +%s)"
 INVENTORY_CLOCK_SECONDS="$SECONDS"
 
@@ -1385,6 +1389,13 @@ inventory_refresh_diagnostic() {  # <phase> <native-status|pending> <private-out
         printf 'publisher_token=%s\n' "${SNAPSHOT_LOOP_TOKEN:-}"
     } > "$temporary" || { rm -f "$temporary"; return 1; }
     chmod 600 "$temporary" && mv "$temporary" "$directory/latest" || return 1
+    # Keep a compact, secret-free timeline. `latest` alone loses the reason for
+    # a provider outage when the next retry overwrites its failure status.
+    if [ "$status" != pending ]; then
+        printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$phase" "$status" "$((SECONDS - started))" \
+            >> "$directory/history" || return 1
+        chmod 600 "$directory/history" || return 1
+    fi
     case "$status" in pending|0) return 0 ;; esac
     private_tmp="$(mktemp "$directory/.failure.XXXXXX")" || return 1
     if [ -f "$raw" ] && [ ! -L "$raw" ]; then
