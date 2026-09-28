@@ -970,9 +970,20 @@ class BrowserHumanizer:
 
     async def _move_to_unlocked(self, x: int, y: int) -> None:
         """Internal: Move mouse along Bezier curve to target."""
-        # Skip if already at position
+        # Even when the cursor is already on the target, emit a short wander-in.
+        # FCaptcha scores a press with zero preceding mouseMoved samples as
+        # "Click injected with no pointer trajectory (teleport clicks)"
+        # (agent 7f8b9c24 vision_ai 0.7). A few-sample approach keeps the
+        # press inside a real trajectory without looking like a long re-aim.
         if self._last_pos == (x, y):
-            return
+            angle = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(14, 28)
+            origin = (
+                int(x - dist * math.cos(angle)),
+                int(y - dist * math.sin(angle)),
+            )
+            self._last_pos = origin
+            # Fall through into the normal path synthesizer from the offset.
 
         if self._mouse_synthesis_enabled:
             distance = math.sqrt((x - self._last_pos[0]) ** 2 + (y - self._last_pos[1]) ** 2)
