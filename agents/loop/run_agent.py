@@ -43,7 +43,12 @@ from helpers.llm import (
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
-from helpers.summarize import compaction_saved_ratio, compress_context, estimate_context_tokens
+from helpers.summarize import (
+    compaction_saved_ratio,
+    compress_context,
+    estimate_context_tokens,
+    hard_cap_tool_result_text,
+)
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from helpers.workflow_safe import safe_now as _safe_now
@@ -1832,7 +1837,7 @@ async def run_agent(
                             context.append(
                                 {
                                     "role": "TOOL",
-                                    "text": f"Error: {error}",
+                                    "text": hard_cap_tool_result_text(f"Error: {error}"),
                                     "timestamp": _safe_now().isoformat(),
                                     "metadata": {
                                         "toolCallId": tool_call_id,
@@ -1883,6 +1888,12 @@ async def run_agent(
                     else:
                         result_message = result.get("message", "") if isinstance(result, dict) else str(result)
 
+                    # Activity-mode agents (explore/browser leaves) append
+                    # locally. Bound the payload so one grep/email dump cannot
+                    # push the protected compaction tail past the overflow
+                    # trigger (prod a890a362: 228k→210k still above 167k).
+                    if not poll_messages:
+                        result_message = hard_cap_tool_result_text(result_message or "")
                     if is_error:
                         new_msg = {
                             "role": "TOOL",
