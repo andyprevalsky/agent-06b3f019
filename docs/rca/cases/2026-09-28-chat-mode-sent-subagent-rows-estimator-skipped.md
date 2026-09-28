@@ -79,8 +79,11 @@ routerTokens ~2M (`failsProvider: true`); after filter, 6 parent-scoped rows /
 Port `filter_internal_subagent_messages` to
 `back-end/src/providers/chat/contextScope.ts` and apply it in
 `loadChatModelMessages` before budget check / Router assembly. Parent-visible
-rows (goal, spawn chips, completion summary, user follow-ups) stay; explore
-internals drop. Auto-compact remains for parent-scoped overflow.
+rows stay — including spawn_agent FINISHED bodies that omit `subAgentId` on
+purpose (~28 explore summaries / ~47k tokens on this agent). Explore/browser
+work-stream rows tagged `subAgentId` drop. Cross-language contract fixtures in
+`shared/context-scope/fixtures.json` pin the predicate for Python + TS.
+Auto-compact remains for parent-scoped overflow.
 
 10k-agent behavior: O(messages on one agent) once per chat turn; no shared
 fan-in. Filtering shrinks chat payloads after long explore trees instead of

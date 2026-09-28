@@ -1,0 +1,118 @@
+{
+  "contract_version": 1,
+  "description": "Cross-language contract for is_internal_subagent_message / isInternalSubagentMessage. Agent loop and chat mode must agree: drop child work streams, keep parent-visible spawn results (task_complete / spawn FINISHED omit subAgentId on purpose).",
+  "cases": [
+    {
+      "name": "parent_spawn_finished_result_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "FINDINGS: three verified SF sublets under $3000/mo for Oct 18–Dec 10.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "spawn-root-1",
+          "agentType": "explore",
+          "title": "Research SF sublets"
+        }
+      }
+    },
+    {
+      "name": "parent_spawn_in_progress_chip_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "IN_PROGRESS",
+          "toolCallId": "spawn-root-1",
+          "title": "Explore SF sublets"
+        }
+      }
+    },
+    {
+      "name": "explore_web_fetch_with_subAgentId_dropped",
+      "is_internal": true,
+      "message": {
+        "role": "TOOL",
+        "text": "Fetched Airbnb listing body with amenities and prices.",
+        "metadata": {
+          "toolName": "web_fetch",
+          "toolStatus": "FINISHED",
+          "toolCallId": "explore-fetch-1",
+          "subAgentId": "29fda27f-f89e-5252-827f-39a36f197036",
+          "title": "Fetched listing"
+        }
+      }
+    },
+    {
+      "name": "explore_thinking_chip_with_subAgentId_dropped",
+      "is_internal": true,
+      "message": {
+        "role": "TOOL",
+        "text": "",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "nested-spawn",
+          "subAgentId": "explore-child-1",
+          "title": "Explore agent thinking"
+        }
+      }
+    },
+    {
+      "name": "foreach_child_suffixed_toolCallId_dropped",
+      "is_internal": true,
+      "message": {
+        "role": "TOOL",
+        "text": "Child tree step",
+        "metadata": {
+          "toolName": "web_search",
+          "toolStatus": "FINISHED",
+          "toolCallId": "foreach-base:3",
+          "subAgentIds": ["child-a", "child-b"]
+        }
+      }
+    },
+    {
+      "name": "general_purpose_aggregate_unsuffixed_toolCallId_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Aggregate spawn_general_purpose_agent result for the parent.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "spawn-gp-1",
+          "subAgentIds": ["gp-child-1"],
+          "agentType": "general_purpose"
+        }
+      }
+    },
+    {
+      "name": "task_complete_terminal_omits_subAgentId_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Agent paused by user",
+        "metadata": {
+          "toolName": "spawn_claude_code_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "call_parent_spawn",
+          "title": "Session Cancelled",
+          "action_type": "task_complete"
+        }
+      }
+    },
+    {
+      "name": "user_follow_up_kept",
+      "is_internal": false,
+      "message": {
+        "role": "USER",
+        "text": "that link doesn't even work",
+        "metadata": {}
+      }
+    }
+  ]
+}

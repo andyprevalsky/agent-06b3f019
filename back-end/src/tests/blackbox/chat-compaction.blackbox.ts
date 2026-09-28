@@ -27,12 +27,28 @@ import {
   buildProdChatSubagentLeakScenario,
   PROD_CHAT_SUBAGENT_LEAK_AGENT_ID,
   PROD_CHAT_SUBAGENT_LEAK_FOLLOW_UP,
+  PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER,
 } from '../fixtures/chat-subagent-leak-prod-3b5c2813';
 import { COMPACTION_SUMMARY_PREFIX } from '../../providers/chat/chatCompactionPrompts';
 import {
   filterInternalSubagentMessages,
   isInternalSubagentMessage,
 } from '../../providers/chat/contextScope';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+const contextScopeFixtures = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'shared/context-scope/fixtures.json'), 'utf8')
+) as {
+  contract_version: number;
+  cases: Array<{
+    name: string;
+    is_internal: boolean;
+    message: ChatMessage;
+  }>;
+};
 
 interface TestResult {
   name: string;
@@ -346,9 +362,39 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
-    'filterInternalSubagentMessages drops explore work streams and keeps parent rows',
+    'shared/context-scope fixtures agree with isInternalSubagentMessage',
     () => {
-      const messages = buildProdChatSubagentLeakScenario(20);
+      assertEqual(contextScopeFixtures.contract_version, 1, 'contract version');
+      if (contextScopeFixtures.cases.length < 6) {
+        throw new Error('shared context-scope fixtures missing cases');
+      }
+      for (const testCase of contextScopeFixtures.cases) {
+        assertEqual(
+          isInternalSubagentMessage(testCase.message),
+          testCase.is_internal,
+          testCase.name
+        );
+      }
+      const filtered = filterInternalSubagentMessages(
+        contextScopeFixtures.cases.map((testCase) => testCase.message)
+      );
+      const keptNames = new Set(
+        contextScopeFixtures.cases
+          .filter((testCase) => filtered.includes(testCase.message))
+          .map((testCase) => testCase.name)
+      );
+      assertEqual(keptNames.has('parent_spawn_finished_result_kept'), true, 'spawn result kept');
+      assertEqual(
+        keptNames.has('explore_web_fetch_with_subAgentId_dropped'),
+        false,
+        'explore fetch dropped'
+      );
+    },
+  ],
+  [
+    'filterInternalSubagentMessages drops explore work streams and keeps parent spawn results',
+    () => {
+      const messages = buildProdChatSubagentLeakScenario(20, 3);
       const filtered = filterInternalSubagentMessages(messages);
       assertEqual(
         filtered.some((message) => isInternalSubagentMessage(message)),
@@ -365,14 +411,34 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         true,
         'root completion summary preserved'
       );
+      const spawnFinished = filtered.filter(
+        (message) =>
+          message.metadata?.toolName === 'spawn_agent' &&
+          message.metadata?.toolStatus === 'FINISHED' &&
+          (message.text?.length ?? 0) > 0
+      );
+      if (spawnFinished.length < 3) {
+        throw new Error(
+          `parent spawn FINISHED results must survive filter, got ${spawnFinished.length}`
+        );
+      }
       assertEqual(
-        filtered.some((message) => message.metadata?.toolName === 'spawn_agent'),
+        spawnFinished.every((message) =>
+          message.text?.includes(PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER)
+        ),
         true,
-        'parent spawn chip preserved'
+        'parent spawn result bodies preserved'
       );
       if (filtered.length >= messages.length) {
         throw new Error(
           `filter must shrink explore flood (${messages.length} -> ${filtered.length})`
+        );
+      }
+      const keptChars = filtered.reduce((total, message) => total + (message.text?.length ?? 0), 0);
+      const keptTokens = Math.floor(keptChars / 4);
+      if (keptTokens < 5_000) {
+        throw new Error(
+          `filtered parent context must retain spawn summaries, got ~${keptTokens} tokens`
         );
       }
     },
@@ -408,7 +474,8 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       );
 
       if (ensureRawCount < 0) throw new Error('ensureWithinBudget was not invoked');
-      if (ensureRawCount > 20) {
+      // 12 spawn IN_PROGRESS + 12 spawn FINISHED + goal/assistant/completion/follow-up
+      if (ensureRawCount > 40) {
         throw new Error(
           `budget path must see parent-scoped history only, got ${ensureRawCount} rows`
         );
@@ -423,6 +490,13 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         true,
         'follow-up ask preserved for chat'
       );
+      assertEqual(
+        messages.some((message) =>
+          message.text?.includes(PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER)
+        ),
+        true,
+        'parent spawn result bodies reach chat'
+      );
 
       let routerChars = 0;
       for (const message of messages) {
@@ -430,6 +504,11 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         if (message.text) routerChars += message.text.length;
       }
       const routerTokensApprox = Math.floor(routerChars / 4);
+      if (routerTokensApprox < 5_000) {
+        throw new Error(
+          `filtered chat must keep spawn summaries (~tens of k tokens), got ${routerTokensApprox}`
+        );
+      }
       if (routerTokensApprox >= 131_000) {
         throw new Error(
           `filtered chat must fit Cerebras/OpenRouter 131k window (${routerTokensApprox})`

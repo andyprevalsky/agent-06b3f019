@@ -1,12 +1,11 @@
 /**
  * Keep chat LLM contexts scoped to the owning agent.
  *
- * Mirrors agents/helpers/context_scope.py. The agent loop strips
- * ``metadata.subAgentId`` rows before the model sees them; chat mode must do
- * the same. The compaction estimator also skips those rows, so sending them
- * to Router/Generator while estimating without them leaves post-completion
- * chat over the provider window with no auto-compact trigger
- * (prod agent 3b5c2813-c8bd-4ddb-a8bf-f7561c1f7125).
+ * Cross-language twin of agents/helpers/context_scope.py. Shared fixtures live
+ * in shared/context-scope/fixtures.json (loaded by back-end chat-compaction and
+ * agents context_scope blackboxes). Parent-visible spawn FINISHED / task_complete
+ * rows omit subAgentId on purpose so their result bodies survive this filter;
+ * explore/browser work-stream rows carry subAgentId and are dropped.
  */
 
 import type { ChatMessage } from './initialContext';

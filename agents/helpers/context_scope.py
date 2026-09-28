@@ -1,4 +1,8 @@
-"""Helpers for keeping agent LLM contexts scoped to the owning agent."""
+"""Helpers for keeping agent LLM contexts scoped to the owning agent.
+
+Cross-language twin of back-end/src/providers/chat/contextScope.ts. Shared
+classification fixtures: shared/context-scope/fixtures.json.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,8 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     because the parent receives one aggregate result under the original
     toolCallId. Direct ``spawn_general_purpose_agent`` results also use plural
     ``subAgentIds`` but keep the original, unsuffixed toolCallId, so they remain
-    visible to the parent context.
+    visible to the parent context. Parent spawn FINISHED / task_complete
+    terminals omit ``subAgentId`` so the result body stays in parent/chat context.
     """
     if not isinstance(message, dict):
         return False
