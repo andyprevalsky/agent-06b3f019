@@ -7242,8 +7242,16 @@ def test_passkeys_are_revalidated_after_start_navigation():
     assert navigated < revalidate < main_loop
 
 
-def test_passkeys_are_revalidated_before_each_usage_readback():
-    """Any navigation-capable action may reset WebAuthn before the next poll."""
+def test_passkey_usage_readback_does_not_rebuild_authenticator():
+    """Usage polling must be read-only — rebuilding mid-ceremony kills Amazon passkeys.
+
+    Agent f380ca3c (browser-amazon-return 2026-09-28): syncing before every
+    ``record_passkey_usage_once`` poll re-enabled WebAuthn ~3s after Sign-in-
+    with-Passkey clicks, invalidated the in-flight virtual authenticator, and
+    produced Amazon's "No passkeys available" dialog despite a healthy pre-click
+    seed. Pre-action ``ensure_browser_overlays_suppressed`` remains the arming
+    choke point; this helper only records counter advances.
+    """
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -7253,12 +7261,10 @@ def test_passkeys_are_revalidated_before_each_usage_readback():
     helper_end = source.index("async def sync_passkeys_onto_target(", helper_start)
     helper = source[helper_start:helper_end]
 
-    revalidate = helper.index(
-        'await sync_passkeys_onto_target(context="before passkey usage readback")'
-    )
-    readback = helper.index("await record_used_passkey_credentials(")
-
-    assert revalidate < readback
+    assert "await record_used_passkey_credentials(" in helper
+    assert "sync_passkeys_onto_target" not in helper
+    assert "inject_passkeys" not in helper
+    assert 'context="before passkey usage readback"' not in source
 
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():

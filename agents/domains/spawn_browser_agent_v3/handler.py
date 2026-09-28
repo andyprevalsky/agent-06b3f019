@@ -5734,11 +5734,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
             return
-        # Any browser action can navigate (links, forms, redirects, history),
-        # and Kernel may reset the target-scoped WebAuthn environment at that
-        # boundary. Revalidate before every counter poll so the next agent
-        # interaction always sees the held credentials on a live authenticator.
-        await sync_passkeys_onto_target(context="before passkey usage readback")
+        # Read-only. Do NOT re-seed / rebuild the virtual authenticator here.
+        # Agent f380ca3c (browser-amazon-return 2026-09-28): syncing before every
+        # usage poll ran ~3s after Sign-in-with-Passkey clicks, called
+        # WebAuthn.enable + addVirtualAuthenticator mid-ceremony, and surfaced
+        # Amazon's "No passkeys available for amazon.com on this device" dialog
+        # despite a healthy pre-click seed — burning ~5 minutes of the 665s cap
+        # before the return write_lock. Pre-action
+        # ensure_browser_overlays_suppressed() already re-arms before
+        # ceremony-capable clicks/typing; usage readback must not race that.
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,

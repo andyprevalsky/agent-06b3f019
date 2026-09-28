@@ -1188,11 +1188,40 @@ class DOMService:
                 )
                 if not environment_was_reset:
                     raise RuntimeError("Failed to verify the browser passkey authenticator") from e
-                logger.warning(
-                    "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
-                )
-                authenticator_id = None
-                seeded_ids.clear()
+                # A relying-party ceremony can transiently make getCredentials fail.
+                # Rebuilding immediately (WebAuthn.enable + new authenticator) kills
+                # that in-flight assertion — Amazon then shows "No passkeys available"
+                # (agent f380ca3c). Retry once before declaring a real reset.
+                await asyncio.sleep(0.15)
+                try:
+                    result = await self._send_cdp_command(
+                        cdp_session,
+                        "WebAuthn.getCredentials",
+                        {"authenticatorId": authenticator_id},
+                    )
+                    observed_ids = {
+                        credential.get("credentialId")
+                        for credential in result.get("credentials", []) or []
+                        if credential.get("credentialId")
+                    }
+                    if seeded_ids.issubset(observed_ids):
+                        logger.info(
+                            "🔑 [passkey] authenticator recovered after transient getCredentials failure; "
+                            "skipping rebuild"
+                        )
+                    else:
+                        logger.warning(
+                            "⚠️ [passkey] virtual authenticator lost seeded credentials after retry; "
+                            "rebuilding it"
+                        )
+                        authenticator_id = None
+                        seeded_ids.clear()
+                except Exception:
+                    logger.warning(
+                        "⚠️ [passkey] WebAuthn environment/authenticator was reset; rebuilding it"
+                    )
+                    authenticator_id = None
+                    seeded_ids.clear()
 
         if authenticator_id is None:
             try:

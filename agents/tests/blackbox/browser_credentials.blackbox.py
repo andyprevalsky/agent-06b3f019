@@ -577,6 +577,51 @@ async def test_passkey_injection_recovers_after_virtual_environment_loss() -> No
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
 
 
+async def test_passkey_sync_skips_rebuild_after_transient_getcredentials_failure() -> None:
+    """A flaky getCredentials during an in-flight ceremony must not rebuild.
+
+    Agent f380ca3c: rebuilding (WebAuthn.enable + new authenticator) mid-ceremony
+    produced Amazon's "No passkeys available" dialog. Retry once; if credentials
+    are still present, keep the live authenticator.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    fail_next_get_credentials = {"armed": False, "failures": 0}
+
+    async def flaky_then_ok(method: str, params: dict, target_id: str):
+        if method == "WebAuthn.getCredentials" and fail_next_get_credentials["armed"]:
+            fail_next_get_credentials["armed"] = False
+            fail_next_get_credentials["failures"] += 1
+            raise RuntimeError(
+                "Could not find a Virtual Authenticator matching the ID"
+            )
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(flaky_then_ok)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_before = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+
+    # Arm a single transient failure on the next health-check getCredentials.
+    fail_next_get_credentials["armed"] = True
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
+    assert fail_next_get_credentials["failures"] == 1
+    enable_after = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_after = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+    assert enable_after == enable_before, "transient failure must not re-enable WebAuthn"
+    assert authenticator_after == authenticator_before, (
+        "transient failure must not create a replacement authenticator"
+    )
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
 async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target() -> None:
     """The wedge from agent e36c8759: Chrome scopes both per target.
 
