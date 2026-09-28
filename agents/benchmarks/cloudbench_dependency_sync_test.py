@@ -1668,9 +1668,11 @@ async def fake_main_async(_args):
     async def pause(*_args, **_kwargs):
         return True
 
-    def exact_sessions(_url, aid):
+    def exact_sessions(_url, aid, *, require_deleted=False):
         assert aid == "root-agent"
-        return {{"root_user_id": "00000000-0000-4000-8000-000000000001", "tree_agent_ids": [aid], "browser_sessions": []}}
+        if require_deleted:
+            assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"
+        return {{"root_user_id": "00000000-0000-4000-8000-000000000001", "tree_agent_ids": [aid], "browser_sessions": [], "purchase_cleanup": []}}
 
     def close_sessions(_url, aid, _before, *, evidence):
         assert Path(os.environ["CLOUDBENCH_TEST_DELETE_MARKER"]).read_text() == "204\\n"
