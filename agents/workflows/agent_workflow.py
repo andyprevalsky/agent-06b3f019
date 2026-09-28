@@ -3566,9 +3566,10 @@ class AgentWorkflow:
         # Calculate cost from tokens using stored pricing (fractional cents)
         cost_cents = 0.0
         model_for_usage = _resolve_usage_model(actual_model, self.model)
-        if from_fast_cache:
+        zero_user_charge = model_for_usage.endswith(("-claude", "-gpt", "-foundry"))
+        if from_fast_cache or zero_user_charge:
             workflow.logger.info(
-                f"💰 $0 cost (fast cache replay): actual_model={model_for_usage}, "
+                f"💰 $0 user charge: actual_model={model_for_usage}, "
                 f"in={tokens_in}, out={tokens_out}, cache_read={cache_read_input_tokens}, call_site={call_site}"
             )
             try:
@@ -3588,7 +3589,7 @@ class AgentWorkflow:
                                 "model": model_for_usage,
                                 "cache_read_input_tokens": cache_read_input_tokens,
                                 "cache_creation_input_tokens": cache_creation_input_tokens,
-                                "from_fast_cache": True,
+                                "from_fast_cache": from_fast_cache,
                             }
                         ],
                         self._usage_checkpoint(),

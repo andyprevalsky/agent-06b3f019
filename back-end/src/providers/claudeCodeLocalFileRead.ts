@@ -19,15 +19,18 @@ function isCanonicalPathInsideRoot(root: string, candidate: string): boolean {
 }
 
 function resolveOpenDescriptorPath(descriptor: number): string {
-  const descriptorPath =
-    process.platform === 'linux' ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
-  try {
-    const resolved = realpathSync.native(descriptorPath);
-    if (resolved !== descriptorPath) return resolved;
-  } catch {
-    // Darwin's descriptor filesystem may not expose the vnode path to realpath.
+  if (process.platform === 'linux') {
+    const descriptorPath = `/proc/self/fd/${descriptor}`;
+    try {
+      const resolved = realpathSync.native(descriptorPath);
+      if (resolved !== descriptorPath) return resolved;
+    } catch {
+      // Fail closed below if procfs cannot resolve the opened descriptor.
+    }
   }
   if (process.platform === 'darwin') {
+    // realpath(/dev/fd/N) can return /dev/fd/<basename> on macOS, which is
+    // unrelated to the opened file and falsely fails the root containment check.
     const output = execFileSync(
       '/usr/sbin/lsof',
       ['-a', '-p', String(process.pid), '-d', String(descriptor), '-Fn'],

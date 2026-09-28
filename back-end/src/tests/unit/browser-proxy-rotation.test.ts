@@ -6,7 +6,10 @@
  */
 import assert from 'node:assert';
 import { rotateProxySchema } from '../../domains/browser-session/types';
-import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
+import {
+  kernelProxyCandidates,
+  selectReusableKernelProxy,
+} from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import {
   isSteelProvisioningOutage,
@@ -44,6 +47,29 @@ function testResidentialUnchanged(): void {
   assert.strictEqual(candidates[0].proxyKey, 'residential:US:CA:san_francisco');
   assert.strictEqual(candidates[0].type, 'residential');
   assert.strictEqual(candidates[0].source, 'kernel_residential_city');
+}
+
+function testRestoredProxyReuse(): void {
+  const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0]!;
+  const matching = {
+    id: 'ready-proxy',
+    name: candidate.name,
+    type: candidate.type,
+    status: 'available' as const,
+    config: { country: 'us', state: 'ca', city: 'palo_alto' },
+  };
+  assert.strictEqual(selectReusableKernelProxy([matching], candidate), 'ready-proxy');
+  assert.strictEqual(
+    selectReusableKernelProxy([{ ...matching, status: 'unavailable' }], candidate),
+    undefined
+  );
+  assert.strictEqual(
+    selectReusableKernelProxy(
+      [{ ...matching, config: { ...matching.config, city: 'berkeley' } }],
+      candidate
+    ),
+    undefined
+  );
 }
 
 function testRotationTierLadder(): void {
@@ -188,6 +214,7 @@ function testSteelOutageDetector(): void {
 function main(): void {
   testMobileCandidates();
   testResidentialUnchanged();
+  testRestoredProxyReuse();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();
