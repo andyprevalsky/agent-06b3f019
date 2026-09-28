@@ -9872,11 +9872,13 @@ async def _call_declared_llm_judge(
     verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
 
 The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
-when every criterion is directly grounded in tool/browser output or typed benchmark state. Otherwise score
-0.0 and explain the first missing or contradicted requirement. An attention request proves only its typed
-terminal gate; it does not prove item, price, date, address, quantity, or selection constraints. Unsupported
-assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
-eligible orders fail unless a criterion explicitly defines that state as success.
+when every criterion is directly grounded in tool/browser output, typed benchmark state, or fields that
+appear on a pending payment-approval / request_payment_card attention request (merchant, line items,
+date/time, seat, fees, totals, product URLs, ratings). Otherwise score 0.0 and explain the first missing
+or contradicted requirement. Generic non-payment attention requests (auth assistance, write-lock without
+a receipt, login blockers) prove only their typed terminal gate — not cart contents. Unsupported
+assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and
+unavailable eligible orders fail unless a criterion explicitly defines that state as success.
 
 Task requirement: {task_requirement}{manifest_block}
 Criteria:
