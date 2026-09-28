@@ -608,6 +608,36 @@ async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_targe
     assert "credential-amazon" in live[0], "the held passkey was not seeded onto the new target"
 
 
+async def test_passkey_inject_without_focused_target_retains_held_keys() -> None:
+    """Missing focus must not kill the browser agent during opportunistic re-seed.
+
+    Prod a890a362 Task Failed mid-goto with:
+      No focused browser target is available for passkey injection
+    after a successful navigation cleared agent_focus_target_id. The next
+    step's record_passkey_usage_once → inject_passkeys hard-raised and
+    aborted the activity. Overlay suppression already soft-fails the same
+    condition; passkey inject must retain held keys and re-arm when focus
+    returns (re-init all injected state, not kill the run).
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send, target_id="")
+    dom._session.agent_focus_target_id = None
+
+    seeded = await dom.inject_passkeys([AMAZON_PASSKEY])
+
+    assert seeded == 0
+    assert dom._held_passkeys_by_credential_id.get("credential-amazon") == AMAZON_PASSKEY
+    assert state.calls == [], "no CDP commands without a focused target"
+
+    # Focus returns → re-arm seeds the retained passkey onto the live target.
+    dom._session.agent_focus_target_id = "target-a"
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert "credential-amazon" in dom._passkey_seeded_by_target.get("target-a", set())
+
+
 async def test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site() -> None:
     """Almost every site is one we hold no passkey for; it still must not wedge.
 
@@ -722,6 +752,10 @@ async def run_all_tests():
     await runner.record_async(
         "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
         test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target,
+    )
+    await runner.record_async(
+        "passkey_inject_without_focused_target_retains_held_keys",
+        test_passkey_inject_without_focused_target_retains_held_keys,
     )
     await runner.record_async(
         "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",
