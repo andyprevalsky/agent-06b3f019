@@ -2493,7 +2493,10 @@ terminate_backend_group() {
         sleep 1
     done
     [ "$still_alive" = 0 ] || kill -KILL -- "-$pgid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
+    # A TERM-ignoring descendant may take another scheduler turn to disappear
+    # after group KILL on a loaded cloud host. Keep the exact group fence until
+    # it is gone; never start a replacement against a still-live backend.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         kill -0 -- "-$pgid" 2>/dev/null || { still_alive=0; break; }
         still_alive=1
         sleep 0.2
