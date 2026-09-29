@@ -2,17 +2,12 @@
 
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import { kernelProxyCandidates, resolveKernelProxyMode } from '../../providers/browser/kernelProxy';
-import { retryWithBackoff } from '../../providers/retry';
-import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
+import { steel } from '../../providers/steel/session';
 import {
   assert,
   assertKernelCityInventoryFallback,
   assertKernelTimeoutFallback,
-  type BrowserApiResponse,
   isRetryableKernelNavigationError,
-  isTransientKernelConnectionError,
-  navigateKernelPage,
-  retryBackendFetch,
   withProvider,
 } from './browser-provider.helpers';
 import {

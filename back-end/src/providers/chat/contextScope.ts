@@ -50,7 +50,8 @@ export function isInternalSubagentMessage(message: ChatMessage): boolean {
   if (metadata.forEachChild === true) return true;
 
   // Direct spawn terminals stamp agentType; historical for_each child rows did not.
-  if (metadata.agentType != null && metadata.agentType !== '') return false;
+  if (metadata.agentType !== null && metadata.agentType !== undefined && metadata.agentType !== '')
+    return false;
 
   const toolCallId = String(metadata.toolCallId ?? '');
   return hasHistoricalForEachChildSuffix(toolCallId, metadata.spawnGroupId);
