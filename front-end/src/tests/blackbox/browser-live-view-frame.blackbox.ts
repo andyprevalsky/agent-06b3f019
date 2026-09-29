@@ -21,7 +21,7 @@ import {
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
   visibleSteelStreamRect,
-} from '@/features/terminal-component-group/components/browser-status-bar/liveViewFrame';
+} from '@/features/terminal-component-group/components/browser-status-bar/liveViewDisplay';
 
 const STEEL_PLAYER =
   'https://connect.steel.dev/v1/sessions/ef622b64-21ae-49c3-862b-b615e4ba9e52/player?interactive=false';
