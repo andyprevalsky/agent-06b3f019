@@ -6374,10 +6374,29 @@ for candidate in run_dir.iterdir():
         raise ValueError("stale-owner output does not map one-to-one to registry")
     port_path = candidate / "status-proxy.port"
     if not regular_file(port_path):
-        raise ValueError("missing stale-owner status proxy mapping")
-    port_value = port_path.read_text(encoding="utf-8").strip()
-    if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
-        raise ValueError("invalid stale-owner status proxy port")
+        # A provider-rejected post-config start never reaches proxy attach.
+        # Admit this output into the exact recovery plan with no preferred
+        # local port; this is a mapping only, never a guest cleanup receipt.
+        start_log = candidate / "cloudbench-boot-start.log"
+        if (
+            not regular_file(start_log)
+            or start_log.stat().st_size > 65_536
+            or "could not start machine due to lack of capacity"
+            not in start_log.read_text(encoding="utf-8")
+            or any(
+                (candidate / name).exists() or (candidate / name).is_symlink()
+                for name in ("post-config-start.accepted", "cloudbench-run.json",
+                             "guest-shutdown.confirmed", "worker-runtime-evidence")
+            )
+            or not regular_file(candidate / "worker-clones.ids")
+            or (candidate / "worker-clones.ids").read_bytes()
+        ):
+            raise ValueError("missing stale-owner status proxy mapping")
+        port_value = "0"
+    else:
+        port_value = port_path.read_text(encoding="utf-8").strip()
+        if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
+            raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
 
 output_machine_by_path = {
@@ -7467,7 +7486,8 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 recovery_machine_states+=("$state")
                 recovery_guest_tokens+=("$guest_run_token")
                 guest_count=$((guest_count + 1))
-                if [ -z "$preferred_start" ] || [ "$preferred_port" -lt "$preferred_start" ]; then
+                if [ "$preferred_port" -ne 0 ] \
+                    && { [ -z "$preferred_start" ] || [ "$preferred_port" -lt "$preferred_start" ]; }; then
                     preferred_start="$preferred_port"
                 fi
                 ;;

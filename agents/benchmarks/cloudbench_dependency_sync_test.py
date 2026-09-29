@@ -22912,6 +22912,32 @@ def test_private_fleet_source_guest_recovery_plan_keeps_exact_mapping(tmp_path: 
     assert {str(p): p.read_bytes() for d in (registry, audit) for p in d.rglob("*") if p.is_file()} == before
 
 
+@pytest.mark.parametrize("invalid", [None, "accepted-start", "worker-clone", "different-error"])
+def test_capacity_rejected_guest_without_proxy_remains_mapped_for_exact_recovery(
+    tmp_path: Path, invalid: str | None
+) -> None:
+    registry, audit, _, expected = _private_source_guest_plan_fixture(tmp_path)
+    output = Path(expected[0].split("\t")[5])
+    (output / "status-proxy.port").unlink()
+    (output / "worker-clones.ids").write_text("" if invalid != "worker-clone" else "deadbeef000002\n")
+    if invalid == "accepted-start":
+        (output / "post-config-start.accepted").write_text("feedface000001\n")
+    if invalid != "different-error":
+        (output / "cloudbench-boot-start.log").write_text(
+            "Error: could not start machine due to lack of capacity\n"
+        )
+    else:
+        (output / "cloudbench-boot-start.log").write_text("Error: unauthorized\n")
+    plan = tmp_path / "plan"
+    result = _private_source_guest_plan_command(registry, audit, plan)
+    if invalid is None:
+        assert result.returncode == 0, result.stderr
+        assert plan.read_text().splitlines() == [expected[0].rsplit("\t", 1)[0] + "\t0"]
+    else:
+        assert result.returncode != 0
+        assert not plan.exists()
+
+
 @pytest.mark.parametrize("corrupt", [
     "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
     "registry-digest-missing", "audit-digest-missing", "both-digests-missing",
