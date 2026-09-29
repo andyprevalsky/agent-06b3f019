@@ -256,6 +256,16 @@ durable evidence with `python3 scripts/publish_evidence_links.py --run-json
 unchanged dependency manifests, pooled snapshot dependencies remain reusable;
 `cloudbench-fetch-ref.sh` logs Git fetch, checkout and reset stage durations
 so a slow cold-code bring-up can be separated from stack/worker startup.
+On the 2026-09-29 fresh-code width-ten run, Git fetch took 0–1 seconds and
+checkout 0–1 seconds per guest after the negotiation fix; check those stage
+lines before attributing a slow stack to Git. The worker autoscaler checks
+the primary's exact mounted volume size. A 20 GB pooled primary uses one
+reusable snapshot of a stopped 20 GB pool volume; a 40 GB fresh primary uses
+the warm snapshot. The first pool snapshot is created once, ahead of task
+start, and its exact ID is cached in the git-common
+`cloudbench-pools/<workspace>.ids.worker-snapshot.json` file. If Fly still
+reports that snapshot as `running`, wait for the same ID to complete; do not
+start another upload or resize every worker to 40 GB to work around it.
 
 For a consecutive full-catalog no-INFRA gate, run
 `scripts/run-bench stability-proof -k K --concurrency N --seed S`. It executes K
@@ -357,6 +367,13 @@ For a cancellation after guest start, exact-owner recovery must obtain guest
 shutdown acknowledgements and recapture the sealed runtime bundle over each
 machine-pinned status proxy before returning pool members; an interrupted local
 collector must never be mistaken for absent guest work.
+If a failed guest cannot seal runtime evidence, preserve its original bytes
+with `scripts/cloudbench-build-interrupted-pool-archive.py`, then run
+`scripts/run-bench-fleet --recover-stale-owner <exact-owner-token>`. A task
+that allocated no browser session may carry a `provider-zero-manifest` plus
+its exact zero-allocation query receipt; the forensic verifier checks those
+against the original run/backend bytes before releasing the owner. Such an
+archive is always zero proof credit, even when the benchmark itself evaluated.
 For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
 `CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
 nondefault machine uses its own git-common dependency/snapshot proof file, so
