@@ -3474,6 +3474,7 @@ class BrowserNetworkRecorder:
                 if self._same_origin_api_succeeded_after(
                     entry_url,
                     entry.get("response_ts_ms"),
+                    generation=generation,
                 ):
                     # Delayed body capture of an earlier soft-block must not
                     # rotate the browser after the same-origin API already
@@ -3585,6 +3586,7 @@ class BrowserNetworkRecorder:
         self,
         url: str,
         challenge_response_ts_ms: Any,
+        generation: int | None = None,
     ) -> bool:
         """True when a later same-origin XHR/fetch/document already returned 2xx."""
         try:
@@ -3593,6 +3595,8 @@ class BrowserNetworkRecorder:
             challenge_ts = None
         for other in (getattr(self, "entries", None) or {}).values():
             if not isinstance(other, Mapping):
+                continue
+            if generation is not None and int(other.get("browser_generation") or 0) != generation:
                 continue
             other_url = str(other.get("url") or "")
             if not other_url or not _same_origin(other_url, url):
@@ -3644,9 +3648,13 @@ class BrowserNetworkRecorder:
                     cleared_generations.add(int(rejection.get("browser_generation")))
                 continue
             kept.append(dict(rejection))
-        if len(kept) == len(rejections):
+        cleared = len(rejections) - len(kept)
+        if cleared <= 0:
             return
         self._provider_exit_rejections = kept
+        # Discarded challenges never became provider exits — free the cap slots.
+        api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+        self._api_challenge_provider_exits = max(0, api_exits - cleared)
         if cleared_generations:
             rejected_generations = set(getattr(self, "_rejected_network_generations", set()) or set())
             self._rejected_network_generations = rejected_generations - cleared_generations
@@ -3655,7 +3663,7 @@ class BrowserNetworkRecorder:
             agent_id=getattr(self, "agent_id", None),
             task_id=getattr(self, "task_id", None),
             url=_redact_url_query(url),
-            cleared=len(rejections) - len(kept),
+            cleared=cleared,
         )
 
     def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
@@ -3668,14 +3676,21 @@ class BrowserNetworkRecorder:
         rejections = getattr(self, "_provider_exit_rejections", [])
         while rejections:
             rejection = rejections.pop(0)
+            rejection_generation: int | None = None
+            if isinstance(rejection, Mapping):
+                with contextlib.suppress(TypeError, ValueError):
+                    rejection_generation = int(rejection.get("browser_generation"))
             if (
                 isinstance(rejection, Mapping)
                 and str(rejection.get("reason") or "") == _API_CHALLENGE_HTML_REASON
                 and self._same_origin_api_succeeded_after(
                     str(rejection.get("url") or ""),
                     rejection.get("response_ts_ms"),
+                    generation=rejection_generation,
                 )
             ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                self._api_challenge_provider_exits = max(0, api_exits - 1)
                 with contextlib.suppress(TypeError, ValueError):
                     generation = int(rejection.get("browser_generation"))
                     rejected_generations = set(
