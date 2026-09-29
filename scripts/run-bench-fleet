@@ -6407,6 +6407,11 @@ if worker_by_machine:
         "disposition",
     }
     for machine_id, (clone_name, volume_id) in machine_records.items():
+        if machine_id in pool_ids:
+            # Pool primaries were validated against their exact claim and
+            # audit above. They are sources for fresh autoscaler workers, not
+            # fresh clones with expected-fresh/by-machine-id entries.
+            continue
         expected = fields(
             audit / "expected-fresh" / clone_name,
             allowed={"clone_name", "source_machine_id"},
