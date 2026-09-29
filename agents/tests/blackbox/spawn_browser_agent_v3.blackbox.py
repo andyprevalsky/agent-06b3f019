@@ -7379,7 +7379,11 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     # The live loop's state observe (not the simulated path) must re-arm first.
     marker = "Step {iteration} - resolving page state"
     start = source.index(marker)
-    window = source[start : start + 800]
+    # Include the soft-timeout + Kernel VA-drop comment block that precedes the
+    # ensure/get_browser_state calls (comment growth previously broke an 800-char
+    # window while the call order stayed correct).
+    observe = source.index("observe_page_state = await", start)
+    window = source[start : observe + 120]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index(
         "get_browser_state("

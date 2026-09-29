@@ -7,6 +7,7 @@ import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { steel } from '../../providers/steel/session';
 import {
   assert,
