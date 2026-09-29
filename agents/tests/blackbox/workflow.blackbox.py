@@ -1890,6 +1890,9 @@ def test_card_summary_from_evidence_rejects_long_cached_search_envelope():
     ]
 
     assert is_ablated_completion_summary(cached_search)
+    assert not is_ablated_completion_summary(
+        "Fast Mode cache trajectory ended; prior tool evidence is sufficient."
+    )
     summary = card_summary_from_evidence(context, {"creator_name": "Brett Adcock"})
     assert not is_ablated_completion_summary(summary)
     assert "Brett Adcock" in summary

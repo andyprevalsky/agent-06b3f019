@@ -15,7 +15,6 @@ USAGE:
 """
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -79,62 +78,6 @@ ALIAS_REQUIRED_FIELDS = {
 }
 
 assert set(ALIAS_REQUIRED_FIELDS) == set(ALIAS_TYPE_OVERRIDES)
-
-
-_FAN_IN_SYNTHESIS_RE = re.compile(
-    r"(?i)\b("
-    r"consolidat\w*|merg\w*|synthes\w*|finaliz\w*|fan[- ]?in|"
-    r"produc(?:e|ing) the final|final (?:artifact|answer|report|ranking|candidate)|"
-    r"rank(?:ing)? (?:all|the)|deduplicat\w*"
-    r")\b"
-)
-_FAN_IN_DERIVATION_RE = re.compile(
-    r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,1000}\b(?:based on|from|using)\b"
-)
-_FAN_IN_ARTIFACT_RE = re.compile(
-    r"(?is)(?:"
-    r"\b(?:build|create|generate)\b.{0,200}\b(?:calendar|hooks?|openings?)\b|"
-    r"\bselect\b.{0,200}\bcreators?\b"
-    r")"
-)
-
-
-def is_fan_in_synthesis_goal(goal: str) -> bool:
-    """True when a DAG goal looks like merge/consolidate/finalize synthesis.
-
-    Callers that rewrite execution must also require fan-in evidence (non-empty
-    ``depends_on``). Besides explicit synthesis verbs, recognize artifact
-    derivations such as "create ... using ..." and "select ... based on ...";
-    these consume prior task results and should stay in the parent.
-    """
-    return bool(
-        _FAN_IN_SYNTHESIS_RE.search(goal or "")
-        or _FAN_IN_DERIVATION_RE.search(goal or "")
-        or _FAN_IN_ARTIFACT_RE.search(goal or "")
-    )
-
-
-def maybe_rewrite_recursive_gp_synthesis_task(task: "DAGTask") -> bool:
-    """Rewrite fan-in synthesis planned as general_purpose spawn into reasoning.
-
-    Planners sometimes schedule "consolidate / merge / finalize" as
-    spawn_general_purpose_agent, which forces a same-goal recursive spawn via
-    the param-populator contract. Those steps are pure synthesis and belong on
-    reasoning so the parent keeps ownership of the deliverable.
-
-    Requires both a synthesis-shaped goal AND positive fan-in evidence
-    (``depends_on`` non-empty) so keyword-only false positives do not strip
-    the GP ``output_schema`` contract from standalone work.
-    """
-    if task.tool_name != "spawn_general_purpose_agent":
-        return False
-    if not task.depends_on:
-        return False
-    if not is_fan_in_synthesis_goal(task.goal):
-        return False
-    task.tool_name = "reasoning"
-    return True
-
 
 
 class ParamPopulationContractError(ValueError):
@@ -801,10 +744,6 @@ async def _execute_single_task(
     # Name of the early IN_PROGRESS tool chip once emitted (non-reasoning path).
     # Tracked so a cancellation can terminalize the exact same live chip.
     early_tool_event_name: Optional[str] = None
-    if maybe_rewrite_recursive_gp_synthesis_task(task):
-        workflow.logger.info(
-            f"[DAG] Rewrote fan-in synthesis task {task.index} spawn_general_purpose_agent → reasoning"
-        )
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:

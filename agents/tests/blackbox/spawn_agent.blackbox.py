@@ -1184,11 +1184,10 @@ async def test_handler_sub_agent_delegates_without_verifier_arg():
     assert cfg["context_gates"] == {"network": False}
 
 
-async def test_handler_blocks_recursive_general_purpose_for_explore_only_child():
-    """Explore-only research children should not spawn another general-purpose agent."""
-    from tools.base import MessageStatus
-
-    from domains.spawn_agent.handler import SpawnAgentManager
+async def test_handler_does_not_block_general_purpose_from_explore_only_wording():
+    """Goal substrings must not rewrite or block the requested spawn type."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
 
     wf = _FakeWFInstance(
         depth=1,
@@ -1197,22 +1196,29 @@ async def test_handler_blocks_recursive_general_purpose_for_explore_only_child()
             "MUST NOT use browser agent, Claude Code, or code sandbox."
         ),
     )
-
-    events = await _collect(
-        SpawnAgentManager().execute_tool(
-            workflow_instance=wf,
-            tool_call={
-                "type": "general_purpose",
-                "goal": "Determine Tokyo population",
-                "output_schema": {"fields": []},
-            },
-            tool_call_id="tc",
-        )
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
     )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": "Determine Tokyo population",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
 
-    assert len(events) == 1
-    assert events[0].status == MessageStatus.ERROR
-    assert "explore-agent web research only" in events[0].message
+    assert fake_mgr.last_call is not None
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
 async def test_handler_fast_mode_spawns_cached_general_purpose_from_explore_only_child():
@@ -1863,11 +1869,10 @@ async def test_handler_allows_root_explicit_general_purpose_with_explore_researc
     assert fake_mgr.last_call["tool_call"]["sub_agent"]["goal"].startswith("Find current Tokyo population")
 
 
-async def test_handler_blocks_recursive_general_purpose_for_web_search_only_child():
-    """Generated explore/web-search-only child prompts should also be protected."""
-    from tools.base import MessageStatus
-
-    from domains.spawn_agent.handler import SpawnAgentManager
+async def test_handler_does_not_block_general_purpose_from_web_search_only_wording():
+    """Explore/web-search-only wording must not rewrite a requested general-purpose spawn."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
 
     wf = _FakeWFInstance(
         depth=1,
@@ -1877,22 +1882,29 @@ async def test_handler_blocks_recursive_general_purpose_for_web_search_only_chil
             "explore/web-search research capability available to you; do not use browser/code/sandbox."
         ),
     )
-
-    events = await _collect(
-        SpawnAgentManager().execute_tool(
-            workflow_instance=wf,
-            tool_call={
-                "type": "general_purpose",
-                "goal": "Find current Tokyo population",
-                "output_schema": {"fields": []},
-            },
-            tool_call_id="tc",
-        )
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
     )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": "Find current Tokyo population",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
 
-    assert len(events) == 1
-    assert events[0].status == MessageStatus.ERROR
-    assert "explore-agent web research only" in events[0].message
+    assert fake_mgr.last_call is not None
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
 async def test_handler_allows_explore_for_explore_only_child():
@@ -1932,11 +1944,10 @@ async def test_handler_allows_explore_for_explore_only_child():
     assert any(e.status == MessageStatus.FINISHED for e in events)
 
 
-async def test_handler_blocks_root_general_purpose_for_explore_subagent_only_task():
-    """Root tasks that ask for explore sub-agents only should not switch to general-purpose."""
-    from tools.base import MessageStatus
-
-    from domains.spawn_agent.handler import SpawnAgentManager
+async def test_handler_does_not_block_root_general_purpose_from_explore_subagent_wording():
+    """Root explore-sub-agent wording must not rewrite a requested general-purpose spawn."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
 
     wf = _FakeWFInstance(
         depth=0,
@@ -1946,23 +1957,30 @@ async def test_handler_blocks_root_general_purpose_for_explore_subagent_only_tas
             "Do NOT use Claude Code, a browser agent, or any code sandbox."
         ),
     )
-
-    events = await _collect(
-        SpawnAgentManager().execute_tool(
-            workflow_instance=wf,
-            tool_call={"type": "general_purpose", "goal": "Compare the cities", "output_schema": {"fields": []}},
-            tool_call_id="tc",
-        )
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
     )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"type": "general_purpose", "goal": "Compare the cities", "output_schema": {"fields": []}},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
 
-    assert len(events) == 1
-    assert events[0].status == MessageStatus.ERROR
-    assert "explore-agent web research only" in events[0].message
+    assert fake_mgr.last_call is not None
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
-async def test_handler_caps_root_explore_for_one_per_city_task():
-    """Do not keep spawning explore agents after satisfying a one-per-city instruction."""
-    from tools.base import MessageStatus
+async def test_handler_does_not_cap_explore_from_one_per_city_wording():
+    """City-count phrases must not cap further explore spawns."""
+    from tools.base import EventType, MessageStatus, ToolEvent
 
     from domains.spawn_agent.handler import SpawnAgentManager
 
@@ -1990,57 +2008,9 @@ async def test_handler_caps_root_explore_for_one_per_city_task():
         ),
         context=prior_context,
     )
-
-    events = await _collect(
-        SpawnAgentManager().execute_tool(
-            workflow_instance=wf,
-            tool_call={"type": "explore", "goal": "Research Austin again"},
-            tool_call_id="tc-extra",
-        )
-    )
-
-    assert len(events) == 1
-    assert events[0].status == MessageStatus.ERROR
-    assert "already has 3 explore agents" in events[0].message
-
-
-async def test_handler_reserves_final_explore_slot_across_same_turn_calls():
-    """Only one concurrent replacement may claim the final city slot."""
-    from tools.base import EventType, MessageStatus, ToolEvent
-
-    from domains.spawn_agent.handler import SpawnAgentManager
-
-    prior_context = []
-    for idx in range(2):
-        prior_context.append(
-            {
-                "role": "TOOL",
-                "metadata": {
-                    "toolCallId": f"tc-{idx}",
-                    "toolName": "spawn_agent",
-                    "toolStatus": "FINISHED",
-                    "agentType": "explore",
-                },
-            }
-        )
-    wf = _FakeWFInstance(
-        depth=0,
-        goal=(
-            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
-            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
-            "Do NOT use Claude Code, a browser agent, or any code sandbox."
-        ),
-        context=prior_context,
-    )
     manager = SpawnAgentManager()
 
     async def fake_spawn_explore(_workflow_instance, _tool_call, _tool_call_id):
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Exploring",
-            message="started",
-            status=MessageStatus.IN_PROGRESS,
-        )
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
             title="Explored",
@@ -2049,125 +2019,16 @@ async def test_handler_reserves_final_explore_slot_across_same_turn_calls():
         )
 
     manager._spawn_explore = fake_spawn_explore
-    calls = [
-        manager.execute_tool(wf, {"type": "explore", "goal": f"Research Denver {idx}"}, f"replacement-{idx}")
-        for idx in range(4)
-    ]
-
-    first_event = await anext(calls[0])
-    blocked_events = [await anext(call) for call in calls[1:]]
-    assert first_event.status == MessageStatus.IN_PROGRESS
-    assert all(event.status == MessageStatus.ERROR for event in blocked_events)
-    assert all("already has 3 explore agents" in event.message for event in blocked_events)
-
-    assert (await anext(calls[0])).status == MessageStatus.FINISHED
-    try:
-        await anext(calls[0])
-    except StopAsyncIteration:
-        pass
-    else:
-        raise AssertionError("explore generator should finish after releasing its reservation")
-    assert wf._explore_slot_reservations == set()
-
-
-async def test_handler_allows_one_corrective_explore_after_verifier_feedback():
-    """A failed completion opens one reserved remediation slot, not an unbounded retry fanout."""
-    from tools.base import EventType, MessageStatus, ToolEvent
-
-    from domains.spawn_agent.handler import SpawnAgentManager
-
-    prior_context = [
-        {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": f"tc-{idx}",
-                "toolName": "spawn_agent",
-                "toolStatus": "FINISHED",
-                "agentType": "explore",
-            },
-        }
-        for idx in range(3)
-    ]
-    prior_context.append(
-        {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": "completion-1",
-                "toolName": "attempt_completion",
-                "toolStatus": "FINISHED",
-                "title": "⚖️ Verifier rejected (50%) — continue task",
-                "verifierMessage": True,
-            },
-        }
-    )
-    wf = _FakeWFInstance(
-        depth=0,
-        goal=(
-            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
-            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
-            "Do NOT use Claude Code, a browser agent, or any code sandbox."
-        ),
-        context=prior_context,
-    )
-    manager = SpawnAgentManager()
-
-    async def fake_spawn_explore(_workflow_instance, _tool_call, _tool_call_id):
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Exploring",
-            message="started",
-            status=MessageStatus.IN_PROGRESS,
+    events = await _collect(
+        manager.execute_tool(
+            wf,
+            {"type": "explore", "goal": "Research Austin again"},
+            "tc-extra",
         )
+    )
 
-    manager._spawn_explore = fake_spawn_explore
-    first = manager.execute_tool(wf, {"type": "explore", "goal": "Fix Denver"}, "corrective-1")
-    second = manager.execute_tool(wf, {"type": "explore", "goal": "Fix Denver again"}, "corrective-2")
-
-    assert (await anext(first)).status == MessageStatus.IN_PROGRESS
-    blocked = await anext(second)
-    assert blocked.status == MessageStatus.ERROR
-    assert "already has 4 explore agents" in blocked.message
-    await first.aclose()
-    assert wf._explore_slot_reservations == set()
-
-
-def test_prior_explore_agent_count_ignores_failed_and_in_progress_children():
-    """Only FINISHED explore calls consume the one-per-city success budget."""
-    from types import SimpleNamespace
-
-    from domains.spawn_agent.handler import _prior_explore_agent_count
-
-    context = [
-        {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": "failed-child",
-                "toolName": "spawn_agent",
-                "toolStatus": "IN_PROGRESS",
-                "agentType": "explore",
-            },
-        },
-        {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": "failed-child",
-                "toolName": "spawn_agent",
-                "toolStatus": "ERROR",
-                "agentType": "explore",
-            },
-        },
-        {
-            "role": "TOOL",
-            "metadata": {
-                "toolCallId": "successful-child",
-                "toolName": "spawn_agent",
-                "toolStatus": "FINISHED",
-                "agentType": "explore",
-            },
-        },
-    ]
-
-    assert _prior_explore_agent_count(SimpleNamespace(context=context)) == 1
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
 async def test_handler_allows_general_purpose_when_explicitly_required():
@@ -2199,11 +2060,10 @@ async def test_handler_allows_general_purpose_when_explicitly_required():
     assert any(e.status == MessageStatus.FINISHED for e in events)
 
 
-async def test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose():
-    """Parent benchmark wording must not disable explore-only guard inside children."""
-    from tools.base import MessageStatus
-
-    from domains.spawn_agent.handler import SpawnAgentManager
+async def test_handler_does_not_block_child_general_purpose_from_parent_wording():
+    """Parent explore-only wording must not rewrite a requested child general-purpose spawn."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+    import domains.spawn_agent.handler as h
 
     wf = _FakeWFInstance(
         depth=1,
@@ -2213,22 +2073,29 @@ async def test_handler_blocks_child_general_purpose_even_when_parent_required_ge
             "Claude Code, or code sandbox."
         ),
     )
-
-    events = await _collect(
-        SpawnAgentManager().execute_tool(
-            workflow_instance=wf,
-            tool_call={
-                "type": "general_purpose",
-                "goal": "Find current Tokyo population using only explore-agent web research.",
-                "output_schema": {"fields": []},
-            },
-            tool_call_id="tc",
-        )
+    fake_mgr = _FakeDelegateManager(
+        [ToolEvent(type=EventType.POST_MESSAGE, title="Sub done", message="ok", status=MessageStatus.FINISHED)]
     )
+    original = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: fake_mgr
+    try:
+        events = await _collect(
+            h.SpawnAgentManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={
+                    "type": "general_purpose",
+                    "goal": "Find current Tokyo population using only explore-agent web research.",
+                    "output_schema": {"fields": []},
+                },
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        h.get_sub_agent_manager = original
 
-    assert len(events) == 1
-    assert events[0].status == MessageStatus.ERROR
-    assert "explore-agent web research only" in events[0].message
+    assert fake_mgr.last_call is not None
+    assert any(e.status == MessageStatus.FINISHED for e in events)
+    assert not any(e.status == MessageStatus.ERROR for e in events)
 
 
 async def test_handler_for_each_depth_exceeded_raises():
@@ -4010,10 +3877,6 @@ async def run_all_tests():
     r.record("resolve_phase_default", test_resolve_start_phase_default)
     r.record("resolve_phase_execute", test_resolve_start_phase_execute)
     r.record("resolve_phase_invalid", test_resolve_start_phase_invalid_defaults_plan)
-    r.record(
-        "handler_counts_only_finished_explore_children",
-        test_prior_explore_agent_count_ignores_failed_and_in_progress_children,
-    )
     # coerce_for_each_items
     r.record("coerce_items_list", test_coerce_for_each_items_list)
     r.record("coerce_items_empty", test_coerce_for_each_items_empty)
@@ -4061,8 +3924,8 @@ async def run_all_tests():
     await r.record_async("handler_code_delegates", test_handler_code_delegates)
     await r.record_async("handler_sub_agent_no_verifier_arg", test_handler_sub_agent_delegates_without_verifier_arg)
     await r.record_async(
-        "handler_blocks_recursive_general_purpose_for_explore_only_child",
-        test_handler_blocks_recursive_general_purpose_for_explore_only_child,
+        "handler_does_not_block_general_purpose_from_explore_only_wording",
+        test_handler_does_not_block_general_purpose_from_explore_only_wording,
     )
     await r.record_async(
         "handler_fast_mode_spawns_cached_general_purpose_from_explore_only_child",
@@ -4121,36 +3984,28 @@ async def run_all_tests():
         test_handler_allows_root_explicit_general_purpose_with_explore_research_children,
     )
     await r.record_async(
-        "handler_blocks_recursive_general_purpose_for_web_search_only_child",
-        test_handler_blocks_recursive_general_purpose_for_web_search_only_child,
+        "handler_does_not_block_general_purpose_from_web_search_only_wording",
+        test_handler_does_not_block_general_purpose_from_web_search_only_wording,
     )
     await r.record_async(
         "handler_allows_explore_for_explore_only_child",
         test_handler_allows_explore_for_explore_only_child,
     )
     await r.record_async(
-        "handler_blocks_root_general_purpose_for_explore_subagent_only_task",
-        test_handler_blocks_root_general_purpose_for_explore_subagent_only_task,
+        "handler_does_not_block_root_general_purpose_from_explore_subagent_wording",
+        test_handler_does_not_block_root_general_purpose_from_explore_subagent_wording,
     )
     await r.record_async(
-        "handler_caps_root_explore_for_one_per_city_task",
-        test_handler_caps_root_explore_for_one_per_city_task,
-    )
-    await r.record_async(
-        "handler_reserves_final_explore_slot_across_same_turn_calls",
-        test_handler_reserves_final_explore_slot_across_same_turn_calls,
-    )
-    await r.record_async(
-        "handler_allows_one_corrective_explore_after_verifier_feedback",
-        test_handler_allows_one_corrective_explore_after_verifier_feedback,
+        "handler_does_not_cap_explore_from_one_per_city_wording",
+        test_handler_does_not_cap_explore_from_one_per_city_wording,
     )
     await r.record_async(
         "handler_allows_general_purpose_when_explicitly_required",
         test_handler_allows_general_purpose_when_explicitly_required,
     )
     await r.record_async(
-        "handler_blocks_child_general_purpose_even_when_parent_required_general_purpose",
-        test_handler_blocks_child_general_purpose_even_when_parent_required_general_purpose,
+        "handler_does_not_block_child_general_purpose_from_parent_wording",
+        test_handler_does_not_block_child_general_purpose_from_parent_wording,
     )
     await r.record_async("handler_for_each_depth", test_handler_for_each_depth_exceeded_raises)
     await r.record_async("handler_for_each_no_items", test_handler_for_each_no_items_raises)

@@ -590,16 +590,11 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
 def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     from domains.spawn_agent.handler import (
         _activity_handle_done,
-        _explore_agent_capacity,
-        _explore_limit_error,
-        _explore_slot_reservations,
         _fm_explore_handles,
-        _has_failed_completion_feedback,
         _is_for_each_finalize_timeout,
         _is_oai_demo_for_each_tool,
         _oai_demo_child_result_failed,
         _oai_demo_first_level_gp_count,
-        _prior_explore_agent_count,
         _prior_oai_demo_for_each_count,
         _recover_oai_demo_for_each_timeout,
         prune_fast_mode_explores,
@@ -727,73 +722,6 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
         )
         == 2
     )
-
-    assert _prior_explore_agent_count(SimpleNamespace(context="x")) == 0
-    assert (
-        _prior_explore_agent_count(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "IN_PROGRESS",
-                            "toolCallId": "e0",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {"role": "TOOL", "metadata": {"toolName": "web_search"}},
-                ]
-            )
-        )
-        == 1
-    )
-
-    slots = _explore_slot_reservations(SimpleNamespace())
-    assert "x" not in slots
-    slots.add("x")
-    assert "x" in _explore_slot_reservations(SimpleNamespace(_explore_slot_reservations=slots))
-    assert "one explore" in _explore_limit_error(3)
-
-    assert _has_failed_completion_feedback(SimpleNamespace(context="nope")) is False
-    assert (
-        _has_failed_completion_feedback(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "text": "verifier rejected the answer",
-                        "metadata": {
-                            "toolName": "attempt_completion",
-                            "toolStatus": "FINISHED",
-                            "verifierMessage": "no",
-                            "title": "Verifier rejected",
-                        },
-                    }
-                ]
-            )
-        )
-        is True
-    )
-    assert _explore_agent_capacity(SimpleNamespace(context=[]), 2) == 2
 
     demo_wf = SimpleNamespace(
         goal=OAI_DEMO_ROOT_GOAL_PREFIX,
