@@ -118,7 +118,11 @@ boot held the synchronized slice barrier roughly eight minutes longer than
 its peers while its shared CPU showed sustained pressure. It now receives the
 existing 8GB/shared-CPU-4x primary shape for real execution, reusing a 20GB
 pool volume through the already verified dynamic resize path. The next slice
-will measure whether that removes at least five percent of full E2E time.
+showed the planner ready alongside peers, but `image-handling` then held nine
+ready stacks at the barrier with its worker not listening and CPU pressure
+reaching 84.59%. That attempt was canceled before task execution, with no
+acceptance credit. `image-handling` now receives the same resource-only large
+primary; its startup and cleanup still need live verification.
 
 At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or

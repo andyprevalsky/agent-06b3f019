@@ -8636,8 +8636,8 @@ bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
     assert result.returncode == 0, result.stderr
 
 
-def test_planner_primary_resizes_only_for_real_benchmark() -> None:
-    """CPU-bound planner boot can reuse a pool volume with a larger guest VM."""
+def test_cpu_bound_primary_resizes_only_for_real_benchmark() -> None:
+    """CPU-bound stack boots can reuse a pool volume with a larger guest VM."""
     helpers = _fleet_primary_shape_helpers(FLEET_SCRIPT.read_text())
     script = f"""set -eu
 CATALOG_BROWSER_REQUIRED_TASKS=()
@@ -8647,11 +8647,15 @@ FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
 CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
 {helpers}
-[ "$(primary_vm_size_for_bench planner-memory-blue-bottle-on)" = shared-cpu-4x ]
-[ "$(primary_vm_memory_for_bench planner-memory-blue-bottle-on)" = 8192 ]
-bench_uses_default_pool_shape planner-memory-blue-bottle-on
+for task in planner-memory-blue-bottle-on image-handling; do
+  [ "$(primary_vm_size_for_bench "$task")" = shared-cpu-4x ]
+  [ "$(primary_vm_memory_for_bench "$task")" = 8192 ]
+  bench_uses_default_pool_shape "$task"
+done
 INFRA_PROBE=1
-[ "$(primary_vm_size_for_bench planner-memory-blue-bottle-on)" = shared-cpu-2x ]
+for task in planner-memory-blue-bottle-on image-handling; do
+  [ "$(primary_vm_size_for_bench "$task")" = shared-cpu-2x ]
+done
 """
     result = subprocess.run(
         ["bash", "-c", script], text=True, capture_output=True, check=False,
