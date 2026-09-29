@@ -486,7 +486,7 @@ test('required credential table sync propagates write failures', async () => {
 
 // Source-structure invariants for seed-local sync modes (mode branching,
 // failure deferral, transient-failure retries) live in
-// seed-local.part2.blackbox.ts.
+// seed-local.part2.blackbox.ts / seed-local.part3.blackbox.ts.
 
 test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
   const databaseUrl = process.env.DATABASE_URL;

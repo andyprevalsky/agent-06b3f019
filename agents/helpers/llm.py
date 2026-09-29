@@ -6378,6 +6378,45 @@ async def call_llm_activity(
         raise
 
 
+async def _persist_mass_agent_root_title(
+    agent_id: str,
+    goal: str,
+    include_title: bool,
+    backend_url: str,
+    api_key: str,
+) -> None:
+    """Best-effort PATCH of the mass-agent root title after schema generation fails."""
+    from domains.spawn_agent.config import mass_agent_root_title
+
+    title = mass_agent_root_title(goal, include_title, None)
+    if not title:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.patch(
+                f"{backend_url}/api/agents/{agent_id}",
+                headers={
+                    **backend_api_headers(api_key),
+                    **workflow_generation_headers(),
+                },
+                json={"generated_title": title},
+            )
+        if not response.is_success:
+            logger.warning(
+                "Failed to persist mass-agent root title",
+                agent_id=agent_id,
+                status_code=response.status_code,
+            )
+            return
+        logger.info("Persisted mass-agent root title after schema generation miss", agent_id=agent_id)
+    except Exception as persist_error:
+        logger.warning(
+            "Failed to persist mass-agent root title",
+            agent_id=agent_id,
+            error=extract_error_message(persist_error),
+        )
+
+
 @activity.defn
 @traced("set_response_schema_activity")
 async def set_response_schema_activity(
@@ -6422,6 +6461,8 @@ async def set_response_schema_activity(
         logger.error("No user messages provided for schema generation", agent_id=agent_id)
         return None
 
+    from domains.spawn_agent.config import mass_agent_root_title
+
     _safe_heartbeat(
         "Generating response schema and title via Rose" if include_title else "Generating response schema via Rose"
     )
@@ -6445,23 +6486,37 @@ async def set_response_schema_activity(
         from providers.fast_cache import client as _fc_client
         from providers.fast_cache import normalize as _fc_norm
 
-        _fc_key = _fc_norm.content_key(
-            goal,
-            "response_schema",
-            {
-                "pool": "rose-1-flash",
-                "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
-                + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
-                "user": f"Goal: {goal}",
-                "response_model": (
-                    "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
-                ),
-                "temperature": 0.3,
-                "max_tokens": [2000, 4000],
-            },
+        # Content key includes the pool name. Dual-read rose-1-flash + legacy
+        # rose-1-lite so the warm July/Aug response_schema row still hits after
+        # the 2026-09-27 pool rename (otherwise generated_title never PATCHes and
+        # mass-agent T7 fails with "Root task title is missing").
+        _fc_material = {
+            "pool": "rose-1-flash",
+            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
+            + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
+            "user": f"Goal: {goal}",
+            "response_model": (
+                "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
+            ),
+            "temperature": 0.3,
+            "max_tokens": [2000, 4000],
+        }
+        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(
+            goal, "response_schema", _fc_material
         )
+        _fc_key = _fc_lookup_keys[0]
         if fast_mode_cache_enabled:
-            _fc_cached = await _fc_client.cache_get(_fc_key)
+            try:
+                _fc_cached, _ = await _fc_client.cache_get_first(_fc_lookup_keys)
+            except Exception as exc:
+                # Transport / get-first failure with no usable hit must fall
+                # through to live schema generation (not abort the activity).
+                logger.warning(
+                    "Fast-cache response_schema lookup failed; generating live",
+                    agent_id=agent_id,
+                    error=str(exc),
+                )
+                _fc_cached = None
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:
@@ -6494,6 +6549,7 @@ async def set_response_schema_activity(
                         _fc_norm.goal_hash(goal),
                         {"schema": schema, "title": title, "usage": usage},
                     )
+            title = mass_agent_root_title(goal, include_title, title)
             generate_elapsed = time.perf_counter() - generate_start
             logger.info(
                 f"[TIMING] Schema generation Rose call: {generate_elapsed * 1000:.1f}ms ({generate_elapsed:.2f}s)"
@@ -6564,11 +6620,13 @@ async def set_response_schema_activity(
             status_code=e.response.status_code,
             response_text=e.response.text[:500],
         )
+        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
         return None
     except ResponseSchemaPersistenceError:
         raise
     except Exception as e:
         logger.error("Failed to generate response schema", agent_id=agent_id, error=extract_error_message(e))
+        await _persist_mass_agent_root_title(agent_id, goal, include_title, backend_url, api_key)
         return None
 
 

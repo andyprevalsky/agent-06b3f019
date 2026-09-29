@@ -9,8 +9,7 @@ import {
   createClosedRouterActionDetector,
   type ClosedRouterAction,
 } from '../../providers/chat/routerJsonStream';
-import { poolForModel } from '../../providers/rose/pools';
-import { CEREBRAS_CHAT_MODEL } from '../../providers/rose/cerebrasRoute';
+import { getPool, poolForModel } from '../../providers/rose/pools';
 
 interface TestResult {
   name: string;
@@ -44,7 +43,7 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 
 const tests: Array<[string, () => Promise<void> | void]> = [
   [
-    'Ultra chat uses Flash for both synchronous phases',
+    'Ultra chat uses rose-fast via direct-cerebras hedge for both synchronous phases',
     () => {
       const requestedModel = 'rose-labs/rose-1-ultra';
       const selected = selectChatPhaseModels(requestedModel);
@@ -57,7 +56,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-flash', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'generator primary model');
+      assertEqual(getPool(generatorPool).cerebrasModel, 'qwen-3.8-27b', 'rose-fast Cerebras hop');
     },
   ],
   [
@@ -68,17 +67,19 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(selected.router, requestedModel, 'router model');
       assertEqual(selected.generator, requestedModel, 'generator model');
+      assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router hedge route');
+      assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator hedge route');
     },
   ],
   [
-    'dedicated chat router resolves through the pinned Cerebras model',
+    'dedicated chat router resolves through the rose-fast pool Cerebras model',
     () => {
       const selected = selectChatPhaseModels('rose-labs/rose-1-ultra');
       const poolName = poolForModel(selected.router);
 
       assertEqual(poolName, 'rose-1-flash', 'router pool');
       if (!poolName) throw new Error('router model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'router Cerebras model');
+      assertEqual(getPool(poolName).cerebrasModel, 'qwen-3.8-27b', 'router Cerebras model');
     },
   ],
   [

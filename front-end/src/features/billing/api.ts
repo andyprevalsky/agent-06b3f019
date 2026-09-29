@@ -18,7 +18,10 @@ export async function startSubscriptionCheckoutApi(returnUrl?: string): Promise<
     body: returnUrl ? JSON.stringify({ returnUrl }) : undefined,
   });
 
-  const payload = (await response.json().catch(() => null)) as { url?: string; error?: string } | null;
+  const payload = (await response.json().catch(() => null)) as {
+    url?: string;
+    error?: string;
+  } | null;
   if (!response.ok || !payload?.url) {
     throw new Error(payload?.error || 'Failed to start subscription checkout');
   }

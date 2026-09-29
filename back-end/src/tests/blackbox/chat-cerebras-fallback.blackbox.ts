@@ -195,13 +195,22 @@ async function runEmptyCerebrasStream(): Promise<void> {
   process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
 
   const openRouterModels: string[] = [];
+  let exclusiveModelAttempts = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url === OPENROUTER_API_URL) {
       const model = requestedModel(init);
       openRouterModels.push(model);
-      // Cerebras returns a clean, empty stream; the waterfall model serves content.
-      return sseResponse(model === OPENROUTER_CEREBRAS_MODEL ? EMPTY_SSE : FALLBACK_SSE);
+      // Exclusive chat and rose-1-flash waterfall[0] share the same OpenRouter
+      // id (qwen/qwen3.8-27b). The first attempt is the exclusive empty stream;
+      // a later same-model waterfall hop must fail closed so gemini (step 2)
+      // is reached — otherwise the empty stream is replayed and throws.
+      if (model === OPENROUTER_CEREBRAS_MODEL) {
+        exclusiveModelAttempts += 1;
+        if (exclusiveModelAttempts === 1) return sseResponse(EMPTY_SSE);
+        return new Response('cerebras upstream unavailable', { status: 503 });
+      }
+      return sseResponse(FALLBACK_SSE);
     }
     return originalFetch(input, init);
   }) as typeof fetch;

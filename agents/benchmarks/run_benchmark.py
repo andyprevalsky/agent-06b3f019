@@ -195,12 +195,17 @@ _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 #   and the agent burns the 420s cap retrying a rejected checkbox instead of
 #   completing. Isolated browser profiles protect cookie/DB state but not this
 #   CPU/LLM contention class — keep webdecoy exclusive even then.
+# - agent-payment-setup-resume: resets the shared-user AgentCard Integration to
+#   connect_required, then expects onboarding attention. A concurrent sibling's
+#   live-fixture overlay must not race that fixture (even after compute-token
+#   sync stopped rewriting agentcard rows).
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
     AMAZON_MX_TAMY_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
     BIOMETRICS_WEBDECOY_TASK_NAME,
+    "agent-payment-setup-resume",
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -9867,11 +9872,13 @@ async def _call_declared_llm_judge(
     verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
 
 The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
-when every criterion is directly grounded in tool/browser output or typed benchmark state. Otherwise score
-0.0 and explain the first missing or contradicted requirement. An attention request proves only its typed
-terminal gate; it does not prove item, price, date, address, quantity, or selection constraints. Unsupported
-assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
-eligible orders fail unless a criterion explicitly defines that state as success.
+when every criterion is directly grounded in tool/browser output, typed benchmark state, or fields that
+appear on a pending payment-approval / request_payment_card attention request (merchant, line items,
+date/time, seat, fees, totals, product URLs, ratings). Otherwise score 0.0 and explain the first missing
+or contradicted requirement. Generic non-payment attention requests (auth assistance, write-lock without
+a receipt, login blockers) prove only their typed terminal gate — not cart contents. Unsupported
+assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and
+unavailable eligible orders fail unless a criterion explicitly defines that state as success.
 
 Task requirement: {task_requirement}{manifest_block}
 Criteria:
@@ -10166,7 +10173,69 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         explicit_count = len(grouped_explicit.get(root, set()))
         leaf_count = len(grouped_leaf.get(root, set()))
         counts.setdefault(agent_class, {})[instance_id] = explicit_count if explicit_count else leaf_count
+
+    # Browser agents that die during session init (provider ReadTimeout before
+    # session_init / browser_session_metadata) leave a 0-step instance. When the
+    # root agent retries with a later spawn, counting the dead attempt as a
+    # min_steps subject fails isolation benches even though the successful
+    # browser did the work (webdecoy agent 2a421e78 / task 14184300). Keep the
+    # empty instance when it is the only browser evidence so min_steps still
+    # fails closed on "browser never started".
+    browser_counts = counts.get("browser")
+    if browser_counts:
+        session_reached_ids = _browser_session_reached_ids(messages)
+        session_reached_roots = {
+            find(("browser", instance_id))
+            for instance_id in session_reached_ids
+            if ("browser", instance_id) in parents
+        }
+        has_live_browser = any(
+            actual > 0 or find(("browser", instance_id)) in session_reached_roots
+            for instance_id, actual in browser_counts.items()
+        )
+        if has_live_browser:
+            for instance_id, actual in list(browser_counts.items()):
+                root = find(("browser", instance_id))
+                if actual > 0 or root in session_reached_roots:
+                    continue
+                browser_counts.pop(instance_id, None)
+            if not browser_counts:
+                counts.pop("browser", None)
+
     return counts
+
+
+def _browser_session_reached_ids(messages: list) -> set[str]:
+    """Ids for browser instances that published live session evidence."""
+    reached: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            has_session_meta = isinstance(candidate.get("browser_session_metadata"), dict)
+            session_ready = action_type == "session_init" and status == "FINISHED"
+            if not has_session_meta and not session_ready:
+                continue
+            for key in (
+                "task_id",
+                "taskId",
+                "subAgentId",
+                "sub_agent_id",
+                "toolCallId",
+                "tool_call_id",
+            ):
+                value = candidate.get(key)
+                if value:
+                    reached.add(str(value))
+    return reached
 
 
 def _validate_agent_class_min_steps(

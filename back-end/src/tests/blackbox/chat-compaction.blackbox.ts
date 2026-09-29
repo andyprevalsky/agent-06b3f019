@@ -23,7 +23,32 @@ import {
   PROD_CHAT_COMPACTION_CONTINUE,
   PROD_CHAT_COMPACTION_FOLLOW_UP,
 } from '../fixtures/chat-compaction-prod-3eb68a5c';
+import {
+  buildProdChatSubagentLeakScenario,
+  PROD_CHAT_SUBAGENT_LEAK_AGENT_ID,
+  PROD_CHAT_SUBAGENT_LEAK_FOLLOW_UP,
+  PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER,
+} from '../fixtures/chat-subagent-leak-prod-3b5c2813';
 import { COMPACTION_SUMMARY_PREFIX } from '../../providers/chat/chatCompactionPrompts';
+import {
+  filterInternalSubagentMessages,
+  isInternalSubagentMessage,
+} from '../../providers/chat/contextScope';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+const contextScopeFixtures = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'shared/context-scope/fixtures.json'), 'utf8')
+) as {
+  contract_version: number;
+  cases: Array<{
+    name: string;
+    is_internal: boolean;
+    message: ChatMessage;
+  }>;
+};
 
 interface TestResult {
   name: string;
@@ -291,6 +316,202 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         true,
         'follow-up ask preserved after compaction'
       );
+    },
+  ],
+  [
+    'prod agent 3b5c2813 explore subAgentId flood undercounts estimate vs router payload',
+    () => {
+      const messages = buildProdChatSubagentLeakScenario();
+      const estimated = estimateContextTokens(messages);
+      assertEqual(
+        shouldAutoCompactChat(messages),
+        false,
+        'estimator skips subAgentId rows so raw history must miss compact trigger'
+      );
+      if (estimated >= getAutoCompactThreshold()) {
+        throw new Error(
+          `fixture must undercount like prod (${estimated} >= ${getAutoCompactThreshold()})`
+        );
+      }
+
+      // Mirror routerLlm.ts: TOOL text is forwarded regardless of subAgentId.
+      let routerChars = 0;
+      let routerCount = 1;
+      for (const message of messages) {
+        if (message.role === 'TOOL') {
+          if (!message.text?.trim()) continue;
+          routerChars += message.text.length;
+          routerCount += 1;
+        } else if (message.role === 'USER' && message.text) {
+          routerChars += message.text.length;
+          routerCount += 1;
+        } else if (message.role === 'ASSISTANT') {
+          routerChars += message.text.length;
+          routerCount += 1;
+        }
+      }
+      const routerTokensApprox = Math.floor(routerChars / 4);
+      if (routerTokensApprox < 131_000) {
+        throw new Error(
+          `fixture must exceed Cerebras/OpenRouter 131k when subAgent rows are sent (${routerTokensApprox})`
+        );
+      }
+      if (routerCount < 500) {
+        throw new Error(`fixture should flood router like prod (~1866), got ${routerCount}`);
+      }
+    },
+  ],
+  [
+    'shared/context-scope fixtures agree with isInternalSubagentMessage',
+    () => {
+      assertEqual(contextScopeFixtures.contract_version, 1, 'contract version');
+      if (contextScopeFixtures.cases.length < 6) {
+        throw new Error('shared context-scope fixtures missing cases');
+      }
+      for (const testCase of contextScopeFixtures.cases) {
+        assertEqual(
+          isInternalSubagentMessage(testCase.message),
+          testCase.is_internal,
+          testCase.name
+        );
+      }
+      const filtered = filterInternalSubagentMessages(
+        contextScopeFixtures.cases.map((testCase) => testCase.message)
+      );
+      const keptNames = new Set(
+        contextScopeFixtures.cases
+          .filter((testCase) => filtered.includes(testCase.message))
+          .map((testCase) => testCase.name)
+      );
+      assertEqual(keptNames.has('parent_spawn_finished_result_kept'), true, 'spawn result kept');
+      assertEqual(
+        keptNames.has('explore_web_fetch_with_subAgentId_dropped'),
+        false,
+        'explore fetch dropped'
+      );
+    },
+  ],
+  [
+    'filterInternalSubagentMessages drops explore work streams and keeps parent spawn results',
+    () => {
+      const messages = buildProdChatSubagentLeakScenario(20, 3);
+      const filtered = filterInternalSubagentMessages(messages);
+      assertEqual(
+        filtered.some((message) => isInternalSubagentMessage(message)),
+        false,
+        'no internal subagent rows remain'
+      );
+      assertEqual(
+        filtered.some((message) => message.text === PROD_CHAT_SUBAGENT_LEAK_FOLLOW_UP),
+        true,
+        'follow-up ask preserved'
+      );
+      assertEqual(
+        filtered.some((message) => message.metadata?.toolName === 'completion_summary'),
+        true,
+        'root completion summary preserved'
+      );
+      const spawnFinished = filtered.filter(
+        (message) =>
+          message.metadata?.toolName === 'spawn_agent' &&
+          message.metadata?.toolStatus === 'FINISHED' &&
+          (message.text?.length ?? 0) > 0
+      );
+      if (spawnFinished.length < 3) {
+        throw new Error(
+          `parent spawn FINISHED results must survive filter, got ${spawnFinished.length}`
+        );
+      }
+      assertEqual(
+        spawnFinished.every((message) =>
+          message.text?.includes(PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER)
+        ),
+        true,
+        'parent spawn result bodies preserved'
+      );
+      if (filtered.length >= messages.length) {
+        throw new Error(
+          `filter must shrink explore flood (${messages.length} -> ${filtered.length})`
+        );
+      }
+      const keptChars = filtered.reduce((total, message) => total + (message.text?.length ?? 0), 0);
+      const keptTokens = Math.floor(keptChars / 4);
+      if (keptTokens < 5_000) {
+        throw new Error(
+          `filtered parent context must retain spawn summaries, got ~${keptTokens} tokens`
+        );
+      }
+    },
+  ],
+  [
+    'loadChatModelMessages strips subAgentId flood before budget/router (agent 3b5c2813)',
+    async () => {
+      const fixture = buildProdChatSubagentLeakScenario();
+      let ensureRawCount = -1;
+      const messages = await loadChatModelMessages(
+        {
+          agentId: PROD_CHAT_SUBAGENT_LEAK_AGENT_ID,
+          requestedModel: 'rose-labs/rose-1-ultra',
+        },
+        {
+          findMessages: async () =>
+            fixture.map((message) => ({
+              role: message.role,
+              text: message.text,
+              filePointer: message.filePointer ?? null,
+              metadata: message.metadata ?? null,
+            })),
+          ensureWithinBudget: async (params) => {
+            ensureRawCount = params.rawMessages.length;
+            if (params.rawMessages.some((message) => isInternalSubagentMessage(message))) {
+              throw new Error('subAgentId explore rows must be stripped before ensureWithinBudget');
+            }
+            return params.rawMessages;
+          },
+        }
+      );
+
+      if (ensureRawCount < 0) throw new Error('ensureWithinBudget was not invoked');
+      // 12 spawn IN_PROGRESS + 12 spawn FINISHED + goal/assistant/completion/follow-up
+      if (ensureRawCount > 40) {
+        throw new Error(
+          `budget path must see parent-scoped history only, got ${ensureRawCount} rows`
+        );
+      }
+      assertEqual(
+        messages.some((message) => isInternalSubagentMessage(message)),
+        false,
+        'router input must not include internal subagent rows'
+      );
+      assertEqual(
+        messages.some((message) => message.text === PROD_CHAT_SUBAGENT_LEAK_FOLLOW_UP),
+        true,
+        'follow-up ask preserved for chat'
+      );
+      assertEqual(
+        messages.some((message) =>
+          message.text?.includes(PROD_CHAT_SUBAGENT_LEAK_SPAWN_RESULT_MARKER)
+        ),
+        true,
+        'parent spawn result bodies reach chat'
+      );
+
+      let routerChars = 0;
+      for (const message of messages) {
+        if (message.role === 'TOOL' && !message.text?.trim()) continue;
+        if (message.text) routerChars += message.text.length;
+      }
+      const routerTokensApprox = Math.floor(routerChars / 4);
+      if (routerTokensApprox < 5_000) {
+        throw new Error(
+          `filtered chat must keep spawn summaries (~tens of k tokens), got ${routerTokensApprox}`
+        );
+      }
+      if (routerTokensApprox >= 131_000) {
+        throw new Error(
+          `filtered chat must fit Cerebras/OpenRouter 131k window (${routerTokensApprox})`
+        );
+      }
     },
   ],
 ];

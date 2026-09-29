@@ -18,10 +18,7 @@ import * as amplitude from '@amplitude/analytics-browser';
 
 import { useToast } from '@/hooks/use-toast';
 import { canUseFastMode, defaultsFastModeOn } from '@/lib/fastModeAccounts';
-import {
-  getFastModeSessionOverride,
-  setFastModeSessionOverride,
-} from '@/lib/fastModeSession';
+import { getFastModeSessionOverride, setFastModeSessionOverride } from '@/lib/fastModeSession';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { getItem, removeItem } from '@/lib/storage';
 
@@ -86,7 +83,8 @@ export function useMessageSending({
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
   const userCanUseFastMode = canUseFastMode(resolvedUser);
-  const userCanUseSimulator = userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
+  const userCanUseSimulator =
+    userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
 
   useEffect(() => {
     messageInputRef.current = messageInput;

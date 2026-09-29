@@ -408,6 +408,12 @@ def _webauthn_browser_double():
         if method == "WebAuthn.enable":
             state.enabled.add(target_id)
             return {}
+        if method == "WebAuthn.disable":
+            state.enabled.discard(target_id)
+            for authenticator_id, (owner, _) in list(state.authenticators.items()):
+                if owner == target_id:
+                    del state.authenticators[authenticator_id]
+            return {}
         if method == "Page.setInterceptFileChooserDialog":
             return {}
         if method == "WebAuthn.addVirtualAuthenticator":
@@ -415,10 +421,27 @@ def _webauthn_browser_double():
                 raise RuntimeError(
                     "The Virtual Authenticator Environment has not been enabled for this session"
                 )
+            # Chrome: only one internal authenticator per environment.
+            for authenticator_id, (owner, _) in state.authenticators.items():
+                if owner == target_id:
+                    raise RuntimeError(
+                        {
+                            "code": -32602,
+                            "message": "Chrome only supports one internal authenticator per environment",
+                        }
+                    )
             state.next_id += 1
             authenticator_id = f"authenticator-{state.next_id}"
             state.authenticators[authenticator_id] = (target_id, {})
             return {"authenticatorId": authenticator_id}
+        if method == "WebAuthn.removeVirtualAuthenticator":
+            authenticator_id = params.get("authenticatorId")
+            if authenticator_id not in state.authenticators:
+                raise RuntimeError(
+                    {"code": -32602, "message": "Could not find a Virtual Authenticator matching the ID"}
+                )
+            del state.authenticators[authenticator_id]
+            return {}
         if method == "WebAuthn.addCredential":
             if params["authenticatorId"] not in state.authenticators:
                 raise RuntimeError(
@@ -443,6 +466,10 @@ def _webauthn_browser_double():
                     "The Virtual Authenticator Environment has not been enabled for this session"
                 )
             return {"credentials": list(creds.values())}
+        if method == "Runtime.evaluate":
+            return {"result": {"value": "https://www.amazon.com/"}}
+        if method == "Page.reload":
+            return {}
         raise AssertionError(method)
 
     return state, send
@@ -577,6 +604,335 @@ async def test_passkey_injection_recovers_after_virtual_environment_loss() -> No
     assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
 
 
+async def test_passkey_sync_skips_rebuild_after_transient_getcredentials_failure() -> None:
+    """A flaky getCredentials during an in-flight ceremony must not rebuild.
+
+    Agent f380ca3c: rebuilding (WebAuthn.enable + new authenticator) mid-ceremony
+    produced Amazon's "No passkeys available" dialog. Retry once; if credentials
+    are still present, keep the live authenticator.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    fail_next_get_credentials = {"armed": False, "failures": 0}
+
+    async def flaky_then_ok(method: str, params: dict, target_id: str):
+        if method == "WebAuthn.getCredentials" and fail_next_get_credentials["armed"]:
+            fail_next_get_credentials["armed"] = False
+            fail_next_get_credentials["failures"] += 1
+            raise RuntimeError(
+                "Could not find a Virtual Authenticator matching the ID"
+            )
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(flaky_then_ok)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_before = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+
+    # Arm a single transient failure on the next health-check getCredentials.
+    fail_next_get_credentials["armed"] = True
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
+    assert fail_next_get_credentials["failures"] == 1
+    enable_after = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_after = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+    assert enable_after == enable_before, "transient failure must not re-enable WebAuthn"
+    assert authenticator_after == authenticator_before, (
+        "transient failure must not create a replacement authenticator"
+    )
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_invalidate_forces_rebuild_when_health_check_would_trust_stale() -> None:
+    """Post-nav false-healthy getCredentials must not skip re-seed.
+
+    Agents f380ca3c / c3b1ca09: after start navigation, getCredentials still
+    returned the pre-nav credentials (``seeded 0``) while Kernel's virtual
+    authenticator environment was already dying. Amazon probed the empty
+    environment seconds later and disabled the passkey CTA. Callers that know
+    a navigation/target boundary just happened must invalidate so the next
+    sync re-enables + re-seeds instead of trusting that health check.
+
+    Invalidate must also remove the Chrome-side authenticator — forgetting the
+    cache alone leaves the old internal authenticator in place and the next
+    ``addVirtualAuthenticator`` fails with ``Chrome only supports one internal
+    authenticator per environment`` (agent f203ae7b).
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    authenticator_before = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+    add_cred_before = sum(1 for method, _ in state.calls if method == "WebAuthn.addCredential")
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    old_authenticator_ids = set(state.authenticators)
+
+    # Without invalidate, a healthy health-check is a no-op reseed.
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
+    assert (
+        sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
+        == authenticator_before
+    )
+
+    # Invalidate removes the Chrome-side authenticator, then the next sync
+    # creates a fresh one + re-seeds (cannot trust the dying health check).
+    await dom.invalidate_passkey_state_for_live_target()
+    assert any(method == "WebAuthn.removeVirtualAuthenticator" for method, _ in state.calls)
+    assert not (old_authenticator_ids & set(state.authenticators)), (
+        "invalidate must remove the stale Chrome-side authenticator before recreate"
+    )
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert (
+        sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
+        == authenticator_before + 1
+    )
+    assert (
+        sum(1 for method, _ in state.calls if method == "WebAuthn.addCredential")
+        == add_cred_before + 1
+    )
+    # Agent c1ebd389: invalidate must drop armed so the next sync re-issues
+    # WebAuthn.enable (remove-only left a half-armed environment Kernel killed).
+    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") == enable_before + 1
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_environment_not_enabled_rebuilds_immediately() -> None:
+    """Kernel's environment-not-enabled is a hard reset, not ceremony grace.
+
+    Agent c1ebd389 (browser-amazon-return 2026-09-28): VA died ~5.6s after every
+    successful seed with ``The Virtual Authenticator Environment has not been
+    enabled for this session`` and never recovered on retry. Ceremony-grace
+    retries delayed rebuild while Amazon disabled the passkey CTA.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    remaining_failures = {"n": 0}
+
+    async def hard_reset(method: str, params: dict, target_id: str):
+        if method == "WebAuthn.getCredentials" and remaining_failures["n"] > 0:
+            remaining_failures["n"] -= 1
+            raise RuntimeError(
+                "The Virtual Authenticator Environment has not been enabled for this session"
+            )
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(hard_reset)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_before = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+
+    # Persistent environment loss — must rebuild on first failure (no grace burn).
+    remaining_failures["n"] = 3
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Immediate rebuild: at most the health-check failure (+ optional readback)
+    # consumed getCredentials errors — not the full 5-attempt grace window.
+    assert remaining_failures["n"] >= 1
+    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") >= enable_before + 1
+    assert (
+        sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
+        >= authenticator_before + 1
+    )
+    remaining_failures["n"] = 0  # stop mocking so usage readback can observe the rebuild
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_ceremony_grace_retries_before_rebuild() -> None:
+    """Recent seed + authenticator-id flap must stretch retries, not rebuild.
+
+    Mid-ceremony flaps within 5s of a successful seed (Amazon Sign-in-with-
+    Passkey) must not tear down the live authenticator. Environment-not-enabled
+    is a hard Kernel reset (see test_passkey_environment_not_enabled_rebuilds_immediately);
+    grace applies only to the authenticator-id mismatch flap.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    remaining_failures = {"n": 0}
+
+    async def flaky_burst(method: str, params: dict, target_id: str):
+        if method == "WebAuthn.getCredentials" and remaining_failures["n"] > 0:
+            remaining_failures["n"] -= 1
+            raise RuntimeError(
+                "Could not find a Virtual Authenticator matching the ID"
+            )
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(flaky_burst)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+    authenticator_before = sum(
+        1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator"
+    )
+
+    # Three transient authenticator-id failures within ceremony grace — must recover, not rebuild.
+    remaining_failures["n"] = 3
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 0
+    assert remaining_failures["n"] == 0
+    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") == enable_before
+    assert (
+        sum(1 for method, _ in state.calls if method == "WebAuthn.addVirtualAuthenticator")
+        == authenticator_before
+    )
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_cdp_session_change_rearms_webauthn() -> None:
+    """A new CDP session_id under the same target must re-enable WebAuthn.
+
+    Agent c1ebd389: Kernel recycled the pooled session; getCredentials then
+    reported environment-not-enabled for the new session while our cache still
+    thought the old authenticator was healthy.
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    session = _fake_webauthn_session(send, target_id="target-a")
+    session_holder = {"id": "session-target-a"}
+
+    async def get_or_create_cdp_session(tid, focus=False):
+        async def scoped_send(method, params=None, _tid=tid):
+            return await send(method, params or {}, _tid)
+
+        return SimpleNamespace(send=scoped_send, session_id=session_holder["id"])
+
+    session.get_or_create_cdp_session = get_or_create_cdp_session
+    dom = DOMService(cdp_url="")
+    dom._session = session
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    enable_before = sum(1 for method, _ in state.calls if method == "WebAuthn.enable")
+
+    session_holder["id"] = "session-target-a-recycled"
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Re-arm issues WebAuthn.enable; one_internal retry may enable once more
+    # after disable — both count as correct recovery of the new CDP session.
+    assert sum(1 for method, _ in state.calls if method == "WebAuthn.enable") >= enable_before + 1
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
+async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
+    """After VA environment loss on Amazon sign-in, reload so the CTA re-probes."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    # Host must match held passkey rpId (amazon.com.mx), not a foreign login page.
+    href = {
+        "value": (
+            "https://www.amazon.com.mx/ap/signin?"
+            "openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F"
+        )
+    }
+
+    async def send_with_reload(method: str, params: dict, target_id: str):
+        if method == "Runtime.evaluate":
+            return {"result": {"value": href["value"]}}
+        if method == "Page.reload":
+            state.calls.append((method, target_id))
+            return {}
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send_with_reload)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert any(method == "Page.reload" for method, _ in state.calls), (
+        "VA rebuild on Amazon sign-in must reload so Conditional UI re-probes"
+    )
+
+
+async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
+    """Reload at most once per href and only when host matches a held rpId."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    href = {"value": "https://accounts.google.com/signin"}
+
+    async def send_with_reload(method: str, params: dict, target_id: str):
+        if method == "Runtime.evaluate":
+            return {"result": {"value": href["value"]}}
+        if method == "Page.reload":
+            state.calls.append((method, target_id))
+            return {}
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send_with_reload)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert not any(method == "Page.reload" for method, _ in state.calls), (
+        "Amazon passkey must not reload an unrelated Google sign-in page"
+    )
+
+    href["value"] = (
+        "https://www.amazon.com.mx/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F"
+    )
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    first_reloads = sum(1 for method, _ in state.calls if method == "Page.reload")
+    assert first_reloads == 1
+
+    # Same href after another rebuild must not reload again (preserve typed fields).
+    state.reset_environment("target-a")
+    # Expire cooldown so only the href gate applies.
+    dom._passkey_auth_reload_at_by_target.clear()
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert sum(1 for method, _ in state.calls if method == "Page.reload") == first_reloads
+
+
+async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
+    """Invalidate must not erase an assertion that advanced signCount before remove."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Simulate relying-party assertion advancing the counter on the live VA.
+    for _owner, creds in state.authenticators.values():
+        if "credential-amazon" in creds:
+            creds["credential-amazon"]["signCount"] = 12
+
+    await dom.invalidate_passkey_state_for_live_target()
+    assert dom._passkey_observed_max_counts.get("credential-amazon") == 12
+    # After invalidate the authenticator map is empty; observed maxima must still
+    # surface so disconnect/usage capture works when reinject fails.
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 12}
+    assert "credential-amazon" in await dom.get_used_passkey_credential_ids()
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Re-seed must use max(base, observed) so RP never sees a rolled-back counter.
+    seeded_counts = [
+        creds["credential-amazon"]["signCount"]
+        for _owner, creds in state.authenticators.values()
+        if "credential-amazon" in creds
+    ]
+    assert seeded_counts and max(seeded_counts) == 12
+    assert "credential-amazon" in await dom.get_used_passkey_credential_ids()
+
+
 async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target() -> None:
     """The wedge from agent e36c8759: Chrome scopes both per target.
 
@@ -606,6 +962,36 @@ async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_targe
     ]
     assert live, "no virtual authenticator was created on the new target"
     assert "credential-amazon" in live[0], "the held passkey was not seeded onto the new target"
+
+
+async def test_passkey_inject_without_focused_target_retains_held_keys() -> None:
+    """Missing focus must not kill the browser agent during opportunistic re-seed.
+
+    Prod a890a362 Task Failed mid-goto with:
+      No focused browser target is available for passkey injection
+    after a successful navigation cleared agent_focus_target_id. The next
+    step's record_passkey_usage_once → inject_passkeys hard-raised and
+    aborted the activity. Overlay suppression already soft-fails the same
+    condition; passkey inject must retain held keys and re-arm when focus
+    returns (re-init all injected state, not kill the run).
+    """
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send, target_id="")
+    dom._session.agent_focus_target_id = None
+
+    seeded = await dom.inject_passkeys([AMAZON_PASSKEY])
+
+    assert seeded == 0
+    assert dom._held_passkeys_by_credential_id.get("credential-amazon") == AMAZON_PASSKEY
+    assert state.calls == [], "no CDP commands without a focused target"
+
+    # Focus returns → re-arm seeds the retained passkey onto the live target.
+    dom._session.agent_focus_target_id = "target-a"
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert "credential-amazon" in dom._passkey_seeded_by_target.get("target-a", set())
 
 
 async def test_native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site() -> None:
@@ -720,8 +1106,40 @@ async def run_all_tests():
         test_passkey_injection_recovers_after_virtual_environment_loss,
     )
     await runner.record_async(
+        "passkey_sync_skips_rebuild_after_transient_getcredentials_failure",
+        test_passkey_sync_skips_rebuild_after_transient_getcredentials_failure,
+    )
+    await runner.record_async(
+        "invalidate_forces_rebuild_when_health_check_would_trust_stale",
+        test_invalidate_forces_rebuild_when_health_check_would_trust_stale,
+    )
+    await runner.record_async(
+        "invalidate_preserves_advanced_signcounts_for_usage",
+        test_invalidate_preserves_advanced_signcounts_for_usage,
+    )
+    await runner.record_async(
+        "passkey_environment_not_enabled_rebuilds_immediately",
+        test_passkey_environment_not_enabled_rebuilds_immediately,
+    )
+    await runner.record_async(
+        "passkey_ceremony_grace_retries_before_rebuild",
+        test_passkey_ceremony_grace_retries_before_rebuild,
+    )
+    await runner.record_async(
+        "passkey_cdp_session_change_rearms_webauthn",
+        test_passkey_cdp_session_change_rearms_webauthn,
+    )
+    await runner.record_async(
+        "passkey_rebuild_reloads_amazon_signin_page",
+        test_passkey_rebuild_reloads_amazon_signin_page,
+    )
+    await runner.record_async(
         "passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target",
         test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target,
+    )
+    await runner.record_async(
+        "passkey_inject_without_focused_target_retains_held_keys",
+        test_passkey_inject_without_focused_target_retains_held_keys,
     )
     await runner.record_async(
         "native_ui_suppression_is_armed_even_with_no_passkeys_for_the_site",

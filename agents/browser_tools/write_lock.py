@@ -261,6 +261,40 @@ RETURN_BUTTON_PHRASES = [
     "submit return",
 ]
 
+# Amazon SPR final-commit routes. Intermediate wizard Continues live under
+# `/spr/returns/cart` and must NOT lock; only the contract/confirm commit does.
+# Agent 785a3207 (2026-09-28 browser-amazon-return): Continue on
+# `/spr/returns/contract/…` submitted the refund with no write_lock attention
+# because the CTA is labeled "Continue", not "Confirm your return".
+RETURN_COMMIT_URL_PATH_PATTERNS = (
+    "/spr/returns/contract",
+    "/spr/returns/confirm",
+)
+
+# Exact (whitespace-stripped) labels that commit a return on RETURN_COMMIT URLs.
+# Do not use bare substring "return" — "Return to your orders" must stay open.
+RETURN_COMMIT_CONTINUE_LABELS = frozenset({
+    "continue",
+    "submit",
+    "confirm",
+})
+
+# Wizard-step Continues that share `/spr/returns/contract` with the final commit.
+# Agent c1b33ca5 (2026-09-28 browser-amazon-return): clicked
+# ``resolutions-section-continue-button`` (Continue after picking Visa refund)
+# intending to reach drop-off selection; write_lock treated it as the final
+# commit, so the approval lacked a named drop-off and the judge failed.
+# Agent cf4935f5 (2026-09-29): same button via shadow ``input type=submit``;
+# signal was only ``submit\nContinue`` until ancestor ids were joined into
+# ``_element_write_lock_signal``. These machine ids must keep Continue unlocked;
+# phrase-only Continues on the same URL still lock (agent 785a3207 final commit).
+RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS = (
+    "resolutions-section-continue",
+    "productconditioncontinue",
+    "reasoncontinue",
+    "methodcontinue",
+)
+
 # Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
 # agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
 # agent e20e5a4e) matched "buy now" inside Terms of Purchase text, forced a
@@ -628,10 +662,262 @@ def is_purchase_button(element_text: str) -> bool:
     return False
 
 
-def is_return_button(element_text: str) -> bool:
-    """Check if element text indicates a return/refund confirmation control."""
+def is_return_commit_url(url: str) -> bool:
+    """True when the URL is an irreversible Amazon (or similar) return commit page.
+
+    ``/spr/returns/confirmation/…`` is the *post*-submit receipt and must not
+    match the ``/spr/returns/confirm`` commit pattern.
+    """
+    if not url:
+        return False
+    path = (urlparse(url).path or "").lower()
+    if "/spr/returns/confirmation" in path:
+        return False
+    return any(pattern in path for pattern in RETURN_COMMIT_URL_PATH_PATTERNS)
+
+
+# Amazon self-service return dead-end copy. Agent 338f26c8 (2026-09-28
+# browser-amazon-return): after mis-selecting Barebells protein bars, Amazon
+# showed "Your return request needs to be reviewed. Please contact customer
+# service." The agent opened Contact Us, burned the remaining step budget,
+# never reached a return write_lock, and the root respawned a second browser
+# (exact count expected 1, got 2).
+AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS = (
+    "your return request needs to be reviewed",
+    "please contact customer service",
+)
+
+AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE = (
+    "Amazon self-service return is blocked for this item "
+    "(return request needs review / contact customer service). "
+    "Do not open Contact Us. Abandon this item and select the next "
+    "eligible non-excluded physical item, or report this exact blocker "
+    "if no other eligible item remains."
+)
+
+
+def detect_amazon_return_self_service_block(url: str, page_text: str) -> Optional[str]:
+    """Return a recovery note when Amazon blocks self-service return for an item.
+
+    Matches only on ``/spr/returns/`` pages so generic Help/Contact copy on
+    order-history does not fire.
+    """
+    if "/spr/returns/" not in (url or "").lower():
+        return None
+    text = (page_text or "").lower()
+    if not text:
+        return None
+    if all(marker in text for marker in AMAZON_RETURN_SELF_SERVICE_BLOCK_MARKERS):
+        return AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    return None
+
+
+# Selected drop-off appears in the refund summary as ``Shipping (<name Dropoff>)``
+# once the agent has chosen a method (agent 788d17cf / cf4935f5 amazon-return).
+_AMAZON_RETURN_SHIPPING_DROPOFF_RE = re.compile(
+    r"Shipping\s*\(\s*([^)]*Drop[\s-]?off[^)]*)\)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_SELECTED_DROPOFF_RE = re.compile(
+    r"(Whole Foods(?:\s+Market)?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Amazon Stores?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Staples\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|FedEx Office\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|(?:The\s+)?UPS Store\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Kohl'?s\s+Drop[\s-]?off[^\n,]{0,60})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_VISA_RE = re.compile(
+    r"Visa(?:\s+card)?\s+ending\s+in\s+(\d{4})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_TOTAL_RE = re.compile(
+    r"(?:Estimated\s+)?total\s+refund\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_SUBTOTAL_RE = re.compile(
+    r"Refund\s+subtotal\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+
+
+def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
+    """Pull named drop-off / refund / payment from an Amazon return commit page.
+
+    Used to enrich the deterministic write-lock fallback so approval copy still
+    names the selected free drop-off when the notification fork is slow or killed
+    (agent 788d17cf: fork in flight at timeout after Whole Foods was selected).
+    """
+    text = page_text or ""
+    fields: dict[str, str] = {}
+    shipping = _AMAZON_RETURN_SHIPPING_DROPOFF_RE.search(text)
+    if shipping:
+        fields["drop_off"] = re.sub(r"\s+", " ", shipping.group(1)).strip(" -:")
+    else:
+        # Prefer a drop-off whose own option/control is selected. Bound the
+        # selection window to this match (and before the next drop-off) so a
+        # later option's [checked] cannot select an earlier one.
+        drop_matches = list(_AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text))
+        for index, match in enumerate(drop_matches):
+            next_start = (
+                drop_matches[index + 1].start()
+                if index + 1 < len(drop_matches)
+                else len(text)
+            )
+            option_end = min(next_start, match.end() + 40)
+            window = text[match.start() : option_end].lower()
+            # Reject negated markers (unchecked / aria-*-false / not selected).
+            has_selection = False
+            for marker in re.finditer(
+                r"\b(checked|selected|pressed)\b",
+                window,
+            ):
+                token = marker.group(1)
+                start = marker.start()
+                prefix = window[max(0, start - 12) : start]
+                suffix = window[start : start + 18]
+                negated_prefix = prefix.endswith("un") or prefix.rstrip().endswith("not")
+                false_attr = (
+                    f"{token}=false" in suffix
+                    or f'{token}="false"' in suffix
+                    or f"{token}='false'" in suffix
+                )
+                if negated_prefix or false_attr:
+                    continue
+                has_selection = True
+                break
+            if has_selection:
+                fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
+                break
+        # Do not guess the first listed drop-off from "no box" alone — multiple
+        # options can share that copy. Require shipping summary or selection
+        # evidence before naming a drop-off in the approval question.
+
+    visa = _AMAZON_RETURN_VISA_RE.search(text)
+    if visa:
+        fields["payment_method"] = f"Visa ending in {visa.group(1)}"
+
+    # Prefer the displayed total; never promote a subtotal as the total refund.
+    refund_total = _AMAZON_RETURN_REFUND_TOTAL_RE.search(text)
+    if refund_total:
+        fields["refund_amount"] = f"${refund_total.group(1)}"
+        fields["refund_label"] = "Estimated total refund"
+    else:
+        refund_subtotal = _AMAZON_RETURN_REFUND_SUBTOTAL_RE.search(text)
+        if refund_subtotal:
+            fields["refund_amount"] = f"${refund_subtotal.group(1)}"
+            fields["refund_label"] = "Refund subtotal"
+
+    return fields
+
+
+def _amazon_return_dropoff_terms(page_text: str, drop_off: str) -> str:
+    """Describe free/no-box/no-label only when the page establishes those terms."""
+    lower = (page_text or "").lower()
+    terms: list[str] = []
+    shipping_free = bool(
+        re.search(
+            r"shipping\s*\([^)]*drop[\s-]?off[^)]*\)\s*:\s*\$0\.00",
+            lower,
+        )
+        or re.search(r"\bfree\s+(?:drop[\s-]?off|return\s+shipping)\b", lower)
+    )
+    if shipping_free:
+        terms.append("free")
+    if "no box" in lower or "no-box" in lower:
+        terms.append("no-box")
+    if "no label" in lower or "no-label" in lower:
+        terms.append("no-label")
+    if not terms:
+        return f"Selected drop-off: {drop_off}."
+    return f"Selected {'/'.join(terms)} drop-off: {drop_off}."
+
+
+def enrich_return_write_lock_question(
+    question: str,
+    page_text: str,
+    *,
+    url: str = "",
+    system_name: str = "Rose",
+) -> str:
+    """Ensure return write-lock approval text names the selected drop-off when visible."""
+    fields = extract_amazon_return_approval_fields(page_text)
+    drop_off = fields.get("drop_off")
+    if not drop_off:
+        return question
+
+    payment = fields.get("payment_method") or "original payment method"
+    amount = fields.get("refund_amount") or "the refund amount shown"
+    refund_label = fields.get("refund_label") or "Refund"
+    drop_off_line = _amazon_return_dropoff_terms(page_text, drop_off)
+    domain = urlparse(url).netloc if url else "Amazon"
+    lines = [
+        "**Approval Needed**",
+        "",
+        f"{system_name} wants to confirm a return on **{domain}**.",
+        "Action: Confirm return",
+        f"Change: {refund_label} {amount} to {payment}. {drop_off_line}",
+    ]
+    if url:
+        lines.append(f"**Page:** {url}")
+    return "\n".join(lines)
+
+
+def _has_return_commit_continue_exclusion(element_text: str) -> bool:
+    """True when the click signal is a mid-wizard Continue on a commit URL."""
+    haystack = normalize_write_lock_text(element_text)
+    if not haystack:
+        return False
+    return any(marker in haystack for marker in RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS)
+
+
+def _return_commit_label_tokens(element_text: str) -> list[str]:
+    """Visible/type tokens from a click signal, excluding DOM id/name lines."""
+    tokens: list[str] = []
+    for signal in (element_text or "").split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            continue
+        text_lower = normalize_write_lock_text(signal)
+        if text_lower:
+            tokens.append(text_lower)
+    return tokens
+
+
+def _is_return_commit_continue_signal(element_text: str) -> bool:
+    """True for irreversible Continue/Submit/Confirm on a return commit URL.
+
+    Agent 785a3207: final commit was ``submit\\nContinue`` (form submit).
+    Agent 13e735c9: mid-wizard span ``Continue`` (no submit type) after picking
+    Visa refund — must stay unlocked so drop-off can be selected first.
+    Exclusion markers (resolutions-section-continue, …) also keep Continues open.
+    """
+    if _has_return_commit_continue_exclusion(element_text):
+        return False
+    tokens = _return_commit_label_tokens(element_text)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    if "confirm" in token_set:
+        return True
+    # Require submit+continue (form submit CTA). A bare type=submit token on a
+    # return-commit URL is not enough — an unrelated unlabeled submit must not
+    # mint a domain-scoped return approval that later lets the real commit through.
+    if "submit" in token_set and "continue" in token_set:
+        return True
+    return False
+
+
+def is_return_button(element_text: str, url: str = "") -> bool:
+    """Check if element text indicates a return/refund confirmation control.
+
+    Phrase matches ("Confirm your return", …) apply on any URL. On Amazon SPR
+    contract/confirm commit URLs, form-submit Continues also lock; plain span
+    Continues used mid-wizard do not.
+    """
     if not element_text:
         return False
+
+    on_return_commit_url = is_return_commit_url(url)
 
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
@@ -646,6 +932,12 @@ def is_return_button(element_text: str) -> bool:
             if normalize_write_lock_text(phrase) in text_lower:
                 logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
                 return True
+
+    if on_return_commit_url and _is_return_commit_continue_signal(element_text):
+        logger.debug(
+            f"Element text '{element_text[:80]}' matched return-commit Continue on {url[:80]}"
+        )
+        return True
     return False
 
 

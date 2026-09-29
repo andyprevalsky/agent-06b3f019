@@ -237,8 +237,8 @@ function FastModeSettingsCard({ phone }: { phone: string }) {
       <CardHeader>
         <CardTitle>Fast Mode</CardTitle>
         <CardDescription>
-          Record and replay cached third-party responses so repeated runs of the same goal skip
-          slow external calls. Session-only; this is the same control as the chat query box.
+          Record and replay cached third-party responses so repeated runs of the same goal skip slow
+          external calls. Session-only; this is the same control as the chat query box.
         </CardDescription>
       </CardHeader>
       <CardContent>
