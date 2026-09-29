@@ -257,6 +257,22 @@ async function main(): Promise<void> {
       assert.equal(calls, 1, `${code}: no retry`);
     }
     globalThis.fetch = (async () =>
+      new Response(
+        'event: error\ndata: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { 'content-type': 'text/event-stream' } }
+      )) as typeof fetch;
+    await assert.rejects(async () => {
+      for await (const _ of openAiApiKeyComplete({
+        poolSpec: POOL_REGISTRY['rose-1-ultra'],
+        model: 'gpt-6-sol',
+        messages: [{ role: 'user', content: 'hi' }],
+        openAiKey: 'test-key',
+        requestId: 'in-band-credit',
+      })) {
+        void _;
+      }
+    }, RosePaymentRequiredError);
+    globalThis.fetch = (async () =>
       new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded' } }), {
         status: 429,
         headers: { 'retry-after': '60' },

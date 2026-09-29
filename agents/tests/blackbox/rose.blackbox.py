@@ -2591,6 +2591,29 @@ async def test_parse_responses_sse_failed_context_length_is_invalid_request():
     assert raised
 
 
+async def test_parse_responses_sse_in_band_credit_exhaustion_is_payment_required():
+    from providers.rose.errors import RosePaymentRequiredError
+
+    lines = [
+        "event: error",
+        'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+        "",
+        "data: [DONE]",
+    ]
+    try:
+        await _drain(
+            parse_responses_sse(
+                _FakeStream(lines),
+                actual_model="gpt-6-sol-openai",
+                pool_name="openai-api-key",
+                request_id="r-credit-event",
+            )
+        )
+    except RosePaymentRequiredError:
+        return
+    assert False, "in-band credit exhaustion must trigger the shared API-key cooldown"
+
+
 def test_build_codex_responses_body_contract():
     pool = get_pool("rose-1-flash")
     body = build_codex_responses_body(
@@ -4220,7 +4243,7 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
 
 
 async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry():
-    """A 429 insufficient_quota is tried once, then Foundry serves later calls."""
+    """An in-band credit error is tried once, then Foundry serves later calls."""
     import providers.rose.client as rc
 
     rc._reset_gpt_api_key_cooldown_cache()
@@ -4237,11 +4260,19 @@ async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundr
             "data: [DONE]",
         ]
     )
+    exhausted_sse = "\n".join(
+        [
+            "event: error",
+            'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+            "",
+            "data: [DONE]",
+        ]
+    )
 
     def handler(req):
         if str(req.url) == OPENAI_RESPONSES_API_URL:
             seen["openai"] += 1
-            return httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
+            return httpx.Response(200, text=exhausted_sse)
         if req.url.host == "a-4989-resource.openai.azure.com":
             seen["foundry"] += 1
             return httpx.Response(200, text=foundry_sse)
@@ -7082,6 +7113,10 @@ async def run_all_tests():
     await r.record_async(
         "responses_sse_failed_context_length",
         test_parse_responses_sse_failed_context_length_is_invalid_request,
+    )
+    await r.record_async(
+        "responses_sse_in_band_credit_exhaustion",
+        test_parse_responses_sse_in_band_credit_exhaustion_is_payment_required,
     )
     r.record("codex_responses_body_contract", test_build_codex_responses_body_contract)
     r.record("codex_cache_scope_session_headers", test_codex_cache_scope_uses_canonical_session_headers)

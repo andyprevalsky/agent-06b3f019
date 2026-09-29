@@ -26,7 +26,8 @@ Compute credentials rotate or cool on provider failures. Both shared API keys
 use separate DB-backed 30-minute cooldowns across users, backend instances,
 and agents after credit exhaustion or authentication failure. For GPT_API_KEY,
 `429 insufficient_quota`, credit exhaustion, spend-limit codes, and 402 count
-as exhausted credits; an ordinary 429 remains a short rate limit. Agents
+as exhausted credits, including when OpenAI reports the error inside an HTTP
+200 Responses stream. An ordinary 429 remains a short rate limit. Agents
 refresh the shared key status through the
 backend, with a 15-second local cache, before deciding whether to skip a key.
 

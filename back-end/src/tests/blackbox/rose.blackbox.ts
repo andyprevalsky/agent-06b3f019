@@ -72,6 +72,7 @@ import {
   parseOpenAISSE,
   parseResponsesSSE,
 } from '../../providers/rose/streaming';
+import { RosePaymentRequiredError } from '../../providers/rose/errors';
 import {
   applyAnthropicResponseFormat,
   applyAnthropicToolConfig,
@@ -1207,6 +1208,27 @@ async function testStreaming_responsesFailedContextLengthIsInvalidRequest() {
     raised = err instanceof RoseInvalidRequest;
   }
   assert(raised, 'context_length_exceeded raises RoseInvalidRequest');
+}
+
+async function testStreaming_inBandCreditExhaustionIsPaymentRequired() {
+  let raised = false;
+  try {
+    await collect(
+      parseResponsesSSE(
+        sseResponse([
+          'event: error',
+          'data: {"type":"error","error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining"}}',
+          '',
+          'data: [DONE]',
+          '',
+        ]).body!,
+        { actualModel: 'gpt-6-sol-openai', poolName: 'openai-api-key', requestId: 'r-credit-event' }
+      )
+    );
+  } catch (err) {
+    raised = err instanceof RosePaymentRequiredError;
+  }
+  assert(raised, 'in-band credit exhaustion triggers the shared API-key cooldown');
 }
 
 async function testClaudeAuth_401FallsThroughToWaterfall() {
@@ -3994,6 +4016,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / Responses failed context length is invalid request',
       fn: testStreaming_responsesFailedContextLengthIsInvalidRequest,
+    },
+    {
+      name: 'streaming / in-band credit exhaustion is payment required',
+      fn: testStreaming_inBandCreditExhaustionIsPaymentRequired,
     },
     {
       name: 'claudeAuth / 401 falls through to waterfall',
