@@ -93,6 +93,27 @@ export function canonicalDatabaseTarget(databaseUrl: string): string {
   return `${hostname}:${port}/${database}`;
 }
 
+/** Envelope present and usable by Claude Code CLI, including post-direct-auth EXPIRED rows. */
+export function isEligibleAndyClaudeSmokeCredential(integration: {
+  isActive: boolean;
+  status: string;
+  failureReason?: string | null;
+  config: unknown;
+}): boolean {
+  const config = integration.config;
+  if (!config || typeof config !== 'object') return false;
+  const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
+  if (typeof encryptedCredentials !== 'string' || encryptedCredentials.length === 0) {
+    return false;
+  }
+  if (integration.isActive && integration.status === 'CONNECTED') return true;
+  // Direct Anthropic can 401 an access token while the same envelope still has a
+  // refresh token. Product credential resolution already serves those EXPIRED
+  // auth_error rows to Claude Code CLI — keep the smoke sync aligned so a
+  // false CONNECTED→EXPIRED flip does not wipe the only local OAuth path.
+  return integration.status === 'EXPIRED' && integration.failureReason === 'auth_error';
+}
+
 export async function syncAndyClaudeTokensFromProd(options?: {
   localDatabaseUrl?: string;
   expectedMinKeys?: number;
@@ -165,16 +186,9 @@ export async function syncAndyClaudeTokensFromProd(options?: {
           })
         ).map((row) => ({ ...row, accountId: '', accountEmail: null }));
 
-    const credentialed = integrations.filter((integration) => {
-      // Never seed revoked/expired rows into local benches — an inactive
-      // Anthropic OAuth token (401 on /v1/models) will poison Claude Code
-      // spawn for the whole k-run if it lands in the pool ahead of good keys.
-      if (!integration.isActive || integration.status !== 'CONNECTED') return false;
-      const config = integration.config;
-      if (!config || typeof config !== 'object') return false;
-      const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
-      return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
-    });
+    const credentialed = integrations.filter((integration) =>
+      isEligibleAndyClaudeSmokeCredential(integration)
+    );
 
     if (credentialed.length === 0) {
       // Clear stale local rows before failing — otherwise revoked/expired
