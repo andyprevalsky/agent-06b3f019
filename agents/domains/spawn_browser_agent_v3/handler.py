@@ -6788,26 +6788,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
             dynamic_system_context = prior_dynamic_context
         if (write_lock_resume_state or {}).get("approval_type") == "payment":
-            card_guidance = build_payment_card_resume_prompt_section(card_refs)
+            card_guidance = build_payment_card_resume_prompt_section(card_refs, payment_card_last4)
             if card_guidance:
-                payment_action = write_lock_resume_state.get("payment_action")
-                payment_action_call_id = write_lock_resume_state.get("payment_action_call_id")
-                if isinstance(payment_action, dict) and isinstance(payment_action_call_id, str):
-                    _append_browser_turn_messages(
-                        browser_turn_messages,
-                        unified_action=payment_action,
-                        result={
-                            "success": True,
-                            "status": "approved",
-                            "last4": payment_card_last4,
-                            "approved_request": payment_card_request,
-                            "message": card_guidance.strip(),
-                        },
-                        tool_call_id=payment_action_call_id,
-                    )
-                else:
-                    # Older in-flight tasks have no pending tool-call snapshot.
-                    browser_turn_messages.append({"role": "user", "content": card_guidance.strip()})
+                browser_turn_messages.append({"role": "user", "content": card_guidance.strip()})
         failed_credential_prep_realms: Dict[str, str] = {}
 
         async def _prepare_credentials_for_url_unquarantined(
@@ -9627,8 +9610,6 @@ Based on this feedback, I need to continue working on the task and address the i
                 resume_result = {
                     "status": "awaiting_payment_card_approval",
                     "payment_request": payment_request,
-                    "payment_action": unified_action,
-                    "payment_action_call_id": tool_call_id_action,
                     "current_url": current_url,
                     "write_lock_notification": payment_write_lock_notification,
                     "write_lock_notification_usage": payment_write_lock_notification_usage,
@@ -10966,8 +10947,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "payment_card_request": _payment_card_request_evidence(payment_payload),
-                        "payment_action": result.get("payment_action"),
-                        "payment_action_call_id": result.get("payment_action_call_id"),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)

@@ -105,10 +105,12 @@ from 1,877 to 2,314 characters at resume, breaking the cached prefix.
 
 Real browser pauses now preserve the exact prior provider transcript, including
 screenshots, and the full action history and URLs. The original dynamic system
-context is frozen across resume; current runtime context changes and the
-approved-card tool result are appended after the prior turns. The latter
-contains only card refs, last four, and the approved request summary, never PAN
-or CVV. Small snapshots travel inline in the Temporal activity result. Above
+context is frozen across resume; current runtime context changes are appended
+after the prior turns. The saved transcript already includes the original
+`request_payment_card` call and its awaiting-approval tool result, so resume
+adds only a factual card-ready user turn with last four and secret-ref names.
+The approved request summary goes to the verifier, never to a duplicate browser
+tool call. Small snapshots travel inline in the Temporal activity result. Above
 one million serialized bytes, the worker synchronously writes chunked AES-GCM
 encrypted snapshots to the trace archive and verifies each read before
 returning a pointer. Resume checks the full SHA-256 before continuing and fails
@@ -133,6 +135,7 @@ the benchmark failure.
 ## Reusable lesson
 
 When an activity resumes after a user approval, preserve the model-visible
-prefix byte for byte and append the approval result as a new turn. A verifier
-also needs the exact approved request; a card's last four digits and page
-history cannot reconstruct it.
+prefix byte for byte and append only the new approval outcome. Do not replay
+the pending tool call if it is already in the saved transcript. A verifier also
+needs the exact approved request; a card's last four digits and page history
+cannot reconstruct it.

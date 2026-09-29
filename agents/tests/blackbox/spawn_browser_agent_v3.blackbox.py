@@ -5386,11 +5386,15 @@ def test_build_payment_card_resume_prompt_section():
             "card_name": "Rose Labs",
             "card_expiry": "12/30",
             "card_cvv": "123",
-        }
+        },
+        "7406",
     )
 
     assert "Payment approval is complete" in out
+    assert "7406" in out
     assert "Do not call request_payment_card again" in out
+    assert "whether to submit checkout" in out
+    assert "submit the checkout form" not in out
     assert "card_number" in out
     assert "card_name" in out
     assert "card_expiry" in out
@@ -20722,14 +20726,14 @@ def test_browser_resume_keeps_embedded_screenshots():
 
 
 def test_browser_payment_resume_keeps_cached_prompt_prefix():
-    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
     from providers.rose.browser_use import build_browser_use_messages
 
     goal = "Complete the approved checkout"
     dynamic_context = "Original browser context"
     prior_turns = [
-        {"role": "assistant", "content": "I found the checkout."},
-        {"role": "user", "content": "Continue with the approved purchase."},
+        {"role": "assistant", "content": "I requested the card.", "tool_calls": [{"id": "call-payment", "type": "function", "function": {"name": "request_payment_card", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call-payment", "name": "request_payment_card", "content": '{"status":"awaiting_payment_card_approval"}'},
     ]
     original = build_browser_use_messages(
         task=goal,
@@ -20740,12 +20744,10 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
         turn_messages=prior_turns,
     )
     resumed_turns = list(prior_turns)
-    _append_browser_turn_messages(
-        resumed_turns,
-        unified_action={"action": "request_payment_card", "thinking": "Get the approved card.", "params": {}},
-        result={"success": True, "status": "approved", "last4": "1234", "message": "Card refs are ready."},
-        tool_call_id="call-payment",
+    card_guidance = build_payment_card_resume_prompt_section(
+        {"card_number": "test", "card_name": "test", "card_expiry": "test", "card_cvv": "test"}, "7406"
     )
+    resumed_turns.append({"role": "user", "content": card_guidance.strip()})
     resumed = build_browser_use_messages(
         task=goal,
         browser_state={},
@@ -20755,8 +20757,9 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
         turn_messages=resumed_turns,
     )
     assert resumed[: len(original)] == original
-    assert resumed[-2]["tool_calls"][0]["id"] == resumed[-1]["tool_call_id"]
-    assert "Card refs are ready." in resumed[-1]["content"]
+    assert len(resumed) == len(original) + 1
+    assert "7406" in resumed[-1]["content"]
+    assert sum("request_payment_card" in str(msg.get("tool_calls")) for msg in resumed) == 1
 
 
 async def test_browser_resume_store_preserves_inline_and_external_snapshots():
