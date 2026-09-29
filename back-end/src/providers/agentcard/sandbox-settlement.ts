@@ -112,19 +112,28 @@ export async function getCardPan(
 }
 
 /**
- * The ONLY provider outcome that proves a candidate purchase is not the card that was just charged.
+ * Provider outcomes that prove a candidate purchase is not the card that was just charged.
  *
  * A card the provider explicitly does not have (404 — e.g. the static provider rejecting a
  * pre-cutoff AgentCard id via `static_card_id_not_managed`) genuinely means "this stale HELD
- * purchase is somebody else's dead card, keep scanning". Everything else — OAuth/setup gates, org
- * rate limits, MCP transport errors, malformed provider responses — means we simply COULD NOT READ
- * the PAN. Treating those as "not this card" is a money bug: the lookup for the ACTUAL Rose card
- * fails, settlement reports 404, `confirmTestPayment` falls through to the raw Stripe path, and the
- * real Rose purchase is left HELD with its wallet funding never consumed. Fail closed instead.
+ * purchase is somebody else's dead card, keep scanning". The same applies to `card_closed`:
+ * AgentCard stops returning credentials after close, so a closed stale HELD purchase must be
+ * skipped so settlement can reach the live OPEN card for the same total. Seen in
+ * `agent-payment-idempotent-abandonment`: a leftover closed card on an earlier HELD purchase
+ * made every confirm 502 with "Could not read the Rose card…" while the live card stayed OPEN.
+ *
+ * Everything else — OAuth/setup gates, org rate limits, MCP transport errors, malformed provider
+ * responses — means we simply COULD NOT READ the PAN. Treating those as "not this card" is a
+ * money bug: the lookup for the ACTUAL Rose card fails, settlement reports 404,
+ * `confirmTestPayment` falls through to the raw Stripe path, and the real Rose purchase is left
+ * HELD with its wallet funding never consumed. Fail closed instead.
  */
 function isCardNotFoundFailure(error: unknown): boolean {
   if (!(error instanceof AgentCardProviderError)) return false;
-  return error.status === 404 || error.code === 'static_card_id_not_managed';
+  if (error.status === 404 || error.code === 'static_card_id_not_managed') return true;
+  const code = typeof error.code === 'string' ? error.code.toLowerCase() : '';
+  if (code === 'card_closed') return true;
+  return /\bcard_closed\b/i.test(error.message);
 }
 
 async function testCharge(input: {

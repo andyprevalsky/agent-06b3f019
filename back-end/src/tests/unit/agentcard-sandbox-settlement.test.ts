@@ -409,6 +409,49 @@ async function main(): Promise<void> {
   );
   assert.equal(notFoundResult.purchaseId, 'purchase-live');
   assert.deepEqual(notFoundCleared, ['purchase-live']);
+
+  // REGRESSION (agent-payment-idempotent-abandonment): a closed stale HELD candidate must be
+  // skipped the same way as card-not-found. AgentCard returns card_closed (no credentials) after
+  // close — treating that as an unreadable-PAN 502 blocks settlement of the live OPEN card that
+  // shares the same totalCents, so Pay never clears.
+  const closedCleared: string[] = [];
+  const closedResult = await settleAgentCardSandboxPayment(
+    { cardNumber: '4242424242421316', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      findHeldPurchasesByTotal: async () => [
+        {
+          id: 'purchase-closed-stale',
+          userId: 'user-1',
+          agentId: null,
+          cardId: 'card-closed-stale',
+          stripePaymentIntentId: 'pi_hold_closed',
+        },
+        {
+          id: 'purchase-live-open',
+          userId: 'user-1',
+          agentId: null,
+          cardId: 'card-live-open',
+          stripePaymentIntentId: 'pi_hold_live_open',
+        },
+      ],
+      getCardPan: async (_userId, _agentId, cardId) => {
+        if (cardId === 'card-closed-stale') {
+          throw new AgentCardProviderError(
+            'get_card_details failed: card_closed: This card is closed and its credentials are no longer available. Issue a new card instead.'
+          );
+        }
+        return '4242424242421316';
+      },
+      claimHeldPurchaseForCharge: async () => true,
+      testCharge: async () => ({}),
+      markPurchaseCleared: async (purchaseId) => {
+        closedCleared.push(purchaseId);
+      },
+    }
+  );
+  assert.equal(closedResult.purchaseId, 'purchase-live-open');
+  assert.deepEqual(closedCleared, ['purchase-live-open']);
+
   // Regression: a failed charge must RELEASE the claim so a retry can settle.
   //
   // `claimHeldPurchaseForCharge` latches HELD -> CHARGING. Before the fix,
