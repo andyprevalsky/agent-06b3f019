@@ -325,6 +325,7 @@ run_suite "Auto RCA Workflow Contract" bash scripts/tests/auto-rca-workflow.test
 run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.blackbox.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
+run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh
