@@ -9,7 +9,9 @@ from domains.spawn_agent.config import (
     OAI_DEMO_CHILD_GOAL_PREFIX,
     OAI_DEMO_CHILD_WINDOW,
     OAI_DEMO_ROOT_GOAL_PREFIX,
+    OAI_DEMO_ROOT_TITLE,
     is_oai_demo_goal,
+    mass_agent_root_title,
 )
 from providers.fast_cache.normalize import (
     OAI_DEMO_ROOT_GOAL_HASH,
@@ -25,6 +27,13 @@ def test_mass_agent_0_is_tagged_demo():
     mass = next(t for t in tasks if t.get("name") == "test-mass-agent-run-0")
     tags = {str(t).upper() for t in (mass.get("tags") or [])}
     assert "DEMO" in tags
+
+
+def test_mass_agent_root_title_only_overrides_demo_roots():
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, True, None) == OAI_DEMO_ROOT_TITLE
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, True, "Task Output") == OAI_DEMO_ROOT_TITLE
+    assert mass_agent_root_title(OAI_DEMO_ROOT_GOAL_PREFIX, False, None) is None
+    assert mass_agent_root_title("Buy socks", True, "Goal Summary") == "Goal Summary"
 
 
 def test_demo_cache_goal_hashes_include_mass_agent_prompt():

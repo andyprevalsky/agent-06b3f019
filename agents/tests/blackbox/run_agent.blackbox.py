@@ -1408,6 +1408,47 @@ async def test_compress_context_activity_exception_preserves_original():
     assert result_ctx is original
 
 
+async def test_activity_tool_results_are_hard_capped_before_context_append():
+    """Explore/activity agents must not append unbounded tool dumps into context.
+
+    Prod a890a362 explore children failed with:
+      Context compression ineffective: compressed context estimate 210745
+      tokens still exceeds trigger 167000 (original estimate 228460)
+    after a single grep result ballooned tokens_in to ~140k. web_fetch already
+    routes through summarize_tool_result; grep did not. Cap at the shared
+    append boundary so every activity-mode tool shares the same floor.
+    """
+    from helpers.summarize import TOOL_RESULT_HARD_CAP_CHARS
+
+    huge = "AMAZON_ORDER_CONFIRMATION " * 20_000  # well above the hard cap
+    assert len(huge) > TOOL_RESULT_HARD_CAP_CHARS
+
+    tool_calls = [{"tool": "grep", "pattern": "amazon"}]
+    detected_tools = [("grep", "tc-huge-grep", 1.0)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        execute_tool_override=mock_execute_tool,
+        max_iterations=1,
+        is_inside_temporal_activity=True,
+        poll_messages_override=None,
+    )
+
+    tool_msgs = [m for m in result.get("context") or [] if m.get("role") == "TOOL"]
+    assert tool_msgs, "expected the grep tool result in context"
+    text = tool_msgs[-1].get("text") or ""
+    assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
+        f"uncapped tool result entered context ({len(text)} chars); "
+        f"hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
+    )
+    assert "truncated, original_len=" in text
+
+
 async def test_run_agent_errors_when_compaction_still_over_trigger():
     """Successful but ineffective compaction should not continue_as_new or call the LLM.
 
@@ -2394,6 +2435,10 @@ async def run_all_tests():
     await r.record_async(
         "compress_context_activity_exception_preserves_original",
         test_compress_context_activity_exception_preserves_original,
+    )
+    await r.record_async(
+        "activity_tool_results_are_hard_capped_before_context_append",
+        test_activity_tool_results_are_hard_capped_before_context_append,
     )
     await r.record_async(
         "run_agent_errors_when_compaction_still_over_trigger",

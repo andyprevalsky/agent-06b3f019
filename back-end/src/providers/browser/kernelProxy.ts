@@ -1,9 +1,22 @@
 import type Kernel from '@onkernel/sdk';
+import { APIConnectionTimeoutError } from '@onkernel/sdk';
 import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
 export type KernelProxyType = 'residential' | 'mobile' | 'isp';
+
+/**
+ * Kernel's SDK defaults (`timeout=60_000`, `maxRetries=2`) multiply a slow
+ * `proxies.create` / `browsers.create` into ~180s of silence before surfacing
+ * `APIConnectionTimeoutError` ("Request timed out."). Session init must fail
+ * fast enough to relax city→state→country within one request instead of
+ * burning the browser-smoke budget on one hung city allocation.
+ */
+export const KERNEL_CREATE_REQUEST_OPTIONS = {
+  timeout: 45_000,
+  maxRetries: 0,
+} as const;
 
 export interface KernelProxyCandidate {
   proxyKey: string;
@@ -149,11 +162,14 @@ export async function getOrCreateKernelProxy(
   }
   const remote = reusableId
     ? null
-    : await client.proxies.create({
-        type: candidate.type,
-        name: candidate.name,
-        config: candidate.config,
-      });
+    : await client.proxies.create(
+        {
+          type: candidate.type,
+          name: candidate.name,
+          config: candidate.config,
+        },
+        KERNEL_CREATE_REQUEST_OPTIONS
+      );
   const remoteId = reusableId ?? remote?.id;
   if (remoteId === undefined || remoteId === '') {
     throw new Error(`Kernel proxy creation returned no ID for ${candidate.proxyKey}`);
@@ -202,6 +218,10 @@ export async function forgetKernelProxy(proxyKey: string): Promise<void> {
 }
 
 export function isKernelProxyAvailabilityError(error: unknown): boolean {
+  // SDK request timeouts (city proxy allocate / session create hung) are
+  // transient location-capacity failures — fall back to a coarser geo key.
+  if (error instanceof APIConnectionTimeoutError) return true;
+
   const message =
     error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
   return [
@@ -214,5 +234,7 @@ export function isKernelProxyAvailabilityError(error: unknown): boolean {
     'no available',
     'location unavailable',
     'proxy not found',
+    'request timed out',
+    'timed out',
   ].some((fragment) => message.includes(fragment));
 }

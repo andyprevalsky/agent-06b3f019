@@ -6283,6 +6283,35 @@ async def test_init_browser_session_transient_failure_returns_retryable():
     assert out["status_code"] == 400
 
 
+async def test_init_browser_session_read_timeout_is_transient():
+    """Kernel create can exceed the 180s client budget (biometrics 05823816).
+
+    httpx.ReadTimeout must NOT raise out of init_browser_session — that fails
+    the Temporal activity, forces an LLM-level respawn of spawn_browser_agent,
+    and burns the smoke dynamic cap. Classify as transient_init_failure so the
+    handler's bounded fresh-proxy retry loop reallocates in-activity.
+    """
+    import httpx
+    from domains.spawn_browser_agent_v3 import repo
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            raise httpx.ReadTimeout("simulated kernel create stall")
+
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        out = await repo.init_browser_session(_fake_config(), "u", "a", "https://example.com")
+
+    assert out["transient_init_failure"] is True
+    assert out["status_code"] == 0
+    assert "ReadTimeout" in out["detail"]
+
+
 async def test_init_browser_session_unique_constraint_is_not_transient():
     """A P2002 on the preallocated BrowserSession.id is never a proxy hiccup.
 
