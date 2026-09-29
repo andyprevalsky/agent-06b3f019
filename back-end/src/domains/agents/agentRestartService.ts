@@ -236,12 +236,12 @@ export async function prepareAgentWorkflowReplacement(
   assertRestartDeadline(options.deadlineAtMs, 'tool snapshot');
   const launchConfig = await historicalLaunchConfig(agent, options.deadlineAtMs);
   assertRestartDeadline(options.deadlineAtMs, 'launch config read');
-  const expectedWorkflowId =
-    options.expectedWorkflowId ?? capturedStaleWorkflowId ?? agent.temporalWorkflowId;
   const claim = await claimReplacementGeneration(
     agentId,
     launchConfig,
-    expectedWorkflowId,
+    options.expectedWorkflowId === undefined && options.deploymentAttempt === undefined
+      ? null
+      : (options.expectedWorkflowId ?? capturedStaleWorkflowId ?? agent.temporalWorkflowId),
     options.deploymentAttempt
   );
   assertRestartDeadline(options.deadlineAtMs, 'replacement claim');

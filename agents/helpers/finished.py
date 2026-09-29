@@ -60,7 +60,13 @@ async def mark_finished(
 
         archive_root_agent_id = root_agent_id or agent_id
         try:
-            archive_settled = await asyncio.to_thread(flush_archive_writes, archive_root_agent_id, 15.0)
+            # mark_finished's workflow start_to_close is 30s. A 15s flush left
+            # no room for the COMPLETED PATCH under 50-child fan-out, so the
+            # activity timed out and a verified agent stayed ACTIVE until the
+            # smoke cap (ed9a3b6e, 2026-09-29). 5s settles local jobs and
+            # still leaves the status write inside the 30s budget; the
+            # backend durable fence reconciles any leftover PUTs.
+            archive_settled = await asyncio.to_thread(flush_archive_writes, archive_root_agent_id, 5.0)
         except Exception as exc:
             logger.warning(
                 "trace_archive.pre_terminal_flush_error",
