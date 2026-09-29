@@ -232,14 +232,22 @@ async function createRemoteSession(
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
+  const profileStartedAt = Date.now();
   const profile = options.omitProfile
     ? { profileId: null, profileSource: 'challenge_candidate_ephemeral' }
     : await createProfile(contextId, agentId, options.boundProfile);
+  log.info('Kernel session profile resolved', {
+    agentId,
+    profileSource: profile.profileSource,
+    durationMs: Date.now() - profileStartedAt,
+  });
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
     retryWithBackoff(
       async () => {
+        const createStartedAt = Date.now();
+        log.info('Kernel browser creation requested', { agentId, proxySource: proxy.proxySource });
         const session = await client.browsers.create({
           headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
           stealth,
@@ -256,6 +264,11 @@ async function createRemoteSession(
             : {}),
           ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
           tags: { rose_agent_id: agentId, rose_session_request: randomUUID() },
+        });
+        log.info('Kernel browser creation completed', {
+          agentId,
+          sessionId: session.session_id,
+          durationMs: Date.now() - createStartedAt,
         });
         const actualProfileId = session.profile?.id ?? null;
         // Only a required authenticated profile (Steel SessionAuth, H-07) fails
@@ -333,7 +346,13 @@ async function createRemoteSession(
 
     let resolved: ResolvedKernelProxy | undefined;
     try {
+      const proxyStartedAt = Date.now();
       resolved = await getOrCreateKernelProxy(client, candidate);
+      log.info('Kernel browser proxy resolved', {
+        agentId,
+        proxySource: resolved.source,
+        durationMs: Date.now() - proxyStartedAt,
+      });
       return await createValidatedSession({
         proxyId: resolved.proxyId,
         proxyKey: resolved.proxyKey,
