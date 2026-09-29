@@ -463,15 +463,12 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       const userId = await createUser('over-limit');
       const fingerprint = `over-limit-${randomUUID()}`;
-      const { MAX_PURCHASE_CENTS, PURCHASE_ABOVE_MAX_LIMIT_CODE } = await import(
-        '../../domains/purchases/config'
-      );
+      const { MAX_PURCHASE_CENTS, PURCHASE_ABOVE_MAX_LIMIT_CODE } =
+        await import('../../domains/purchases/config');
       const response = await request('/api/purchases/mint', {
         method: 'POST',
         headers: apiKeyHeaders(userId),
-        body: JSON.stringify(
-          validMintBody({ fingerprint, totalCents: MAX_PURCHASE_CENTS + 1 })
-        ),
+        body: JSON.stringify(validMintBody({ fingerprint, totalCents: MAX_PURCHASE_CENTS + 1 })),
       });
       assertStatus(response.status, 400, response.data);
       const body = assertSchema(ErrorResponse, response.data, 'over-limit mint');
