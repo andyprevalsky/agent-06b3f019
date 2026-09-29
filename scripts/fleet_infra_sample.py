@@ -41,6 +41,23 @@ def load_pool(repo_root: Path) -> list[str]:
     return names
 
 
+def eligible_pool(repo_root: Path, pool_file: Path | None) -> list[str]:
+    catalog = load_pool(repo_root)
+    if pool_file is None:
+        return catalog
+    names = json.loads(pool_file.read_text())
+    if not isinstance(names, list) or not names or any(
+        not isinstance(name, str) for name in names
+    ):
+        raise ValueError("eligibility pool must be a nonempty JSON name list")
+    if len(names) != len(set(names)):
+        raise ValueError("eligibility pool contains duplicate names")
+    unknown = set(names) - set(catalog)
+    if unknown:
+        raise ValueError(f"eligibility pool contains non-ready tasks: {sorted(unknown)}")
+    return names
+
+
 def sample_slice(pool: list[str], *, width: int, seed: int, slice_index: int) -> list[str]:
     if width < 1:
         raise ValueError("width must be a positive integer")
@@ -53,7 +70,7 @@ def sample_slice(pool: list[str], *, width: int, seed: int, slice_index: int) ->
 def cmd_sample(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     try:
-        pool = load_pool(repo)
+        pool = eligible_pool(repo, args.pool_file)
         names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=args.slice)
     except (CatalogError, ValueError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
@@ -69,8 +86,8 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
     """Emit all slices for the stability proof; assert uniqueness within each."""
     repo = Path(args.repo).resolve()
     try:
-        pool = load_pool(repo)
-    except CatalogError as exc:
+        pool = eligible_pool(repo, args.pool_file)
+    except (CatalogError, ValueError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
     if args.width < 1:
@@ -123,6 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
             "--repo",
             default=str(SCRIPT_DIR.parent),
             help="repository root (default: parent of scripts/)",
+        )
+        sp.add_argument(
+            "--pool-file", type=Path,
+            help="JSON list of ready names eligible for this proof; selection only",
         )
 
     sample = sub.add_parser("sample", help="print one newline-separated slice")

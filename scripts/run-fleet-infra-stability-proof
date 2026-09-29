@@ -32,6 +32,7 @@ RUNS="${FLEET_INFRA_PROOF_RUNS:-10}"
 WIDTH="${FLEET_INFRA_PROOF_WIDTH:-20}"
 SEED="${FLEET_INFRA_PROOF_SEED:-20260908}"
 TIMEOUT="${FLEET_INFRA_PROOF_TIMEOUT:-7200}"
+POOL_FILE=""
 BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS="${BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS-7200}"
 case "$BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in
   ''|*[!0-9]*|0) echo "❌ BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS must be a positive integer" >&2; exit 2 ;;
@@ -57,6 +58,7 @@ Options:
   --concurrency <n>  Alias for --width
   --seed <n>         Deterministic sampling seed (default 20260908)
   --timeout <s>      Per-fleet controller timeout (default 7200)
+  --pool-file <path>  Select from this JSON list of ready task names
   -h, --help         Show this help
 EOF
 }
@@ -91,6 +93,7 @@ while [ "$#" -gt 0 ]; do
       TIMEOUT="${2:-}"; shift 2
       case "$TIMEOUT" in ''|*[!0-9]*|0) echo "❌ --timeout must be a positive integer" >&2; exit 2 ;; esac
       ;;
+    --pool-file) POOL_FILE="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "❌ unknown arg: $1" >&2
@@ -119,13 +122,22 @@ if [ "$WIDTH" -gt 32 ]; then
   echo "❌ refusing width>32 (hard cap 32; same as infra canary; ratchet deliberately)" >&2
   exit 2
 fi
+POOL_FILE_ARGS=()
+if [ -n "$POOL_FILE" ]; then
+  [ -f "$POOL_FILE" ] && [ ! -L "$POOL_FILE" ] || {
+    echo "❌ --pool-file must be a regular JSON file" >&2; exit 2;
+  }
+  POOL_FILE="$(cd "$(dirname "$POOL_FILE")" && pwd -P)/$(basename "$POOL_FILE")"
+  POOL_FILE_ARGS=(--pool-file "$POOL_FILE")
+fi
 
 if [ "$DRY_SAMPLE" = "1" ]; then
   exec python3 "$ROOT_DIR/scripts/fleet_infra_sample.py" dry-proof \
     --repo "$ROOT_DIR" \
     --runs "$RUNS" \
     --width "$WIDTH" \
-    --seed "$SEED"
+    --seed "$SEED" \
+    "${POOL_FILE_ARGS[@]}"
 fi
 
 if [ "$MODE" = capability ]; then
@@ -156,9 +168,9 @@ else
 fi
 echo "   fail closed: any INFRA outcome aborts remaining slices"
 
-python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" "$MODE" <<'PY'
-import json, os, sys, time
-path, proof_id, runs, width, seed, timeout, mode = sys.argv[1:]
+python3 - "$SUMMARY_JSON" "$PROOF_ID" "$RUNS" "$WIDTH" "$SEED" "$TIMEOUT" "$MODE" "$POOL_FILE" <<'PY'
+import hashlib, json, os, sys, time
+path, proof_id, runs, width, seed, timeout, mode, pool_file = sys.argv[1:]
 json.dump(
     {
         "proof_id": proof_id,
@@ -169,6 +181,8 @@ json.dump(
         "timeout_seconds": int(timeout),
         "benchmark_wall_clock_backstop_seconds": int(os.environ["BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS"]),
         "mode": mode,
+        "eligibility_pool_file": pool_file or None,
+        "eligibility_pool_sha256": hashlib.sha256(open(pool_file, "rb").read()).hexdigest() if pool_file else None,
         "slices": [],
         "status": "running",
     },
@@ -611,7 +625,8 @@ exec {proof_completion_reader}< <(
         --repo "$ROOT_DIR" \
         --width "$WIDTH" \
         --seed "$SEED" \
-        --slice "$i"
+        --slice "$i" \
+        "${POOL_FILE_ARGS[@]}"
     )
     if [ "${#BENCHES[@]}" -ne "$WIDTH" ]; then
       echo "❌ slice $i: catalog sample returned ${#BENCHES[@]}/$WIDTH names" >&2 || true
