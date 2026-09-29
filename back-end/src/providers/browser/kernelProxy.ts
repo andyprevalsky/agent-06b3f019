@@ -137,11 +137,16 @@ export async function getOrCreateKernelProxy(
   // Isolated benchmark databases and restored snapshots can lose the local row
   // while the project still owns this proxy. Reuse it instead of provisioning
   // another identical proxy (which can exceed browser-session init deadlines).
-  const projectProxies = await client.proxies.list(
+  let projectProxies = await client.proxies.list(
     { query: candidate.name, limit: 100 },
     { timeout: 10_000, maxRetries: 0 }
   );
-  const reusableId = selectReusableKernelProxy(projectProxies.items, candidate);
+  let reusableId: string | undefined;
+  while (true) {
+    reusableId = selectReusableKernelProxy(projectProxies.items, candidate);
+    if (reusableId !== undefined || !projectProxies.hasNextPage()) break;
+    projectProxies = await projectProxies.getNextPage();
+  }
   const remote = reusableId
     ? null
     : await client.proxies.create({
@@ -176,7 +181,6 @@ export async function getOrCreateKernelProxy(
       where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
     });
     if (winner !== null) {
-      if (remote !== null) await client.proxies.delete(remoteId).catch(() => {});
       return {
         proxyId: winner.proxyId,
         proxyKey: winner.proxyKey,
@@ -185,7 +189,8 @@ export async function getOrCreateKernelProxy(
         location: candidate.location,
       };
     }
-    if (remote !== null) await client.proxies.delete(remoteId).catch(() => {});
+    // Another caller may have listed this remote proxy and be about to save it.
+    // Retain it for a later lookup rather than deleting a possibly referenced ID.
     throw error;
   }
 }

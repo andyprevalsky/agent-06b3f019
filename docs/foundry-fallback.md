@@ -121,10 +121,11 @@ headers and request a quota increase if Foundry becomes a frequent fallback.
 See [Microsoft's rate-limit guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota).
 
 **A second Global Standard deployment does not multiply the available
-GPT-6 Sol quota.** Microsoft's subscription-level quota scheme shares a
-model/version pool across Global Standard deployments and regions; the rollout
-is still in progress, so check this resource's actual quota before assuming
-its tier or scope. Multiple deployments can partition assigned TPM,
+GPT-6 Sol quota.** Microsoft's newer subscription-level quota scheme shares
+one model/version pool across Global Standard deployments and regions; older
+quota guidance describes per-region allocations during this transition.
+Check this subscription's actual tier and allocation before assuming its scope.
+Multiple deployments can partition assigned TPM,
 reduce a deployment-level burst hotspot, or provide a separate operational
 target. Set `AZURE_FOUNDRY_DEPLOYMENTS=gpt-6-sol,gpt-6-sol-b` only after the
 second deployment has capacity. The agent stack hashes the agent ID (or user
@@ -133,8 +134,9 @@ explicit route key or dump agent ID when supplied, then a compute-grant user
 ID, otherwise a request ID; ordinary synchronous chat uses the request ID.
 On pre-content 429,
 it walks the other names. All users and agents still share the Azure quota;
-this is traffic distribution, not a quota increase. See [Microsoft's quota
-scope](https://learn.microsoft.com/en-us/azure/foundry/openai/quotas-limits).
+this is traffic distribution, not a quota increase. See [Microsoft's current
+quota scope](https://learn.microsoft.com/en-us/azure/foundry/openai/quotas-limits)
+and [quota management guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/quota).
 
 ## Verification status
 

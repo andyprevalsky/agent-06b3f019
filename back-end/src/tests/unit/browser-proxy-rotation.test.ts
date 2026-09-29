@@ -5,12 +5,15 @@
  *  - the deterministic Kernel residential → mobile → Steel ladder
  */
 import assert from 'node:assert';
+import type Kernel from '@onkernel/sdk';
 import { rotateProxySchema } from '../../domains/browser-session/types';
 import {
+  getOrCreateKernelProxy,
   kernelProxyCandidates,
   selectReusableKernelProxy,
 } from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
+import { prisma } from '../../providers/database';
 import {
   isSteelProvisioningOutage,
   isSteelSessionRateLimited,
@@ -79,6 +82,82 @@ function testRestoredProxyReuse(): void {
     undefined,
     'a state-restricted proxy must not satisfy a country-only candidate'
   );
+}
+
+async function testPaginatedProxyReuseAndConcurrentOwnership(): Promise<void> {
+  const model = prisma.browserProviderProxy;
+  const originalFind = model.findUnique;
+  const originalCreate = model.create;
+  const candidate = kernelProxyCandidates({ country: 'US' })[0]!;
+  const matching = {
+    id: 'proxy-on-second-page',
+    name: candidate.name,
+    type: candidate.type,
+    status: 'available' as const,
+    config: candidate.config,
+  };
+  let nextPageCalls = 0;
+  let remoteCreateCalls = 0;
+  let remoteDeleteCalls = 0;
+  const lastPage = {
+    items: [matching],
+    hasNextPage: () => false,
+  };
+  const firstPage = {
+    items: [],
+    hasNextPage: () => true,
+    getNextPage: async () => {
+      nextPageCalls += 1;
+      return lastPage;
+    },
+  };
+
+  try {
+    model.findUnique = (async () => null) as typeof model.findUnique;
+    model.create = (async ({ data }: { data: { proxyKey: string; proxyId: string } }) =>
+      data) as typeof model.create;
+    const paginatedClient = {
+      proxies: {
+        list: async () => firstPage,
+        create: async () => {
+          remoteCreateCalls += 1;
+          return { id: 'unexpected' };
+        },
+      },
+    } as unknown as Kernel;
+    const reused = await getOrCreateKernelProxy(paginatedClient, candidate);
+    assert.strictEqual(reused.proxyId, matching.id);
+    assert.strictEqual(nextPageCalls, 1);
+    assert.strictEqual(remoteCreateCalls, 0, 'a later page must be searched before provisioning');
+
+    let findCalls = 0;
+    model.findUnique = (async () => {
+      findCalls += 1;
+      return findCalls === 1 ? null : { proxyId: 'new-proxy', proxyKey: candidate.proxyKey };
+    }) as typeof model.findUnique;
+    model.create = (async () => {
+      throw new Error('unique conflict');
+    }) as typeof model.create;
+    const racingClient = {
+      proxies: {
+        list: async () => ({ items: [], hasNextPage: () => false }),
+        create: async () => ({ id: 'new-proxy' }),
+        delete: async () => {
+          remoteDeleteCalls += 1;
+        },
+      },
+    } as unknown as Kernel;
+    const winner = await getOrCreateKernelProxy(racingClient, candidate);
+    assert.strictEqual(winner.proxyId, 'new-proxy');
+    assert.strictEqual(remoteDeleteCalls, 0, 'the winner may own the created proxy');
+
+    model.findUnique = (async () => null) as typeof model.findUnique;
+    await assert.rejects(() => getOrCreateKernelProxy(racingClient, candidate), /unique conflict/);
+    assert.strictEqual(remoteDeleteCalls, 0, 'a pending winner may still be saving the proxy');
+  } finally {
+    model.findUnique = originalFind;
+    model.create = originalCreate;
+  }
 }
 
 function testRotationTierLadder(): void {
@@ -220,14 +299,18 @@ function testSteelOutageDetector(): void {
   );
 }
 
-function main(): void {
+async function main(): Promise<void> {
   testMobileCandidates();
   testResidentialUnchanged();
   testRestoredProxyReuse();
+  await testPaginatedProxyReuseAndConcurrentOwnership();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 
-main();
+void main().catch((error: unknown) => {
+  process.stderr.write(`${String(error)}\n`);
+  process.exitCode = 1;
+});
