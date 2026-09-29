@@ -268,6 +268,26 @@ def _dag_has_completed_for_each(dag: "TaskDAG") -> bool:
     )
 
 
+# July Fast Mode seeded assemble-final at dag_reasoning p:6. Current planner
+# leftover GPs after for_each inflate the reasoning task.index (70a8df9d
+# used 7), which misses that slot and soft-completes a 92-char stub — T7
+# then sees a 411-char card instead of the 4000-char report.
+OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP = 6
+
+
+def _oai_demo_reasoning_fast_mode_step(
+    task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]
+) -> int:
+    """Replay assemble-final from the July p:6 slot on catalog demo trees."""
+    if task.tool_name != "reasoning":
+        return task.index
+    if not _context_is_oai_demo(context):
+        return task.index
+    if not _dag_has_completed_for_each(dag):
+        return task.index
+    return OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+
+
 def _should_skip_oai_demo_leftover_gp(task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]) -> bool:
     """Skip leftover post-for_each GPs on the catalog demo so assemble-final stays cached.
 
@@ -844,7 +864,9 @@ async def _execute_single_task(
                 gpt_token_pool_id,
                 user_id,
                 # Fast Mode: reasoning keys by canonical request fingerprint.
-                task.index,
+                # Catalog demo assemble-final must use the July p:6 slot even
+                # when leftover post-for_each GPs shifted task.index.
+                _oai_demo_reasoning_fast_mode_step(task, dag, context),
                 system_prompt_text,
             ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —

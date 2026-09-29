@@ -1146,6 +1146,35 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
     assert sibling_terminal[0]["metadata"].get("canceled") is True
 
 
+def test_oai_demo_reasoning_fast_mode_step_uses_july_slot():
+    """Leftover GPs must not shift catalog-demo assemble-final off July p:6."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from loop.dag_executor import (
+        DAGTask,
+        OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP,
+        TaskDAG,
+        TaskState,
+        _oai_demo_reasoning_fast_mode_step,
+    )
+
+    dag = TaskDAG(
+        {
+            "tasks": [
+                {"goal": "Analyze 50 creators", "tool_name": "spawn_general_purpose_agent_for_each"},
+                {"goal": "Final assembly and quality assurance", "tool_name": "reasoning"},
+            ],
+            "dependencies": {"1": [0]},
+        }
+    )
+    dag.tasks[0].state = TaskState.COMPLETED
+    reasoning = dag.tasks[1]
+    demo_ctx = [{"role": "USER", "message": OAI_DEMO_ROOT_GOAL_PREFIX}]
+    assert _oai_demo_reasoning_fast_mode_step(reasoning, dag, demo_ctx) == OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+    assert _oai_demo_reasoning_fast_mode_step(reasoning, dag, [{"role": "USER", "message": "other"}]) == reasoning.index
+    leftover = DAGTask(index=3, goal="calendar", tool_name="spawn_general_purpose_agent")
+    assert _oai_demo_reasoning_fast_mode_step(leftover, dag, demo_ctx) == leftover.index
+
+
 def test_planned_general_purpose_tool_is_not_rewritten_from_goal_text():
     """Synthesis-shaped goals stay on the planned tool. No keyword rewrite."""
     import loop.dag_executor as dag_executor
@@ -1232,6 +1261,7 @@ async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
         "dependencies": {"1": [0], "2": [1]},
     }
     executed: list[str] = []
+    activity_calls: list[dict] = []
 
     schema = {"fields": [{"name": "creator_name", "type": "str", "required": True, "properties": []}]}
 
@@ -1268,6 +1298,7 @@ async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
         param_tool_calls=param_tool_calls,
         context=[{"role": "USER", "message": OAI_DEMO_ROOT_GOAL_PREFIX}],
         reasoning_result={"content": "# positioning_statement\n\nAndy as the founder-operator.", "usage": {}},
+        execute_activity_calls=activity_calls,
     )
 
     assert result["status"] == "completed"
@@ -1275,6 +1306,12 @@ async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
     leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
     assert leftover_events == [], f"leftover GP must not post chips (desyncs assemble-final): {leftover_events}"
     assert dag.tasks[1].state.value == "COMPLETED"
+    from loop.dag_executor import OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+
+    reasoning_call = next(c for c in activity_calls if "reasoning" in c["fn"])
+    # Leftover GPs shift task.index to 2; July assemble-final is still p:6.
+    assert dag.tasks[2].index == 2
+    assert reasoning_call["args"][-2] == OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
 
 
 async def test_execute_dag_transport_lookup_error_still_fails():
@@ -1318,6 +1355,10 @@ async def run_all_tests():
     r.record(
         "dag_foreach_alias_override_passes_spawn_agent_validation",
         test_dag_foreach_alias_override_passes_spawn_agent_validation,
+    )
+    r.record(
+        "oai_demo_reasoning_fast_mode_step_uses_july_slot",
+        test_oai_demo_reasoning_fast_mode_step_uses_july_slot,
     )
     r.record(
         "planned_general_purpose_tool_is_not_rewritten_from_goal_text",
