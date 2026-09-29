@@ -547,6 +547,8 @@ def verify_interrupted_pool_evidence(
                 archived[member.name] = json.loads(data)
             if member.name.endswith("/original/cloudbench-driver.state"):
                 archived[member.name] = data.strip()
+            if member.name.endswith("/original/repo/.context/cloudbench/logs/backend.log"):
+                archived[member.name] = data
             if "/original/cloudbench-driver-clean-" in member.name and member.name.endswith(".ack"):
                 archived[member.name] = data
             if "/original/repo/.context/cloudbench/cloudbench-stack-cleanup-" in member.name and member.name.endswith(".status"):
@@ -564,7 +566,16 @@ def verify_interrupted_pool_evidence(
             if "original/cloudbench-driver.pid" in row["missing"]:
                 assert state == b"exited"
                 if (run / row["task"] / "guest-cleanup.recovery-receipt.json").is_file():
-                    assert services["status"] == "failed"
+                    out = run / row["task"]
+                    provider = object_file(out / "guest-cleanup.provider-manifest.json")
+                    if provider["kind"] == "provider-prestart-zero-manifest":
+                        assert services["status"] == "stopped"
+                        assert "original/repo/.context/cloudbench/run.json" in row["missing"]
+                        verify_prestart_provider_archive(
+                            out, row, provider,
+                            archived[prefix + "repo/.context/cloudbench/logs/backend.log"])
+                    else:
+                        assert services["status"] == "failed"
                 else:
                     assert services["status"] == "stopped"
                     token = row["run_token"]
@@ -592,6 +603,40 @@ def verify_clean_stack_status(status: bytes, token: str) -> None:
     assert clean[b"version"] == b"1" and clean[b"token"] == token.encode()
     assert clean[b"state"] == b"clean"
     assert int(clean[b"stack_pid"]) > 0 and clean[b"stack_birth"]
+
+
+def verify_prestart_provider_archive(
+    out: Path, row: dict[str, object], provider: dict[str, object],
+    original_backend: bytes,
+) -> None:
+    receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
+    state_bytes = regular_bytes(out / "guest-cleanup.state.json", 1048576)
+    state = json.loads(state_bytes)
+    backend_bytes = regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024)
+    evidence = provider["evidence"]
+    assert backend_bytes == original_backend
+    assert provider["kind"] == "provider-prestart-zero-manifest"
+    assert provider["root_agent_id"] is None
+    assert provider["sessions"] == {"kernel": [], "steel": []}
+    assert provider["machine_id"] == row["machine_id"]
+    assert provider["guest_run_token"] == row["run_token"]
+    assert evidence["backend_log_sha256"] == hashlib.sha256(backend_bytes).hexdigest()
+    assert evidence["guest_state_sha256"] == hashlib.sha256(state_bytes).hexdigest()
+    assert all(evidence[key] == 0 for key in (
+        "allocation_event_count", "browser_session_mutation_count",
+        "payment_mutation_count", "root_creation_count"))
+    assert state["schema_version"] == "cloudbench-guest-state-v1"
+    assert state["machine_id"] == row["machine_id"]
+    assert state["guest_run_token"] == row["run_token"]
+    assert state["state"] == state["driver_state"] == "exited"
+    assert state["driver_pid"] is None and state["driver_descendants"] == []
+    assert state["services_status"] == "stopped"
+    assert state["live_service_pids"] == [] and state["backend_closed"] is True
+    assert state["run_json"]["exists"] is False
+    assert receipt["kind"] == "provider-exact-cleanup"
+    assert receipt["root_agent_id"] is None and receipt["results"] == []
+    assert receipt["manifest_sha256"] == hashlib.sha256(
+        json.dumps(provider, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def object_file_from_bytes(data: bytes):
