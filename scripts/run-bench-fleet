@@ -7939,7 +7939,20 @@ admitted_outputs = {path.name for path in run.iterdir() if path.is_dir() and any
     (path / name).exists() or (path / name).is_symlink()
     for name in ('runtime-evidence.owner.json', 'post-config-start.accepted', 'worker-runtime-evidence'))}
 assert admitted_outputs <= task_names
-owned = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
+fresh = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := fields(p)).get('machine_id')}
+pool_dir = audit / 'pool'
+assert pool_dir.is_dir() and not pool_dir.is_symlink()
+pool = set()
+for record in pool_dir.iterdir():
+    row = fields(record)
+    assert (row.get('version') == '1'
+            and row.get('fleet_owner_token') == registry.name
+            and row.get('run_id') == meta['run_id']
+            and row.get('app') == meta['app']
+            and row.get('source') == 'borrowed-pool'
+            and row.get('machine_id') == record.name)
+    if row.get('disposition') == 'claimed':
+        pool.add(record.name)
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
@@ -7951,8 +7964,9 @@ for index, task in enumerate(tasks):
         continue
     identity = out / '.cid'
     assert identity.is_file() and not identity.is_symlink()
-    machine = identity.read_text().split()[-1]
-    assert machine in owned and re.fullmatch(r'[0-9a-f]+', machine)
+    source, machine = identity.read_text().split()
+    assert re.fullmatch(r'[0-9a-f]+', machine)
+    assert (source == 'clone' and machine in fresh) or (source == 'pool' and machine in pool)
     mode = 'simulate' if task['mode'] == 'SIM' else 'real'
     print(index, out, machine, name, mode, sep='\t')
 PY

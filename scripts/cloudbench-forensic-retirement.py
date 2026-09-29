@@ -155,6 +155,7 @@ def verify_prestart_evidence(
 
 def verify_started_pool_evidence(
     registry: Path, run: Path, manifest_path: Path, archive_path: Path,
+    machines_path: Path, volumes_path: Path,
 ) -> dict[str, object]:
     """Release a failed pool run's evidence latch after exact guest cleanup.
 
@@ -189,8 +190,68 @@ def verify_started_pool_evidence(
     assert 1 <= len(tasks) == len(rows) <= 4096
     assert len({row["machine_id"] for row in rows}) == len(rows)
     assert len({row["volume_id"] for row in rows}) == len(rows)
-    for directory in (audit / "expected-fresh", audit / "fresh", audit / "by-machine-id", registry / "clones"):
-        assert directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir())
+    # Autoscaled workers are separate exact-owned fresh clones of the claimed
+    # pool primaries. Their verified original captures stay in the run output;
+    # the provider reaper consumes their durable clone ledger after this latch
+    # is released. Do not require an empty fresh ledger here.
+    worker_contract = __import__("runpy").run_path(
+        str(Path(__file__).with_name("cloudbench-worker-evidence.py")))
+    worker_hashes = []
+    expected_fresh = audit / "expected-fresh"
+    fresh = audit / "fresh"
+    by_machine = audit / "by-machine-id"
+    clones = registry / "clones"
+    for directory in (expected_fresh, fresh, by_machine, clones):
+        assert directory.is_dir() and not directory.is_symlink()
+    names = {path.name for path in fresh.iterdir()}
+    assert names == {path.name for path in expected_fresh.iterdir()}
+    assert names == {path.name for path in clones.iterdir()}
+    fresh_records = {}
+    for name in names:
+        original = fields(fresh / name)
+        expected = fields(expected_fresh / name)
+        clone = fields(clones / name)
+        machine = original["machine_id"]
+        volume = original["volume_id"]
+        assert re.fullmatch(r"cloudbench-[A-Za-z0-9_-]+", name)
+        assert re.fullmatch(r"[0-9a-f]+", machine)
+        assert re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
+        assert original["version"] == "1" and original["fleet_owner_token"] == owner
+        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
+        assert original["clone_name"] == name and original["source"] == "fresh-clone"
+        assert original["disposition"] == "owned"
+        assert expected == {"clone_name": name,
+                            "source_machine_id": original["source_machine_id"]}
+        assert clone == {"name": name, "id": machine, "volume_id": volume}
+        assert regular_bytes(by_machine / machine, 256).decode().strip() == name
+        fresh_records[machine] = original
+    assert {path.name for path in by_machine.iterdir()} == set(fresh_records)
+    machines = object_file(machines_path, 128 * 1024 * 1024)
+    volumes = object_file(volumes_path, 128 * 1024 * 1024)
+    assert isinstance(machines, list) and isinstance(volumes, list)
+    native_machines = {row["id"]: row for row in machines}
+    native_volumes = {row["id"]: row for row in volumes}
+    assert len(native_machines) == len(machines)
+    assert len(native_volumes) == len(volumes)
+    for machine, original in fresh_records.items():
+        assert original["source_machine_id"] in {row["machine_id"] for row in rows}
+        assert original["volume_id"] in native_volumes
+        if machine in native_machines:
+            assert native_machines[machine]["name"] == original["clone_name"]
+        ordinal = next(i for i, row in enumerate(rows)
+                       if row["machine_id"] == original["source_machine_id"])
+        task = tasks[ordinal]["name"]
+        base = run / task / "worker-runtime-evidence" / machine
+        worker_owner = object_file(base / "owner.json")
+        assert all(worker_owner.get(key) == value for key, value in {
+            "version": 1, "machine_id": machine,
+            "primary_machine_id": original["source_machine_id"],
+            "run_token": f"{owner}-{ordinal}"}.items())
+        capture = base / "capture"
+        worker_contract["verify_directory"](
+            capture, worker_contract["authority"](f"{owner}-{ordinal}", machine))
+        worker_hashes.append(hashlib.sha256(regular_bytes(
+            capture / "manifest.json", 1048576)).hexdigest())
     assert archive_path.stat().st_size == manifest["archive_bytes"] <= 512 * 1024 * 1024
     assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
     pool = audit / "pool"
@@ -252,7 +313,26 @@ def verify_started_pool_evidence(
     assert seen == set(expected_files)
     for row in rows:
         name = row["task"]
-        assert archived_services[name]["status"] == "stopped"
+        services_status = archived_services[name]["status"]
+        if services_status != "stopped":
+            # A forcibly stopped primary can retain its original running
+            # services.json. Preserve that truth and require the independently
+            # sealed exact stopped-machine cleanup proof instead.
+            assert services_status == "running"
+            out = run / name
+            stopped = object_file(out / "guest-cleanup.machine-stopped.json")
+            receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
+            assert stopped["version"] == 1 and stopped["state"] == "stopped"
+            assert stopped["machine_id"] == row["machine_id"]
+            assert stopped["fleet_owner_token"] == owner
+            assert stopped["fleet_run_id"] == meta["run_id"]
+            assert receipt["machine_id"] == row["machine_id"]
+            assert receipt["fleet_owner_token"] == owner
+            assert receipt["fleet_run_id"] == meta["run_id"]
+            assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
+                regular_bytes(out / "guest-cleanup.machine-stopped.json", 1048576)
+            ).hexdigest()
+            assert native_machines[row["machine_id"]]["state"] == "stopped"
         results = archived_runs[name].get("tasks")
         assert isinstance(results, list) and len(results) == 1
         assert results[0]["name"] == name
@@ -260,7 +340,11 @@ def verify_started_pool_evidence(
         # independently recovered. No evaluator verdict is synthesized here.
     return {"schema": "cloudbench-started-evidence-verified-v1", "owner": owner,
             "run_id": meta["run_id"], "tasks": len(rows), "files": len(seen),
-            "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
+            "archive_sha256": manifest["archive_sha256"],
+            "verified_workers": len(fresh_records),
+            "worker_manifests_sha256": hashlib.sha256(
+                "".join(sorted(worker_hashes)).encode()).hexdigest(),
+            "proof_credit": 0}
 
 
 def object_file_from_bytes(data: bytes):
@@ -591,7 +675,7 @@ def main() -> None:
                                           args.archive)
     elif manifest.get("schema") == "cloudbench-started-evidence-v1":
         result = verify_started_pool_evidence(args.registry, args.run, args.manifest,
-                                              args.archive)
+                                              args.archive, args.machines, args.volumes)
     else:
         result = verify(args.registry, args.run, args.manifest, args.archive,
                         args.machines, args.volumes)
