@@ -353,16 +353,18 @@ async function createRemoteSession(
       // gone — forgetting it would recreate orphans for the same geo key.
       const message =
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-      const stickyBadProxy =
+      const stickyProxyKey =
         resolved?.proxyKey !== undefined &&
         (message.includes('proxy not found') ||
           message.includes('invalid proxy') ||
           message.includes('proxy unavailable') ||
           message.includes('proxy is unavailable') ||
           message.includes('no_peer') ||
-          message.includes('no peer'));
-      if (stickyBadProxy && resolved !== undefined) {
-        await forgetKernelProxy(resolved.proxyKey).catch(() => {});
+          message.includes('no peer'))
+          ? resolved.proxyKey
+          : undefined;
+      if (stickyProxyKey !== undefined) {
+        await forgetKernelProxy(stickyProxyKey).catch(() => {});
       }
 
       log.warn('Kernel proxy location unavailable; relaxing location specificity', {
