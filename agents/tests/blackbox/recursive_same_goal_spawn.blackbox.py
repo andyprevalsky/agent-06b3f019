@@ -71,66 +71,6 @@ def current_spawn_rule_bullet() -> str:
 
 
 
-def _message_text(msg: dict) -> str:
-    content = msg.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-    return ""
-
-
-_DAG_FORCE_GP_RE = re.compile(
-    r"You MUST call exactly one tool:\s*`spawn_agent`[\s\S]*?"
-    r'spawn_general_purpose_agent`\s+requires\s+`type="general_purpose"`',
-    re.IGNORECASE,
-)
-
-
-def neutralize_dag_forced_gp_synthesis(messages: List[dict]) -> int:
-    """Rewrite DAG param-populator force-messages that compel a GP spawn for fan-in work.
-
-    Production now rewrites those plan nodes to `reasoning` before population.
-    Fixtures freeze the old force text; neutralize it so the live suite measures
-    the post-fix execute prompt rather than an obsolete MUST-spawn contract.
-    """
-    from loop.dag_executor import is_fan_in_synthesis_goal
-
-    rewritten = 0
-    out: List[dict] = []
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            out.append(msg)
-            continue
-        text = _message_text(msg)
-        if not _DAG_FORCE_GP_RE.search(text):
-            out.append(msg)
-            continue
-        m = re.match(
-            r"Please execute task \d+ of the plan: (.*?)\n\nYou MUST call",
-            text,
-            re.S,
-        )
-        goal = (m.group(1).strip() if m else text)[:800]
-        if not is_fan_in_synthesis_goal(goal):
-            out.append(msg)
-            continue
-        new_text = (
-            f"Please execute this plan task yourself (fan-in synthesis): {goal}\n\n"
-            "Complete this consolidation / merge / finalize step with your own tools. "
-            "Do NOT call spawn_agent with type=\"general_purpose\". "
-            "Keep ownership of the final deliverable."
-        )
-        out.append({**msg, "content": new_text})
-        rewritten += 1
-    messages[:] = out
-    return rewritten
-
-
 def patch_messages_spawn_rule(
     messages: List[dict], new_bullet: str
 ) -> Tuple[List[dict], int]:
