@@ -91,6 +91,35 @@
       }
     },
     {
+      "name": "provider_toolCallId_with_colon_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Provider-native tool ids may embed colons without a for_each suffix.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "toolu:abc-openai:chatcmpl",
+          "subAgentIds": ["gp-child-1"],
+          "agentType": "general_purpose"
+        }
+      }
+    },
+    {
+      "name": "empty_subAgentIds_aggregate_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Empty aggregate lists must not hide the parent result.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "foreach-base:3",
+          "subAgentIds": []
+        }
+      }
+    },
+    {
       "name": "task_complete_terminal_omits_subAgentId_kept",
       "is_internal": false,
       "message": {

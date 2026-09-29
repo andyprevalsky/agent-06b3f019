@@ -6,6 +6,7 @@ classification fixtures: shared/context-scope/fixtures.json.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List
 
 
@@ -31,8 +32,14 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     if metadata.get("subAgentId"):
         return True
 
+    sub_agent_ids = metadata.get("subAgentIds")
+    if not isinstance(sub_agent_ids, list) or len(sub_agent_ids) == 0:
+        return False
+
     tool_call_id = str(metadata.get("toolCallId") or "")
-    return bool(metadata.get("subAgentIds") and ":" in tool_call_id)
+    # for_each child UI rows use `<base>:<idx>` (idx digits); unsuffixed
+    # aggregates and provider IDs that merely contain ":" stay visible.
+    return bool(re.search(r":\d+$", tool_call_id))
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -10,12 +10,21 @@
 
 import type { ChatMessage } from './initialContext';
 
+function isNonEmptySubAgentIds(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0;
+}
+
+/** for_each child UI rows use `<base>:<idx>` toolCallIds (idx is digits). */
+function hasForEachChildToolCallSuffix(toolCallId: string): boolean {
+  return /:\d+$/.test(toolCallId);
+}
+
 export function isInternalSubagentMessage(message: ChatMessage): boolean {
   const metadata = message.metadata ?? {};
   if (metadata.subAgentId) return true;
 
   const toolCallId = String(metadata.toolCallId ?? '');
-  return Boolean(metadata.subAgentIds && toolCallId.includes(':'));
+  return isNonEmptySubAgentIds(metadata.subAgentIds) && hasForEachChildToolCallSuffix(toolCallId);
 }
 
 export function filterInternalSubagentMessages(messages: ChatMessage[]): ChatMessage[] {
