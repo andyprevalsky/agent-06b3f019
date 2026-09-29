@@ -925,25 +925,21 @@ async def _execute_single_task(
             if actual_tool != task.tool_name:
                 workflow.logger.info(f"[DAG] Resolved alias: {task.tool_name} → {actual_tool}")
 
+            if _should_skip_oai_demo_leftover_gp(task, dag, context):
+                # Do not emit IN_PROGRESS/FINISHED chips. July Fast Mode records
+                # explore + for_each + assemble-final only; leftover skip cards
+                # change the parent transcript and miss the assemble-final cache
+                # (T7 then sees a 411-char stub instead of the 4000-char report).
+                workflow.logger.info(
+                    f"[DAG] Task {task.index} skipped silently: leftover post-for_each GP on OAI demo tree"
+                )
+                return True
+
             # Emit a placeholder before param population so the UI reflects the
             # concrete planned tool while the LLM fills arguments.
             early_tool_name, early_event = _build_early_tool_event(task, actual_tool, tool_call_id)
             await handle_tool_event_fn(early_event, tool_call_id, early_tool_name)
             early_tool_event_name = early_tool_name
-
-            if _should_skip_oai_demo_leftover_gp(task, dag, context):
-                workflow.logger.info(
-                    f"[DAG] Task {task.index} skipped: leftover post-for_each GP on OAI demo tree"
-                )
-                await handle_tool_event_fn(
-                    _fast_mode_skip_event(
-                        task,
-                        message="Fast Mode leftover post-for_each GP skipped so assemble-final can replay.",
-                    ),
-                    tool_call_id,
-                    early_tool_event_name or task.tool_name,
-                )
-                return True
 
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.

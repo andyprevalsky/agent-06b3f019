@@ -1273,11 +1273,8 @@ async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
     assert result["status"] == "completed"
     assert executed == ["for_each"]
     leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
-    assert leftover_events, f"leftover chip missing: {events}"
-    terminal = [e for e in leftover_events if e["status"] not in (None, "IN_PROGRESS")]
-    assert terminal and terminal[0]["status"] == "FINISHED"
-    assert terminal[0]["metadata"].get("fastModeCacheSkip") is True
-    assert not any(e["status"] == "ERROR" for e in leftover_events)
+    assert leftover_events == [], f"leftover GP must not post chips (desyncs assemble-final): {leftover_events}"
+    assert dag.tasks[1].state.value == "COMPLETED"
 
 
 async def test_execute_dag_transport_lookup_error_still_fails():
