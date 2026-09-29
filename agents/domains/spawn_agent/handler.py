@@ -366,6 +366,13 @@ async def _recover_oai_demo_for_each_timeout(
     if child_agent_id in results:
         return results.get(child_agent_id)
     while child_agent_id not in workflow_instance.child_results:
+        # The child can finish after finalize_child's last durable-state check
+        # without its completion signal reaching this parent. Keep reconciling
+        # the persisted terminal result instead of waiting forever for a signal.
+        if await get_sub_agent_manager()._reconcile_terminal_child_result(
+            workflow_instance, child_agent_id
+        ):
+            break
         try:
             await wait_condition_or_generation_handoff(
                 lambda cid=child_agent_id: cid in workflow_instance.child_results,

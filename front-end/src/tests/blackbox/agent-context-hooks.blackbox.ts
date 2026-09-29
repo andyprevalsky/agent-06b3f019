@@ -13,6 +13,7 @@ import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import React from 'react';
 import type { AgentContextValue, AgentProviderProps } from '@/features/agent-context/types';
+import { benchmarkShareToken, captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 
 // Mock subs BEFORE importing hook
 vi.mock('@/features/agent-context/hooks/useRealtimeSubscription', () => ({
@@ -176,13 +177,14 @@ describe('useAgentProvider', () => {
   it('loads a shared benchmark transcript without a session or agent API auth', async () => {
     localStorage.clear();
     window.history.replaceState({}, '', '/?agent-id=shared-agent&benchmark-share=run.token');
+    captureBenchmarkShareToken();
     server.use(
-      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, ({ request }) => {
+      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, ({ request, params }) => {
         expect(new URL(request.url).searchParams.get('share')).toBe('run.token');
         expect(request.headers.has('authorization')).toBe(false);
         expect(request.headers.has('x-api-key')).toBe(false);
         return HttpResponse.json({
-          agent: makeAgent({ agent_id: 'shared-agent', goal: 'shared recording' }),
+          agent: makeAgent({ agent_id: params.agentId as string, goal: 'shared recording' }),
           messages: [
             {
               message_id: 'recorded-message',
@@ -204,6 +206,10 @@ describe('useAgentProvider', () => {
     expect(capturedRequests.some((request) => request.url.includes('/agents/shared-agent'))).toBe(
       false,
     );
+    act(() => result.current.setSelectedAgentId('sibling-agent'));
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('sibling-agent'));
+    expect(benchmarkShareToken()).toBe('run.token');
+    expect(window.location.search).toBe('?agent-id=sibling-agent');
     unmount();
   });
 

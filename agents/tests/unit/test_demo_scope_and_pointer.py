@@ -973,3 +973,32 @@ def test_materialize_persists_rewritten_schema_for_passthrough_only_response():
     result = asyncio.run(materialize_oai_demo_report_files_activity("user-1", response, schema, "agent-1"))
     # No uploads were planned, but the schema must still describe a file.
     assert result["output_schema"]["fields"][0]["type"] != "string"
+
+
+def test_for_each_timeout_recovers_terminal_child_without_completion_signal(monkeypatch):
+    from domains.spawn_agent import handler
+
+    child_id = "completed-without-signal"
+    workflow_instance = SimpleNamespace(
+        goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+        fast_cache_goal="",
+        fast_mode_cache_enabled=True,
+        child_results={},
+        pending_children={child_id},
+    )
+
+    class FakeManager:
+        async def _reconcile_terminal_child_result(self, workflow, agent_id):
+            assert agent_id == child_id
+            workflow.child_results[agent_id] = {"status": "completed", "summary": "saved result"}
+            workflow.pending_children.discard(agent_id)
+            return True
+
+    monkeypatch.setattr(handler, "get_sub_agent_manager", lambda: FakeManager())
+    recovered = asyncio.run(
+        handler._recover_oai_demo_for_each_timeout(
+            workflow_instance, child_id, TimeoutError("activity timed out")
+        )
+    )
+    assert recovered == {"status": "completed", "summary": "saved result"}
+    assert child_id not in workflow_instance.pending_children

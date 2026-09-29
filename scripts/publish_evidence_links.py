@@ -262,6 +262,29 @@ def validate_browser_agents_terminated_with_recording(
     return failures
 
 
+def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
+    """Extract short, rendered phrases from each visible transcript role."""
+    snippets: dict[str, list[str]] = {"user": [], "assistant": []}
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = str(message.get("text") or "")
+        if (
+            role not in ("USER", "ASSISTANT")
+            or _message_metadata(message).get("hidden")
+        ):
+            continue
+        for line in content.splitlines():
+            # React renders Markdown markers as formatting, so match the text
+            # the signed-out visitor sees instead of the raw Markdown source.
+            visible_line = re.sub(r"[`*_#>~]", "", line).strip()
+            if len(visible_line) >= 12:
+                snippets[str(role).lower()].append(visible_line[:60])
+                break
+    return {role: values[:8] for role, values in snippets.items()}
+
+
 def verify_agent_reachable(
     agent_id: str, token: str, *, timeout: float = 60.0
 ) -> tuple[str, int]:
@@ -305,15 +328,8 @@ def verify_agent_reachable(
                 raise SystemExit(f"FE page returned HTTP {fe_resp.status}")
     except Exception as exc:
         raise SystemExit(f"FE page unreachable: {exc}") from exc
-    snippets = [
-        str(message.get("text") or "")[:60]
-        for message in messages
-        if isinstance(message, dict)
-        and message.get("role") in ("USER", "ASSISTANT")
-        and len(str(message.get("text") or "")) >= 15
-        and not _message_metadata(message).get("hidden")
-    ][:8]
-    if not snippets:
+    snippets = visible_transcript_snippets(messages)
+    if not snippets["user"]:
         raise SystemExit("FE browser verification has no visible transcript snippets")
     browser = subprocess.run(
         ["node", str(REPO_ROOT / "scripts" / "verify_benchmark_share_link.cjs")],

@@ -33,6 +33,20 @@ def msg(**meta: Any) -> dict:
 
 agent = "00000000-0000-4000-8000-000000000001"
 
+# The browser verifier checks both rendered roles. Markdown progress headings
+# become plain text in the page, and hidden messages must not count.
+snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Raise the round for Rose Labs"},
+        {"role": "ASSISTANT", "text": "**Setting the plan**\n\n"},
+        {"role": "ASSISTANT", "text": "private hidden reply", "metadata": {"hidden": True}},
+    ]
+)
+assert snippets == {
+    "user": ["Raise the round for Rose Labs"],
+    "assistant": ["Setting the plan"],
+}, snippets
+
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 

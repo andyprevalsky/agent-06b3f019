@@ -19,6 +19,9 @@ it('removes the bearer query before analytics while keeping the current entry re
   expect(window.history.state.existing).toBe('router-state');
   expect(benchmarkShareToken()).toBe('secret-token');
 
+  window.history.replaceState(window.history.state, '', '/?agent-id=sibling-agent');
+  expect(benchmarkShareToken()).toBe('secret-token');
+
   window.history.pushState({}, '', '/?agent-id=shared-agent');
   expect(benchmarkShareToken()).toBeNull();
 });

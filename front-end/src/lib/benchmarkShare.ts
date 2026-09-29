@@ -43,7 +43,8 @@ export function benchmarkShareToken(): string | null {
       : null;
   if (!entry || typeof entry !== 'object') return null;
   const share = entry as Partial<CapturedBenchmarkShare>;
-  return share.agentId === agentId && typeof share.token === 'string' ? share.token : null;
+  // The capability is scoped to the archived run, which can contain several agents.
+  return typeof share.token === 'string' ? share.token : null;
 }
 
 export function isBenchmarkSharedView(): boolean {
