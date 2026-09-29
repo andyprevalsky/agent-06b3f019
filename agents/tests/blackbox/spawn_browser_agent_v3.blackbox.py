@@ -18396,6 +18396,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_current_url(self, *, fallback: str = ""):
             return fallback or "https://example.com/login"
 
+        async def ensure_browser_overlays_suppressed(self):
+            return None
+
         def start_captcha_telemetry_indicator(self, poll_phase):
             self._captcha_poll = poll_phase
 
