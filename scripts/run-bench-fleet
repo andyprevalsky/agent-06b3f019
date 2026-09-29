@@ -7293,7 +7293,14 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 fi
                 barrier_token="$guest_barrier_token"
                 recovery_benches+=("$bench")
-                recovery_clone_names+=("$clone_name")
+                # A pool claim is bound by Machine ID and mounted Volume, not
+                # a fresh-clone name record. Its synthetic plan label is not
+                # the provider Machine name used by stopped-state proof.
+                if [ "$kind" = "pool-guest" ]; then
+                    recovery_clone_names+=("$actual_name")
+                else
+                    recovery_clone_names+=("$clone_name")
+                fi
                 recovery_outputs+=("$output")
                 recovery_ips+=("$private_ip")
                 recovery_remote+=("$remote_port")
