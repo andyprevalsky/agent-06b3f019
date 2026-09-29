@@ -2,10 +2,11 @@
  * SMS Supervisor LLM call.
  *
  * Owns exactly one thing: turn a list of messages into a `SupervisorResponse`.
- * Streams a rose-1-flash completion (Cerebras-first), honours the per-user
- * blackbox fixture override, and shapes the consumed stream into
- * `{ reasoning, tool_calls }` whether the model answered with native tool_use
- * blocks or with the structured-output JSON envelope as content.
+ * Streams a rose-fast (rose-1-flash) completion through the normal pool path
+ * (Cerebras Qwen → OpenRouter waterfall), honours the per-user blackbox fixture
+ * override, and shapes the consumed stream into `{ reasoning, tool_calls }`
+ * whether the model answered with native tool_use blocks or with the
+ * structured-output JSON envelope as content.
  *
  * Split out of supervisorHandler.ts so the handler stays about the tool loop.
  */
@@ -20,6 +21,7 @@ import type { ToolCall } from './supervisorTools';
 
 const log = createLogger('SmsSupervisor');
 
+/** Display alias rose-fast; pool id rose-1-flash. */
 export const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-flash';
 
 export interface SupervisorResponse {
@@ -37,31 +39,30 @@ export async function callSupervisorLlm(
   const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
   const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
 
-  // Same provider path as chat: Cerebras GLM first, with that route's own
-  // failover (quota/rate → OpenRouter unpinned same-model → generic waterfall).
-  // Do not prefer claudeAuth here — SMS reliability must not depend on a user
-  // OAuth token / funded Anthropic key / Anthropic union-schema ceiling.
+  // Default: rose-fast pool path (no provider_route). That hits pool.cerebrasModel
+  // (qwen-3.8-27b) then the pool waterfall — NOT the exclusive chat Cerebras
+  // route, which hardcodes gpt-oss-120b.
   // BENCHMARK_SMS_SUPERVISOR_MODEL(+_ROUTE) overrides for eval isolation only.
   const modelOverride = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
   const activeModel =
     modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
   const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
-  const providerRoute: NonNullable<CompletionOptions['provider_route']> =
-    modelOverride !== undefined && modelOverride !== ''
-      ? routeOverride === 'direct-cerebras' ||
-        routeOverride === 'openrouter-cerebras' ||
-        routeOverride === 'shared-openai-priority' ||
-        routeOverride === 'openrouter-waterfall'
-        ? routeOverride
-        : 'openrouter-waterfall'
-      : 'direct-cerebras';
+  const hasBenchmarkModel = modelOverride !== undefined && modelOverride !== '';
+  const providerRoute: CompletionOptions['provider_route'] | undefined = hasBenchmarkModel
+    ? routeOverride === 'direct-cerebras' ||
+      routeOverride === 'openrouter-cerebras' ||
+      routeOverride === 'shared-openai-priority' ||
+      routeOverride === 'openrouter-waterfall'
+      ? routeOverride
+      : 'openrouter-waterfall'
+    : undefined;
 
   log.info('[SmsSupervisorLLM] Request', {
     model: activeModel,
-    providerRoute,
+    providerRoute: providerRoute ?? 'pool-default',
     messageCount: messages.length,
-    hasClaudeToken: !!claudeToken && providerRoute !== 'direct-cerebras',
-    hasGptToken: !!gptToken && providerRoute !== 'direct-cerebras',
+    hasClaudeToken: !!claudeToken && providerRoute !== undefined,
+    hasGptToken: !!gptToken && providerRoute !== undefined,
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -93,9 +94,11 @@ export async function callSupervisorLlm(
     messages,
     temperature: 0.3,
     response_model: SUPERVISOR_RESPONSE_MODEL,
-    provider_route: providerRoute,
-    ...(providerRoute !== 'direct-cerebras' && claudeToken ? { claude_token: claudeToken } : {}),
-    ...(providerRoute !== 'direct-cerebras' && gptToken
+    ...(providerRoute !== undefined ? { provider_route: providerRoute } : {}),
+    // Compute tokens only on benchmark-overridden routes that need them.
+    // Default rose-fast has directAuthEnabled=false; never send tokens there.
+    ...(providerRoute !== undefined && claudeToken ? { claude_token: claudeToken } : {}),
+    ...(providerRoute !== undefined && gptToken
       ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
       : {}),
   });
