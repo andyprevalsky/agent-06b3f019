@@ -15,8 +15,18 @@ import { createTestHarness } from './trace-archive-test-utils'; // pragma: allow
 
 const { test, finish } = createTestHarness('generation queue cutover unit tests');
 
+const ALL_AGENT_STATUSES = [
+  'STARTING_UP',
+  'ACTIVE',
+  'PAUSED',
+  'COMPLETED',
+  'FAILED',
+  'OUT_OF_CREDITS',
+  'COST_LIMIT_REACHED',
+] as const;
+
 async function createAgent(overrides: {
-  status?: 'ACTIVE' | 'FAILED';
+  status?: (typeof ALL_AGENT_STATUSES)[number];
   statusMessage?: string | null;
   temporalWorkflowId?: string;
 }): Promise<string> {
@@ -97,6 +107,40 @@ async function main(): Promise<void> {
         'cutover must not write a Generation cutover FAILED statusMessage'
       );
     });
+  });
+
+  await test('force-clear replaces owned agents in every AgentStatus', async () => {
+    for (const status of ALL_AGENT_STATUSES) {
+      const workflowId = `status-${status}-${randomUUID()}`;
+      await withAgent({ status, temporalWorkflowId: workflowId }, async (agentId) => {
+        let restartedAgentId: string | null = null;
+        const outcome = await clearSupersededGenerationWorkflow(
+          'navi-agent-tasks@old',
+          workflowId,
+          {
+            restartAgent: async (id) => {
+              restartedAgentId = id;
+              return {
+                success: true,
+                agent_id: id,
+                workflow_id: `${id}:replacement:${randomUUID()}`,
+              };
+            },
+            terminateOrphan: async () => {
+              throw new Error(`${status} agent must not be treated as an orphan`);
+            },
+          }
+        );
+        assert.strictEqual(outcome, 'cleared', `${status} must be replaced`);
+        assert.strictEqual(restartedAgentId, agentId, `${status} must restart`);
+        const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+        assert.notStrictEqual(
+          stored.statusMessage?.startsWith(GENERATION_CUTOVER_STATUS_PREFIX) ?? false,
+          true,
+          `${status} must not receive a Generation cutover FAILED statusMessage`
+        );
+      });
+    }
   });
 
   await test('orphan workflows with no agent row are terminated', async () => {

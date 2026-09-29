@@ -421,6 +421,11 @@ class _FakeWorkflowModule:
             raise self._activity_result
         return self._activity_result
 
+    def now(self):
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc)
+
     async def wait_condition(self, predicate, timeout=None):
         # Predicate should return True immediately after setup
         # (test pre-populates child_results)

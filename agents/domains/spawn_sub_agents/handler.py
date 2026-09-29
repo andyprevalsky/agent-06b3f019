@@ -22,6 +22,8 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
 )
 from helpers.child_results import fetch_child_terminal_result_activity
+from helpers.generation_handoff import GenerationHandoffRequested
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.tool_call_ids import spawn_group_id
@@ -329,10 +331,14 @@ class SpawnSubAgentManager(ToolManager):
             if await self._reconcile_terminal_child_result(workflow_instance, child_agent_id):
                 break
             try:
-                await workflow.wait_condition(
+                await wait_condition_or_generation_handoff(
                     lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                    workflow_instance,
                     timeout=timedelta(seconds=30),
+                    workflow_mod=workflow,
                 )
+            except GenerationHandoffRequested:
+                raise
             except (asyncio.TimeoutError, TimeoutError):
                 continue
 

@@ -42,7 +42,12 @@ from domains.spawn_agent.service import (
     validate_spawn_params,
 )
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
 from helpers.tracing import span
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
@@ -132,7 +137,9 @@ async def wait_for_fast_mode_explore_slot(
 
     if _has_slot():
         return
-    await workflow.wait_condition(_has_slot)
+    await wait_condition_or_generation_handoff(
+        _has_slot, workflow_instance, workflow_mod=workflow
+    )
 
 
 def track_fast_mode_explore(
@@ -360,10 +367,14 @@ async def _recover_oai_demo_for_each_timeout(
         return results.get(child_agent_id)
     while child_agent_id not in workflow_instance.child_results:
         try:
-            await workflow.wait_condition(
+            await wait_condition_or_generation_handoff(
                 lambda cid=child_agent_id: cid in workflow_instance.child_results,
+                workflow_instance,
                 timeout=timedelta(seconds=30),
+                workflow_mod=workflow,
             )
+        except GenerationHandoffRequested:
+            raise
         except (asyncio.TimeoutError, TimeoutError):
             continue
     return workflow_instance.child_results.get(child_agent_id)
@@ -829,6 +840,7 @@ class SpawnAgentManager(ToolManager):
             ):
                 # Wait for activity completion or pause signal
                 was_cancelled = False
+                # cutover-class: activity-bound — cannot continue_as_new until explore activity ends
                 await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
                 if workflow_instance.is_paused and not activity_handle.done():
                     logger.info("Cancelling explore agent due to pause", goal=goal[:100])
@@ -1080,7 +1092,11 @@ class SpawnAgentManager(ToolManager):
             agent_cfgs.append(cfg)
 
         # Wait for un-pause before spawning (parents pause cascades to children).
-        await workflow.wait_condition(lambda: not workflow_instance.is_paused)
+        await wait_condition_or_generation_handoff(
+            lambda: not workflow_instance.is_paused,
+            workflow_instance,
+            workflow_mod=workflow,
+        )
 
         parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-flash")
         parent_source = getattr(workflow_instance, "agent_source", "WEB")
@@ -1299,22 +1315,36 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     last_result = ""
     unavailable_sources: List[Dict] = []
     event_count = 0
-    async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
-        event_count += 1
-        await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_agent")
-        if isinstance(event, ToolEvent) and event.status:
-            last_status = event.status
-        # Capture the result from the FINISHED event
-        if isinstance(event, ToolEvent) and event.data and event.data.get("result"):
-            last_result = event.data["result"]
-        # Capture data sources the explore couldn't reach (connector not connected)
-        if isinstance(event, ToolEvent) and event.data and event.data.get("unavailable_sources"):
-            unavailable_sources = event.data["unavailable_sources"]
-        # Track usage from events
-        if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
-            await workflow_instance._track_usage(
-                event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+    try:
+        async for event in manager.execute_tool(workflow_instance, tool_call, tool_call_id):
+            event_count += 1
+            await workflow_instance._handle_tool_event(event, tool_call_id, "spawn_agent")
+            if isinstance(event, ToolEvent) and event.status:
+                last_status = event.status
+            # Capture the result from the FINISHED event
+            if isinstance(event, ToolEvent) and event.data and event.data.get("result"):
+                last_result = event.data["result"]
+            # Capture data sources the explore couldn't reach (connector not connected)
+            if isinstance(event, ToolEvent) and event.data and event.data.get("unavailable_sources"):
+                unavailable_sources = event.data["unavailable_sources"]
+            # Track usage from events
+            if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
+                await workflow_instance._track_usage(
+                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+                )
+    except GenerationHandoffRequested:
+        if last_status != MessageStatus.FINISHED:
+            await workflow_instance._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="spawn_agent interrupted",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                ),
+                tool_call_id,
+                "spawn_agent",
             )
+        raise
 
     # A required data source wasn't connected: raise one blocking source_connect
     # gate per source (dedup/fan-in collapses duplicates across sub-agents). Each

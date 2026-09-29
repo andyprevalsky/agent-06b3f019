@@ -56,7 +56,11 @@ with workflow.unsafe.imports_passed_through():
     from helpers.context_compaction import build_context_compaction_metadata
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
-    from helpers.generation_handoff import should_handoff_to_generation
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+        should_handoff_to_generation,
+    )
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
@@ -70,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import _run_verifier, run_agent
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
@@ -1924,6 +1929,7 @@ class AgentWorkflow:
             # boundary before the LLM loop. The deploy gate queries this flag,
             # inspects history for workflow-task failures, then terminates the
             # isolated synthetic execution.
+            # cutover-class: deploy-gate — isolated validation run, never a user agent
             await workflow.wait_condition(lambda: not self._deployment_validation)
 
         # =====================================================================
@@ -2526,6 +2532,7 @@ class AgentWorkflow:
     async def _wait_for_messages(self) -> bool:
         """Wait for new messages."""
         try:
+            # cutover-class: bounded — 30s slice; next run_agent iteration re-checks handoff
             await workflow.wait_condition(
                 lambda: self._has_new_messages or not self.is_paused, timeout=timedelta(seconds=30)
             )
@@ -2601,9 +2608,9 @@ class AgentWorkflow:
     async def _check_generation_handoff(self) -> Optional[str]:
         """Return live task queue when this execution should hand off generations.
 
-        Safe checkpoint: called only at the top of a run_agent iteration, after any
-        prior LLM/tool/browser activity completed. Returns None when we are already
-        on the live generation (or the pointer cannot be read).
+        Safe checkpoint: called at the top of a run_agent iteration and from
+        in-tool parks after any prior activity completed. Returns None when we
+        are already on the live generation (or the pointer cannot be read).
         """
         try:
             pointer = await workflow.execute_activity(
@@ -2629,17 +2636,16 @@ class AgentWorkflow:
         Returns the live task queue when cooperative cutover is required while
         paused; otherwise None once the agent is unpaused.
         """
-        while self.is_paused:
-            handoff_queue = await self._check_generation_handoff()
-            if handoff_queue:
-                return handoff_queue
-            try:
-                await workflow.wait_condition(
-                    lambda: not self.is_paused,
-                    timeout=timedelta(seconds=30),
-                )
-            except (asyncio.TimeoutError, TemporalTimeoutError):
-                pass
+        if not self.is_paused:
+            return None
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: not self.is_paused,
+                self,
+                workflow_mod=workflow,
+            )
+        except GenerationHandoffRequested as exc:
+            return exc.task_queue
         return None
 
     async def _check_credits(self) -> None:
@@ -3319,6 +3325,16 @@ class AgentWorkflow:
                 if failed:
                     return {"error": True, "message": result_text or f"{tool_name} failed"}
                 return {"success": True, "message": result_text or f"{tool_name} completed"}
+
+        except GenerationHandoffRequested:
+            # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
+            # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
+            workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
+            return {
+                "success": True,
+                "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                "generation_handoff": True,
+            }
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error

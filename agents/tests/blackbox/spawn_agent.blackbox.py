@@ -463,6 +463,11 @@ class _FakeSpawnWF:
         self.unsafe = real.unsafe
         self.ActivityCancellationType = real.ActivityCancellationType
 
+    def now(self):
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc)
+
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
         self.activity_calls.append({"name": name, "args": args or [], "kwargs": kwargs})

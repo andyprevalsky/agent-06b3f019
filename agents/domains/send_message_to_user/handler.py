@@ -24,6 +24,11 @@ from temporalio.common import RetryPolicy
 from domains.send_message_to_user.config import SMS_FALLBACK_TIMEOUT_MINUTES, SUB_AGENT_AUTO_RESPONSE
 from domains.send_message_to_user.service import is_sub_agent, validate_tool_call
 from domains.send_message_to_user.types import build_attention_metadata
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 # Import activities (executed via workflow.execute_activity)
@@ -141,9 +146,11 @@ class SendMessageToUserManager(ToolManager):
                 timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
             )
             try:
-                await workflow.wait_condition(
+                await wait_condition_or_generation_handoff(
                     lambda: workflow_instance._has_new_messages,  # type: ignore[union-attr]
+                    workflow_instance,
                     timeout=timedelta(minutes=SMS_FALLBACK_TIMEOUT_MINUTES),
+                    workflow_mod=workflow,
                 )
                 logger.info(
                     "User responded within timeout, no SMS needed",
@@ -177,9 +184,20 @@ class SendMessageToUserManager(ToolManager):
         # ── 5. Wait for user response ──
         if not workflow_instance._has_new_messages:  # type: ignore[union-attr]
             try:
-                await workflow.wait_condition(
-                    lambda: workflow_instance._has_new_messages  # type: ignore[union-attr]
+                await wait_condition_or_generation_handoff(
+                    lambda: workflow_instance._has_new_messages,  # type: ignore[union-attr]
+                    workflow_instance,
+                    workflow_mod=workflow,
                 )
+            except GenerationHandoffRequested:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Waiting for reply",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata=build_attention_metadata(message, is_question, is_waiting=True),
+                )
+                raise
             except Exception as e:
                 logger.error("Error waiting for user response: %s", e)
                 yield ToolEvent(

@@ -196,6 +196,11 @@ class _FakeWorkflowModule:
         import temporalio.workflow as real
         self.unsafe = real.unsafe
 
+    def now(self):
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc)
+
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
         if name in self._activity_results:

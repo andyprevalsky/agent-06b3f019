@@ -1,11 +1,13 @@
 /**
  * Generation-queue straggler handling after cooperative cutover's drain SLO.
  *
- * Cooperative continue_as_new only runs at safe checkpoints. A workflow parked
- * on user approval (or any other in-tool wait_condition with an in-flight
- * activity) cannot hand off, so it is still on the superseded queue when the
+ * Cooperative continue_as_new runs at turn-top and every in-tool park that is
+ * not waiting on a running activity (approval, gate, signup, send_message,
+ * wait_for, wait_seconds, spawn child/slot/pause, browser auth). Activity-bound
+ * waits (browser / claude-code / explore handles) cannot continue_as_new until
+ * the activity completes, so they may still be on the superseded queue when the
  * 45-minute SLO fires. Killing those agents as "dead stragglers" is wrong —
- * they are waiting for the user. Replace them onto the live generation.
+ * replace them onto the live generation.
  */
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from './database';

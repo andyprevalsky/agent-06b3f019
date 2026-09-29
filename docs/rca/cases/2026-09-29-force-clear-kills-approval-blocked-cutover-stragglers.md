@@ -87,9 +87,24 @@ FAILED+sealed SMS approve recovery.
 
 Owned stragglers on a superseded generation queue are replaced onto the live
 generation (`clearSupersededGenerationWorkflow` → `restartAgent`). Force-clear
-must not write `Agent.status=FAILED`. The agent stays alive on the new
-generation; in-flight tools use the existing `DEPLOY_INTERRUPTED` retry
-contract. Orphan Temporal executions with no Agent row are still terminated.
+must not write `Agent.status=FAILED` for any AgentStatus. The agent stays
+alive on the new generation; in-flight tools use the existing
+`DEPLOY_INTERRUPTED` retry contract. Orphan Temporal executions with no Agent
+row are still terminated.
+
+In-tool parks now yield cooperatively so cutover does not wait for the SLO:
+
+- Cooperative (30s poll → `GenerationHandoffRequested` → chip FINISHED with
+  `DEPLOY_INTERRUPTED` → run_agent checkpoint 1.6 `continue_as_new`):
+  approval, gate, signup, send_message, wait_for, wait_seconds, spawn
+  child/slot/pause, browser auth + AgentCard funding/setup sleeps.
+- Activity-bound (cannot `continue_as_new` while the activity handle is
+  running; force-clear *replaces*): browser / claude-code / explore
+  `activity_handle.done()` waits.
+- Bounded 30s (`_wait_for_messages`): next loop iteration re-checks the
+  pointer.
+- Deploy-gate (`_deployment_validation`): isolated validation run, not a
+  user agent.
 
 Already-killed rows from the old force-clear can still be revived by
 user-initiated `POST /restart` / `reply_to_agent` (claim no longer skips

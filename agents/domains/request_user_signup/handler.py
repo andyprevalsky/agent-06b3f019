@@ -18,6 +18,11 @@ from domains.request_user_signup.service import (
     outcome_display,
     resolve_signup_outcome,
 )
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 logger = structlog.get_logger()
@@ -52,12 +57,14 @@ class RequestUserSignupManager(ToolManager):
 
         # Wait for user response (signup complete or dismissed)
         try:
-            await workflow.wait_condition(
+            await wait_condition_or_generation_handoff(
                 lambda: (
                     workflow_instance._has_new_messages
                     or workflow_instance._signup_completed
                     or workflow_instance._signup_dismissed
-                )
+                ),
+                workflow_instance,
+                workflow_mod=workflow,
             )
 
             # Determine outcome and reset flags
@@ -88,6 +95,15 @@ class RequestUserSignupManager(ToolManager):
                 metadata=build_signup_metadata(reason, is_waiting=False),
             )
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Account Required",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata=build_signup_metadata(reason, is_waiting=False),
+            )
+            raise
         except Exception as e:
             logger.error(f"Error waiting for signup response: {e}")
             yield ToolEvent(
