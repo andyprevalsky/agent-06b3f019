@@ -153,6 +153,116 @@ def verify_prestart_evidence(
             "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
 
 
+def verify_started_pool_evidence(
+    registry: Path, run: Path, manifest_path: Path, archive_path: Path,
+) -> dict[str, object]:
+    """Release a failed pool run's evidence latch after exact guest cleanup.
+
+    The receipt never makes the benchmark valid. It preserves original logs and
+    results so the already-confirmed cleanup can return prewarmed pool volumes.
+    """
+    owner = registry.name
+    assert re.fullmatch(r"[0-9a-f]{32}", owner)
+    meta = fields(registry / "meta")
+    assert meta["version"] == "2" and meta["fleet_owner_token"] == owner
+    assert meta["cleanup_policy"] == "reap"
+    assert not (registry / "guest-cleanup-unconfirmed").exists()
+    assert (registry / "runtime-evidence-unconfirmed").is_file()
+    audit = Path(meta["audit_dir"])
+    assert audit.is_dir() and not audit.is_symlink() and audit.name == owner
+    audit_meta = fields(audit / "meta")
+    assert audit_meta["fleet_owner_token"] == owner
+    assert audit_meta["run_id"] == meta["run_id"] and audit_meta["app"] == meta["app"]
+    assert run == Path(meta["runs_root"]) / meta["run_id"] and run.resolve() == run
+    assert manifest_path == run / "_forensic/manifest.json"
+    assert archive_path == run / "_forensic/originals.tar.gz"
+    manifest = object_file(manifest_path)
+    assert manifest["schema"] == "cloudbench-started-evidence-v1"
+    assert manifest["owner"] == owner and manifest["run_id"] == meta["run_id"]
+    assert manifest["proof_credit"] == 0
+    lifecycle = object_file(run / "_batch/lifecycle.json")
+    assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0
+    assert lifecycle["fleet_owner_token"] == owner
+    tasks = object_file(run / "_batch/benches.json")
+    rows = manifest["tasks"]
+    assert isinstance(tasks, list) and isinstance(rows, list)
+    assert 1 <= len(tasks) == len(rows) <= 4096
+    assert len({row["machine_id"] for row in rows}) == len(rows)
+    assert len({row["volume_id"] for row in rows}) == len(rows)
+    for directory in (audit / "expected-fresh", audit / "fresh", audit / "by-machine-id", registry / "clones"):
+        assert directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir())
+    assert archive_path.stat().st_size == manifest["archive_bytes"] <= 512 * 1024 * 1024
+    assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
+    pool = audit / "pool"
+    assert pool.is_dir() and not pool.is_symlink()
+    assert {path.name for path in pool.iterdir()} == {row["machine_id"] for row in rows}
+    expected_files: dict[str, dict[str, object]] = {}
+    for ordinal, (task, row) in enumerate(zip(tasks, rows, strict=True)):
+        name = task["name"]
+        assert re.fullmatch(r"[A-Za-z0-9._-]+", name) and name not in (".", "..")
+        assert row["task"] == name and row["ordinal"] == ordinal
+        assert row["run_token"] == f"{owner}-{ordinal}"
+        assert row["proof_credit"] == 0 and row["kind"] == "pool"
+        machine, volume = row["machine_id"], row["volume_id"]
+        assert re.fullmatch(r"[0-9a-f]+", machine)
+        assert re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
+        original = fields(pool / machine)
+        assert original["fleet_owner_token"] == owner
+        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
+        assert original["source"] == "borrowed-pool"
+        assert original["volume_id"] == volume and original["disposition"] == "claimed"
+        out = run / name
+        assert regular_bytes(out / ".cid", 256).decode().split() == ["pool", machine]
+        assert regular_bytes(out / "guest-shutdown.confirmed", 256).decode().strip() == meta["run_id"]
+        assert object_file(out / "runtime-evidence.owner.json") == {
+            "version": 1, "machine_id": machine, "run_token": row["run_token"]}
+        files = row["files"]
+        assert isinstance(files, dict)
+        mandatory = {"bench.log", "repo/.context/cloudbench/services.json",
+                     "repo/.context/cloudbench/stack.log",
+                     "repo/.context/cloudbench/logs/backend.log",
+                     "repo/.context/cloudbench/run.json"}
+        assert mandatory <= set(files)
+        for relative, info in files.items():
+            assert safe_name(relative) and type(info["bytes"]) is int
+            assert 0 <= info["bytes"] <= 64 * 1024 * 1024
+            assert re.fullmatch(r"[0-9a-f]{64}", info["sha256"])
+            member = f"{name}/{relative}"
+            assert member not in expected_files
+            expected_files[member] = info
+    seen = set()
+    archived_services = {}
+    archived_runs = {}
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive:
+            assert member.isfile() and member.name in expected_files
+            assert member.name not in seen
+            info = expected_files[member.name]
+            assert member.size == info["bytes"]
+            stream = archive.extractfile(member)
+            assert stream is not None
+            data = stream.read(member.size + 1)
+            assert len(data) == member.size
+            assert hashlib.sha256(data).hexdigest() == info["sha256"]
+            if member.name.endswith("/repo/.context/cloudbench/services.json"):
+                archived_services[member.name.split("/", 1)[0]] = json.loads(data)
+            if member.name.endswith("/repo/.context/cloudbench/run.json"):
+                archived_runs[member.name.split("/", 1)[0]] = json.loads(data)
+            seen.add(member.name)
+    assert seen == set(expected_files)
+    for row in rows:
+        name = row["task"]
+        assert archived_services[name]["status"] == "stopped"
+        results = archived_runs[name].get("tasks")
+        assert isinstance(results, list) and len(results) == 1
+        assert results[0]["name"] == name
+        # A failed archive/driver stays failed even when provider cleanup was
+        # independently recovered. No evaluator verdict is synthesized here.
+    return {"schema": "cloudbench-started-evidence-verified-v1", "owner": owner,
+            "run_id": meta["run_id"], "tasks": len(rows), "files": len(seen),
+            "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
+
+
 def object_file_from_bytes(data: bytes):
     return json.loads(data)
 
@@ -479,6 +589,9 @@ def main() -> None:
     if manifest.get("schema") == "cloudbench-prestart-evidence-v1":
         result = verify_prestart_evidence(args.registry, args.run, args.manifest,
                                           args.archive)
+    elif manifest.get("schema") == "cloudbench-started-evidence-v1":
+        result = verify_started_pool_evidence(args.registry, args.run, args.manifest,
+                                              args.archive)
     else:
         result = verify(args.registry, args.run, args.manifest, args.archive,
                         args.machines, args.volumes)

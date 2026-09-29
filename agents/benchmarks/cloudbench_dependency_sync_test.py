@@ -66,6 +66,85 @@ DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 FORENSIC_RETIREMENT_SCRIPT = ROOT / "scripts" / "cloudbench-forensic-retirement.py"
 
 
+def test_failed_started_pool_forensics_preserve_originals_without_proof_credit(tmp_path: Path) -> None:
+    verifier = importlib.util.spec_from_file_location("cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT)
+    assert verifier is not None and verifier.loader is not None
+    module = importlib.util.module_from_spec(verifier)
+    verifier.loader.exec_module(module)
+    owner = "e" * 32
+    run_id = "fixture-run"
+    machine = "deadbeef000001"
+    volume = "vol_Fixture123"
+    task = "fixture-bench"
+    registry = tmp_path / "ownership" / owner
+    audit = tmp_path / "audits" / owner
+    run = tmp_path / "runs" / run_id
+    out = run / task
+    forensic = run / "_forensic"
+    (registry / "clones").mkdir(parents=True)
+    for directory in ("expected-fresh", "fresh", "by-machine-id", "pool"):
+        (audit / directory).mkdir(parents=True)
+    (out / "remote-logs").mkdir(parents=True)
+    forensic.mkdir()
+    (run / "_batch").mkdir()
+    (registry / "meta").write_text(
+        f"version=2\nfleet_owner_token={owner}\napp=bench-app\n"
+        f"run_id={run_id}\nruns_root={run.parent}\naudit_dir={audit}\n"
+        "cleanup_policy=reap\n"
+    )
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (audit / "meta").write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+    )
+    (audit / "pool" / machine).write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+        f"machine_id={machine}\nvolume_id={volume}\nsource=borrowed-pool\n"
+        "disposition=claimed\n"
+    )
+    (run / "_batch/benches.json").write_text(json.dumps([{"name": task}]))
+    (run / "_batch/lifecycle.json").write_text(json.dumps({
+        "status": "failed", "controller_exit_code": 1, "fleet_owner_token": owner,
+    }))
+    (out / ".cid").write_text(f"pool {machine}\n")
+    (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
+    (out / "runtime-evidence.owner.json").write_text(json.dumps({
+        "version": 1, "machine_id": machine, "run_token": f"{owner}-0",
+    }))
+    files = {
+        "bench.log": b"original failed driver log\n",
+        "repo/.context/cloudbench/services.json": b'{"status":"stopped"}',
+        "repo/.context/cloudbench/stack.log": b"original stack log\n",
+        "repo/.context/cloudbench/logs/backend.log": b"original backend log\n",
+        "repo/.context/cloudbench/run.json": json.dumps({
+            "tasks": [{"name": task, "benchmark_status": "ERROR"}],
+        }).encode(),
+    }
+    archive_path = forensic / "originals.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for relative, payload in files.items():
+            info = tarfile.TarInfo(f"{task}/{relative}")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    manifest_path = forensic / "manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema": "cloudbench-started-evidence-v1", "owner": owner,
+        "run_id": run_id, "proof_credit": 0,
+        "archive_bytes": archive_path.stat().st_size,
+        "archive_sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        "tasks": [{
+            "task": task, "ordinal": 0, "kind": "pool", "machine_id": machine,
+            "volume_id": volume, "run_token": f"{owner}-0", "proof_credit": 0,
+            "files": {relative: {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+                      for relative, payload in files.items()},
+        }],
+    }))
+    receipt = module.verify_started_pool_evidence(registry, run, manifest_path, archive_path)
+    assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
+    (out / "guest-shutdown.confirmed").unlink()
+    with pytest.raises((AssertionError, OSError)):
+        module.verify_started_pool_evidence(registry, run, manifest_path, archive_path)
+
+
 def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "same") -> None:
     for relative in (
         "package.json",
