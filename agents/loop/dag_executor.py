@@ -234,6 +234,18 @@ def _build_early_tool_event(
     )
 
 
+def _is_strict_readonly_cache_miss(exc: BaseException) -> bool:
+    """True when Fast Mode refused a live populate because the slot is absent.
+
+    Transport/lookup faults also raise FastCacheLookupError; those stay
+    failures. Only the clean read-only miss ("no row, live fallback disabled")
+    is a skip — replay what is cached, do not invent a live DAG node.
+    """
+    if not error_chain_has_type(exc, "FastCacheLookupError"):
+        return False
+    return "Strict read-only benchmark cache miss" in extract_error_message(exc)
+
+
 def extract_error_message(e: Exception) -> str:
     """
     Extract the actual error message from an exception, unwrapping Temporal wrappers.
@@ -1136,6 +1148,33 @@ async def _execute_single_task(
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
         error_msg = extract_error_message(e)
+        if _is_strict_readonly_cache_miss(e):
+            # Fast Mode read-only: this DAG node's populate is not in the
+            # cache. Skip it without an ERROR chip so leftover post-for_each
+            # GPs do not fail t10; execute_loop can still replay cached work.
+            workflow.logger.info(
+                f"[DAG] Task {task.index} skipped: Fast Mode has no cached populate for this node"
+            )
+            skip_tool_name = early_tool_event_name or (
+                DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
+            )
+            skip_title = DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
+            await handle_tool_event_fn(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=skip_title,
+                    message="Fast Mode cache has no populate for this DAG node; skipping.",
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "dagTaskIndex": task.index,
+                        "plannedToolName": task.tool_name,
+                        "fastModeCacheSkip": True,
+                    },
+                ),
+                tool_call_id,
+                skip_tool_name,
+            )
+            return True
         workflow.logger.error(f"[DAG] Task {task.index} error: {error_msg}", exc_info=True)
         if task.tool_name == "reasoning":
             await post_message(

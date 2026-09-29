@@ -1162,6 +1162,81 @@ def test_planned_general_purpose_tool_is_not_rewritten_from_goal_text():
     assert task.tool_name == "spawn_general_purpose_agent"
 
 
+async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
+    """A Fast Mode read-only populate miss skips the leftover node; no ERROR chip.
+
+    Mass-agent July cache has explore + for_each populate rows. The leftover
+    post-for_each GP is not in that cache. Strict read-only correctly refuses
+    a live param-populator call (FastCacheLookupError). That miss must not
+    become a toolStatus=ERROR chip — t10-no-tool-failures treats ERROR as a
+    failed run even when execute_loop later replays the leftover from cache.
+    """
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+
+    leftover_goal = "Produce fresh tool-grounded evidence for remaining deliverables"
+    plan_data = {
+        "tasks": [
+            {"goal": "search first", "tool_name": "web_search"},
+            {"goal": leftover_goal, "tool_name": "spawn_general_purpose_agent"},
+        ],
+        "dependencies": {"1": [0]},
+    }
+    executed: list[str] = []
+
+    def param_tool_calls(args):
+        extra = args[10] if args and len(args) > 10 else ""
+        if leftover_goal in extra:
+            inner = FastCacheLookupError(
+                "Strict read-only benchmark cache miss for dag_param_populator; live fallback is disabled"
+            )
+            wrapped = RuntimeError("Activity task failed")
+            wrapped.cause = inner
+            raise wrapped
+        return [{"tool": "web_search", "query": "ok"}]
+
+    async def execute_tool(name, params, tool_call_id):
+        executed.append(name)
+        return {"message": f"{name} done"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+    )
+
+    assert result["status"] == "completed"
+    assert all(t.state.value == "COMPLETED" for t in dag.tasks)
+    assert executed == ["web_search"]
+    leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
+    assert leftover_events, f"leftover chip missing: {events}"
+    assert any(e["status"] == "IN_PROGRESS" for e in leftover_events)
+    terminal = [e for e in leftover_events if e["status"] not in (None, "IN_PROGRESS")]
+    assert len(terminal) >= 1
+    assert terminal[0]["status"] == "FINISHED"
+    assert terminal[0]["metadata"].get("fastModeCacheSkip") is True
+    assert not any(e["status"] == "ERROR" for e in leftover_events)
+
+
+async def test_execute_dag_transport_lookup_error_still_fails():
+    """A FastCacheLookupError that is not a clean read-only miss stays a failure."""
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+
+    plan_data = {
+        "tasks": [{"goal": "search first", "tool_name": "web_search"}],
+        "dependencies": {},
+    }
+
+    def param_tool_calls(_args):
+        raise FastCacheLookupError("fast_cache.get_error: ReadTimeout after retries")
+
+    result, events, dag = await _run_execute_dag(plan_data, param_tool_calls=param_tool_calls)
+
+    assert result["status"] == "needs_llm"
+    assert dag.tasks[0].state.value == "FAILED"
+    error_events = [e for e in events if e["type"] == "tool_event" and e["status"] == "ERROR"]
+    assert error_events, f"transport lookup error must still ERROR: {events}"
+
+
 async def run_all_tests():
     print("dag-executor blackbox tests:")
     r = BlackboxResult()
@@ -1187,6 +1262,14 @@ async def run_all_tests():
     r.record(
         "planned_general_purpose_tool_is_not_rewritten_from_goal_text",
         test_planned_general_purpose_tool_is_not_rewritten_from_goal_text,
+    )
+    await r.record_async(
+        "execute_dag_strict_readonly_populate_miss_skips_without_error",
+        test_execute_dag_strict_readonly_populate_miss_skips_without_error,
+    )
+    await r.record_async(
+        "execute_dag_transport_lookup_error_still_fails",
+        test_execute_dag_transport_lookup_error_still_fails,
     )
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record(
