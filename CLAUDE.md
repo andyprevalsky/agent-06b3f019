@@ -262,7 +262,12 @@ the 7,200-second backstop after this requested validation.
 After each valid slice, report the whole slice's wall-clock time and every
 bench's individual wall-clock time (including startup, evidence collection and
 teardown, alongside the task-execution duration where available). Inspect the
-critical path before advancing. Apply and validate any infrastructure-only
+critical path and task trajectories before advancing: provider retries and
+latency, browser steps and session recording, archive writes, evaluator timing,
+and cleanup receipts. Recovered errors must be checked for lost evidence or a
+material slowdown. Include smoke-tagged tasks in representative slices while
+preserving the three-completion requirement; a one-response chat smoke cannot
+qualify by adding synthetic calls. Apply and validate any infrastructure-only
 change that can reduce the slice's end-to-end wall clock by more than 5% without
 changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
@@ -289,9 +294,12 @@ snapshot list even while completed donor snapshots exist, so the controller
 retries the listing before treating the donor as unprovisioned. For the counted
 mixed-shape fleet proof, set `CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1`: an 8 GB
 browser/payment primary claims a stopped 20 GB pool volume and its boot-config
-update resizes compute to the required shape before guest start. The controller
-verifies the native stopped Machine shape after the update; the next pool
-preflight returns it to the default 4 GB shape. This avoids a per-slice 40 GB
+update resizes compute to the required shape before guest start. Retain an
+already-admitted 8 GB shape across slices and claim a matching stopped Machine
+first: shrinking every pool member to 4 GB forced another host-local CPU
+reservation on the next browser run, which failed with Fly's "insufficient CPUs
+available on the current host" even though another stopped member could be
+resized. Verify any actual resize before start. This avoids a per-slice 40 GB
 legacy-donor restore without changing benchmark execution or evaluation.
 An inert provider probe on 2026-09-29 resized one stopped pool Machine 4 GB →
 8 GB → 4 GB with the same volume, env, mounts and command. Keep
@@ -659,7 +667,7 @@ Always log these events (use `[Component]` prefix, include IDs, truncate payload
 **Query backend locally:**
 
 ```bash
-curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="
+curl -s "http://localhost:3001/api/agents/{agent_id}" -H "X-API-Key: $BACKEND_API_KEY"
 ```
 
 ## Database
@@ -784,7 +792,7 @@ Real user ID: `1f85ff25-6e29-4c1b-8739-f917bd101a30` (Andy Prevalsky)
 
 ```bash
 curl -s -X POST "http://localhost:3001/api/agents" \
-  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-API-Key: $BACKEND_API_KEY" \
   -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30" \
   -H "Content-Type: application/json" \
   -d '{"goal": "...", "start_phase": "plan"}'
@@ -797,7 +805,7 @@ Use `"start_phase": "execute"` to skip planning too. Omit `start_phase` for norm
 
 ```bash
 curl -s "http://localhost:3001/api/agents/{agent_id}" \
-  -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+  -H "X-API-Key: $BACKEND_API_KEY" \
   -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
 ```
 
@@ -808,7 +816,7 @@ Messages are in the response under `.messages[]`. Each message has `role`, `mess
 ```
 Step 1: DELETE the agent (stop bleeding tokens)
    curl -s -X DELETE "http://localhost:3001/api/agents/{agent_id}" \
-     -H "X-API-Key: AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag=" \
+     -H "X-API-Key: $BACKEND_API_KEY" \
      -H "X-User-Id: 1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 Step 2: KILL the run script (stop all services)

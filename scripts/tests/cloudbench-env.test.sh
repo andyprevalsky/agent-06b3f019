@@ -752,6 +752,84 @@ normalize_current_pool_shape || fail "existing stopped pool shape did not normal
   fail "pool normalizer must mutate only the mismatched stopped machine"
 unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_machine FLY
 
+# A second fleet must retain admitted 8GB pool shapes and assign each task a
+# matching stopped Machine before attempting a host-local resize.
+eval "$shape_function_source"
+eval "$normalize_function_source"
+shape_hints_source="$(awk '
+  /^pool_write_shape_hints\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+claim_function_source="$(awk '
+  /^claim_pool_machine\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$shape_hints_source" ] && [ -n "$claim_function_source" ] ||
+  fail "could not load production shape-aware pool claims"
+eval "$shape_hints_source"
+eval "$claim_function_source"
+POOL_IDS_FILE="$TMP_ROOT/mixed-shape-pool.ids"
+printf 'a1\nb2\n' > "$POOL_IDS_FILE"
+FLEET_DIR="$TMP_ROOT/mixed-shape-run"
+mkdir -p "$FLEET_DIR"
+POOL_INVENTORY_JSON='[{"id":"a1","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}},{"id":"b2","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
+FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+resize_pool_machine() { fail "admitted large pool shape was needlessly resized"; }
+normalize_current_pool_shape || fail "mixed stopped pool shapes were not admitted"
+pool_write_shape_hints || fail "mixed pool shape hints were not written"
+require_text "$FLEET_DIR/pool-shapes.tsv" "b2 shared 4 8192" \
+  "large pool shape hint was lost"
+POOL_CLAIMS_DIR="$TMP_ROOT/mixed-shape-claims"
+CLAIMED_POOL_FILE="$FLEET_DIR/claimed.ids"
+UNAVAILABLE_POOL_IDS=()
+: > "$CLAIMED_POOL_FILE"
+machine_volume_id_from_json() { printf 'vol-mixed-shape'; }
+write_pool_claim() { printf 'owned\n' > "$1"; }
+cloudbench_env_sha256() { printf '%064d' 0; }
+fleet_audit_record_pool_machine() { return 0; }
+large_claim="$(claim_pool_machine shared-cpu-4x 8192)"
+[ "$large_claim" = "b2" ] ||
+  fail "large benchmark did not prefer the admitted 8GB Machine"
+small_claim="$(claim_pool_machine shared-cpu-2x 4096)"
+[ "$small_claim" = "a1" ] ||
+  fail "small benchmark did not prefer the admitted 4GB Machine"
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+unset -f pool_machine_shape_from_json normalize_current_pool_shape pool_write_shape_hints \
+  claim_pool_machine resize_pool_machine machine_volume_id_from_json write_pool_claim \
+  cloudbench_env_sha256 fleet_audit_record_pool_machine
+
+boot_update_source="$(awk '
+  /^boot_update_with_capacity_recovery\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$boot_update_source" ] || fail "missing production boot update capacity recovery"
+eval "$boot_update_source"
+CLOUDBENCH_BOOT_UPDATE_ATTEMPTS=1
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS=10
+CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS=0
+boot_update_calls=0
+_with_timeout() {
+  boot_update_calls=$((boot_update_calls + 1))
+  if [ "$boot_update_calls" = 1 ]; then
+    echo 'Error: insufficient CPUs available to fulfill request on the current host'
+    return 1
+  fi
+  return 0
+}
+sleep() { :; }
+boot_update_with_capacity_recovery "$TMP_ROOT/host-capacity-update.log" fake update ||
+  fail "host-local CPU shortage was not retried as provider capacity"
+[ "$boot_update_calls" = 2 ] ||
+  fail "host-local CPU shortage consumed the ordinary boot retry budget"
+unset -f boot_update_with_capacity_recovery _with_timeout sleep
+unset CLOUDBENCH_BOOT_UPDATE_ATTEMPTS CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS \
+  CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS
+
 # The resize optimization only changes pool admission. A real large-primary
 # task keeps its 8GB request, while the default path still forks a separate
 # large Machine when the opt-in is absent.

@@ -3105,7 +3105,7 @@ boot_update_with_capacity_recovery() {
             return 0
         fi
         if grep -Eiq \
-            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)' \
+            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)|insufficient CPUs available to fulfill request on the current host' \
             "$update_log" 2>/dev/null; then
             if [ "$SECONDS" -ge "$capacity_deadline" ]; then
                 echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2

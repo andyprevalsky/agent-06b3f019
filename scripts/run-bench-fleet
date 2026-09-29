@@ -851,8 +851,9 @@ primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
 bench_uses_default_pool_shape() {  # <task>; pool claim eligibility
     # Opt-in proof optimization: a stopped 20GB pool Machine may be resized
     # during its boot-config update for an 8GB task. The exact same volume and
-    # benchmark bytes are reused; the next pool preflight restores the default
-    # shape after verified teardown. Capacity still accounts for the task's
+    # benchmark bytes are reused; the next pool preflight retains an admitted
+    # large shape so another browser task can claim it directly. Capacity
+    # still accounts for the task's
     # requested (larger) VM size in enforce_app_capacity_guard.
     if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
         && bench_needs_large_primary "$1"; then
@@ -9358,10 +9359,12 @@ resize_pool_machine() {  # resize_pool_machine <id>
 normalize_current_pool_shape() {
     local id shape state kind cpus memory failed=0 inventory
     local target_kind="shared" target_cpus
+    local large_cpus
     local -a resize_ids=() resize_pids=()
     export -n inventory POOL_INVENTORY_JSON 2>/dev/null || true
     [ -f "$POOL_IDS_FILE" ] || return 0
     target_cpus="$(printf '%s' "$FLEET_PRIMARY_VM_SIZE" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+    large_cpus="$(printf '%s' "${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
     case "$FLEET_PRIMARY_VM_SIZE" in performance-*) target_kind="performance" ;; esac
     [ -n "$target_cpus" ] || { echo "❌ invalid fleet primary VM size: $FLEET_PRIMARY_VM_SIZE" >&2; return 1; }
     inventory="$POOL_INVENTORY_JSON"
@@ -9371,6 +9374,15 @@ normalize_current_pool_shape() {
         shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
         read -r state kind cpus memory <<< "$shape"
         [ "$state" = "stopped" ] || continue
+        # Dynamic fleets can reuse an already-proven large primary directly.
+        # Shrinking it here forces another host-local CPU reservation when the
+        # next browser task grows it again; that reservation can be unavailable
+        # even though the stopped 8GB Machine was already admitted.
+        if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
+            && [ "$kind" = "shared" ] && [ "$cpus" = "$large_cpus" ] \
+            && [ "$memory" = "${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-}" ]; then
+            continue
+        fi
         if [ "$kind" != "$target_kind" ] || [ "$cpus" != "$target_cpus" ] \
             || [ "$memory" != "$FLEET_PRIMARY_VM_MEMORY" ]; then
             resize_ids+=("$id")
@@ -9400,15 +9412,59 @@ normalize_current_pool_shape() {
         fi
     done
     POOL_INVENTORY_JSON="$inventory"
-    echo "✅ pool shape verified: $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB"
+    if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ]; then
+        echo "✅ pool shapes verified: default and admitted large primaries"
+    else
+        echo "✅ pool shape verified: $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB"
+    fi
+}
+pool_write_shape_hints() {
+    local hints="$FLEET_DIR/pool-shapes.tsv"
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    printf '%s' "$POOL_INVENTORY_JSON" | python3 -c '
+import json, os, sys, tempfile
+from pathlib import Path
+ids_path, hints_path = map(Path, sys.argv[1:])
+machines = {machine.get("id"): machine for machine in json.load(sys.stdin)}
+lines = []
+for machine_id in ids_path.read_text().splitlines():
+    machine = machines.get(machine_id, {})
+    guest = (machine.get("config") or {}).get("guest") or {}
+    if machine.get("state") == "stopped":
+        kind = guest.get("cpu_kind", "-")
+        cpus = guest.get("cpus", "-")
+        memory = guest.get("memory_mb", "-")
+        lines.append(f"{machine_id} {kind} {cpus} {memory}\n")
+fd, tmp = tempfile.mkstemp(prefix=".pool-shapes.", dir=hints_path.parent)
+try:
+    with os.fdopen(fd, "w") as handle:
+        handle.writelines(lines)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, hints_path)
+finally:
+    if os.path.exists(tmp): os.unlink(tmp)
+' "$POOL_IDS_FILE" "$hints"
 }
 claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
-    local claim_digest
+    local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus
+    local shape_pass candidate_shape shape_matches hints="$FLEET_DIR/pool-shapes.tsv"
+    desired_cpus="$(printf '%s' "$desired_size" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
+    for shape_pass in exact fallback; do
     while read -r id; do
         [ -n "$id" ] || continue
+        if [ -n "$desired_cpus" ] && [ -f "$hints" ]; then
+            candidate_shape="$(awk -v id="$id" '$1 == id { print $2, $3, $4; exit }' "$hints")"
+            shape_matches=0
+            [ "$candidate_shape" = "shared $desired_cpus $desired_memory" ] && shape_matches=1
+            if [ "$shape_pass" = exact ] && [ "$shape_matches" = 0 ]; then continue; fi
+            if [ "$shape_pass" = fallback ] && [ "$shape_matches" = 1 ]; then continue; fi
+        elif [ "$shape_pass" = fallback ]; then
+            continue
+        fi
         if [ -n "${PRIVATE_SOURCE_ID:-}" ]; then
             private_source_allows_provider_call machine start "$id" || return 1
         fi
@@ -9516,6 +9572,7 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
         fi
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
+    done
 }
 
 # ── One controller lock PER WORKSPACE (children run with --no-lock) ─────────
@@ -10363,6 +10420,7 @@ if [ -z "$PROVISION_POOL" ]; then
 fi
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 normalize_current_pool_shape || exit 1
+pool_write_shape_hints || exit 1
 # READ-ONLY env preflight: the run path never stages/mutates the shared
 # prod-aligned app secrets (that would race concurrent workstreams). It only
 # verifies they exist; refreshing them is an explicit maintenance op.
@@ -12528,7 +12586,7 @@ for bench in "${BENCHES[@]}"; do
         # start. A 4GB pool must never silently host an 8GB payment/browser
         # guest. Both cases reuse the existing 20GB volume.
         if bench_uses_default_pool_shape "$bench"; then
-            pcid="$(claim_pool_machine)"
+            pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"
         else
             echo "  ↪️  [$bench] using distinct primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
         fi
@@ -12591,10 +12649,15 @@ for bench in "${BENCHES[@]}"; do
     pool_boot_vm_size=""
     pool_boot_vm_memory=""
     if [ "$src" = "pool" ] \
-        && [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
-        && bench_needs_large_primary "$bench"; then
-        pool_boot_vm_size="$(primary_vm_size_for_bench "$bench")"
-        pool_boot_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+        && [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ]; then
+        desired_vm_size="$(primary_vm_size_for_bench "$bench")"
+        desired_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+        desired_vm_cpus="$(printf '%s' "$desired_vm_size" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
+        current_pool_shape="$(awk -v id="$cid" '$1 == id { print $2, $3, $4; exit }' "$FLEET_DIR/pool-shapes.tsv")"
+        if [ "$current_pool_shape" != "shared $desired_vm_cpus $desired_vm_memory" ]; then
+            pool_boot_vm_size="$desired_vm_size"
+            pool_boot_vm_memory="$desired_vm_memory"
+        fi
     fi
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
