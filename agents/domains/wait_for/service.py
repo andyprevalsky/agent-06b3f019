@@ -7,7 +7,6 @@ for lightweight LLM condition evaluation.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -18,126 +17,9 @@ from domains.wait_for.types import ConditionEvaluation
 
 DEPLOY_INTERRUPTED_ERROR_CODE = "DEPLOY_INTERRUPTED"
 
-_SIBLING_AGENT_MARKERS = (
-    "explore agent",
-    "sub-agent",
-    "subagent",
-    "child agent",
-    "the agent",
-)
-_SIBLING_COMPLETION_MARKERS = ("returned", "completed", "finished", "done")
-_SPAWN_TOOL_NAMES = frozenset(
-    {
-        "spawn_agent",
-        "spawn_general_purpose_agent",
-        "spawn_general_purpose_agent_for_each",
-    }
-)
-_TOKEN_STOPWORDS = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "with",
-        "that",
-        "this",
-        "from",
-        "has",
-        "have",
-        "its",
-        "their",
-        "agent",
-        "explore",
-        "researching",
-        "research",
-        "returned",
-        "results",
-        "result",
-        "completed",
-        "finished",
-        "done",
-        "full",
-        "summary",
-        "sources",
-        "source",
-        "whether",
-        "currently",
-        "true",
-        "gather",
-        "evidence",
-    }
-)
-_TOKEN_RE = re.compile(r"[a-z0-9+]{3,}")
-
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
-
-
-def is_sibling_agent_completion_condition(condition: str) -> bool:
-    """True when wait_for is polling for a sibling/child agent to finish.
-
-    That verdict is already in the conversation (spawn_* FINISHED). Spawning a
-    new web-search explore cannot observe it, so condition-mode must not sleep.
-    """
-    blob = str(condition or "").lower()
-    if not blob:
-        return False
-    has_agent = any(marker in blob for marker in _SIBLING_AGENT_MARKERS)
-    has_done = any(marker in blob for marker in _SIBLING_COMPLETION_MARKERS)
-    return has_agent and has_done
-
-
-def _condition_tokens(text: str) -> set[str]:
-    return {token for token in _TOKEN_RE.findall(str(text or "").lower()) if token not in _TOKEN_STOPWORDS}
-
-
-def _spawn_goal_blob(message: dict[str, Any]) -> str:
-    metadata = message.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    parts = (
-        metadata.get("fullGoal"),
-        metadata.get("title"),
-        metadata.get("displayGoal"),
-        message.get("message"),
-    )
-    return "\n".join(str(part) for part in parts if part)
-
-
-def sibling_agent_completion_already_met(
-    messages: list[dict[str, Any]] | None, condition: str
-) -> Optional[str]:
-    """Return evidence when a matching sibling spawn already finished.
-
-    ``None`` means this is not a sibling-completion condition, or no finished
-    spawn overlaps the condition topic. Caller then falls through to polling.
-    """
-    if not is_sibling_agent_completion_condition(condition):
-        return None
-    cond_tokens = _condition_tokens(condition)
-    if len(cond_tokens) < 2:
-        return None
-    for message in messages or []:
-        if str(message.get("role") or "").upper() != "TOOL":
-            continue
-        metadata = message.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        tool_name = str(metadata.get("toolName") or "")
-        if tool_name not in _SPAWN_TOOL_NAMES:
-            continue
-        status = str(metadata.get("toolStatus") or "").upper()
-        if status not in {"FINISHED", "SUCCESS", "COMPLETED"}:
-            continue
-        overlap = cond_tokens & _condition_tokens(_spawn_goal_blob(message))
-        if len(overlap) < 2:
-            continue
-        return (
-            f"Sibling {tool_name} already finished with topic overlap "
-            f"{sorted(overlap)[:8]}."
-        )
-    return None
 
 
 def cap_evidence(evidence: str) -> str:
