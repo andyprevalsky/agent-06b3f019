@@ -13,6 +13,8 @@ grep -q '^configure_local_db_url$' "$RUN_SH" || {
 
 LOCAL_DB_URL='postgresql://postgres:postgres@localhost:5432/victoria_bench_test'
 USE_SYSTEM_PG=true
+IS_CLOUD=false
+BENCHMARK_MODE=true
 configure_local_db_url
 system_limit="${DATABASE_URL#*connection_limit=}"
 system_limit="${system_limit%%&*}"
@@ -23,10 +25,28 @@ system_limit="${system_limit%%&*}"
 }
 [[ "$DIRECT_URL" == "$LOCAL_DB_URL" ]] || exit 1
 
+unset LOCAL_DB_CONNECTION_LIMIT
+IS_CLOUD=true
+configure_local_db_url
+[[ "$DATABASE_URL" == *'connection_limit=80&pool_timeout=30' ]] || {
+    echo "FAIL: Cloud benchmark lost its 80-connection fan-out pool" >&2
+    exit 1
+}
+
+unset LOCAL_DB_CONNECTION_LIMIT
+IS_CLOUD=false
 USE_SYSTEM_PG=false
 configure_local_db_url
+[[ "$DATABASE_URL" == *'connection_limit=80&pool_timeout=30' ]] || {
+    echo "FAIL: dedicated Docker benchmark lost its 80-connection fan-out pool" >&2
+    exit 1
+}
+
+unset LOCAL_DB_CONNECTION_LIMIT
+BENCHMARK_MODE=false
+configure_local_db_url
 [[ "$DATABASE_URL" == *'connection_limit=50&pool_timeout=30' ]] || {
-    echo "FAIL: Docker stack lost its dedicated 50-connection pool" >&2
+    echo "FAIL: non-benchmark Docker stack lost its 50-connection pool" >&2
     exit 1
 }
 echo 'run-system-pg-pool-budget: OK'

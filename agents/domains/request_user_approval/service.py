@@ -13,6 +13,11 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 from .config import (
@@ -119,12 +124,23 @@ class RequestUserApprovalManager(ToolManager):
 
         # 3. Wait indefinitely for user response (approval is blocking)
         try:
-            await workflow.wait_condition(
-                lambda: len(workflow_instance.context) > 0 and workflow_instance.context[-1].get("role") == "USER"
+            await wait_condition_or_generation_handoff(
+                lambda: len(workflow_instance.context) > 0 and workflow_instance.context[-1].get("role") == "USER",
+                workflow_instance,
+                workflow_mod=workflow,
             )
 
             logger.info("User responded to approval request", request_id=request_id)
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="🔐 Requesting user approval",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata=event_metadata,
+            )
+            raise
         except Exception as e:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -278,7 +294,22 @@ async def request_user_approval_direct(
     context_len_before_wait = len(workflow_instance.context)
 
     # Wait indefinitely for this specific request's response
-    await workflow.wait_condition(lambda: request_id in workflow_instance._signal_responses)
+    try:
+        await wait_condition_or_generation_handoff(
+            lambda: request_id in workflow_instance._signal_responses,
+            workflow_instance,
+            workflow_mod=workflow,
+        )
+    except GenerationHandoffRequested:
+        interrupt_event = ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="🔐 Requesting user approval",
+            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+            status=MessageStatus.FINISHED,
+            metadata=event_metadata,
+        )
+        await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
+        raise
 
     signal_response = workflow_instance._signal_responses.pop(request_id)
 

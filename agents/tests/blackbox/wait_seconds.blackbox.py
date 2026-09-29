@@ -174,6 +174,36 @@ async def test_execute_tool_sleep_raises_yields_error():
     assert "sleep cancelled" in events[-1].message
 
 
+async def test_execute_tool_handoff_yields_finished_and_raises():
+    """A live generation pointer during sleep closes FINISHED, not ERROR."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from tools.base import MessageStatus
+    from tools.wait_seconds import WaitSecondsManager
+
+    class FakeWorkflow:
+        async def _check_generation_handoff(self):
+            return "navi-agent-tasks@new"
+
+    manager = WaitSecondsManager()
+    events = []
+    raised = None
+    try:
+        async for event in manager.execute_tool(
+            workflow_instance=FakeWorkflow(),
+            tool_call={"seconds": 10},
+            tool_call_id="tc-handoff",
+        ):
+            events.append(event)
+    except GenerationHandoffRequested as exc:
+        raised = exc
+
+    assert raised is not None
+    assert raised.task_queue == "navi-agent-tasks@new"
+    assert events[0].status == MessageStatus.IN_PROGRESS
+    assert events[-1].status == MessageStatus.FINISHED
+    assert events[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def test_wait_seconds_entry_point():
     """wait_seconds() entry point iterates events and returns last status."""
     from tools.wait_seconds import wait_seconds
@@ -217,6 +247,7 @@ async def run_all_tests():
     await r.record_async("execute_tool_invalid_yields_error", test_execute_tool_invalid_yields_error)
     await r.record_async("execute_tool_happy_path", test_execute_tool_happy_path_yields_in_progress_then_finished)
     await r.record_async("execute_tool_sleep_raises", test_execute_tool_sleep_raises_yields_error)
+    await r.record_async("execute_tool_handoff_finished", test_execute_tool_handoff_yields_finished_and_raises)
     await r.record_async("wait_seconds_entry_point", test_wait_seconds_entry_point)
     teardown_mock()
     return r.all_passed

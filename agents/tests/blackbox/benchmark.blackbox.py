@@ -12122,6 +12122,39 @@ def test_apply_manifest_environment_injects_wmh_base_url_and_model():
                 os.environ[key] = value
 
 
+def test_apply_manifest_environment_sizes_pool_for_mass_agent_fanout():
+    """Isolated runner DATABASE_URL must exceed the 50-child mass-agent fan-out."""
+    import os
+    from urllib.parse import parse_qs, urlparse
+
+    from benchmarks.local import apply_manifest_environment
+
+    saved = os.environ.get("DATABASE_URL")
+    try:
+        apply_manifest_environment(
+            {
+                "ports": {"backend": 55020, "health": 55022, "local_db": 55025},
+                "database": {
+                    "name": "victoria_test_manifest",
+                    "port": 55025,
+                    "use_system_postgres": True,
+                },
+                "urls": {},
+            }
+        )
+        parsed = urlparse(os.environ["DATABASE_URL"])
+        limit = int(parse_qs(parsed.query)["connection_limit"][0])
+        assert limit >= 80, (
+            f"isolated DATABASE_URL connection_limit={limit} saturates "
+            "the 50-child mass-agent fan-out (P2028 txn-start timeouts)"
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = saved
+
+
 def test_local_services_manifest_validation_requires_ports():
     """Service manifest parsing fails fast when run.sh has not published required ports."""
     import json
@@ -18578,6 +18611,10 @@ async def run_all_tests():
     )
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
     r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
+    r.record(
+        "apply_manifest_env_sizes_mass_agent_pool",
+        test_apply_manifest_environment_sizes_pool_for_mass_agent_fanout,
+    )
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
     r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)

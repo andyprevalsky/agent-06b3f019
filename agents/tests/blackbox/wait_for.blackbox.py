@@ -409,8 +409,8 @@ async def test_handler_timestamp_happy_path():
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
     assert MessageStatus.FINISHED in statuses
-    # Slept ~5 minutes (300 seconds)
-    assert 300 in fake.sleep_records
+    # Slept ~5 minutes (300 seconds), possibly sliced into 30s handoff polls
+    assert sum(fake.sleep_records) == 300
 
 
 async def test_handler_condition_paused_yields_error():
@@ -957,7 +957,7 @@ async def test_handler_timestamp_live_fast_mode_still_sleeps_until_target():
 
     statuses = [e.status for e in events]
     assert MessageStatus.FINISHED in statuses
-    assert 300 in fake.sleep_records, (
+    assert sum(fake.sleep_records) == 300, (
         f"live Fast Mode skipped timestamp sleep; sleep_records={fake.sleep_records!r}"
     )
 
@@ -1100,7 +1100,7 @@ async def test_handler_condition_live_fast_mode_honors_check_interval_sleep():
         restore()
 
     assert evals["n"] == 2
-    assert 600 in fake.sleep_records, (
+    assert sum(fake.sleep_records) == 600, (
         f"live Fast Mode skipped inter-check sleep; sleep_records={fake.sleep_records!r}"
     )
     finished = [e for e in events if e.status == MessageStatus.FINISHED]

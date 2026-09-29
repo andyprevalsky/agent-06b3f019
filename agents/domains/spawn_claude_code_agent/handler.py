@@ -318,6 +318,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
                 # Wait for activity completion or pause signal
                 was_cancelled = False
+                # cutover-class: activity-bound — cannot continue_as_new until claude-code activity ends
                 await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
                 if workflow_instance.is_paused and not activity_handle.done():
                     logger.info("[ClaudeCode] Cancelling due to pause", agent_id=agent_id)

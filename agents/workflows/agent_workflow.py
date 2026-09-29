@@ -56,7 +56,11 @@ with workflow.unsafe.imports_passed_through():
     from helpers.context_compaction import build_context_compaction_metadata
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
-    from helpers.generation_handoff import should_handoff_to_generation
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+        should_handoff_to_generation,
+    )
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
@@ -70,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import _run_verifier, run_agent
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
@@ -1117,8 +1122,17 @@ class AgentWorkflow:
             },
         }
 
-    def _continuation_args(self, context: Optional[List[Dict]]) -> List[Any]:
-        """Build the single canonical execute continuation argument contract."""
+    def _continuation_args(
+        self,
+        context: Optional[List[Dict]],
+        start_phase: str = "execute_continued",
+    ) -> List[Any]:
+        """Build the canonical continue_as_new argument contract.
+
+        Default ``execute_continued`` skips PLAN/DAG (paused + execute-phase
+        handoff). PLAN-phase generation handoff passes ``start_phase="plan"``
+        so the resumed workflow finishes planning instead of jumping to execute.
+        """
         args = [
             self.agent_id,
             self.user_id,
@@ -1131,7 +1145,7 @@ class AgentWorkflow:
             self.parent_agent_id,
             self.depth,
             self.bus_id,
-            "execute_continued",
+            start_phase,
             self.max_iterations,
             self.price_limit_cents,
             self.context_gates or None,
@@ -1924,6 +1938,7 @@ class AgentWorkflow:
             # boundary before the LLM loop. The deploy gate queries this flag,
             # inspects history for workflow-task failures, then terminates the
             # isolated synthetic execution.
+            # cutover-class: deploy-gate — isolated validation run, never a user agent
             await workflow.wait_condition(lambda: not self._deployment_validation)
 
         # =====================================================================
@@ -2526,6 +2541,7 @@ class AgentWorkflow:
     async def _wait_for_messages(self) -> bool:
         """Wait for new messages."""
         try:
+            # cutover-class: bounded — 30s slice; next run_agent iteration re-checks handoff
             await workflow.wait_condition(
                 lambda: self._has_new_messages or not self.is_paused, timeout=timedelta(seconds=30)
             )
@@ -2601,9 +2617,9 @@ class AgentWorkflow:
     async def _check_generation_handoff(self) -> Optional[str]:
         """Return live task queue when this execution should hand off generations.
 
-        Safe checkpoint: called only at the top of a run_agent iteration, after any
-        prior LLM/tool/browser activity completed. Returns None when we are already
-        on the live generation (or the pointer cannot be read).
+        Safe checkpoint: called at the top of a run_agent iteration and from
+        in-tool parks after any prior activity completed. Returns None when we
+        are already on the live generation (or the pointer cannot be read).
         """
         try:
             pointer = await workflow.execute_activity(
@@ -2629,17 +2645,16 @@ class AgentWorkflow:
         Returns the live task queue when cooperative cutover is required while
         paused; otherwise None once the agent is unpaused.
         """
-        while self.is_paused:
-            handoff_queue = await self._check_generation_handoff()
-            if handoff_queue:
-                return handoff_queue
-            try:
-                await workflow.wait_condition(
-                    lambda: not self.is_paused,
-                    timeout=timedelta(seconds=30),
-                )
-            except (asyncio.TimeoutError, TemporalTimeoutError):
-                pass
+        if not self.is_paused:
+            return None
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: not self.is_paused,
+                self,
+                workflow_mod=workflow,
+            )
+        except GenerationHandoffRequested as exc:
+            return exc.task_queue
         return None
 
     async def _check_credits(self) -> None:
@@ -3319,6 +3334,17 @@ class AgentWorkflow:
                 if failed:
                     return {"error": True, "message": result_text or f"{tool_name} failed"}
                 return {"success": True, "message": result_text or f"{tool_name} completed"}
+
+        except GenerationHandoffRequested as exc:
+            # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
+            # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
+            workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
+            return {
+                "success": True,
+                "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                "generation_handoff": True,
+                "handoff_task_queue": exc.task_queue,
+            }
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error
@@ -4526,7 +4552,10 @@ class AgentWorkflow:
                 f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
             )
             workflow.continue_as_new(
-                args=self._continuation_args(result.get("context")),
+                args=self._continuation_args(
+                    result.get("context"),
+                    start_phase="plan" if phase == "PLAN" else "execute_continued",
+                ),
                 task_queue=handoff_queue.strip(),
             )
             return result
@@ -5130,12 +5159,18 @@ class AgentWorkflow:
                 update_tree=False,
             )
 
-            # Mark finished (includes structured_response for persistence)
+            # Mark finished (includes structured_response for persistence).
+            # mark_finished only reads the first USER text as the goal
+            # (extract_goal_from_context). Forwarding the full conversation
+            # put a 638092-byte payload on the activity command (TMPRL1103
+            # warn 512KB) and left ed9a3b6e ACTIVE until the 900s smoke cap.
+            # message_count still records the real transcript length.
+            finished_steps = [{"role": "USER", "text": self.goal or "No goal specified"}]
             await workflow.execute_activity(
                 mark_finished,
                 args=[
                     self.agent_id,
-                    context,
+                    finished_steps,
                     self.token_count,
                     self.context_size,
                     len(context),

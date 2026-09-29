@@ -446,6 +446,14 @@ require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'force-clear-g
   "generation cutover must force-clear stragglers on the old queue (not deployment migrate)"
 require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" '--execute' \
   "generation force-clear must require --execute"
+require_text "$ROOT/back-end/scripts/force-clear-generation-queue.ts" 'clearSupersededGenerationWorkflow' \
+  "generation force-clear must replace stragglers via clearSupersededGenerationWorkflow"
+require_text "$ROOT/back-end/src/providers/generationQueueCutover.ts" 'restartAgent' \
+  "generation cutover stragglers must be replaced, not marked FAILED"
+if grep -n "status: 'FAILED'" "$ROOT/back-end/scripts/force-clear-generation-queue.ts" \
+  | grep -v 'summary.failed' >/dev/null; then
+  fail "force-clear must not mark owned agents FAILED"
+fi
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" 'count-open-workflows-on-queue.ts' \
   "cooperative cutover must poll open workflows on the old generation queue"
 require_text "$ROOT/scripts/deploy-agents-cooperative-cutover.sh" '--image-label' \

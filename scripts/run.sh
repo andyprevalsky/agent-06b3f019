@@ -965,17 +965,21 @@ if ! ensure_fast_mode_cache_schema bash -c \
     exit 1
 fi
 
-# Docker gives each stack its own Postgres server, so a 50-connection pool can
-# absorb a sub-agent fan-out. System Postgres is shared by every local stack:
-# three concurrent /deploy stacks with 50 connections each exceed its default
-# max_connections=100 and leave child workflows stranded at STARTING_UP.
-# Keep a smaller per-stack pool there and let Prisma queue the short DB reads.
+# Local macOS system Postgres is shared by all workspaces and defaults to 100
+# connections. Keep each local stack small so other stacks can connect. Cloud
+# benchmark stacks retain their larger pool for 50-child Fast Mode fan-out;
+# dedicated Docker benchmark databases can use that pool as well.
 configure_local_db_url() {
-    local connection_limit=50
-    if $USE_SYSTEM_PG; then
-        connection_limit=12
+    local supplied_limit="${LOCAL_DB_CONNECTION_LIMIT:-}"
+    if $BENCHMARK_MODE; then
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"
+    else
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"
     fi
-    export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${connection_limit}&pool_timeout=30"
+    if $USE_SYSTEM_PG && ! $IS_CLOUD && [ -z "$supplied_limit" ]; then
+        export LOCAL_DB_CONNECTION_LIMIT=12
+    fi
+    export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${LOCAL_DB_CONNECTION_LIMIT}&pool_timeout=30"
     export DIRECT_URL="$LOCAL_DB_URL"
 }
 configure_local_db_url
