@@ -3103,9 +3103,9 @@ PY
     [ "$disposition" = "validate-only" ] && return 0
     [ ! -L "$audit/pool" ] || return 1
     mkdir -p "$audit/pool" || return 1
-    save_audit="$FLEET_TEARDOWN_OWNERSHIP_DIR"; save_owner="$FLEET_OWNER_TOKEN"
-    save_run="$RUN_ID"; save_pool_ids="$POOL_IDS_FILE"; save_pool_meta="$POOL_META_FILE"
-    save_pool_lock="$POOL_IDS_LOCK"
+    save_audit="${FLEET_TEARDOWN_OWNERSHIP_DIR:-}"; save_owner="${FLEET_OWNER_TOKEN:-}"
+    save_run="${RUN_ID:-}"; save_pool_ids="${POOL_IDS_FILE:-}"
+    save_pool_meta="${POOL_META_FILE:-}"; save_pool_lock="${POOL_IDS_LOCK:-}"
     FLEET_TEARDOWN_OWNERSHIP_DIR="$audit"; FLEET_OWNER_TOKEN="$owner"; RUN_ID="$run_id"
     POOL_IDS_FILE="$ledger"; POOL_META_FILE="$meta_file"; POOL_IDS_LOCK="$ledger.lock"
     if [ -f "$record" ]; then
@@ -3189,8 +3189,9 @@ if (
     raise SystemExit(1)
 PY
     [ "$disposition" = "validate-only" ] && return 0
-    save_audit="$FLEET_TEARDOWN_OWNERSHIP_DIR"; save_owner="$FLEET_OWNER_TOKEN"; save_run="$RUN_ID"
-    save_pool_ids="$POOL_IDS_FILE"; save_pool_meta="$POOL_META_FILE"
+    save_audit="${FLEET_TEARDOWN_OWNERSHIP_DIR:-}"; save_owner="${FLEET_OWNER_TOKEN:-}"
+    save_run="${RUN_ID:-}"; save_pool_ids="${POOL_IDS_FILE:-}"
+    save_pool_meta="${POOL_META_FILE:-}"
     FLEET_TEARDOWN_OWNERSHIP_DIR="$audit"; FLEET_OWNER_TOKEN="$owner"; RUN_ID="$run_id"
     POOL_IDS_FILE="$ledger"; POOL_META_FILE="$meta_file"
     if [ "$disposition" = "transferred-to-pool-stopped" ]; then
