@@ -16002,13 +16002,15 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
-def test_browser_smoke_prompt_targets_document_title_not_h1():
-    """Live example.com dropped its H1; smoke must ask for the stable <title>."""
+def test_browser_smoke_prompt_targets_rose_palette():
+    """The approved smoke goal reads Rose Labs' visible color palette."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-smoke")
     prompt = (task.prompt or "").lower()
-    assert "document title" in prompt or "<title>" in prompt
+    assert "roselabs.ai" in prompt
+    assert "color palette" in prompt
+    assert "at least three" in prompt
     assert "main heading" not in prompt
     assert "h1" not in prompt
 
@@ -19307,8 +19309,8 @@ async def run_all_tests():
         test_browser_smoke_accepts_captured_single_step_trajectory,
     )
     r.record(
-        "browser_smoke_prompt_targets_document_title",
-        test_browser_smoke_prompt_targets_document_title_not_h1,
+        "browser_smoke_prompt_targets_rose_palette",
+        test_browser_smoke_prompt_targets_rose_palette,
     )
     r.record(
         "cache_coverage_prompt_targets_document_title",
