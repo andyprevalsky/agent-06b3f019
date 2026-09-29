@@ -161,7 +161,11 @@ if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]
 fi
 
 stage_started="$(date +%s)"
-git_cmd fetch --no-tags origin "$REF" || fetch_status=$?
+# This checkout has one relevant parent: its current HEAD. Advertising every
+# historic detached ref wastes negotiation on persistent pool volumes. Object
+# maintenance already ran above under our exact lock, so do not repeat Git's
+# opportunistic auto-maintenance on every fresh-code boot.
+git_cmd fetch --no-tags --no-auto-gc --negotiation-tip=HEAD origin "$REF" || fetch_status=$?
 echo "[cloudbench] git-fetch $(( $(date +%s) - stage_started ))s"
 if [ "${fetch_status:-0}" -ne 0 ]; then
     echo "[cloudbench] FATAL: could not fetch requested ref $REF" >&2

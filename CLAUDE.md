@@ -224,6 +224,39 @@ independent copies with at most N active; never repeat a task by passing duplica
 names to one fleet. Named slices are `daily`, `pre-deploy`, `rose-bench`,
 `polar-bench`, and `incomplete`.
 
+**Cloud runner quick start:** From a configured clone, run
+`scripts/run-bench list`, then `scripts/run-bench <task> --wait` for one real
+isolated benchmark. For an infrastructure streak, use
+`scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer>
+--exclude-file <prior-successful-names.json> --min-successful-llm 3`;
+the exclusion file is a JSON array of task names already used in accepted
+earlier runs. Capability slices
+are sampled without replacement across that command, and the command stops at
+the first infrastructure failure. Add `--dry-sample` first to review all task
+names and check smoke/non-Polar coverage; `--pool-file <ready-names.json>`
+restricts eligibility when a proof has a specific task pool. Preserve the
+printed run/proof directories and exact owner token. Never use duplicate task
+arguments as a substitute for `-k`; `--concurrency` is tasks per slice, not
+the number of sequential slices. The normal `--timeout` and benchmark
+backstop are each 7,200 seconds. Only the current user-requested accelerated
+validation uses `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and `--timeout 300`,
+with the independent 30-minute end-to-end cutoff described below.
+
+**If a run goes wrong:** Start with its `summary.json`, `_batch/run.json`,
+`_batch/lifecycle.json`, per-task `cloudbench-run.json`, `fleet-child.log`,
+`remote-logs/cloudbench-driver.log`, and `teardown-ownership` audit. Use
+`/descend` for the exact HARNESS-versus-INFRA contract and `/RCA` plus
+`docs/root-cause-analysis.md` for a failing path. A task `FAILED` verdict can
+still satisfy an infrastructure proof; a missing result, missing successful
+model responses, stale/foreign evidence, or unverified teardown cannot. Stop
+only the exact controller PID/owner recorded for your run and let its traps
+recover resources; use its exact stale-owner recovery path if needed. Publish
+durable evidence with `python3 scripts/publish_evidence_links.py --run-json
+<run.json> --agent-id <id>` before citing an FE link. For new commits with
+unchanged dependency manifests, pooled snapshot dependencies remain reusable;
+`cloudbench-fetch-ref.sh` logs Git fetch, checkout and reset stage durations
+so a slow cold-code bring-up can be separated from stack/worker startup.
+
 For a consecutive full-catalog no-INFRA gate, run
 `scripts/run-bench stability-proof -k K --concurrency N --seed S`. It executes K
 sequential random slices of N isolated ready tasks from the unified first-party

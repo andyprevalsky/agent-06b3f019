@@ -79,6 +79,10 @@ output="$(
   fail "requested ref was not checked out"
 grep -Fq '[cloudbench] compacting persistent Git object store' <<<"$output" || \
   fail "oversized persistent object store did not trigger compaction"
+for stage in git-maintenance git-fetch git-checkout git-reset; do
+  grep -Eq "\\[cloudbench\\] $stage [0-9]+s" <<<"$output" || \
+    fail "fresh-code timing omitted $stage"
+done
 assert_lock_released "$lock_path"
 
 # The exact-SHA idempotent fast path intentionally skips maintenance because no

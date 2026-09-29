@@ -41,28 +41,48 @@ def load_pool(repo_root: Path) -> list[str]:
     return names
 
 
-def eligible_pool(repo_root: Path, pool_file: Path | None) -> list[str]:
+def eligible_pool(
+    repo_root: Path, pool_file: Path | None, exclude_file: Path | None = None
+) -> list[str]:
     catalog = load_pool(repo_root)
-    if pool_file is None:
-        return catalog
-    names = json.loads(pool_file.read_text())
-    if not isinstance(names, list) or not names or any(
-        not isinstance(name, str) for name in names
-    ):
-        raise ValueError("eligibility pool must be a nonempty JSON name list")
-    if len(names) != len(set(names)):
-        raise ValueError("eligibility pool contains duplicate names")
-    unknown = set(names) - set(catalog)
-    if unknown:
-        raise ValueError(f"eligibility pool contains non-ready tasks: {sorted(unknown)}")
+    names = catalog
+    if pool_file is not None:
+        names = json.loads(pool_file.read_text())
+        if not isinstance(names, list) or not names or any(
+            not isinstance(name, str) for name in names
+        ):
+            raise ValueError("eligibility pool must be a nonempty JSON name list")
+        if len(names) != len(set(names)):
+            raise ValueError("eligibility pool contains duplicate names")
+        unknown = set(names) - set(catalog)
+        if unknown:
+            raise ValueError(f"eligibility pool contains non-ready tasks: {sorted(unknown)}")
+    if exclude_file is not None:
+        excluded = json.loads(exclude_file.read_text())
+        if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
+            raise ValueError("exclusion file must be a JSON name list")
+        excluded_names = set(excluded)
+        names = [name for name in names if name not in excluded_names]
+        if not names:
+            raise ValueError("exclusion file exhausted the eligible pool")
     return names
 
 
-def sample_slice(pool: list[str], *, width: int, seed: int, slice_index: int) -> list[str]:
+def sample_slice(
+    pool: list[str], *, width: int, seed: int, slice_index: int, disjoint: bool = False
+) -> list[str]:
     if width < 1:
         raise ValueError("width must be a positive integer")
     if width > len(pool):
         raise ValueError(f"width {width} exceeds catalog pool size {len(pool)}")
+    if slice_index < 0:
+        raise ValueError("slice index must be nonnegative")
+    if disjoint:
+        if width * (slice_index + 1) > len(pool):
+            raise ValueError("disjoint slices exceed the eligible catalog pool")
+        shuffled = list(pool)
+        random.Random(int(seed)).shuffle(shuffled)
+        return shuffled[width * slice_index : width * (slice_index + 1)]
     rng = random.Random(int(seed) ^ (int(slice_index) + 1))
     return rng.sample(pool, width)
 
@@ -70,9 +90,9 @@ def sample_slice(pool: list[str], *, width: int, seed: int, slice_index: int) ->
 def cmd_sample(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     try:
-        pool = eligible_pool(repo, args.pool_file)
-        names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=args.slice)
-    except (CatalogError, ValueError) as exc:
+        pool = eligible_pool(repo, args.pool_file, args.exclude_file)
+        names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=args.slice, disjoint=args.disjoint)
+    except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
     if args.json:
@@ -86,8 +106,8 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
     """Emit all slices for the stability proof; assert uniqueness within each."""
     repo = Path(args.repo).resolve()
     try:
-        pool = eligible_pool(repo, args.pool_file)
-    except (CatalogError, ValueError) as exc:
+        pool = eligible_pool(repo, args.pool_file, args.exclude_file)
+    except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
     if args.width < 1:
@@ -102,10 +122,13 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
     if args.runs < 1:
         print("❌ runs must be a positive integer", file=sys.stderr)
         return 2
+    if args.disjoint and args.width * args.runs > len(pool):
+        print("❌ disjoint slices exceed the eligible catalog pool", file=sys.stderr)
+        return 2
 
     slices: list[dict[str, object]] = []
     for i in range(args.runs):
-        names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=i)
+        names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=i, disjoint=args.disjoint)
         if len(set(names)) != len(names):
             print(f"❌ slice {i} has duplicate names", file=sys.stderr)
             return 2
@@ -145,6 +168,8 @@ def build_parser() -> argparse.ArgumentParser:
             "--pool-file", type=Path,
             help="JSON list of ready names eligible for this proof; selection only",
         )
+        sp.add_argument("--exclude-file", type=Path, help="JSON list of previously used names")
+        sp.add_argument("--disjoint", action="store_true", help="never reuse a name across slices")
 
     sample = sub.add_parser("sample", help="print one newline-separated slice")
     add_repo(sample)

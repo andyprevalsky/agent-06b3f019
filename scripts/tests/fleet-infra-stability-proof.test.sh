@@ -94,6 +94,40 @@ A="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --s
 B="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --slice 0)"
 [ "$A" = "$B" ] || fail "sampler must be deterministic for a fixed seed/slice"
 
+# A capability campaign must not silently reuse a task within its accepted
+# streak or pick a name supplied from an earlier successful campaign.
+exclude_file="$(mktemp)"
+# The first sampled name is always a valid catalog name; JSON-encode it rather
+# than relying on shell escaping in an operator-provided exclusion file.
+python3 - "$exclude_file" "$A" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps([sys.argv[2].splitlines()[0]]) + "\n")
+PY
+capability_sample="$(mktemp)"
+"$RUN_BENCH" stability-proof --dry-sample --runs 3 --width 10 \
+  --seed 20260908 --exclude-file "$exclude_file" > "$capability_sample"
+python3 - "$capability_sample" "$exclude_file" <<'PY' || fail "capability slices reused or excluded a task"
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+excluded = set(json.loads(Path(sys.argv[2]).read_text()))
+names = [name for row in data["slices"] for name in row["names"]]
+assert len(names) == 30 and len(set(names)) == 30
+assert not excluded.intersection(names)
+PY
+small_pool="$(mktemp)"
+python3 - "$small_pool" "$A" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps(sys.argv[2].splitlines()[:3]) + "\n")
+PY
+if python3 "$SAMPLER" dry-proof --repo "$ROOT_DIR" --runs 2 --width 2 \
+  --seed 1 --disjoint --pool-file "$small_pool" >/dev/null 2>&1; then
+  fail "disjoint sampler must reject a campaign wider than its pool"
+fi
+rm -f "$exclude_file" "$capability_sample" "$small_pool"
+
 tmp="$(mktemp -d)"
 export FLEET_INFRA_CANARY_STAMP="$tmp/fleet-infra-canary.last-pass"
 export FLEET_INFRA_CANARY_LOCK="$tmp/fleet-infra-canary-preflight.transaction.lock"
@@ -330,6 +364,15 @@ FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
 FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-pass" \
 FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
   "$RUN_BENCH" stability-proof -k=2 --concurrency=3 --seed 17
+if FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
+  FLEET_INFRA_PROOF_STATE_ROOT="$tmp/missing-llm-evidence" \
+  FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
+    "$RUN_BENCH" stability-proof --runs 1 --concurrency 2 --seed 17 \
+      --min-successful-llm 3 >"$tmp/missing-llm-evidence.log" 2>&1; then
+  fail "capability proof accepted a verdict with no completed LLM evidence"
+fi
+grep -Fq 'lacks the required correlated successful LLM evidence' \
+  "$tmp/missing-llm-evidence.log" || fail "missing LLM proof did not explain the failure"
 python3 - "$tmp/capability-pass" "$FLEET_INFRA_CANARY_STAMP" <<'PY' || fail "capability proof summary invalid"
 import json
 import sys
