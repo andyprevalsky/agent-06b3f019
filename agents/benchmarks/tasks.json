@@ -2815,7 +2815,7 @@
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
-    "timeout_seconds": 450,
+    "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
     "tags": ["browser", "smoke"],

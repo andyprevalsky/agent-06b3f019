@@ -102,12 +102,45 @@ async def test_mark_finished_with_structured_response():
             structured_response={"name": "Alice", "email": "alice@example.com"},
         )
 
-    call = assert_captured_call(
-        url_contains="/api/agents/agent-fin-3/status",
-        method="PATCH",
+    call = next(
+        request
+        for request in get_captured_requests()
+        if request["url"].endswith("/api/agents/agent-fin-3/status") and request["method"] == "PATCH"
     )
     body = json.loads(call["requestBody"])
     assert body["structuredResponse"] == {"name": "Alice", "email": "alice@example.com"}
+
+
+async def test_mark_finished_untitled_root_uses_verified_output_for_title():
+    """A missing startup schema cannot leave a completed root without its output-derived title."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.finished import mark_finished
+
+        await mark_finished(
+            agent_id="agent-title-root",
+            root_agent_id="agent-title-root",
+            steps_taken=[{"role": "USER", "text": "Analyze creators and build my brand strategy"}],
+            structured_response={
+                "top_creators_analysis": [{"creator_name": "Example"}],
+                "positioning_statement": "A research-backed founder voice",
+            },
+        )
+
+    requests = [
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-title-root" in request["url"] and request["method"] == "PATCH"
+    ]
+    title_request = next(
+        (request for request in requests if json.loads(request["requestBody"]).get("generated_title")),
+        None,
+    )
+    assert title_request is not None
+    assert json.loads(title_request["requestBody"])["generated_title"] == "Creator Brand Strategy"
+    status_request = next(request for request in requests if request["url"].endswith("/status"))
+    assert requests.index(title_request) < requests.index(status_request)
+    assert json.loads(status_request["requestBody"])["status"] == "COMPLETED"
 
 
 async def test_mark_finished_flushes_archive_before_terminal_status():
@@ -190,6 +223,10 @@ async def run_all_tests():
     await r.record_async("happy_path", test_mark_finished_happy_path)
     await r.record_async("boundary", test_mark_finished_boundary)
     await r.record_async("structured_response", test_mark_finished_with_structured_response)
+    await r.record_async(
+        "root_title_from_verified_output",
+        test_mark_finished_untitled_root_uses_verified_output_for_title,
+    )
     await r.record_async(
         "archive_flush_before_terminal_status",
         test_mark_finished_flushes_archive_before_terminal_status,

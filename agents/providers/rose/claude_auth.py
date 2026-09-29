@@ -256,6 +256,12 @@ def _supports_anthropic_fast_mode(model: str) -> bool:
     return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
 
 
+def _supports_anthropic_effort(model: str) -> bool:
+    # Haiku 4.5 accepts extended thinking but rejects output_config.effort.
+    # Include its dated API ID alongside the alias used by rose-1-mini.
+    return not model.startswith("claude-haiku-4-5")
+
+
 def _model_rejects_forced_tool_choice(model: str) -> bool:
     """Fable 5.1 / Mythos 5.1 400 on tool_choice type any/tool.
 
@@ -392,12 +398,12 @@ def build_anthropic_body(
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
 
-    # Always stamp output_config.effort so every Anthropic body is well-formed.
-    # Default is xhigh; callers may override (planner_llm still passes "max",
-    # which normalizes to xhigh).
-    oc = body.get("output_config") or {}
-    oc["effort"] = _normalize_reasoning_effort(effort)
-    body["output_config"] = oc
+    # Default to xhigh on models that support effort. Haiku 4.5 rejects the
+    # parameter, including on structured-output calls such as web_fetch.
+    if _supports_anthropic_effort(pool_spec.claude_auth_model):
+        oc = body.get("output_config") or {}
+        oc["effort"] = _normalize_reasoning_effort(effort)
+        body["output_config"] = oc
 
     def _h(obj: Any) -> str:
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]
