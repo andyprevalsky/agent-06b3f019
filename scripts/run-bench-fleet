@@ -7272,7 +7272,8 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local guest_barrier_token details detail_status state actual_name configuration
     local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
     local recovery_index shutdown_status proxy_cleanup_status
-    local prestart_inventory prestart_log prestart_status forensic_manifest
+    local prestart_inventory prestart_log prestart_status forensic_manifest forensic_schema
+    local stopped_state stopped_attempt
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
@@ -7562,6 +7563,52 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         proxy_cleanup_status=0
     else
         proxy_cleanup_status=$?
+    fi
+    if [ "$shutdown_status" -eq 0 ] && [ "$proxy_cleanup_status" -eq 0 ] \
+        && [ -f "$forensic_manifest" ] && [ ! -L "$forensic_manifest" ]; then
+        forensic_schema="$(python3 - "$forensic_manifest" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text())["schema"])
+PY
+)" || shutdown_status=1
+        if [ "$shutdown_status" -eq 0 ] \
+            && [ "$forensic_schema" = cloudbench-interrupted-pool-evidence-v1 ]; then
+            # The archive verifier requires every exact pool Machine stopped.
+            # They remain owned until that verifier checks the original bytes,
+            # attached volumes, and cleanup receipts; stopping alone grants no
+            # evidence credit and cannot release the claim.
+            for recovery_index in "${!recovery_machine_ids[@]}"; do
+                output="${recovery_outputs[$recovery_index]}"
+                if [ ! -f "$output/guest-shutdown.confirmed" ] \
+                    || [ -L "$output/guest-shutdown.confirmed" ] \
+                    || [ "$(cat "$output/guest-shutdown.confirmed")" != "$RUN_ID" ]; then
+                    shutdown_status=1
+                    break
+                fi
+                if [ "${recovery_machine_states[$recovery_index]}" = started ] \
+                    && ! fly_with_timeout 90 machine stop \
+                        "${recovery_machine_ids[$recovery_index]}" -a "$APP" >/dev/null 2>&1; then
+                    shutdown_status=1
+                    break
+                fi
+            done
+            if [ "$shutdown_status" -eq 0 ]; then
+                for recovery_index in "${!recovery_machine_ids[@]}"; do
+                    stopped_state=""
+                    for stopped_attempt in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+                        stopped_state="$(pool_machine_state "${recovery_machine_ids[$recovery_index]}")" || stopped_state=""
+                        [ "$stopped_state" = stopped ] && break
+                        sleep 2
+                    done
+                    if [ "$stopped_state" != stopped ]; then
+                        echo "❌ exact archived Machine ${recovery_machine_ids[$recovery_index]} did not verify stopped" >&2
+                        shutdown_status=1
+                        break
+                    fi
+                done
+            fi
+        fi
     fi
     if [ "$shutdown_status" -ne 0 ] || [ "$proxy_cleanup_status" -ne 0 ]; then
         RUN_ID="$save_run"
