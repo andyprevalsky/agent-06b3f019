@@ -30,7 +30,10 @@ async function main() {
       userId,
       parentAgentId: null,
       deletedAt: null,
-      status: { in: ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'] },
+      OR: [
+        { status: { in: ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'] } },
+        { status: 'FAILED', statusMessage: { startsWith: 'Generation cutover:' } },
+      ],
     },
     orderBy: { createdAt: 'desc' },
     take: 10,
