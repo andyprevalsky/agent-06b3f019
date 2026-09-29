@@ -213,17 +213,35 @@ async function main(): Promise<void> {
           'deploy snapshot claims must still skip FAILED candidates'
         );
 
-        const userClaim = await claimReplacementGeneration(
+        const userClaim = await claimReplacementGeneration(agentId, undefined, null, undefined);
+        assert(
+          !('skipped' in userClaim),
+          'user-initiated restart must recover a FAILED cutover agent'
+        );
+        assert.strictEqual(userClaim.staleWorkflowId, workflowId);
+      }
+    );
+  });
+
+  await test('explicit expectedWorkflowId still fences without a deployment attempt', async () => {
+    const workflowId = `${randomUUID()}:deployment-sealed:${randomUUID()}`;
+    await withAgent(
+      {
+        status: 'FAILED',
+        statusMessage: `${GENERATION_CUTOVER_STATUS_PREFIX} terminated workflow still on superseded queue navi-agent-tasks@old`,
+        temporalWorkflowId: workflowId,
+      },
+      async (agentId) => {
+        const fencedClaim = await claimReplacementGeneration(
           agentId,
           undefined,
           workflowId,
           undefined
         );
         assert(
-          !('skipped' in userClaim),
-          'user-initiated restart must recover a FAILED cutover agent'
+          'skipped' in fencedClaim,
+          'migrate/snapshot claims must skip FAILED even without deploymentAttempt'
         );
-        assert.strictEqual(userClaim.staleWorkflowId, workflowId);
       }
     );
   });

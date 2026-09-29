@@ -20,11 +20,10 @@ export async function claimReplacementGeneration(
   expectedWorkflowId: string | null,
   deploymentAttempt: string | undefined
 ) {
-  // Snapshot claims (deploy migrate) pass deploymentAttempt so a FAILED/COMPLETED
-  // race between snapshot and claim is skipped. User-initiated restart — including
-  // recovering an agent that force-clear previously marked FAILED — must not use
-  // that skip, or a late approval can never revive the sealed generation.
-  if (expectedWorkflowId === null || deploymentAttempt === undefined) {
+  // Snapshot / migrate claims pass an explicit expectedWorkflowId so a
+  // FAILED/COMPLETED race after the snapshot is skipped. Ordinary user
+  // restarts pass null so a late approval can revive a sealed generation.
+  if (expectedWorkflowId === null) {
     return claimWorkflowReplacement(agentId, launchConfig);
   }
   return claimWorkflowReplacement(agentId, launchConfig, {

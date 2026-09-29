@@ -1122,8 +1122,17 @@ class AgentWorkflow:
             },
         }
 
-    def _continuation_args(self, context: Optional[List[Dict]]) -> List[Any]:
-        """Build the single canonical execute continuation argument contract."""
+    def _continuation_args(
+        self,
+        context: Optional[List[Dict]],
+        start_phase: str = "execute_continued",
+    ) -> List[Any]:
+        """Build the canonical continue_as_new argument contract.
+
+        Default ``execute_continued`` skips PLAN/DAG (paused + execute-phase
+        handoff). PLAN-phase generation handoff passes ``start_phase="plan"``
+        so the resumed workflow finishes planning instead of jumping to execute.
+        """
         args = [
             self.agent_id,
             self.user_id,
@@ -1136,7 +1145,7 @@ class AgentWorkflow:
             self.parent_agent_id,
             self.depth,
             self.bus_id,
-            "execute_continued",
+            start_phase,
             self.max_iterations,
             self.price_limit_cents,
             self.context_gates or None,
@@ -4539,7 +4548,10 @@ class AgentWorkflow:
                 f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
             )
             workflow.continue_as_new(
-                args=self._continuation_args(result.get("context")),
+                args=self._continuation_args(
+                    result.get("context"),
+                    start_phase="plan" if phase == "PLAN" else "execute_continued",
+                ),
                 task_queue=handoff_queue.strip(),
             )
             return result

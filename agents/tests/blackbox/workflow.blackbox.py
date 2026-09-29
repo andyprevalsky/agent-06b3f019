@@ -3819,6 +3819,51 @@ async def test_workflow_generation_handoff_continue_as_new_onto_live_queue():
         args, task_queue = continued[0]
         assert task_queue == "navi-agent-tasks@newgen"
         assert args[6] == context
+        assert args[11] == "execute_continued"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_plan_phase_resumes_plan():
+    """PLAN-phase cutover must continue_as_new with start_phase=plan, not execute."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-plan-handoff"
+    wf.user_id = "user-1"
+    wf.goal = "finish planning after cutover"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "still planning"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="PLAN",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        assert args[6] == context
+        assert args[11] == "plan"
     finally:
         _restore_workflow(original)
 
@@ -7565,6 +7610,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_generation_handoff_continue_as_new",
         test_workflow_generation_handoff_continue_as_new_onto_live_queue,
+    )
+    await r.record_async(
+        "wf_generation_handoff_plan_resumes_plan",
+        test_workflow_generation_handoff_plan_phase_resumes_plan,
     )
     await r.record_async(
         "wf_paused_handoff_continue_as_new",
