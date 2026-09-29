@@ -313,7 +313,7 @@ function extractStreamableReasoning(
 export function buildGeneratorCompletionOptions(params: {
   model: string;
   messages: CompletionMessage[];
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   providerFastMode: boolean;
   abortSignal?: AbortSignal;
 }): CompletionOptions {
@@ -335,7 +335,7 @@ export function buildGeneratorCompletionOptions(params: {
       },
     },
     provider_fast_mode: params.providerFastMode,
-    provider_route: params.providerRoute,
+    ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
 }
@@ -344,7 +344,7 @@ type GeneratorLlmParams = {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
 };

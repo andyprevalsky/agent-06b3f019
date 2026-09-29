@@ -9,8 +9,7 @@ import {
   createClosedRouterActionDetector,
   type ClosedRouterAction,
 } from '../../providers/chat/routerJsonStream';
-import { poolForModel } from '../../providers/rose/pools';
-import { CEREBRAS_CHAT_MODEL } from '../../providers/rose/cerebrasRoute';
+import { getPool, poolForModel } from '../../providers/rose/pools';
 
 interface TestResult {
   name: string;
@@ -44,20 +43,20 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 
 const tests: Array<[string, () => Promise<void> | void]> = [
   [
-    'Ultra chat uses Flash for both synchronous phases',
+    'Ultra chat uses rose-fast for both synchronous phases (no provider_route override)',
     () => {
       const requestedModel = 'rose-labs/rose-1-ultra';
       const selected = selectChatPhaseModels(requestedModel);
 
       assertEqual(selected.requested, requestedModel, 'persisted requested model');
       assertEqual(selected.router, 'rose-labs/rose-1-flash', 'router model');
-      assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router provider route');
+      assertEqual(selected.routerProviderRoute, undefined, 'router provider route');
       assertEqual(selected.generator, 'rose-labs/rose-1-flash', 'generator model');
-      assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator provider route');
+      assertEqual(selected.generatorProviderRoute, undefined, 'generator provider route');
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-flash', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'generator primary model');
+      assertEqual(getPool(generatorPool).cerebrasModel, 'qwen-3.8-27b', 'rose-fast Cerebras hop');
     },
   ],
   [
@@ -68,17 +67,19 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(selected.router, requestedModel, 'router model');
       assertEqual(selected.generator, requestedModel, 'generator model');
+      assertEqual(selected.routerProviderRoute, undefined, 'no router route override');
+      assertEqual(selected.generatorProviderRoute, undefined, 'no generator route override');
     },
   ],
   [
-    'dedicated chat router resolves through the pinned Cerebras model',
+    'dedicated chat router resolves through the rose-fast pool Cerebras model',
     () => {
       const selected = selectChatPhaseModels('rose-labs/rose-1-ultra');
       const poolName = poolForModel(selected.router);
 
       assertEqual(poolName, 'rose-1-flash', 'router pool');
       if (!poolName) throw new Error('router model did not resolve to a Rose pool');
-      assertEqual(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b', 'router Cerebras model');
+      assertEqual(getPool(poolName).cerebrasModel, 'qwen-3.8-27b', 'router Cerebras model');
     },
   ],
   [

@@ -76,12 +76,12 @@ function directGeneratorOptions() {
   });
 }
 
-async function testPhaseUsesDirectCerebras(): Promise<void> {
+async function testPhaseUsesRoseFastPoolCerebras(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   process.env.OPENROUTER_API_KEY = 'openrouter-must-not-run';
-  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.CEREBRAS_API_KEY = 'rose-fast-pool-cerebras';
   const calls: string[] = [];
   let capturedBody: Record<string, unknown> = {};
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -93,12 +93,14 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
   }) as typeof fetch;
   try {
     const options = phaseGeneratorOptions();
+    assert.equal(options.provider_route, undefined);
+    assert.equal(Object.hasOwn(options, 'provider_route'), false);
     const chunks = await collect(await createStreamingCompletion(options));
     assert.deepEqual(calls, [CEREBRAS_API_URL]);
-    assert.equal(capturedBody.model, 'gpt-oss-120b');
+    assert.equal(capturedBody.model, 'qwen-3.8-27b');
     assert.equal(capturedBody.temperature, 0.7);
     assert.equal(capturedBody.clear_thinking, undefined);
-    assert.equal(capturedBody.reasoning_effort, 'low');
+    assert.equal(capturedBody.reasoning_effort, 'high');
     assert.deepEqual(capturedBody.messages, options.messages);
     assert.deepEqual(capturedBody.response_format, options.response_format);
     const format = capturedBody.response_format as {
@@ -107,7 +109,7 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     assert.equal(format.json_schema?.name, 'generator_response');
     assert.equal(format.json_schema?.strict, true);
     assert.deepEqual(format.json_schema?.schema, GENERATOR_JSON_SCHEMA);
-    assert.equal(chunks[0]?.actual_model, 'gpt-oss-120b');
+    assert.equal(chunks[0]?.actual_model, 'qwen-3.8-27b');
     assert.equal(chunks[0]?.pool_name, 'cerebras-direct');
     assert.equal(calls.includes(OPENROUTER_API_URL), false);
   } finally {
@@ -432,7 +434,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  await testPhaseUsesDirectCerebras();
+  await testPhaseUsesRoseFastPoolCerebras();
   await testDirectFailureFallsThroughToWaterfall();
   await testDirectPreHeaderStallFallsThroughToWaterfall();
   await testSilentDirectRouteRacesIndependentFallbacks();

@@ -12,36 +12,36 @@ function test(name: string, run: () => void): void {
   process.stdout.write(`PASS sms-supervisor-provider-route: ${name}\n`);
 }
 
-test('routes through Cerebras with failover, never straight at Anthropic', () => {
-  // 2026-07-28: the supervisor sent `claude_token`, routing every turn direct
-  // to Anthropic. That made this surface depend on three independent things —
-  // the user's OAuth token, an API key with credit, and a tool schema under
-  // Anthropic's 16-union-parameter ceiling. All three failed at once, every
-  // call 400'd, and the run degraded silently to a waterfall model.
-  //
-  // The fix is the route, NOT a smaller tool surface. `direct-cerebras`
-  // carries its own cascade (quota/rate -> same model via OpenRouter with the
-  // provider unpinned; stalls/5xx/empty -> generic waterfall), so one provider
-  // having a bad minute cannot take SMS down.
-  // The default path must still be Cerebras. The benchmark override exists
-  // only to A/B a different model against the same task; it is env-gated and
-  // unset in prod.
-  assert.ok(SUPERVISOR_LLM_SOURCE.includes("'direct-cerebras'"));
+test('defaults to rose-fast pool path — no exclusive cerebras / gpt-oss override', () => {
+  // 2026-09-29: SMS forced provider_route 'direct-cerebras', which hardcodes
+  // gpt-oss-120b and bypasses rose-fast's pool.cerebrasModel (qwen-3.8-27b).
+  // Default must omit provider_route so createStreamingCompletion uses the
+  // rose-1-flash pool path. Benchmark env overrides remain for eval isolation.
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-flash'"));
   assert.ok(SUPERVISOR_LLM_SOURCE.includes('BENCHMARK_SMS_SUPERVISOR_MODEL'));
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("providerRoute ?? 'pool-default'"));
 
-  // Compute tokens must stay OFF the default route. They are legitimately sent
-  // when the benchmark override moves the run onto a waterfall route (that path
-  // needs a user token), so the invariant is not "never mentioned" — it is
-  // "never sent while providerRoute is direct-cerebras". Assert the gate itself:
-  // a bare `claude_token: claudeToken` with no route check is the regression.
+  // Default assignment must NOT pin direct-cerebras. The only remaining
+  // 'direct-cerebras' mention is inside the benchmark route-override allowlist.
+  const allowlistHits = (
+    SUPERVISOR_LLM_SOURCE.match(/routeOverride === 'direct-cerebras'/g) ?? []
+  ).length;
+  assert.equal(allowlistHits, 1, 'direct-cerebras may appear only as a benchmark allowlist check');
+  const allDirectHits = (SUPERVISOR_LLM_SOURCE.match(/direct-cerebras/g) ?? []).length;
+  assert.equal(
+    allDirectHits,
+    1,
+    `expected exactly one 'direct-cerebras' mention (benchmark allowlist); found ${allDirectHits}`
+  );
+
+  // Compute tokens must stay OFF the default (undefined-route) path.
   for (const token of ['claude_token', 'gpt_token']) {
     const gated = SUPERVISOR_LLM_SOURCE.includes(
-      `providerRoute !== 'direct-cerebras' && ${token === 'claude_token' ? 'claudeToken' : 'gptToken'}`
+      `providerRoute !== undefined && ${token === 'claude_token' ? 'claudeToken' : 'gptToken'}`
     );
     assert.ok(
       gated,
-      `${token} must be gated behind providerRoute !== 'direct-cerebras'; an ungated send puts the ` +
-        'default SMS route back on a user compute token instead of Cerebras'
+      `${token} must be gated behind providerRoute !== undefined; ungated send puts SMS on a user compute token instead of rose-fast`
     );
   }
 });

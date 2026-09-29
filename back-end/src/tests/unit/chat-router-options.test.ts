@@ -29,7 +29,8 @@ async function run(): Promise<void> {
   });
 
   assert.equal(options.model, 'rose-labs/rose-1-flash');
-  assert.equal(options.provider_route, 'direct-cerebras');
+  assert.equal(options.provider_route, undefined);
+  assert.equal(Object.hasOwn(options, 'provider_route'), false);
   assert.equal(options.provider_fast_mode, true);
   assert.equal(options.abort_signal, abortController.signal);
   assert.equal(options.temperature, 0.3);

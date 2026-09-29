@@ -251,7 +251,7 @@ function extractStreamableReasoning(
 export function buildRouterCompletionOptions(params: {
   model: string;
   messages: CompletionMessage[];
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   providerFastMode: boolean;
   abortSignal?: AbortSignal;
 }): CompletionOptions {
@@ -273,7 +273,7 @@ export function buildRouterCompletionOptions(params: {
       },
     },
     provider_fast_mode: params.providerFastMode,
-    provider_route: params.providerRoute,
+    ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
 }
@@ -282,7 +282,7 @@ export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   onRouterStarted?: () => void;
   onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {

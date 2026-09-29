@@ -60,9 +60,9 @@ async function run(): Promise<void> {
   try {
     const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
     assert.equal(phases.router, 'rose-labs/rose-1-flash');
-    assert.equal(phases.routerProviderRoute, 'direct-cerebras');
+    assert.equal(phases.routerProviderRoute, undefined);
     assert.equal(phases.generator, 'rose-labs/rose-1-flash');
-    assert.equal(phases.generatorProviderRoute, 'direct-cerebras');
+    assert.equal(phases.generatorProviderRoute, undefined);
     const chunks = await collect(
       await createStreamingCompletion({
         model: phases.router,
