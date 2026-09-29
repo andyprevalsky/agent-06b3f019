@@ -268,7 +268,10 @@ poll budget and delayed stack health by several minutes in the 2026-09-29
 diagnostic. This guest-only default does not change the eight-worker deploy
 stress test. Real browser and payment benches retain their 8 GB shape and
 frontend contract. A fresh large-primary clone still inherits the legacy
-donor's 40 GB volume until a verified 20 GB donor replaces it. Keep
+donor's 40 GB volume until a verified 20 GB donor replaces it. Keep using the
+existing stopped pool across slices; Fly can transiently return a valid empty
+snapshot list even while completed donor snapshots exist, so the controller
+retries the listing before treating the donor as unprovisioned. Keep
 `waiting_for_detach` volumes in the exact-owner ledger: Fly has accepted
 deletion but has not confirmed a terminal state. If a fleet is canceled before
 its boot-config barrier releases, only the exact stopped-Machine, unreleased

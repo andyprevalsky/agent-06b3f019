@@ -10458,11 +10458,16 @@ else
     # an empty result mean absence.
     SNAPSHOTS_JSON=""
     for _snap_attempt in 1 2 3 4 5 6; do
-        SNAPSHOTS_JSON="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
-        if printf '%s' "$SNAPSHOTS_JSON" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
-            break
+        _snapshots_candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        if printf '%s' "$_snapshots_candidate" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
+            SNAPSHOTS_JSON="$_snapshots_candidate"
+            # Fly can briefly return a valid but empty/still-hydrating list
+            # while older completed snapshots exist. A valid JSON response is
+            # not enough to conclude that the donor has no usable snapshot.
+            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+                break
+            fi
         fi
-        SNAPSHOTS_JSON=""
         [ "$_snap_attempt" = "6" ] || sleep $(( _snap_attempt * 3 ))
     done
     if [ -z "$SNAPSHOTS_JSON" ]; then
