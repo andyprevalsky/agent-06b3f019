@@ -5823,6 +5823,9 @@ def test_build_verifier_context_messages_filters_subagent_tree_rows():
                 "toolStatus": "FINISHED",
                 "subAgentIds": ["child-1"],
                 "busId": "bus-1",
+                # Historical for_each children share spawnGroupId with the parent
+                # toolCallId prefix (see spawn_group_id / for_each batch path).
+                "spawnGroupId": "tc-1",
             },
         },
         {
