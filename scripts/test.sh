@@ -327,6 +327,7 @@ run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-successful-llm-queries.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
+run_suite "Cloud Benchmark Quiesced Forensic Retirement" python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Agent Workflow Surface Hash" bash scripts/tests/agent-surface-hash.test.sh
 run_suite "Mac App Release Drift" bash scripts/tests/mac-app-release-drift.test.sh

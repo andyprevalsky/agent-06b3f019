@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import stat
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -36,6 +37,38 @@ def fields(path: Path) -> dict[str, str]:
 
 def object_file(path: Path, limit: int = 1048576):
     return json.loads(regular_bytes(path, limit))
+
+
+def verify_quiesced_provider_archive(
+    out: Path, row: dict[str, object], owner: str, run_id: str,
+) -> dict[str, object]:
+    """Bind a canceled guest's original files to its exact recovery receipt.
+
+    A driver may exit without its normal ACK while exact guest recovery still
+    quiesces the stack and releases every logged provider session. That leaves
+    services.json stopped, not failed. The original run/backend bytes, the
+    quiescence receipt, and the provider cleanup receipt must all agree.
+    """
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
+    args = argparse.Namespace(
+        owner=owner, fleet_run_id=run_id, bench=row["task"],
+        machine_id=row["machine_id"], output_dir=str(out),
+        guest_run_token=row["run_token"],
+        run_json=str(out / "guest-cleanup.run.json"),
+        backend_log=str(out / "guest-cleanup.backend.log"),
+        quiescence_receipt=str(out / "guest-cleanup.quiescence.json"),
+    )
+    provider = object_file(out / "guest-cleanup.provider-manifest.json")
+    receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
+    assert provider["kind"] == "provider-exact-manifest"
+    assert provider == helper["provider_manifest"](args)
+    assert helper["validate_provider_receipt"](receipt, provider, None)
+    originals = row["files"]
+    assert originals["original/repo/.context/cloudbench/run.json"]["sha256"] == (
+        provider["evidence"]["run_json_sha256"])
+    assert originals["original/repo/.context/cloudbench/logs/backend.log"]["sha256"] == (
+        provider["evidence"]["backend_log_sha256"])
+    return provider
 
 
 def safe_name(name: str) -> bool:
@@ -493,8 +526,8 @@ def verify_interrupted_pool_evidence(
                 "original/repo/.context/cloudbench/run.json" in row["missing"])
             stopped_path = out / "guest-cleanup.machine-stopped.json"
             receipt_path = out / "guest-cleanup.recovery-receipt.json"
-            assert stopped_path.is_file() == receipt_path.is_file()
             if stopped_path.is_file():
+                assert receipt_path.is_file()
                 stopped = object_file(stopped_path)
                 receipt = object_file(receipt_path)
                 assert stopped["state"] == "stopped" and stopped["machine_id"] == machine
@@ -507,6 +540,8 @@ def verify_interrupted_pool_evidence(
                     regular_bytes(out / "guest-cleanup.machine-status.txt", 1048576)).hexdigest()
                 assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
                     json.dumps(stopped, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            elif receipt_path.is_file():
+                verify_quiesced_provider_archive(out, row, owner, meta["run_id"])
             else:
                 # A confirmed normal shutdown may finish before the driver
                 # writes run.json. Preserve its exact original clean ACK and
@@ -574,6 +609,11 @@ def verify_interrupted_pool_evidence(
                         verify_prestart_provider_archive(
                             out, row, provider,
                             archived[prefix + "repo/.context/cloudbench/logs/backend.log"])
+                    elif provider["kind"] == "provider-exact-manifest":
+                        assert services["status"] == "stopped"
+                        assert "original/repo/.context/cloudbench/run.json" in row["files"]
+                        verify_quiesced_provider_archive(
+                            out, row, owner, meta["run_id"])
                     else:
                         assert services["status"] == "failed"
                 else:
