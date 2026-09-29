@@ -7168,7 +7168,8 @@ PY
             <<< "$state_summary"
         if [ "$quiescence_status" -ne 0 ]; then
             if [ "$state_kind" = "active" ] \
-                || [ "$state_kind" = "exited-no-run" ]; then
+                || [ "$state_kind" = "exited-no-run" ] \
+                || [ "$state_kind" = "exited" ]; then
                 cloudbench_fetch_guest_evidence status_code \
                     "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
                     "/repo/.context/cloudbench/logs/backend.log" \

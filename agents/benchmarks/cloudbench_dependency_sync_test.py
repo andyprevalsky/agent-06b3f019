@@ -10626,14 +10626,14 @@ def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(
 
 @pytest.mark.parametrize(
     "guest_state",
-    ("active", "exited-no-run"),
-    ids=("active", "exited-without-final-run"),
+    ("active", "exited-no-run", "exited-broken-stack"),
+    ids=("active", "exited-without-final-run", "exited-with-failed-stack-cleanup"),
 )
-def test_runless_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
+def test_unquiesced_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
     tmp_path: Path,
     guest_state: str,
 ) -> None:
-    """A runless exact guest is fenced by exact Machine stop before cleanup."""
+    """An unquiesced exact guest is fenced by Machine stop before cleanup."""
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
         _extract_fleet_function(fleet, signature)
@@ -10692,7 +10692,7 @@ def test_runless_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
             "backend_port": None,
             "backend_closed": None,
         }
-    else:
+    elif guest_state == "exited-no-run":
         state_fields = {
             "state": "exited",
             "reason": (
@@ -10710,6 +10710,21 @@ def test_runless_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
             "backend_port": 3001,
             "backend_closed": True,
         }
+    else:
+        state_fields = {
+            "state": "exited",
+            "reason": "guest services are not durably stopped",
+            "driver_state": "exited",
+            "driver_pid": None,
+            "driver_process_state": None,
+            "driver_token_match": False,
+            "driver_descendants": [],
+            "services_status": None,
+            "stopped_service_pids": [],
+            "live_service_pids": [],
+            "backend_port": None,
+            "backend_closed": None,
+        }
     state_payload = json.dumps(
         {
             "schema_version": "cloudbench-guest-state-v1",
@@ -10724,11 +10739,11 @@ def test_runless_guest_seals_sessions_then_stops_exact_machine_before_cleanup(
                 "within_limit": True,
             },
             "run_json": {
-                "exists": False,
-                "regular": False,
+                "exists": guest_state == "exited-broken-stack",
+                "regular": guest_state == "exited-broken-stack",
                 "symlink": False,
-                "bytes": None,
-                "within_limit": False,
+                "bytes": 100 if guest_state == "exited-broken-stack" else None,
+                "within_limit": guest_state == "exited-broken-stack",
             },
             "backend_log": {
                 "exists": True,

@@ -40,6 +40,11 @@ The fleet's cancellation recovery treated the narrower benchmark-root receipt
 as sufficient to publish `guest-shutdown.confirmed`. It then waited the full
 600-second runtime-evidence deadline on HTTP 409 even though the same guest had
 already reported the terminal HTTP 500. Recovery failed with ownership retained.
+After that invalid confirmation was preserved separately, the next exact
+recovery exposed a second gap: the guest state was `exited`, with no driver
+descendants, but its services manifest still said `failed`. The quiescence
+helper correctly rejected this as not durably stopped, while the fleet refused
+to enter its existing exact Machine-stop/provider-cleanup fallback.
 No task prompt, evaluator, scoring rule, or execution timeout was changed.
 
 ## Diagnosis
@@ -51,6 +56,9 @@ branch called `recover-runner-receipt` and published the whole-guest confirmatio
 without checking `/shutdown-health`. An already persisted runner-only recovery
 receipt took the same shortcut. A separate collector loop treated HTTP 409 as
 transient until its deadline and did not inspect the terminal shutdown state.
+The recovery fallback accepted `active` and `exited-no-run`, but excluded a
+validated `exited` driver whose stack cleanup failed. That excluded precisely
+the guest for which an exact Machine stop is needed before provider release.
 The deeper general class is using a receipt from one ownership scope to attest
 to a larger scope. The original stack-cleanup failure remains under investigation;
 these two recovery bugs are independently reproduced and repaired.
@@ -69,7 +77,11 @@ fixture asserted that full exact provider cleanup must run instead. The
 terminal-collector repro in
 `scripts/tests/cloudbench-runtime-evidence-collector.test.py` failed before the
 fix because it reached its three-second deadline rather than reporting the
-already terminal guest failure. Both same tests pass after the fix.
+already terminal guest failure. The added
+`test_unquiesced_guest_seals_sessions_then_stops_exact_machine_before_cleanup[exited-with-failed-stack-cleanup]`
+failed before the second fix with `exact guest quiescence rejected: guest
+services are not durably stopped`; the identical test passes afterward and
+asserts Machine stop precedes provider cleanup.
 
 ## Solution
 
@@ -79,8 +91,10 @@ absent, it preserves any earlier runner receipt separately and proceeds through
 the existing exact guest/process/provider recovery. The runtime-evidence
 collector probes the same authenticated shutdown endpoint after HTTP 409 and
 fails immediately on its terminal HTTP 500; ordinary delayed sealing retains
-its existing bounded wait. Blackbox tests cover failed, healthy, and previously
-persisted runner receipts plus terminal collector failure. A live recovery and
+its existing bounded wait. A validated unquiesced `exited` driver now joins
+the existing exact Machine-stop/provider-cleanup fallback. Blackbox tests
+cover failed, healthy, and previously persisted runner receipts, terminal
+collector failure, and stop-before-provider-cleanup ordering. A live recovery and
 ten consecutive complete slices are still required before this case can be
 marked fixed.
 
