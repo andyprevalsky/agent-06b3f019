@@ -22,9 +22,11 @@ export async function searchTrajectorySource(
     excludeRootAgentId = await repo.findRootAgentId(agentId, userId);
   }
   const pathRoot = input.filters.agentTrajectories?.pathRootAgentId;
-  if (pathRoot !== undefined &&
-      /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(pathRoot) &&
-      !(await trajectoryRepo.hasArchivedTrajectoryRoot(userId, pathRoot))) {
+  if (
+    pathRoot !== undefined &&
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(pathRoot) &&
+    !(await trajectoryRepo.hasArchivedTrajectoryRoot(userId, pathRoot))
+  ) {
     try {
       await indexArchivedTraceFromR2(pathRoot, userId);
     } catch (error) {

@@ -43,9 +43,12 @@ function string(value: unknown): string | null {
 }
 
 function date(value: unknown, fallback: Date): Date {
-  const candidate = value instanceof Date
-    ? value
-    : typeof value === 'number' ? new Date(value) : new Date(String(value ?? ''));
+  const candidate =
+    value instanceof Date
+      ? value
+      : typeof value === 'number'
+        ? new Date(value)
+        : new Date(String(value ?? ''));
   return Number.isNaN(candidate.getTime()) ? fallback : candidate;
 }
 
@@ -59,8 +62,9 @@ function textParts(value: unknown, depth = 0): string[] {
   if (object === null || ['image', 'image_url', 'audio', 'video'].includes(String(object.type))) {
     return [];
   }
-  return ['text', 'content', 'output', 'arguments', 'result']
-    .flatMap((key) => textParts(object[key], depth + 1));
+  return ['text', 'content', 'output', 'arguments', 'result'].flatMap((key) =>
+    textParts(object[key], depth + 1)
+  );
 }
 
 function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] {
@@ -80,20 +84,22 @@ function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] 
     const searchText = string(message?.text);
     if (!id || !agentId || !role || !TRACE_ROLES.has(role) || !searchText) return [];
     const agent = agents.get(agentId);
-    return [{
-      messageId: id,
-      userId: fixture.user_id,
-      rootAgentId,
-      agentId,
-      surface: string(agent?.source) ?? 'WEB',
-      role,
-      createdAt: date(message?.createdAt ?? message?.timestamp, fallback),
-      searchText,
-      agentGoal: string(agent?.goal) ?? '',
-      agentTitle: string(agent?.title),
-      archivePath: END_FIXTURE_PATH,
-      traceKind: 'message',
-    }];
+    return [
+      {
+        messageId: id,
+        userId: fixture.user_id,
+        rootAgentId,
+        agentId,
+        surface: string(agent?.source) ?? 'WEB',
+        role,
+        createdAt: date(message?.createdAt ?? message?.timestamp, fallback),
+        searchText,
+        agentGoal: string(agent?.goal) ?? '',
+        agentTitle: string(agent?.title),
+        archivePath: END_FIXTURE_PATH,
+        traceKind: 'message',
+      },
+    ];
   });
 }
 
@@ -107,10 +113,14 @@ function llmRows(
   const wrapper = record(payload);
   const dump = wrapper?.kind === 'legacy-llm-dump' ? record(wrapper.payload) : wrapper;
   if (dump === null) return [];
-  if (string(dump.root_agent_id) !== null && dump.root_agent_id !== fixture.root_agent_id) return [];
+  if (string(dump.root_agent_id) !== null && dump.root_agent_id !== fixture.root_agent_id)
+    return [];
   const agentId = string(dump.agent_id) ?? fixture.root_agent_id;
-  if (!(fixture.agent_ids ?? []).includes(agentId) &&
-      !(partialArchive && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(agentId))) return [];
+  if (
+    !(fixture.agent_ids ?? []).includes(agentId) &&
+    !(partialArchive && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(agentId))
+  )
+    return [];
   const agent = (fixture.rows.Agent ?? []).map(record).find((row) => row?.id === agentId);
   const createdAt = date(
     dump.ts_ms ?? dump.ingested_ms ?? dump.created_at,
@@ -121,7 +131,9 @@ function llmRows(
     const entry = record(message);
     const role = string(entry?.role)?.toUpperCase();
     if (!role || !TRACE_ROLES.has(role)) continue;
-    const text = textParts(entry?.content ?? entry?.text).join('\n').trim();
+    const text = textParts(entry?.content ?? entry?.text)
+      .join('\n')
+      .trim();
     if (text) candidates.push({ role, kind: 'llm_context', text });
   }
   const output = textParts(dump.output).join('\n').trim();
@@ -132,20 +144,22 @@ function llmRows(
       .digest('hex');
     if (seen.has(digest)) return [];
     seen.add(digest);
-    return [{
-      messageId: `llm-${digest}`,
-      userId: fixture.user_id,
-      rootAgentId: fixture.root_agent_id,
-      agentId,
-      surface: string(agent?.source) ?? 'WEB',
-      role: candidate.role,
-      createdAt,
-      searchText: candidate.text,
-      agentGoal: string(agent?.goal) ?? '',
-      agentTitle: string(agent?.title),
-      archivePath: artifactPath,
-      traceKind: candidate.kind,
-    }];
+    return [
+      {
+        messageId: `llm-${digest}`,
+        userId: fixture.user_id,
+        rootAgentId: fixture.root_agent_id,
+        agentId,
+        surface: string(agent?.source) ?? 'WEB',
+        role: candidate.role,
+        createdAt,
+        searchText: candidate.text,
+        agentGoal: string(agent?.goal) ?? '',
+        agentTitle: string(agent?.title),
+        archivePath: artifactPath,
+        traceKind: candidate.kind,
+      },
+    ];
   });
 }
 
@@ -162,22 +176,30 @@ export class ArchivedTraceNotFoundError extends Error {
   }
 }
 
-async function replaceArchivedRows(rootAgentId: string, rows: ArchivedTrajectoryRow[]): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await tx.agentTrajectorySearch.deleteMany({
-      where: { rootAgentId, archivePath: { not: null } },
-    });
-    for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
-      const batch = rows.slice(start, start + WRITE_BATCH_SIZE);
-      await tx.$executeRaw(Prisma.sql`
+async function replaceArchivedRows(
+  rootAgentId: string,
+  rows: ArchivedTrajectoryRow[]
+): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.agentTrajectorySearch.deleteMany({
+        where: { rootAgentId, archivePath: { not: null } },
+      });
+      for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+        const batch = rows.slice(start, start + WRITE_BATCH_SIZE);
+        await tx.$executeRaw(Prisma.sql`
       INSERT INTO "AgentTrajectorySearch" (
         "messageId", "userId", "rootAgentId", "agentId", surface, role,
         "createdAt", "searchText", "agentGoal", "agentTitle", "archivePath", "traceKind"
-      ) VALUES ${Prisma.join(batch.map((row) => Prisma.sql`(
+      ) VALUES ${Prisma.join(
+        batch.map(
+          (row) => Prisma.sql`(
         ${row.messageId}, ${row.userId}, ${row.rootAgentId}, ${row.agentId},
         ${row.surface}, ${row.role}, ${row.createdAt}, ${row.searchText},
         ${row.agentGoal}, ${row.agentTitle}, ${row.archivePath}, ${row.traceKind}
-      )`))}
+      )`
+        )
+      )}
       ON CONFLICT ("messageId") DO UPDATE SET
         "userId" = EXCLUDED."userId",
         "rootAgentId" = EXCLUDED."rootAgentId",
@@ -191,8 +213,10 @@ async function replaceArchivedRows(rootAgentId: string, rows: ArchivedTrajectory
         "archivePath" = EXCLUDED."archivePath",
         "traceKind" = EXCLUDED."traceKind"
       `);
-    }
-  }, { timeout: 60_000 });
+      }
+    },
+    { timeout: 60_000 }
+  );
 }
 
 /** Index one finalized bundle. Grep then reads PostgreSQL, never scans R2. */
@@ -207,9 +231,9 @@ export async function indexArchivedTrace(
   }
   const rows = archivedMessageRows(fixture);
   const seen = new Set<string>();
-  const llmPaths = [...new Set(artifactPaths)].filter(
-    (path) => /^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(path)
-  ).sort();
+  const llmPaths = [...new Set(artifactPaths)]
+    .filter((path) => /^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(path))
+    .sort();
   const failures: Array<{ path: string; error: string }> = [];
   for (let start = 0; start < llmPaths.length; start += 4) {
     const paths = llmPaths.slice(start, start + 4);
@@ -226,7 +250,12 @@ export async function indexArchivedTrace(
     });
   }
   if (failures.length > 0) {
-    throw new Error(`Could not read ${failures.length} LLM artifacts for ${rootAgentId}: ${failures.slice(0, 3).map((failure) => `${failure.path} (${failure.error})`).join(', ')}`);
+    throw new Error(
+      `Could not read ${failures.length} LLM artifacts for ${rootAgentId}: ${failures
+        .slice(0, 3)
+        .map((failure) => `${failure.path} (${failure.error})`)
+        .join(', ')}`
+    );
   }
   await replaceArchivedRows(rootAgentId, rows);
   return rows.length;
@@ -259,10 +288,10 @@ async function indexArchivedTraceFromR2Unlocked(
   });
   if (owner === null) return 0;
   const finalized = manifest?.finalized === true;
-  const fixture = await readJson(
+  const fixture = (await readJson(
     rootAgentId,
     finalized ? END_FIXTURE_PATH : 'db/start.fixture.json.gz.enc'
-  ) as ScopedDbFixture;
+  )) as ScopedDbFixture;
   if (
     manifest?.root_agent_id !== rootAgentId ||
     correlations?.user_id !== fixture.user_id ||
@@ -281,5 +310,10 @@ async function indexArchivedTraceFromR2Unlocked(
     }
   }
   const objects = await listArchivedObjectsStrict(rootAgentId);
-  return indexArchivedTrace(rootAgentId, fixture, objects.map((object) => object.path), !finalized);
+  return indexArchivedTrace(
+    rootAgentId,
+    fixture,
+    objects.map((object) => object.path),
+    !finalized
+  );
 }

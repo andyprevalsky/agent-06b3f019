@@ -226,11 +226,13 @@ export async function storeWorkerArtifact(
       // A stale worker can still submit to a reused local benchmark port. In
       // production the SQL Agent may already have been purged, so do not use
       // its presence as the condition for indexing the archived bundle.
-      const localRoot = process.env.NODE_ENV === 'production' ? true :
-        (await prisma.agent.findUnique({
-          where: { id: input.rootAgentId },
-          select: { id: true },
-        })) !== null;
+      const localRoot =
+        process.env.NODE_ENV === 'production'
+          ? true
+          : (await prisma.agent.findUnique({
+              where: { id: input.rootAgentId },
+              select: { id: true },
+            })) !== null;
       if (localRoot) {
         await indexArchivedTraceFromR2(input.rootAgentId);
       }
