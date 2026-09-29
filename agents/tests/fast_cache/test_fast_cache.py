@@ -2944,6 +2944,32 @@ def test_oai_demo_replay_rewrites_aman_to_andy_only_for_this_task():
         reset_context(token)
 
 
+def test_content_lookup_keys_dual_read_flash_and_lite_pools():
+    """rose-1-flash content keys must dual-read the pre-rename rose-1-lite row."""
+    material = {
+        "pool": "rose-1-flash",
+        "system": "schema system",
+        "user": "Goal: mass agent",
+        "response_model": "_GeneratedResponseSchemaWithTitle",
+        "temperature": 0.3,
+        "max_tokens": [2000, 4000],
+    }
+    keys = normalize.content_lookup_keys_with_pool_aliases("mass agent", "response_schema", material)
+    flash_key = normalize.content_key("mass agent", "response_schema", material)
+    lite_key = normalize.content_key(
+        "mass agent", "response_schema", {**material, "pool": "rose-1-lite"}
+    )
+    assert keys[0] == flash_key
+    assert lite_key in keys
+    assert flash_key != lite_key
+    # Reverse alias direction (legacy callers still on lite) also dual-reads flash.
+    reverse = normalize.content_lookup_keys_with_pool_aliases(
+        "mass agent", "response_schema", {**material, "pool": "rose-1-lite"}
+    )
+    assert reverse[0] == lite_key
+    assert flash_key in reverse
+
+
 def test_position_lookup_keys_include_july_demo_aliases():
     request = {
         "pool": "rose-1-ultra",

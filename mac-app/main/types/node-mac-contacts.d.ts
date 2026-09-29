@@ -1,10 +1,6 @@
 declare module 'node-mac-contacts' {
   export type OptionalProperty =
-    | 'jobTitle'
-    | 'departmentName'
-    | 'organizationName'
-    | 'middleName'
-    | string;
+    'jobTitle' | 'departmentName' | 'organizationName' | 'middleName' | string;
 
   export interface MacContact {
     identifier: string;
@@ -22,4 +18,3 @@ declare module 'node-mac-contacts' {
   export function getAllContacts(props?: OptionalProperty[]): MacContact[];
   export function getAuthStatus(): string;
 }
-

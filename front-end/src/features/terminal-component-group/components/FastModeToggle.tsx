@@ -69,8 +69,8 @@ export default function FastModeToggle({ enabled, onChange }: FastModeToggleProp
               : 'Turn on to use provider fast mode on LLM calls that support it.'}
           </p>
           <p className="text-muted-foreground">
-            Session-only; applies to the next agent you create. Demo prompt cache
-            replay is separate and does not use this button.
+            Session-only; applies to the next agent you create. Demo prompt cache replay is separate
+            and does not use this button.
           </p>
         </div>
       </TooltipContent>

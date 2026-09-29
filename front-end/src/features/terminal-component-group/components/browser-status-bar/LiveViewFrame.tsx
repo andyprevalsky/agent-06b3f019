@@ -22,7 +22,7 @@ import {
   resolveLiveViewDisplaySize,
   steelLiveViewIframeCropStyle,
   steelLiveViewScaledCropStyle,
-} from './liveViewGeometry';
+} from './liveViewDisplay';
 
 interface LiveViewFrameProps {
   url: string;

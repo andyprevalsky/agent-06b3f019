@@ -576,8 +576,22 @@ class _FakeDelegateManager:
 
         return _gen()
 
-    def finalize_child(self, workflow_instance, child_info, sub_agent, child_tool_id, bus_id):
-        self.last_call = {"child_info": child_info, "child_tool_id": child_tool_id, "bus_id": bus_id}
+    def finalize_child(
+        self,
+        workflow_instance,
+        child_info,
+        sub_agent,
+        child_tool_id,
+        bus_id,
+        *,
+        for_each_child: bool = False,
+    ):
+        self.last_call = {
+            "child_info": child_info,
+            "child_tool_id": child_tool_id,
+            "bus_id": bus_id,
+            "for_each_child": for_each_child,
+        }
 
         async def _gen():
             for e in self._events:
@@ -3853,7 +3867,7 @@ async def test_handler_for_each_drain_exception_counts_as_failure():
     import domains.spawn_agent.handler as h
 
     class _BadDrainMgr:
-        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id):
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id, *, for_each_child: bool = False):
             async def _gen():
                 # Yield first event success, then raise on second iteration
                 yield ToolEvent(
@@ -3896,7 +3910,7 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
     import domains.spawn_agent.handler as h
 
     class _BadSpawnMgr:
-        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id):
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id, *, for_each_child: bool = False):
             async def _gen():
                 raise RuntimeError("spawn explosion")
                 yield  # generator marker

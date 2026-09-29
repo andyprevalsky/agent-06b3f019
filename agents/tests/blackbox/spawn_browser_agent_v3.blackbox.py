@@ -532,6 +532,135 @@ def test_visible_result_completion_rewrites_post_submit_wait():
     assert "0.07" in forced["params"]["reasoning"]
 
 
+def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
+    """9f53aed4: identical 0.5 rejects with complete output must stop the loop.
+
+    Live example.com had no H1; verifier kept scoring 0.5 with the same
+    reasoning while already emitting main_heading + page_url. Soft-accept
+    after the streak so the browser agent completes instead of hub-pause.
+    Soft-accept is unverified (handler must not report success=True).
+    """
+    from domains.spawn_browser_agent_v3.verifier_reject_circuit import (
+        next_identical_reject_streak,
+        should_soft_accept_identical_verifier_reject,
+        structured_response_covers_schema,
+    )
+
+    schema = {
+        "fields": [
+            {"name": "main_heading", "type": "str", "required": True},
+            {"name": "page_url", "type": "str", "required": True},
+        ]
+    }
+    output = {
+        "main_heading": "No H1 exists on the inspected page",
+        "page_url": "https://example.com/",
+    }
+    fingerprint = ""
+    streak = 0
+    reason = (
+        "The live-page checks found zero H1 elements; Example Domain is the "
+        "document title, not an H1."
+    )
+    for _ in range(3):
+        fingerprint, streak = next_identical_reject_streak(
+            previous_fingerprint=fingerprint,
+            previous_streak=streak,
+            reasoning=reason,
+            score=0.5,
+        )
+    assert streak == 3
+    assert should_soft_accept_identical_verifier_reject(
+        consecutive_identical=streak,
+        structured_response=output,
+        response_schema=schema,
+    )
+    assert not should_soft_accept_identical_verifier_reject(
+        consecutive_identical=2,
+        structured_response=output,
+        response_schema=schema,
+    )
+    assert not should_soft_accept_identical_verifier_reject(
+        consecutive_identical=3,
+        structured_response={"page_url": "https://example.com/"},
+        response_schema=schema,
+    )
+    # Optional-only schema must still require non-empty usable output.
+    optional_only = {
+        "fields": [
+            {"name": "notes", "type": "str", "required": False},
+        ]
+    }
+    assert not structured_response_covers_schema({}, optional_only)
+    assert not structured_response_covers_schema({"notes": ""}, optional_only)
+    assert structured_response_covers_schema({"notes": "seen"}, optional_only)
+    # Unknown keys (e.g. error) must not satisfy an optional-only schema.
+    assert not structured_response_covers_schema(
+        {"error": "extraction failed"}, optional_only
+    )
+    # Malformed fields collections must not fall through to schema-less accept.
+    assert not structured_response_covers_schema(
+        {"main_heading": "x"}, {"fields": {"name": "main_heading"}}
+    )
+    assert not structured_response_covers_schema({"main_heading": "x"}, {"fields": []})
+    # Score changes reset the streak even when reasoning matches.
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning=reason,
+        score=0.9,
+    )
+    assert streak == 1
+    # Different reason resets the streak.
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning="Need a screenshot of the cart total.",
+        score=0.5,
+    )
+    assert streak == 1
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning=reason,
+        score=1.0,
+    )
+    assert streak == 0
+
+
+def test_handler_soft_accept_reports_unverified_not_verified_success():
+    """Soft-accept must not collapse into a verified success=True completion."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "completion_success = not verifier_soft_accepted" in source
+    assert '"verifier_soft_accepted": verifier_soft_accepted' in source
+    assert "Identical verifier reject circuit: completing " in source
+    assert "unverified with already-populated structured" in source
+    assert 'result.get("verifier_soft_accepted")' in source
+
+
+def test_handler_wires_identical_verifier_reject_circuit():
+    """attempt_completion path must import and call the reject circuit helpers."""
+    import ast
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    tree = ast.parse(source)
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "domains.spawn_browser_agent_v3.verifier_reject_circuit":
+            imported.update(alias.name for alias in node.names)
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("verifier_reject_circuit"):
+            imported.update(alias.name for alias in node.names)
+    # Relative import inside the package
+    if "should_soft_accept_identical_verifier_reject" not in imported:
+        assert "from .verifier_reject_circuit import" in source
+        assert "should_soft_accept_identical_verifier_reject" in source
+        assert "next_identical_reject_streak" in source
+    assert "Soft-accepting browser attempt_completion after" in source
+
+
 def test_visible_result_completion_rewrites_post_submit_scroll():
     """b234cfa8 stated Risk Score 0.11 + bot verdict, then scrolled until 420s.
 
@@ -3690,6 +3819,65 @@ async def test_click_press_holds_no_remote_round_trip_between_down_and_up():
     # The drifted release (motor noise without a longer press) is the CDP path's
     # job and is asserted by test_humanized_click_presses_and_releases_via_cdp_*.
 
+
+async def test_click_at_same_coords_still_emits_pointer_trajectory():
+    """RCA (agent 7f8b9c24): FCaptcha vision_ai 'teleport clicks'.
+
+    When the cursor is already on the target, `_move_to_unlocked` used to no-op.
+    The subsequent press then had zero preceding mouseMoved samples and was
+    scored as "Click injected with no pointer trajectory". Always wander in.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class TrackingMouse:
+        def __init__(self):
+            self.moves: list[tuple[float, float]] = []
+
+        async def move(self, x, y):
+            self.moves.append((float(x), float(y)))
+
+        async def down(self, **kwargs):
+            return None
+
+        async def up(self, **kwargs):
+            return None
+
+        async def click(self, *args, **kwargs):
+            return None
+
+    class FakeKeyboard:
+        async def press(self, *args, **kwargs):
+            return None
+
+    mouse = TrackingMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=FakeKeyboard(),
+        viewport_size={"width": 1280, "height": 800},
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+                "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS": "1",
+                "BROWSER_AGENT_CDP_MOUSE_TRANSPORT": "0",
+            },
+            clear=False,
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        await humanizer.initialize_cursor((360, 240))
+        mouse.moves.clear()
+        await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
+
+    assert len(mouse.moves) >= 3, (
+        f"same-coord click must emit an approach trajectory; got {len(mouse.moves)} moves"
+    )
+
+
 async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -6410,6 +6598,37 @@ async def test_init_browser_session_transient_failure_returns_retryable():
     assert out["status_code"] == 400
 
 
+async def test_init_browser_session_timeout_returns_retryable():
+    """Worker httpx ReadTimeout on /init must be transient, not ActivityError.
+
+    Kernel create can exceed the 180s client budget (webdecoy 2a421e78 /
+    biometrics 05823816). httpx.ReadTimeout must NOT raise out of
+    init_browser_session — that fails the Temporal activity, forces an
+    LLM-level respawn of spawn_browser_agent, and burns the smoke dynamic
+    cap. Classify as transient_init_failure so the handler's bounded
+    fresh-proxy retry loop reallocates in-activity.
+    """
+    import httpx
+    from domains.spawn_browser_agent_v3 import repo
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            raise httpx.ReadTimeout("simulated kernel create stall")
+
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        out = await repo.init_browser_session(_fake_config(), "u", "a", "https://example.com")
+
+    assert out["transient_init_failure"] is True
+    assert out["status_code"] == 0
+    assert "ReadTimeout" in out["detail"]
+
+
 async def test_init_browser_session_unique_constraint_is_not_transient():
     """A P2002 on the preallocated BrowserSession.id is never a proxy hiccup.
 
@@ -7151,8 +7370,46 @@ def test_passkeys_are_revalidated_after_start_navigation():
     assert navigated < revalidate < main_loop
 
 
-def test_passkeys_are_revalidated_before_each_usage_readback():
-    """Any navigation-capable action may reset WebAuthn before the next poll."""
+def test_passkey_boundary_syncs_force_invalidate_before_inject():
+    """Nav/rotation syncs must invalidate cached authenticator health first.
+
+    Agents f380ca3c / c3b1ca09 (browser-amazon-return 2026-09-28): after start
+    navigation the health check returned ``seeded 0`` against a dying Kernel
+    virtual-authenticator id; ~5–6s later CDP reported ``environment has not
+    been enabled``. Amazon's sign-in page had already probed the empty
+    authenticator and disabled the passkey CTA. Boundary contexts must call
+    ``invalidate_passkey_state_for_live_target`` before ``inject_passkeys``;
+    ordinary session-start / realm syncs must not (they rely on the health
+    check so we do not thrash a healthy authenticator).
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    helper_start = source.index("async def sync_passkeys_onto_target(")
+    helper_end = source.index("browser_task_paused_for_resume", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "invalidate_passkey_state_for_live_target()" in helper
+    assert "await dom_service.invalidate_passkey_state_for_live_target()" in helper
+    assert 'context in ("after start navigation", "after proxy rotation")' in helper
+    # inject must come AFTER the invalidate gate in source order
+    assert helper.index("invalidate_passkey_state_for_live_target()") < helper.index(
+        "dom_service.inject_passkeys("
+    )
+
+
+def test_passkey_usage_readback_does_not_rebuild_authenticator():
+    """Usage polling must be read-only — rebuilding mid-ceremony kills Amazon passkeys.
+
+    Agent f380ca3c (browser-amazon-return 2026-09-28): syncing before every
+    ``record_passkey_usage_once`` poll re-enabled WebAuthn ~3s after Sign-in-
+    with-Passkey clicks, invalidated the in-flight virtual authenticator, and
+    produced Amazon's "No passkeys available" dialog despite a healthy pre-click
+    seed. Pre-action ``ensure_browser_overlays_suppressed`` remains the arming
+    choke point; this helper only records counter advances.
+    """
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -7162,13 +7419,37 @@ def test_passkeys_are_revalidated_before_each_usage_readback():
     helper_end = source.index("async def sync_passkeys_onto_target(", helper_start)
     helper = source[helper_start:helper_end]
 
-    revalidate = helper.index(
-        'await sync_passkeys_onto_target(context="before passkey usage readback")'
+    assert "await record_used_passkey_credentials(" in helper
+    assert "sync_passkeys_onto_target" not in helper
+    assert "inject_passkeys" not in helper
+    assert 'context="before passkey usage readback"' not in source
+
+
+def test_passkeys_rearmed_before_each_step_state_observe():
+    """Kernel drops VA ~5s after seed; re-arm before every step state fetch.
+
+    Agent c1ebd389: usage readback logged environment-not-enabled between
+    ceremony-capable actions while Amazon's disabled passkey CTA stayed dead.
+    Step-start ``ensure_browser_overlays_suppressed`` keeps the authenticator
+    alive across LLM think time so Conditional UI / CTA probes succeed.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    # The live loop's state observe (not the simulated path) must re-arm first.
+    marker = "Step {iteration} - resolving page state"
+    start = source.index(marker)
+    # Include the soft-timeout + Kernel VA-drop comment block that precedes the
+    # ensure/get_browser_state calls (comment growth previously broke an 800-char
+    # window while the call order stayed correct).
+    observe = source.index("observe_page_state = await", start)
+    window = source[start : observe + 120]
+    assert "ensure_browser_overlays_suppressed()" in window
+    assert window.index("ensure_browser_overlays_suppressed()") < window.index(
+        "get_browser_state("
     )
-    readback = helper.index("await record_used_passkey_credentials(")
-
-    assert revalidate < readback
-
 
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
     from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
@@ -9904,6 +10185,354 @@ def test_network_recorder_redirect_location_survives_header_casing():
     rows = recorder.query_requests(include_query=True)
     assert rows[0]["redirects"][0]["location"] == "https://shop.test/2fa"
     assert isinstance(recorder, BrowserNetworkRecorder)
+
+async def test_api_challenge_html_triggers_provider_exit_rejection():
+    """403 challenge HTML on same-origin XHR must rotate exit (cookie GET probes miss it)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+        _is_api_challenge_html_response,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=200,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="image",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 100,
+        }
+    }
+
+    class _FakeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _API_CHALLENGE_HTML_REASON
+    assert rejection["url"] == "https://wl.eventim.us/event/_/692405/order/checkaddtocart"
+    assert rejection["browser_generation"] == 1
+    assert rejection["status"] == 403
+    assert rejection["response_ts_ms"] == 100
+
+
+async def test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success():
+    """AMC movie-page CF 403 document must not rotate after the page loads 200.
+
+    browser-event-ticket reached Confirm Purchase, opened digger-79125 for receipt
+    metadata, then a same-origin document/fetch 403 challenge-HTML body capture
+    queued provider-exit-recovery and destroyed the checkout tab / reservation
+    before request_payment_card. graph.amctheatres.com is cross-origin to www and
+    is intentionally excluded; the live failure was www document/fetch 403.
+    """
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Attention Required! "
+        b"<div id='cf-chl-widget'>Just a moment...</div>"
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    success_html = (
+        b"<!DOCTYPE html><html><body><h1>Digger movie showtimes at an AMC Theatre</h1>"
+        b"<p>Get Tickets</p></body></html>"
+    )
+    movie_url = "https://www.amctheatres.com/movies/digger-79125"
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    # Later success already recorded (page recovered after brief CF 403).
+    recorder.entries = {
+        "1:r-challenge": {
+            "browser_generation": 1,
+            "url": movie_url,
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 1000,
+            "document_url": movie_url,
+        },
+        "1:r-success": {
+            "browser_generation": 1,
+            "url": movie_url,
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 2500,
+            "document_url": movie_url,
+        },
+    }
+
+    class _ChallengeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._provider_exit_rejections == []
+
+    # Inverse race: challenge body lands first, then success clears / pop drops it.
+    recorder._network_generation = 2
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder.entries = {
+        "2:r-challenge": {
+            "browser_generation": 2,
+            "url": movie_url,
+            "resource_type": "Document",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 1000,
+            "document_url": movie_url,
+        }
+    }
+    await recorder._fetch_response_body("2:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    assert recorder._provider_exit_rejections
+    assert recorder._provider_exit_rejections[0]["reason"] == _API_CHALLENGE_HTML_REASON
+    recorder.entries["2:r-success"] = {
+        "browser_generation": 2,
+        "url": movie_url,
+        "resource_type": "document",
+        "mime_type": "text/html",
+        "status": 200,
+        "response_ts_ms": 2500,
+        "document_url": movie_url,
+    }
+
+    class _SuccessCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": success_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("2:r-success", "r-success", "cdp-1", _SuccessCdp())
+    assert recorder.pop_provider_exit_rejection() is None
+    assert 2 not in recorder._rejected_network_generations
+
+    # Pop-time race: queued exit still present, success only in entries table.
+    recorder._network_generation = 3
+    recorder._rejected_network_generations = {3}
+    recorder._api_challenge_provider_exits = 0
+    recorder._provider_exit_rejections = [
+        {
+            "reason": _API_CHALLENGE_HTML_REASON,
+            "url": movie_url,
+            "browser_generation": 3,
+            "status": 403,
+            "response_ts_ms": 1000,
+        }
+    ]
+    recorder.entries = {
+        "3:r-success": {
+            "browser_generation": 3,
+            "url": movie_url,
+            "resource_type": "fetch",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 2500,
+            "document_url": movie_url,
+        }
+    }
+    assert recorder.pop_provider_exit_rejection() is None
+    assert 3 not in recorder._rejected_network_generations
+
+    # Missing challenge timestamp must not treat any same-endpoint 2xx as success
+    # (console-derived 403s omit response_ts_ms).
+    assert not recorder._same_origin_api_succeeded_after(
+        movie_url,
+        challenge_response_ts_ms=None,
+        generation=3,
+        method="GET",
+        resource_type="document",
+    )
+
+
+async def test_api_challenge_requires_same_endpoint_not_merely_same_origin():
+    """Unrelated same-origin 2xx must not suppress a challenged XHR/fetch POST.
+
+    Document/config polls commonly return 200 between browser-loop steps; matching
+    only on origin would drop real API-challenge exits (checkaddtocart 403).
+    """
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    challenge_url = "https://wl.eventim.us/event/_/692405/order/checkaddtocart"
+    other_url = "https://wl.eventim.us/api/config"
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r-challenge": {
+            "browser_generation": 1,
+            "url": challenge_url,
+            "method": "POST",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 200,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+        "1:r-unrelated": {
+            "browser_generation": 1,
+            "url": other_url,
+            "method": "GET",
+            "resource_type": "fetch",
+            "mime_type": "application/json",
+            "status": 200,
+            "response_ts_ms": 300,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+        "1:r-document": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405",
+            "method": "GET",
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 350,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+    }
+
+    class _ChallengeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _API_CHALLENGE_HTML_REASON
+    assert rejection["url"] == challenge_url
+    assert rejection["method"] == "POST"
+
+    # Same-endpoint retry success may clear; unrelated origin traffic must not.
+    recorder._provider_exit_rejections = [
+        {
+            "reason": _API_CHALLENGE_HTML_REASON,
+            "url": challenge_url,
+            "method": "POST",
+            "resource_type": "xhr",
+            "browser_generation": 1,
+            "status": 403,
+            "response_ts_ms": 200,
+        }
+    ]
+    recorder._api_challenge_provider_exits = 1
+    recorder._rejected_network_generations = {1}
+    recorder._clear_api_challenge_rejections_for_origin(
+        other_url,
+        success_ts_ms=400,
+        success_generation=1,
+        success_method="GET",
+        success_resource_type="fetch",
+    )
+    assert recorder._provider_exit_rejections
+    recorder.entries["1:r-retry"] = {
+        "browser_generation": 1,
+        "url": challenge_url,
+        "method": "POST",
+        "resource_type": "xhr",
+        "mime_type": "application/json",
+        "status": 200,
+        "response_ts_ms": 500,
+        "document_url": "https://wl.eventim.us/event/_/692405",
+    }
+    assert recorder.pop_provider_exit_rejection() is None
+
 
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
     """Finished and failed requests are terminal, not in flight. Repeated clears
@@ -13100,6 +13729,195 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
+
+async def test_execute_click_write_lock_amazon_contract_continue_triggers_approval():
+    """Continue on /spr/returns/contract is the live Amazon return commit CTA.
+
+    Reproduces 785a3207: element_text ``submit\\nContinue`` on the contract URL
+    must raise ``needs_write_approval`` / ``return`` before the click runs.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.attributes = {"type": "submit", "role": "button"}
+    element.get_all_children_text = MagicMock(return_value="submit\nContinue")
+    element.parent_node = None
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=63833,
+        coords=None,
+        thinking=None,
+        humanizer=None,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf"
+        ),
+        system_name="Rose",
+    )
+
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "return"
+    assert "Continue" in out["element_text"]
+    ah.record_action.assert_not_awaited()
+
+
+async def test_execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked():
+    """Shadow submit under resolutions-section-continue must not lock before drop-off.
+
+    RCA agent cf4935f5 (2026-09-29 browser-amazon-return): DOM was
+    ``span#resolutions-section-continue-button > span > SHADOW input[type=submit]``
+    with sibling announce text ``Continue``. Indexed click collected only
+    ``submit\\nContinue`` (no ancestor id), wrote write_lock with
+    \"drop-off … chosen in the next step\", and the judge failed. Ancestor ids
+    must join the signal so the exclusion marker keeps this wizard Continue open.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    announce = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button-announce"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    host = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    wrapper = SimpleNamespace(
+        attributes={},
+        parent_node=host,
+        node_name="SPAN",
+        get_all_children_text=lambda: "",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=wrapper,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+        tag_name="input",
+    )
+    # Keep announce reachable if signal walk ever includes siblings via host text.
+    _ = announce
+
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=None)
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(40, 60))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=50647,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "b641f39a-9f22-490a-af1e-97736b7bb809"
+        ),
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    assert out.get("status") != "needs_write_approval"
+    hu.click_at_coords.assert_awaited_once_with(40, 60)
+    ah.record_action.assert_awaited()
+
+
+def test_element_write_lock_signal_includes_ancestor_exclusion_ids():
+    """Shadow submit must surface parent resolutions-section-continue id."""
+    from domains.spawn_browser_agent_v3.service_actions import _element_write_lock_signal
+
+    host = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    wrapper = SimpleNamespace(
+        attributes={},
+        parent_node=host,
+        node_name="SPAN",
+        get_all_children_text=lambda: "",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=wrapper,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+    )
+
+    signal = _element_write_lock_signal(element)
+
+    assert "submit" in signal
+    assert "Continue" in signal
+    assert "resolutions-section-continue-button" in signal
+    from browser_tools.write_lock import is_return_button
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "b641f39a-9f22-490a-af1e-97736b7bb809"
+    )
+    assert not is_return_button(signal, contract)
+
+
+async def test_execute_click_write_lock_amazon_cart_continue_does_not_trigger():
+    """Wizard Continues on /spr/returns/cart stay unlocked (reason/refund steps)."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(10, 20))
+    element = MagicMock()
+    element.attributes = {"type": "submit"}
+    element.get_all_children_text = MagicMock(return_value="submit\nContinue")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=34176,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/cart"
+            "?itemId=jmsjoxmusitttop&orderId=114-52626"
+        ),
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    hu.click_at_coords.assert_awaited_once_with(10, 20)
+    ah.record_action.assert_awaited()
+
 async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input():
     """A textless shadow input inherits the bounded label beside it in its nearest ancestor."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -13189,6 +14007,255 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
     assert not is_return_button("Return to your orders")
+
+
+def test_write_lock_return_continue_on_amazon_contract_url():
+    """Amazon SPR contract Commit Continue must lock; wizard Continues must not.
+
+    RCA agent 785a3207 (2026-09-28 browser-amazon-return): write_lock click
+    check saw ``submit\\nContinue`` on ``/spr/returns/contract/…`` and allowed
+    the click; the agent landed on ``/spr/returns/confirmation/`` with no
+    attention request. Intermediate Continues on ``/spr/returns/cart`` must
+    stay unlocked so the reason/refund wizard can proceed.
+    """
+    from browser_tools.write_lock import is_return_button, is_return_commit_url
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf?ref_=spr_itms_post"
+    )
+    cart = (
+        "https://www.amazon.com/spr/returns/cart"
+        "?itemId=jmsjoxmusitttop&orderId=114-5262647-6331410"
+    )
+    confirm = "https://www.amazon.com/spr/returns/confirm"
+
+    assert is_return_commit_url(contract)
+    assert is_return_commit_url(confirm)
+    assert not is_return_commit_url(cart)
+    assert not is_return_commit_url("https://www.amazon.com/your-orders/orders")
+    assert not is_return_commit_url(
+        "https://www.amazon.com/spr/returns/confirmation/d2304f78-2fdb-43d0-b8d5-8a531ff1"
+    )
+
+    # Final commit is form submit + Continue (785a3207). Bare span Continue on
+    # contract is mid-wizard (13e735c9) and must stay unlocked for drop-off.
+    assert is_return_button("submit\nContinue", contract)
+    assert is_return_button("submit\nContinue", confirm)
+    assert not is_return_button("Continue", contract)
+    assert not is_return_button("Continue", confirm)
+    assert not is_return_button("Continue", cart)
+    assert not is_return_button("submit\nContinue", cart)
+    assert not is_return_button("Continue")  # no URL → phrase-only path
+    # Bare type=submit without a return-commit label must not mint approval.
+    assert not is_return_button("submit", contract)
+    assert not is_return_button("submit", confirm)
+    assert not is_return_button("Refund to your Visa ending in 9616", contract)
+    assert not is_return_button("View return/refund status", contract)
+    assert is_return_button("Confirm your return", confirm)
+    assert is_return_button("Confirm", contract)
+
+    # Mid-wizard resolution Continue on contract URL must stay unlocked so the
+    # agent can reach drop-off selection (c1b33ca5 / 13e735c9).
+    resolutions = "submit\nContinue\nresolutions-section-continue-button"
+    assert not is_return_button(resolutions, contract)
+    assert not is_return_button(
+        "Continue\nresolutions-section-continue-button",
+        contract,
+    )
+    # Explicit confirm phrases still lock even when a wizard id is present.
+    assert is_return_button(
+        "Confirm your return\nresolutions-section-continue-button",
+        contract,
+    )
+
+
+def test_amazon_return_approval_fields_name_selected_dropoff():
+    """Page-grounded return fallback must name Whole Foods once selected.
+
+    RCA agent 788d17cf (2026-09-29): write_lock fired after Whole Foods was
+    selected, but the notification fork was still in flight when the dynamic
+    timeout killed the worker — approvals_triggered stayed 0. Enriching the
+    deterministic fallback from page text keeps drop-off in the approval even
+    when the fork is cut short.
+    """
+    from browser_tools.write_lock import (
+        enrich_return_write_lock_question,
+        extract_amazon_return_approval_fields,
+    )
+
+    page = (
+        "How would you like to return the items?\n"
+        "Whole Foods Dropoff - Open 7 Days a Week (checked=true)\n"
+        "Refund subtotal: $10.85\n"
+        "Shipping (Whole Foods Dropoff): $0.00\n"
+        "Estimated total refund: $10.85\n"
+        "$10.85 will be sent to the original payment method Visa ending in 9616\n"
+        "Confirm your return\n"
+        "No box needed. No label needed.\n"
+    )
+    fields = extract_amazon_return_approval_fields(page)
+    assert fields["drop_off"].lower().startswith("whole foods")
+    assert fields["payment_method"] == "Visa ending in 9616"
+    assert fields["refund_amount"] == "$10.85"
+    assert fields["refund_label"] == "Estimated total refund"
+    enriched = enrich_return_write_lock_question(
+        "Approve return?",
+        page,
+        url="https://www.amazon.com/spr/returns/contract/abc",
+        system_name="Rose",
+    )
+    assert "Whole Foods" in enriched
+    assert "9616" in enriched
+    assert "$10.85" in enriched
+    assert "Estimated total refund" in enriched
+    assert "free" in enriched.lower()
+    assert "no-box" in enriched.lower()
+    assert "drop-off" in enriched.lower()
+
+    # A later option's [checked] must not select an earlier drop-off.
+    misordered = (
+        "Whole Foods Dropoff - Open 7 Days a Week\n"
+        "UPS Store Dropoff (checked=true)\n"
+        "Shipping (UPS Store Dropoff): $0.00\n"
+        "Estimated total refund: $15.00\n"
+        "Visa ending in 1234\n"
+    )
+    mis_fields = extract_amazon_return_approval_fields(misordered)
+    assert "ups" in mis_fields["drop_off"].lower()
+    assert "whole foods" not in mis_fields["drop_off"].lower()
+
+    # False-valued / negated markers must not count as selection.
+    for negated in (
+        "Whole Foods Dropoff (checked=false)\nUPS Store Dropoff (checked=true)\n",
+        "Whole Foods Dropoff (selected=false)\nUPS Store Dropoff (selected=true)\n",
+        "Whole Foods Dropoff (aria-pressed=false)\nUPS Store Dropoff (pressed)\n",
+        "Whole Foods Dropoff (not checked)\nUPS Store Dropoff (checked)\n",
+        "Whole Foods Dropoff (not selected)\nUPS Store Dropoff (selected)\n",
+    ):
+        neg_fields = extract_amazon_return_approval_fields(
+            negated + "Shipping (UPS Store Dropoff): $0.00\nEstimated total refund: $15.00\n"
+        )
+        assert "ups" in neg_fields["drop_off"].lower(), negated
+        assert "whole foods" not in neg_fields["drop_off"].lower(), negated
+
+    # Prefer total over an earlier larger subtotal; label subtotal when alone.
+    subtotal_first = (
+        "UPS Store Dropoff (checked=true)\n"
+        "Refund subtotal: $18.00\n"
+        "Estimated total refund: $15.00\n"
+        "Visa ending in 1234\n"
+    )
+    total_fields = extract_amazon_return_approval_fields(subtotal_first)
+    assert total_fields["refund_amount"] == "$15.00"
+    assert total_fields["refund_label"] == "Estimated total refund"
+    subtotal_only = (
+        "UPS Store Dropoff (checked=true)\n"
+        "Refund subtotal: $18.00\n"
+        "Visa ending in 1234\n"
+    )
+    sub_fields = extract_amazon_return_approval_fields(subtotal_only)
+    assert sub_fields["refund_amount"] == "$18.00"
+    assert sub_fields["refund_label"] == "Refund subtotal"
+    sub_enriched = enrich_return_write_lock_question(
+        "Approve return?",
+        subtotal_only,
+        url="https://www.amazon.com/spr/returns/contract/abc",
+    )
+    assert "Refund subtotal $18.00" in sub_enriched
+    assert "free no-box/no-label" not in sub_enriched.lower()
+    assert "Selected drop-off:" in sub_enriched
+
+    # Multiple drop-offs + shared "no box" copy without selection/shipping
+    # evidence must not invent a selected drop-off for the approval question.
+    ambiguous = (
+        "How would you like to return the items?\n"
+        "Whole Foods Dropoff - Open 7 Days a Week\n"
+        "UPS Store Dropoff\n"
+        "No box needed. No label needed.\n"
+        "Confirm your return\n"
+    )
+    ambiguous_fields = extract_amazon_return_approval_fields(ambiguous)
+    assert "drop_off" not in ambiguous_fields
+    assert (
+        enrich_return_write_lock_question("Approve return?", ambiguous)
+        == "Approve return?"
+    )
+
+
+def test_amazon_return_self_service_block_detection_and_prompt():
+    """CS-review return wall must surface a recovery note; groceries exclude snacks.
+
+    RCA agent 338f26c8 (2026-09-28 browser-amazon-return): browser chose Barebells
+    protein bars (rationalized as non-grocery), hit Amazon's
+    "return request needs to be reviewed / contact customer service" wall,
+    opened Contact Us, burned max steps with no write_lock, then root spawned a
+    second browser (exact count expected 1, got 2). Zafit travel bottles were
+    already known eligible non-grocery.
+    """
+    from browser_tools.write_lock import (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE,
+        detect_amazon_return_self_service_block,
+    )
+    from providers.rose.browser_use import (
+        build_browser_use_system_prompt,
+        format_browser_state_for_tool,
+    )
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "d2304f78-2fdb-43d0-b8d5-8a531ff1dacf?ref_=spr_itms_post"
+    )
+    cart = (
+        "https://www.amazon.com/spr/returns/cart"
+        "?itemId=jmshnrkrklsowmp&orderId=114-7740305-3601863"
+    )
+    blocked_copy = (
+        "How can we make it right?\n"
+        "Your return request needs to be reviewed. Please contact customer service."
+    )
+
+    assert detect_amazon_return_self_service_block(contract, blocked_copy) == (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    )
+    assert detect_amazon_return_self_service_block(cart, blocked_copy) == (
+        AMAZON_RETURN_SELF_SERVICE_BLOCK_NOTE
+    )
+    assert detect_amazon_return_self_service_block(
+        "https://www.amazon.com/your-orders/orders", blocked_copy
+    ) is None
+    assert detect_amazon_return_self_service_block(contract, "Choose a refund method") is None
+    assert detect_amazon_return_self_service_block(contract, "") is None
+
+    formatted = format_browser_state_for_tool(
+        {
+            "url": contract,
+            "title": "Online Return Center",
+            "dom_tree": f"[1]<h1>{blocked_copy}</h1>\n[2]<a>Contact Us</a>",
+            "viewport": {"width": 1280, "height": 720},
+            "scroll_position": {"x": 0, "y": 0},
+        }
+    )
+    assert "Page Signal:" in formatted
+    assert "Do not open Contact Us" in formatted
+    assert "next eligible" in formatted.lower()
+
+    clean = format_browser_state_for_tool(
+        {
+            "url": cart,
+            "title": "Online Return Center",
+            "dom_tree": "[1]<h1>What's the reason for return?</h1>",
+            "viewport": {"width": 1280, "height": 720},
+            "scroll_position": {"x": 0, "y": 0},
+        }
+    )
+    assert "Page Signal:" not in clean
+
+    prompt = build_browser_use_system_prompt([])
+    assert "# Returns" in prompt
+    assert "protein bars" in prompt.lower()
+    assert "contact customer service" in prompt.lower()
+    assert "Do not open Contact Us" in prompt
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -17673,6 +18740,9 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
         async def get_current_url(self, *, fallback: str = ""):
             return fallback or "https://example.com/login"
 
+        async def ensure_browser_overlays_suppressed(self):
+            return None
+
         def start_captcha_telemetry_indicator(self, poll_phase):
             self._captcha_poll = poll_phase
 
@@ -20235,6 +21305,18 @@ async def run_all_tests():
         test_visible_result_completion_rewrites_post_submit_wait,
     )
     r.record(
+        "identical_verifier_reject_circuit_soft_accepts",
+        test_identical_verifier_reject_circuit_soft_accepts_complete_output,
+    )
+    r.record(
+        "handler_soft_accept_reports_unverified_not_verified_success",
+        test_handler_soft_accept_reports_unverified_not_verified_success,
+    )
+    r.record(
+        "handler_wires_identical_verifier_reject_circuit",
+        test_handler_wires_identical_verifier_reject_circuit,
+    )
+    r.record(
         "visible_result_completion_rewrites_post_submit_scroll",
         test_visible_result_completion_rewrites_post_submit_scroll,
     )
@@ -20610,6 +21692,10 @@ async def run_all_tests():
         test_init_browser_session_transient_failure_returns_retryable,
     )
     await r.record_async(
+        "init_browser_session_timeout_retryable",
+        test_init_browser_session_timeout_returns_retryable,
+    )
+    await r.record_async(
         "init_browser_session_unique_constraint_not_transient",
         test_init_browser_session_unique_constraint_is_not_transient,
     )
@@ -20702,8 +21788,16 @@ async def run_all_tests():
         test_passkeys_are_revalidated_after_start_navigation,
     )
     r.record(
-        "passkeys_revalidated_before_each_usage_readback",
-        test_passkeys_are_revalidated_before_each_usage_readback,
+        "passkey_boundary_syncs_force_invalidate_before_inject",
+        test_passkey_boundary_syncs_force_invalidate_before_inject,
+    )
+    r.record(
+        "passkeys_rearmed_before_each_step_state_observe",
+        test_passkeys_rearmed_before_each_step_state_observe,
+    )
+    r.record(
+        "passkey_usage_readback_does_not_rebuild_authenticator",
+        test_passkey_usage_readback_does_not_rebuild_authenticator,
     )
     await r.record_async(
         "provider_handoff_replaces_humanizer",
@@ -20994,6 +22088,18 @@ async def run_all_tests():
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
     )
+    await r.record_async(
+        "api_challenge_html_provider_exit",
+        test_api_challenge_html_triggers_provider_exit_rejection,
+    )
+    await r.record_async(
+        "stale_api_challenge_html_exit_superseded",
+        test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success,
+    )
+    await r.record_async(
+        "api_challenge_requires_same_endpoint_not_merely_same_origin",
+        test_api_challenge_requires_same_endpoint_not_merely_same_origin,
+    )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
         "execute_action_request_payment_card",
@@ -21263,6 +22369,18 @@ async def run_all_tests():
         test_execute_click_write_lock_return_confirmation_triggers_approval,
     )
     await r.record_async(
+        "execute_click_write_lock_amazon_contract_continue",
+        test_execute_click_write_lock_amazon_contract_continue_triggers_approval,
+    )
+    await r.record_async(
+        "execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked",
+        test_execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked,
+    )
+    await r.record_async(
+        "execute_click_write_lock_amazon_cart_continue_open",
+        test_execute_click_write_lock_amazon_cart_continue_does_not_trigger,
+    )
+    await r.record_async(
         "execute_click_write_lock_shadow_input_ancestor_text",
         test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input,
     )
@@ -21271,8 +22389,24 @@ async def run_all_tests():
         test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text,
     )
     r.record(
+        "element_write_lock_signal_includes_ancestor_exclusion_ids",
+        test_element_write_lock_signal_includes_ancestor_exclusion_ids,
+    )
+    r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
+    )
+    r.record(
+        "write_lock_return_continue_on_amazon_contract_url",
+        test_write_lock_return_continue_on_amazon_contract_url,
+    )
+    r.record(
+        "amazon_return_approval_fields_name_selected_dropoff",
+        test_amazon_return_approval_fields_name_selected_dropoff,
+    )
+    r.record(
+        "amazon_return_self_service_block_detection_and_prompt",
+        test_amazon_return_self_service_block_detection_and_prompt,
     )
     r.record(
         "write_lock_purchase_button_excludes_terms_consent_prose",
@@ -21687,6 +22821,10 @@ async def run_all_tests():
     await r.record_async(
         "click_press_has_no_round_trip_inside_hold",
         test_click_press_holds_no_remote_round_trip_between_down_and_up,
+    )
+    await r.record_async(
+        "click_at_same_coords_emits_pointer_trajectory",
+        test_click_at_same_coords_still_emits_pointer_trajectory,
     )
     await r.record_async(
         "browser_humanizer_cursor_observer_after_overlay",

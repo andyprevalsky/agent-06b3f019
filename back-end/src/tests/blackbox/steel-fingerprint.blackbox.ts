@@ -24,6 +24,7 @@ import {
   testSavedSteelResolutionDoesNotContaminateAnonymousProfiles,
 } from './steel-fingerprint.saved-profile.behavior';
 import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
+import { testWorkerHardwareConcurrencyMatchesPage as runWorkerHardwareConcurrencyMatchesPage } from './steel-fingerprint.worker-concurrency.behavior';
 
 function makeFingerprint(): FingerprintData {
   return {
@@ -113,6 +114,10 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
 
 async function testFingerprintTimezoneFormatUsesUserLocation(): Promise<void> {
   await runTimezoneFormatUsesUserLocation(makeFingerprint);
+}
+
+async function testWorkerHardwareConcurrencyMatchesPage(): Promise<void> {
+  await runWorkerHardwareConcurrencyMatchesPage(makeFingerprint);
 }
 
 function testProxySettingsDropCityFallsBackToStateLevel(): void {
@@ -477,6 +482,10 @@ async function main(): Promise<void> {
     {
       name: 'fingerprint timezone format uses user location not host TZ',
       fn: testFingerprintTimezoneFormatUsesUserLocation,
+    },
+    {
+      name: 'Worker hardwareConcurrency matches page spoof (FCaptcha mismatch)',
+      fn: testWorkerHardwareConcurrencyMatchesPage,
     },
     {
       name: 'proxy settings drop unsupported city and fall back to country+state',

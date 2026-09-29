@@ -261,7 +261,12 @@ async def test_poll_and_update_context_filters_subagent_work_and_advances_cursor
         "role": "TOOL",
         "text": "Fanout tree row",
         "timestamp": "2024-01-01T00:00:03+00:00",
-        "metadata": {"toolName": "spawn_general_purpose_agent", "toolCallId": "tc:0", "subAgentIds": ["child-1"]},
+        "metadata": {
+            "toolName": "spawn_general_purpose_agent",
+            "toolCallId": "tc:0",
+            "subAgentIds": ["child-1"],
+            "forEachChild": True,
+        },
     }
     internal_msg = {
         "role": "TOOL",

@@ -1149,7 +1149,12 @@ class SpawnAgentManager(ToolManager):
             saw_error = False
             try:
                 async for event in sub_manager.finalize_child(
-                    workflow_instance, child_info, sub_agent_for_finalize, tcid, parent_bus_id
+                    workflow_instance,
+                    child_info,
+                    sub_agent_for_finalize,
+                    tcid,
+                    parent_bus_id,
+                    for_each_child=True,
                 ):
                     await workflow_instance._handle_tool_event(event, tcid, "spawn_agent")
                     if isinstance(event, ToolEvent) and event.status == MessageStatus.ERROR:

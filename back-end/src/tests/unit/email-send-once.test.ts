@@ -201,9 +201,8 @@ async function main(): Promise<void> {
       const idempotencyKey = `${prefix}-success`;
       const key = operationKey(userId, agentId, idempotencyKey);
       keys.push(key);
-      const { setSendEmailOverrideForTests } = await import(
-        '../../domains/integrations/service.emailSendOnce'
-      );
+      const { setSendEmailOverrideForTests } =
+        await import('../../domains/integrations/service.emailSendOnce');
       setSendEmailOverrideForTests(async () => ({ id: 'gmail-ok-1', threadId: 'thread-ok-1' }));
       try {
         const result = await sendEmailOnce(userId, {
@@ -242,7 +241,9 @@ async function main(): Promise<void> {
         })
       );
 
-      const record = await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey: key } });
+      const record = await prisma.toolSideEffect.findUniqueOrThrow({
+        where: { operationKey: key },
+      });
       assert.strictEqual(record.status, 'FAILED');
       assert.ok(typeof record.error === 'string' && record.error.length > 0);
     });

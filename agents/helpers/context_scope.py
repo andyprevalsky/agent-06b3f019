@@ -1,20 +1,46 @@
-"""Helpers for keeping agent LLM contexts scoped to the owning agent."""
+"""Helpers for keeping agent LLM contexts scoped to the owning agent.
+
+Cross-language twin of back-end/src/providers/chat/contextScope.ts. Shared
+classification fixtures: shared/context-scope/fixtures.json.
+"""
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List
+
+_PROVIDER_NUMERIC_TOOL_CALL_ID = re.compile(r"^(toolu|tooluse):\d+$", re.IGNORECASE)
+
+
+def _is_provider_numeric_tool_call_id(tool_call_id: str) -> bool:
+    """Provider-native ids that look like ``base:digits`` but are not for_each children."""
+    return _PROVIDER_NUMERIC_TOOL_CALL_ID.fullmatch(tool_call_id) is not None
+
+
+def _has_historical_for_each_child_suffix(tool_call_id: str, spawn_group_id: Any) -> bool:
+    """Historical for_each child UI rows use ``{spawnGroupId}:{idx}`` (ASCII digits)."""
+    if not isinstance(spawn_group_id, str) or not spawn_group_id:
+        return False
+    if _is_provider_numeric_tool_call_id(tool_call_id):
+        return False
+    pattern = re.compile(rf"^{re.escape(spawn_group_id)}:[0-9]+$")
+    return pattern.fullmatch(tool_call_id) is not None
 
 
 def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     """Return True for intermediate work messages emitted by a spawned agent.
 
     ``subAgentId`` rows belong to one child agent's own work stream.
-    For_each child tree rows use plural ``subAgentIds`` plus suffixed
-    ``toolCallId`` values like ``<base>:<idx>``; those UI rows are also hidden
-    because the parent receives one aggregate result under the original
-    toolCallId. Direct ``spawn_general_purpose_agent`` results also use plural
-    ``subAgentIds`` but keep the original, unsuffixed toolCallId, so they remain
-    visible to the parent context.
+    For_each child tree rows are producer-marked with ``forEachChild: true``
+    plus plural ``subAgentIds``; those UI rows are hidden because the parent
+    receives one aggregate result under the original toolCallId (and
+    ``forEachAggregate: true``). Historical rows (pre-marker) still use a
+    ``{spawnGroupId}:{idx}`` toolCallId with nonempty ``subAgentIds`` and are
+    also dropped. A bare provider id like ``toolu:123`` must stay
+    parent-visible. Direct spawn terminals that stamp ``agentType`` (including
+    numeric-suffixed ids like ``custom:7``) stay visible. Parent spawn
+    FINISHED / task_complete terminals omit ``subAgentId`` so the result body
+    stays in parent/chat context.
     """
     if not isinstance(message, dict):
         return False
@@ -26,8 +52,23 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     if metadata.get("subAgentId"):
         return True
 
+    if metadata.get("forEachAggregate") is True:
+        return False
+
+    sub_agent_ids = metadata.get("subAgentIds")
+    if not isinstance(sub_agent_ids, list) or len(sub_agent_ids) == 0:
+        return False
+
+    if metadata.get("forEachChild") is True:
+        return True
+
+    # Direct spawn terminals stamp agentType; historical for_each child rows did not.
+    agent_type = metadata.get("agentType")
+    if agent_type is not None and agent_type != "":
+        return False
+
     tool_call_id = str(metadata.get("toolCallId") or "")
-    return bool(metadata.get("subAgentIds") and ":" in tool_call_id)
+    return _has_historical_for_each_child_suffix(tool_call_id, metadata.get("spawnGroupId"))
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

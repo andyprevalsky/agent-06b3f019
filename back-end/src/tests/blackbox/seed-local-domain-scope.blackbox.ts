@@ -52,7 +52,7 @@ test('runtime seed reads fall back to the direct endpoint when no pooler is conf
 
 test('compute-token sync disables revoked pool rows and excludes stale local eligibility', () => {
   const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const helperStart = source.indexOf('async function syncIntegrations()');
+  const helperStart = source.indexOf('async function syncIntegrations(');
   const helperEnd = source.indexOf('/** Email providers refreshed', helperStart);
   const helper = source.slice(helperStart, helperEnd);
   const gptStart = source.indexOf('async function inspectGptCodeIntegrations()');
