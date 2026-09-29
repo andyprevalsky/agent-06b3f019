@@ -351,10 +351,8 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
 
 // Cerebras Qwen is rate-capped hard at the org level (5 req/min across all
 // models), so a burst of concurrent chats trips a 402 `quota` before any
-// caller-visible content. That must NOT sink the chat AND must NOT drop to a
-// generic model: the request falls over to the SAME model (qwen/qwen3.8-27b) via
-// OpenRouter with the provider unpinned — OpenRouter still prefers Cerebras but
-// may spill to another Qwen host past the cap.
+// caller-visible content. Race same-model spill against a fast paid fallback so
+// a slow Qwen host cannot consume the chat completion deadline.
 async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
@@ -370,7 +368,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const calls: string[] = [];
-  let openRouterBody: Record<string, unknown> = {};
+  const openRouterBodies: Record<string, unknown>[] = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
@@ -386,7 +384,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       );
     }
     if (url === OPENROUTER_API_URL) {
-      openRouterBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      openRouterBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return sseResponse(GENERATOR_SSE);
     }
     throw new Error(`Fallover left Gemma-via-OpenRouter and hit a generic provider: ${url}`);
@@ -398,10 +396,14 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       calls.includes(OPENROUTER_API_URL),
       'a Cerebras 402 quota must fall over to OpenRouter'
     );
-    // Same model — never a generic one.
-    assert.equal(openRouterBody.model, 'qwen/qwen3.8-27b', 'fallover must stay on rose-fast Qwen');
+    const sameModelBody = openRouterBodies.find((body) => body.model === 'qwen/qwen3.8-27b');
+    assert.ok(sameModelBody, 'fallover must attempt rose-fast Qwen');
+    assert.ok(
+      openRouterBodies.some((body) => body.model === 'z-ai/glm-5.3-flash'),
+      'fallover must also start the fast paid route'
+    );
     // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
-    const provider = openRouterBody.provider as {
+    const provider = sameModelBody.provider as {
       order?: string[];
       allow_fallbacks?: boolean;
       only?: string[];

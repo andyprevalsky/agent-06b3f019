@@ -9,9 +9,12 @@ config();
 const base = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const key = process.env.BACKEND_API_KEY;
 if (!key) throw new Error('BACKEND_API_KEY is required for benchmark-share blackbox');
+const shareSecret = process.env.BENCHMARK_SHARE_SECRET;
+if (!shareSecret)
+  throw new Error('BENCHMARK_SHARE_SECRET is required for benchmark-share blackbox');
 
 function token(runId: string, expiry: number): string {
-  const signature = createHmac('sha256', key!)
+  const signature = createHmac('sha256', shareSecret)
     .update(`benchmark-share:v1:${runId}:${expiry}`)
     .digest('hex');
   return `${runId}.${expiry}.${signature}`;

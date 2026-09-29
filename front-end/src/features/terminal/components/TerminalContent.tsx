@@ -127,6 +127,11 @@ interface TerminalLayoutProps {
 }
 
 function TerminalLayout(props: TerminalLayoutProps) {
+  if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
+  return <InteractiveTerminalLayout {...props} />;
+}
+
+function InteractiveTerminalLayout(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   // THE app-wide attention subscription. Held here because this is the common
   // ancestor of the header (bell + mobile drawer) and the sidebar; every other
@@ -136,7 +141,6 @@ function TerminalLayout(props: TerminalLayoutProps) {
     () => unansweredAgentIds(attention.requests),
     [attention.requests],
   );
-  if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} attention={attention} />;
   return (
     <AttentionRequestsProvider value={attention}>
       <div
@@ -216,37 +220,34 @@ function TerminalLayout(props: TerminalLayoutProps) {
 }
 
 function SharedBenchmarkLayout({
-  attention,
   agents,
   drip,
   derived,
   models,
   modelsLoading,
-}: TerminalLayoutProps & { attention: ReturnType<typeof useAttentionRequests> }) {
+}: TerminalLayoutProps) {
   return (
-    <AttentionRequestsProvider value={attention}>
-      <div
-        className="h-screen w-screen bg-background dark:bg-navi-black"
-        style={{ height: '100dvh' }}
-      >
-        <div className="absolute left-5 top-5 z-50 text-base font-semibold">Rose</div>
-        <MainContent
-          agents={agents}
-          drip={drip}
-          currentView="agents"
-          models={models}
-          modelsLoading={modelsLoading}
-          pendingApproval={derived.pendingApproval}
-          pendingGates={derived.pendingGates}
-          hasActiveAttention={derived.hasActiveAttention}
-          browserStatusProps={derived.browserStatusProps}
-          systemMessages={derived.systemMessages}
-          BrowserStatusBarCarousel={BrowserStatusBarCarousel}
-          NetworkView={NetworkView}
-          sidebarWidthCollapsed={0}
-        />
-      </div>
-    </AttentionRequestsProvider>
+    <div
+      className="h-screen w-screen bg-background dark:bg-navi-black"
+      style={{ height: '100dvh' }}
+    >
+      <div className="absolute left-5 top-5 z-50 text-base font-semibold">Rose</div>
+      <MainContent
+        agents={agents}
+        drip={drip}
+        currentView="agents"
+        models={models}
+        modelsLoading={modelsLoading}
+        pendingApproval={derived.pendingApproval}
+        pendingGates={derived.pendingGates}
+        hasActiveAttention={derived.hasActiveAttention}
+        browserStatusProps={derived.browserStatusProps}
+        systemMessages={derived.systemMessages}
+        BrowserStatusBarCarousel={BrowserStatusBarCarousel}
+        NetworkView={NetworkView}
+        sidebarWidthCollapsed={0}
+      />
+    </div>
   );
 }
 

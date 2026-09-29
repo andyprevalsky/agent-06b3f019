@@ -590,7 +590,7 @@ export async function callRouterLlm(params: {
 
   if (completionDeadline.expired()) {
     deadlineDecision = parseRouterDecisionAfterDeadline(
-      structuredOutput.finalText(),
+      structuredOutput.currentText(),
       accumulatedJson
     );
     if (!deadlineDecision) {

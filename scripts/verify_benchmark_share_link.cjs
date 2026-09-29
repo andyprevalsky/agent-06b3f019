@@ -38,6 +38,17 @@ async function main() {
       snippets,
       { timeout: 30000 },
     );
+    if (new URL(page.url()).searchParams.has("benchmark-share"))
+      throw new Error("bearer token remained in the browser URL");
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
+    await page
+      .getByText("Read-only benchmark recording")
+      .waitFor({ timeout: 30000 });
+    await page.waitForFunction(
+      (texts) => texts.some((text) => document.body.innerText.includes(text)),
+      snippets,
+      { timeout: 30000 },
+    );
     if (!apiStatuses.includes(200))
       throw new Error("shared agent API did not return HTTP 200");
     if (await page.getByText("You're On The Waitlist!").isVisible()) {

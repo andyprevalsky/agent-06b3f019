@@ -79,9 +79,9 @@ def _auth_headers() -> dict[str, str]:
 
 
 def benchmark_share_token(run_id: str) -> str:
-    key = os.getenv("BACKEND_API_KEY")
+    key = os.getenv("BENCHMARK_SHARE_SECRET")
     if not key:
-        raise SystemExit("BACKEND_API_KEY is required to sign benchmark share links")
+        raise SystemExit("BENCHMARK_SHARE_SECRET is required to sign benchmark share links")
     expiry = int(time.time()) + 30 * 24 * 60 * 60
     signature = hmac.new(
         key.encode(),

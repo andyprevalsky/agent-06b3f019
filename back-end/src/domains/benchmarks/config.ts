@@ -3,7 +3,7 @@ import path from 'path';
 
 /** Server-only signing key for time-limited benchmark recording links. */
 export function benchmarkShareSecret(): string | undefined {
-  return process.env.BACKEND_API_KEY;
+  return process.env.BENCHMARK_SHARE_SECRET;
 }
 
 /** Absolute path to the first-party benchmark task definitions JSON file. */
