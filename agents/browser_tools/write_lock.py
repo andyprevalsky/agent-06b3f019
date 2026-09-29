@@ -712,6 +712,98 @@ def detect_amazon_return_self_service_block(url: str, page_text: str) -> Optiona
     return None
 
 
+# Selected drop-off appears in the refund summary as ``Shipping (<name Dropoff>)``
+# once the agent has chosen a method (agent 788d17cf / cf4935f5 amazon-return).
+_AMAZON_RETURN_SHIPPING_DROPOFF_RE = re.compile(
+    r"Shipping\s*\(\s*([^)]*Drop[\s-]?off[^)]*)\)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_SELECTED_DROPOFF_RE = re.compile(
+    r"(Whole Foods(?:\s+Market)?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Amazon Stores?\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Staples\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|FedEx Office\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|(?:The\s+)?UPS Store\s+Drop[\s-]?off[^\n,]{0,60}"
+    r"|Kohl'?s\s+Drop[\s-]?off[^\n,]{0,60})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_VISA_RE = re.compile(
+    r"Visa(?:\s+card)?\s+ending\s+in\s+(\d{4})",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_RE = re.compile(
+    r"(?:Estimated total refund|total refund|Refund subtotal)\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+
+
+def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
+    """Pull named drop-off / refund / payment from an Amazon return commit page.
+
+    Used to enrich the deterministic write-lock fallback so approval copy still
+    names the selected free drop-off when the notification fork is slow or killed
+    (agent 788d17cf: fork in flight at timeout after Whole Foods was selected).
+    """
+    text = page_text or ""
+    fields: dict[str, str] = {}
+    shipping = _AMAZON_RETURN_SHIPPING_DROPOFF_RE.search(text)
+    if shipping:
+        fields["drop_off"] = re.sub(r"\s+", " ", shipping.group(1)).strip(" -:")
+    else:
+        # Prefer a drop-off mentioned with selected/checked nearby.
+        for match in _AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text):
+            window_start = max(0, match.start() - 120)
+            window = text[window_start : match.end() + 80].lower()
+            if "checked" in window or "selected" in window or "pressed" in window:
+                fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
+                break
+        if "drop_off" not in fields:
+            first = _AMAZON_RETURN_SELECTED_DROPOFF_RE.search(text)
+            if first and ("no box" in text.lower() or "no-box" in text.lower()):
+                fields["drop_off"] = re.sub(r"\s+", " ", first.group(1)).strip(" -:")
+
+    visa = _AMAZON_RETURN_VISA_RE.search(text)
+    if visa:
+        fields["payment_method"] = f"Visa ending in {visa.group(1)}"
+
+    refund = _AMAZON_RETURN_REFUND_RE.search(text)
+    if refund:
+        fields["refund_amount"] = f"${refund.group(1)}"
+
+    return fields
+
+
+def enrich_return_write_lock_question(
+    question: str,
+    page_text: str,
+    *,
+    url: str = "",
+    system_name: str = "Rose",
+) -> str:
+    """Ensure return write-lock approval text names the selected drop-off when visible."""
+    fields = extract_amazon_return_approval_fields(page_text)
+    drop_off = fields.get("drop_off")
+    if not drop_off:
+        return question
+
+    payment = fields.get("payment_method") or "original payment method"
+    amount = fields.get("refund_amount") or "the refund amount shown"
+    domain = urlparse(url).netloc if url else "Amazon"
+    lines = [
+        "**Approval Needed**",
+        "",
+        f"{system_name} wants to confirm a return on **{domain}**.",
+        "Action: Confirm return",
+        (
+            f"Change: Refund {amount} to {payment}. "
+            f"Selected free no-box/no-label drop-off: {drop_off}."
+        ),
+    ]
+    if url:
+        lines.append(f"**Page:** {url}")
+    return "\n".join(lines)
+
+
 def _has_return_commit_continue_exclusion(element_text: str) -> bool:
     """True when the click signal is a mid-wizard Continue on a commit URL."""
     haystack = normalize_write_lock_text(element_text)

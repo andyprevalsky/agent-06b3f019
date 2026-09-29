@@ -13812,6 +13812,45 @@ def test_write_lock_return_continue_on_amazon_contract_url():
     )
 
 
+def test_amazon_return_approval_fields_name_selected_dropoff():
+    """Page-grounded return fallback must name Whole Foods once selected.
+
+    RCA agent 788d17cf (2026-09-29): write_lock fired after Whole Foods was
+    selected, but the notification fork was still in flight when the dynamic
+    timeout killed the worker — approvals_triggered stayed 0. Enriching the
+    deterministic fallback from page text keeps drop-off in the approval even
+    when the fork is cut short.
+    """
+    from browser_tools.write_lock import (
+        enrich_return_write_lock_question,
+        extract_amazon_return_approval_fields,
+    )
+
+    page = (
+        "How would you like to return the items?\n"
+        "Whole Foods Dropoff - Open 7 Days a Week (checked=true)\n"
+        "Refund subtotal: $10.85\n"
+        "Shipping (Whole Foods Dropoff): $0.00\n"
+        "Estimated total refund: $10.85\n"
+        "$10.85 will be sent to the original payment method Visa ending in 9616\n"
+        "Confirm your return\n"
+    )
+    fields = extract_amazon_return_approval_fields(page)
+    assert fields["drop_off"].lower().startswith("whole foods")
+    assert fields["payment_method"] == "Visa ending in 9616"
+    assert fields["refund_amount"] == "$10.85"
+    enriched = enrich_return_write_lock_question(
+        "Approve return?",
+        page,
+        url="https://www.amazon.com/spr/returns/contract/abc",
+        system_name="Rose",
+    )
+    assert "Whole Foods" in enriched
+    assert "9616" in enriched
+    assert "$10.85" in enriched
+    assert "drop-off" in enriched.lower()
+
+
 def test_amazon_return_self_service_block_detection_and_prompt():
     """CS-review return wall must surface a recovery note; groceries exclude snacks.
 
@@ -21690,6 +21729,10 @@ async def run_all_tests():
     r.record(
         "write_lock_return_continue_on_amazon_contract_url",
         test_write_lock_return_continue_on_amazon_contract_url,
+    )
+    r.record(
+        "amazon_return_approval_fields_name_selected_dropoff",
+        test_amazon_return_approval_fields_name_selected_dropoff,
     )
     r.record(
         "amazon_return_self_service_block_detection_and_prompt",

@@ -9222,31 +9222,55 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service.get_browser_state(include_screenshot=True),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
-                    notification_result = await _generate_write_lock_notification(
-                        rose_client=rose_client,
-                        task_prompt=task_prompt,
-                        dynamic_system_context=dynamic_system_context,
-                        browser_turn_messages=browser_turn_messages,
-                        browser_state=write_lock_browser_state,
-                        action_entries=action_entries,
-                        config=config,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                        browser_task_id=task_id,
-                        iteration=iteration,
-                        token_state=token_state,
-                        gpt_token=gpt_token,
-                        gpt_account_id=gpt_account_id,
-                        gpt_token_source=gpt_token_source,
-                        gpt_token_pool_id=gpt_token_pool_id,
-                        browser_use_mode=browser_use_mode,
-                        approval_type=approval_type,
-                        current_url=current_url,
-                        trusted_page_urls=visited_urls,
-                        pending_action=unified_action,
-                        write_lock_result=result,
-                        system_name=system_name,
-                        fallback_question=question,
+                    if approval_type == "return":
+                        from browser_tools.write_lock import enrich_return_write_lock_question
+
+                        page_text = str(
+                            write_lock_browser_state.get("dom_tree")
+                            or write_lock_browser_state.get("formatted_state")
+                            or ""
+                        )
+                        question = enrich_return_write_lock_question(
+                            question,
+                            page_text,
+                            url=current_url,
+                            system_name=system_name,
+                        )
+                    # Cap the notification fork so a slow waterfall cannot burn the
+                    # remaining bench budget after drop-off is already selected
+                    # (agent 788d17cf: write_lock at T+631s, fork still in flight at
+                    # dynamic timeout). Enriched return fallback already names drop-off.
+                    _notification_timeout_s = (
+                        45.0 if approval_type == "return" else BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS
+                    )
+                    notification_result = await asyncio.wait_for(
+                        _generate_write_lock_notification(
+                            rose_client=rose_client,
+                            task_prompt=task_prompt,
+                            dynamic_system_context=dynamic_system_context,
+                            browser_turn_messages=browser_turn_messages,
+                            browser_state=write_lock_browser_state,
+                            action_entries=action_entries,
+                            config=config,
+                            user_id=user_id,
+                            agent_id=agent_id,
+                            browser_task_id=task_id,
+                            iteration=iteration,
+                            token_state=token_state,
+                            gpt_token=gpt_token,
+                            gpt_account_id=gpt_account_id,
+                            gpt_token_source=gpt_token_source,
+                            gpt_token_pool_id=gpt_token_pool_id,
+                            browser_use_mode=browser_use_mode,
+                            approval_type=approval_type,
+                            current_url=current_url,
+                            trusted_page_urls=visited_urls,
+                            pending_action=unified_action,
+                            write_lock_result=result,
+                            system_name=system_name,
+                            fallback_question=question,
+                        ),
+                        timeout=_notification_timeout_s,
                     )
                     write_lock_notification = notification_result.get("notification")
                     write_lock_notification_usage = {
