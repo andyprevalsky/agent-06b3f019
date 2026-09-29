@@ -1,9 +1,10 @@
 """Live cutover e2e: force-migrate (restart API) must CLOSE a running sub-agent.
 
 NOTE: This exercises the **break-glass / force-migrate** path via
-``POST /api/agents/:id/restart`` (same as ``migrate-open-agent-workflows.ts``),
-NOT the happy-path cooperative cutover (activity-drain + continue_as_new handoff).
-Cooperative handoff is covered by unit/blackbox tests on ``generation_handoff``.
+``POST /api/agents/:id/restart`` (same as ``migrate-open-agent-workflows.ts``).
+Cooperative in-tool handoff (park → pointer flip → continue_as_new) is covered
+by ``agents/tests/blackbox/generation_cutover.blackbox.py``. Park+restart cases
+(``wait-seconds-cutover``) prove a parked agent is replaced, never marked FAILED.
 
 What this proves that no blackbox can
 -------------------------------------
@@ -363,6 +364,91 @@ async def run_explore_cutover_test(test: Any, timeout_override: int | None = Non
     try:
         passed, detail = await _run_cutover_case(
             test.prompt, "spawn_agent", timeout_override or test.timeout
+        )
+    except AssertionError as exc:
+        return (False, str(exc), time.time() - started)
+    except Exception as exc:
+        return (False, f"{type(exc).__name__}: {exc}", time.time() - started)
+    return (passed, detail, time.time() - started)
+
+
+PARK_START_TIMEOUT = 180
+PARK_SETTLE_SECONDS = 15
+GENERATION_CUTOVER_STATUS_PREFIX = "Generation cutover:"
+
+
+async def _wait_for_live_tool(agent_id: str, tool_name: str, timeout: int) -> tuple[set[str], str, str]:
+    """Block until ``tool_name`` is IN_PROGRESS. Returns (callIds, generation, status)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        data = await get_agent_status(agent_id)
+        agent = data.get("agent", data)
+        messages = data.get("messages", [])
+        live_calls = _live_tool_calls(messages, tool_name)
+        generation = agent.get("temporal_workflow_id") or ""
+        status = str(agent.get("status") or "")
+        if live_calls and generation:
+            return live_calls, generation, status
+        if status in {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}:
+            raise AssertionError(
+                f"agent reached {status} before {tool_name} was in flight — cannot exercise a park cutover"
+            )
+        await asyncio.sleep(POLL_INTERVAL)
+    raise AssertionError(f"no in-flight {tool_name} park within {timeout}s")
+
+
+async def _run_park_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bool, str]:
+    """Force-replace a parked in-tool wait. The agent must stay replaceable, not FAILED."""
+    agent_id: Optional[str] = None
+    try:
+        agent_id = await spawn_agent(goal, start_phase="execute", timeout=timeout)
+        calls_before, generation_before, status_before = await _wait_for_live_tool(
+            agent_id, tool_name, PARK_START_TIMEOUT
+        )
+        if status_before == "FAILED":
+            return False, f"agent was already FAILED before cutover ({status_before})"
+
+        generation_after = await _trigger_cutover(agent_id)
+        if not generation_after or generation_after == generation_before:
+            return (
+                False,
+                f"cutover did not start a new generation "
+                f"(before={generation_before!r} after={generation_after!r})",
+            )
+
+        await asyncio.sleep(PARK_SETTLE_SECONDS)
+        data = await get_agent_status(agent_id)
+        agent = data.get("agent", data)
+        status = str(agent.get("status") or "")
+        status_message = str(agent.get("status_message") or agent.get("statusMessage") or "")
+        if status == "FAILED":
+            return (
+                False,
+                f"WRONG: parked {tool_name} agent was marked FAILED after replace "
+                f"(statusMessage={status_message!r})",
+            )
+        if status_message.startswith(GENERATION_CUTOVER_STATUS_PREFIX):
+            return (
+                False,
+                f"WRONG: cutover wrote a Generation cutover FAILED statusMessage: {status_message!r}",
+            )
+        return (
+            True,
+            f"replaced parked {tool_name} call(s) {sorted(calls_before)} "
+            f"{generation_before} -> {generation_after} without FAILED (status={status})",
+        )
+    finally:
+        if agent_id and os.environ.get("E2E_KEEP_AGENT") != "1":
+            await cleanup_agent(agent_id)
+        elif agent_id:
+            print(f"    [kept for inspection] agent_id={agent_id}")
+
+
+async def run_park_cutover_test(test: Any, timeout_override: int | None = None) -> tuple[bool, str, float]:
+    started = time.time()
+    try:
+        passed, detail = await _run_park_cutover_case(
+            test.prompt, str(test.workflow_cutover), timeout_override or test.timeout
         )
     except AssertionError as exc:
         return (False, str(exc), time.time() - started)
