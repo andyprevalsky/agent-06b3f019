@@ -84,6 +84,35 @@ def test_backstop_cancels_active_poll_then_pauses_before_diagnostics(monkeypatch
     assert task.timeout_seconds == 0  # The catalog contract is unchanged.
 
 
+def test_backstop_retries_cancellation_absorbed_by_provider(monkeypatch):
+    events = []
+
+    async def reconnecting_poll(*args):
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                events.append("cancelled")
+                if events.count("cancelled") == 2:
+                    raise
+
+    async def pause(*args):
+        events.append("paused")
+        return True
+
+    async def read(*args):
+        events.append("diagnostics")
+        return {"agent": {"status": "PAUSED"}, "messages": []}
+
+    monkeypatch.setattr(runner, "benchmark_wall_clock_backstop_seconds", lambda: 0.01)
+    monkeypatch.setattr(runner, "_poll_agent", reconnecting_poll)
+    monkeypatch.setattr(runner, "pause_agent", pause)
+    monkeypatch.setattr(runner, "get_agent", read)
+    result = asyncio.run(runner.poll_agent("http://test", "agent", get_task_by_name("polar-bu-034")))
+    assert events == ["cancelled", "cancelled", "paused", "diagnostics"]
+    assert "wall-clock backstop" in result[3]
+
+
 def test_inner_timeout_is_not_reported_as_backstop(monkeypatch):
     async def fail(*args):
         raise TimeoutError("provider read timed out")

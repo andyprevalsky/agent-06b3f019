@@ -3910,13 +3910,33 @@ async def _run_with_agent_execution_backstop(
     print(f"    🛑 Agent execution wall-clock backstop: {seconds}s")
     snapshot: dict = {}
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
-    deadline = asyncio.timeout_at(started_at + seconds)
+    deadline = started_at + seconds
+    execution = asyncio.create_task(execute(snapshot))
     try:
-        async with deadline:
-            return await execute(snapshot)
-    except TimeoutError:
-        if not deadline.expired():
-            raise
+        finished, _ = await asyncio.wait(
+            {execution}, timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+        )
+        if finished:
+            return await execution
+        print(f"    ⏰ Agent execution deadline reached after {seconds}s; cancelling poll")
+        # asyncio.timeout_at waits for cancellation to propagate. A provider
+        # coroutine can absorb that cancellation during reconnect/close and
+        # keep the entire benchmark alive. Retry within a separate finite
+        # grace period, then surface INFRA if it still owns execution.
+        for _ in range(5):
+            execution.cancel()
+            finished, _ = await asyncio.wait({execution}, timeout=1.0)
+            if finished:
+                break
+        if not execution.done():
+            raise RuntimeError(
+                f"Agent execution did not stop after {seconds}s wall-clock backstop"
+            )
+        await asyncio.gather(execution, return_exceptions=True)
+    except BaseException:
+        if not execution.done():
+            execution.cancel()
+        raise
     # Stop paid work before diagnostics; the normal task path subsequently
     # waits for terminal browser evidence and performs payment/agent cleanup.
     if not await pause_agent(base_url, agent_id):
