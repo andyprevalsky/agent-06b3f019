@@ -940,6 +940,12 @@ fi
 if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
     STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
+if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+    # The probe executes no benchmark task. One Temporal worker proves stack
+    # readiness without starting eight idle Python processes on a 4 GB guest
+    # or spending the namespace's poll budget before the real fleet starts.
+    STACK_ENV+=("BENCHMARK_AGENT_WORKERS=1")
+fi
 if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
     STACK_ENV+=("BENCHMARK_BUNDLED_FRONTEND=true")
 fi
