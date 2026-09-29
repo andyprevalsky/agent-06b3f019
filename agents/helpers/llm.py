@@ -659,57 +659,77 @@ def _normalize_generated_agent_title(raw: str) -> Optional[str]:
     return cleaned[:80].rstrip() or None
 
 
-_PURCHASE_GOAL_MARKERS = (
-    "buy me",
-    "purchase",
-    "order",
-    "place an order",
-    "complete checkout",
-    "checkout",
+# Imperative acquire-this-item phrases only. Bare nouns ("order", "purchase",
+# "checkout") match attached catalog labels like "Source Order Id" and
+# "Purchase Price Usd" and must not classify a send/lookup/offer goal as a buy.
+_PURCHASE_INTENT_RE = re.compile(
+    r"\b(?:buy|purchase|order)\s+(?:me|a|an|the|this|something|from)\b"
+    r"|\bplace\s+(?:an|the)\s+order\b"
+    r"|\bcomplete\s+(?:the\s+)?(?:checkout|purchase)\b",
+    re.IGNORECASE,
+)
+# User asked for a confirmation identifier. Catalog labels like "Source Order Id"
+# must not count — require confirmation/receipt language, not a bare "order id".
+_EXPLICIT_CONFIRMATION_REQUEST_RE = re.compile(
+    r"\b(?:order confirmation|confirmation id|confirmation number|"
+    r"receipt (?:id|number|identifier)|purchase confirmation)\b",
+    re.IGNORECASE,
+)
+_PURCHASE_CONFIRMATION_FIELD_TOKENS = (
+    "order_id",
+    "order id",
+    "order number",
+    "order_confirmation_id",
+    "order confirmation id",
+    "order confirmation number",
+    "confirmation_id",
+    "confirmation id",
+    "confirmation number",
+    "receipt_number",
+    "receipt number",
+    "purchase_confirmation_id",
+    "purchase confirmation id",
+    "purchase confirmation number",
 )
 
 
 def _is_purchase_goal(goal: str) -> bool:
-    normalized = f" {goal.lower()} "
-    return any(marker in normalized for marker in _PURCHASE_GOAL_MARKERS)
+    return bool(_PURCHASE_INTENT_RE.search(goal or ""))
+
+
+def _user_requested_confirmation_identifier(goal: str) -> bool:
+    return bool(_EXPLICIT_CONFIRMATION_REQUEST_RE.search(goal or ""))
+
+
+def _field_is_purchase_confirmation_identifier(field: Dict[str, Any]) -> bool:
+    searchable = f"{field.get('name', '')} {field.get('description', '')}".lower()
+    return any(token in searchable for token in _PURCHASE_CONFIRMATION_FIELD_TOKENS)
 
 
 def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool:
     fields = schema.get("fields", []) if isinstance(schema, dict) else []
-    for field in fields:
-        name = str(field.get("name", "")).lower()
-        description = str(field.get("description", "")).lower()
-        searchable = f"{name} {description}"
-        if any(
-            token in searchable
-            for token in (
-                "order_id",
-                "order id",
-                "order number",
-                "order_confirmation_id",
-                "order confirmation id",
-                "order confirmation number",
-                "confirmation_id",
-                "confirmation id",
-                "confirmation number",
-                "receipt_number",
-                "receipt number",
-                "purchase_confirmation_id",
-                "purchase confirmation id",
-                "purchase confirmation number",
-            )
-        ):
-            return True
-    return False
+    return any(_field_is_purchase_confirmation_identifier(field) for field in fields)
+
+
+def _schema_without_purchase_confirmation_identifiers(schema: Dict[str, Any]) -> Dict[str, Any]:
+    fields = schema.get("fields", []) if isinstance(schema, dict) else []
+    kept = [field for field in fields if not _field_is_purchase_confirmation_identifier(field)]
+    if not kept:
+        return schema
+    return {"fields": kept}
 
 
 def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure goal-critical fields are present when the model under-specifies a schema."""
+    """Align purchase-proof fields with acquire-intent, not incidental catalog nouns."""
     from utils.payment_boundary_goal import goal_has_payment_boundary_operational_constraints
 
     if goal_has_payment_boundary_operational_constraints(goal):
         return schema
-    if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
+
+    requires_confirmation = _is_purchase_goal(goal) or _user_requested_confirmation_identifier(goal)
+    if not requires_confirmation:
+        return _schema_without_purchase_confirmation_identifiers(schema)
+    if _schema_has_purchase_confirmation_identifier(schema):
         return schema
 
     normalized = {"fields": list(schema.get("fields", []))}
@@ -781,7 +801,16 @@ async def _generate_response_schema_with_rose(
                 prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                 completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                 total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
-                schema = _normalize_response_schema_for_goal(goal, _schema_from_generated_model(generated))
+                generated_schema = _schema_from_generated_model(generated)
+                schema = _normalize_response_schema_for_goal(goal, generated_schema)
+                logger.info(
+                    "Normalized response schema",
+                    agent_id=agent_id,
+                    generated_fields=[str(field.get("name", "")) for field in generated_schema.get("fields", [])],
+                    normalized_fields=[str(field.get("name", "")) for field in schema.get("fields", [])],
+                    purchase_intent=_is_purchase_goal(goal),
+                    explicit_confirmation_request=_user_requested_confirmation_identifier(goal),
+                )
                 title = (
                     _normalize_generated_agent_title(generated.title)
                     if isinstance(generated, _GeneratedResponseSchemaWithTitle)

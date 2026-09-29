@@ -1289,6 +1289,107 @@ def test_normalize_response_schema_preserves_explicit_confirmation_identifier_re
     ]
 
 
+def test_normalize_response_schema_does_not_require_confirmation_for_offer_message_goal():
+    """Attached catalog nouns are not purchase intent.
+
+    Reproduces agent 2929bc93-8a53-45fb-a4af-30c482b03bbe. The user asked to
+    send Aman an 80% offer. Schema generation produced recipient + message_body;
+    `_normalize_response_schema_for_goal` then injected required
+    `order_confirmation_id` because the attached item catalog contained the
+    substrings "purchase" and "order" (`Purchase Price Usd`, `Source Order Id`).
+    The verifier rejected the successful iMessage at 50% and the agent opened
+    Amazon to hunt for a confirmation the user never asked for.
+    """
+    from helpers.llm import _is_purchase_goal, _normalize_response_schema_for_goal
+
+    goal = (
+        "1. Quantity: 1\n"
+        "Item Name: RECCI AirFrame California King bed frame, beige chenille\n"
+        "Photo Url: https://m.media-amazon.com/images/I/81t-SHWNBGL._SS284_.jpg\n"
+        "Amazon Url: https://www.amazon.com/dp/B0FR8VJXW5\n"
+        "Price Basis: provided purchase price; tax treatment unspecified\n"
+        "Source Order Id: 114-1660202-2405000\n"
+        "Quote Source Url\n"
+        "Purchase Price Usd: 399.99\n"
+        "General Price Quote Usd\n"
+        "->\n"
+        "Send Aman all items over 10$, the speaker combo just tell him 1k all in, "
+        "for the other items tell him I offer 80% of amazon price (include the links)\n"
+    )
+    generated = {
+        "fields": [
+            {"name": "recipient", "type": "str", "required": True},
+            {"name": "message_body", "type": "str", "required": True},
+        ]
+    }
+
+    assert _is_purchase_goal(goal) is False
+    result = _normalize_response_schema_for_goal(goal, generated)
+    assert [field["name"] for field in result["fields"]] == ["recipient", "message_body"]
+    assert all(field["name"] != "order_confirmation_id" for field in result["fields"])
+
+    llm_emitted_confirmation = {
+        "fields": [
+            *generated["fields"],
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    stripped = _normalize_response_schema_for_goal(goal, llm_emitted_confirmation)
+    assert [field["name"] for field in stripped["fields"]] == ["recipient", "message_body"]
+
+
+def test_normalize_response_schema_keeps_explicitly_requested_confirmation_on_send_goal():
+    """A send/lookup that actually asks for a confirmation identifier keeps it."""
+    from helpers.llm import _normalize_response_schema_for_goal
+
+    result = _normalize_response_schema_for_goal(
+        "Send Aman the order confirmation ID from last week's Amazon shipment.",
+        {"fields": [{"name": "recipient", "type": "str", "required": True}]},
+    )
+    assert [field["name"] for field in result["fields"]] == [
+        "recipient",
+        "order_confirmation_id",
+    ]
+
+
+def test_normalize_response_schema_ignores_order_noun_in_lookup_goal():
+    """'order' / 'purchase' as nouns in a lookup or status request are not buy-intent."""
+    from helpers.llm import _is_purchase_goal, _normalize_response_schema_for_goal
+
+    goal = "Look up my Source Order Id 114-1660202-2405000 and text Aman the purchase status."
+    generated = {
+        "fields": [
+            {"name": "recipient", "type": "str", "required": True},
+            {"name": "order_status", "type": "str", "required": True},
+        ]
+    }
+
+    assert _is_purchase_goal(goal) is False
+    result = _normalize_response_schema_for_goal(goal, generated)
+    assert [field["name"] for field in result["fields"]] == ["recipient", "order_status"]
+
+
+def test_normalize_response_schema_still_requires_confirmation_for_buy_me_goal():
+    """A real acquire-this-item request still gets the confirmation field."""
+    from helpers.llm import _is_purchase_goal, _normalize_response_schema_for_goal
+
+    goal = "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
+    generated = {
+        "fields": [
+            {"name": "selected_beanie_url", "type": "str", "required": True},
+            {"name": "selected_beanie_price_usd", "type": "float", "required": True},
+        ]
+    }
+
+    assert _is_purchase_goal(goal) is True
+    result = _normalize_response_schema_for_goal(goal, generated)
+    assert [field["name"] for field in result["fields"]] == [
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+        "order_confirmation_id",
+    ]
+
+
 def test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal():
     """Payment-boundary harness goals must not auto-inject purchase confirmation ids."""
     from helpers.llm import _normalize_response_schema_for_goal
@@ -8603,6 +8704,22 @@ async def run_all_tests():
     r.record(
         "normalize_response_schema_explicit_confirmation_identifier",
         test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
+    )
+    r.record(
+        "normalize_response_schema_offer_message_no_confirmation",
+        test_normalize_response_schema_does_not_require_confirmation_for_offer_message_goal,
+    )
+    r.record(
+        "normalize_response_schema_explicit_confirmation_on_send_goal",
+        test_normalize_response_schema_keeps_explicitly_requested_confirmation_on_send_goal,
+    )
+    r.record(
+        "normalize_response_schema_lookup_order_noun_no_confirmation",
+        test_normalize_response_schema_ignores_order_noun_in_lookup_goal,
+    )
+    r.record(
+        "normalize_response_schema_buy_me_still_requires_confirmation",
+        test_normalize_response_schema_still_requires_confirmation_for_buy_me_goal,
     )
     r.record(
         "normalize_response_schema_payment_boundary_skip_confirmation",
