@@ -157,16 +157,34 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                         (typeof URL !== 'undefined' && scriptURL instanceof URL)
                           ? _absUrl(scriptURL)
                           : String(scriptURL);
-                      // Classic workers (incl. blob:/data: PoW workers): preamble
-                      // then importScripts the original URL. Module workers use
-                      // static import. Never sync-XHR the body — blob XHR is
-                      // flaky and falls back to the unpatched Native worker.
-                      const wrappedSrc = isModule
-                        ? _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';'
-                        : _workerNavPreamble +
-                          '\\nimportScripts(' +
-                          JSON.stringify(url) +
-                          ');';
+                      // Blob/data PoW workers (FCaptcha): importScripts(blob:) from a
+                      // wrapper blob fails with NetworkError on Kernel Chromium
+                      // (opaque-origin). Inline the body via sync XHR instead.
+                      // http(s): keep importScripts / static import. On any failure
+                      // fall back to Native — an unpatched worker is better than a
+                      // dead one (biometrics 1aba1c91: "FCaptcha worker failed to
+                      // load (NetworkError)").
+                      let wrappedSrc;
+                      if (!isModule && (url.startsWith('blob:') || url.startsWith('data:'))) {
+                        try {
+                          const xhr = new XMLHttpRequest();
+                          xhr.open('GET', url, false);
+                          xhr.send();
+                          if (xhr.status !== 0 && xhr.status !== 200) {
+                            return new Native(...args);
+                          }
+                          wrappedSrc = _workerNavPreamble + '\\n' + xhr.responseText;
+                        } catch (e) {
+                          return new Native(...args);
+                        }
+                      } else {
+                        wrappedSrc = isModule
+                          ? _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';'
+                          : _workerNavPreamble +
+                            '\\nimportScripts(' +
+                            JSON.stringify(url) +
+                            ');';
+                      }
                       const blobUrl = _blobUrl(wrappedSrc);
                       const worker = new Native(blobUrl, options);
                       try {
