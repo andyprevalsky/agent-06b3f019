@@ -126,7 +126,7 @@ def validate(
     if not regular(machines_file):
         # The provider inventory is larger than the small owner metadata.
         info = machines_file.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 16_777_216:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 67_108_864:
             raise ValueError("unsafe provider inventory")
     machines = json.loads(machines_file.read_text())
     if not isinstance(machines, list):
