@@ -361,7 +361,7 @@ async function createRemoteSession(
           message.includes('proxy is unavailable') ||
           message.includes('no_peer') ||
           message.includes('no peer'));
-      if (stickyBadProxy) {
+      if (stickyBadProxy && resolved !== undefined) {
         await forgetKernelProxy(resolved.proxyKey).catch(() => {});
       }
 

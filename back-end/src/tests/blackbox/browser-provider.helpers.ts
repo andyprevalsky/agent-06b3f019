@@ -1,8 +1,36 @@
+import { APIConnectionTimeoutError } from '@onkernel/sdk';
 import type { Page } from 'playwright';
+import {
+  isKernelProxyAvailabilityError,
+  KERNEL_CREATE_REQUEST_OPTIONS,
+} from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
 
 export function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+export function assertKernelCityInventoryFallback(): void {
+  const error = new Error(
+    "400 proxy configuration validation failed: city 'sanfrancisco' is not available for subdivision 'us-ca'"
+  );
+  assert(isKernelProxyAvailabilityError(error), 'expected proxy availability error');
+}
+
+export function assertKernelTimeoutFallback(): void {
+  assert(
+    isKernelProxyAvailabilityError(new APIConnectionTimeoutError()),
+    'APIConnectionTimeoutError must relax city→state→country'
+  );
+  assert(
+    isKernelProxyAvailabilityError(new Error('Request timed out.')),
+    'string timeout must also relax location specificity'
+  );
+  assert(
+    KERNEL_CREATE_REQUEST_OPTIONS.maxRetries === 0 &&
+      KERNEL_CREATE_REQUEST_OPTIONS.timeout === 45_000,
+    'create calls must fail fast (no SDK retry multiplication into ~180s)'
+  );
 }
 
 export function isTransientKernelConnectionError(error: unknown): boolean {
