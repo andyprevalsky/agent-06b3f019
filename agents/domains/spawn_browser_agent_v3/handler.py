@@ -249,13 +249,65 @@ def _normalize_funding_retry_seconds(value: Any) -> float:
     return min(max(retry_seconds, 1.0), 60.0)
 
 
-def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
+def _payment_card_request_evidence(request: Any) -> Optional[Dict[str, Any]]:
+    """Keep only the approved order facts needed to verify a minted card."""
+    if not isinstance(request, dict):
+        return None
+    merchant = request.get("merchant")
+    currency = request.get("currency")
+    total_cents = request.get("totalCents")
+    items = request.get("lineItems")
+    if (
+        not isinstance(merchant, str)
+        or not merchant.strip()
+        or not isinstance(currency, str)
+        or not currency.strip()
+        or isinstance(total_cents, bool)
+        or not isinstance(total_cents, int)
+        or not isinstance(items, list)
+        or not items
+    ):
+        return None
+    safe_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        name, quantity, amount = (
+            item.get("name"),
+            item.get("quantity"),
+            item.get("lineTotalCents"),
+        )
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or isinstance(quantity, bool)
+            or not isinstance(quantity, int)
+            or isinstance(amount, bool)
+            or not isinstance(amount, int)
+        ):
+            return None
+        safe_items.append({"name": name, "quantity": quantity, "lineTotalCents": amount})
+    return {
+        "merchant": merchant,
+        "currency": currency,
+        "totalCents": total_cents,
+        "lineItems": safe_items,
+    }
+
+
+def _build_payment_card_verifier_evidence(
+    last4: Any, request: Any = None
+) -> Optional[Dict[str, Any]]:
     safe_last4 = _normalize_payment_card_last4(last4)
     if safe_last4 is None:
         return None
+    text = f"Approved one-time payment card last four: {safe_last4}"
+    safe_request = _payment_card_request_evidence(request)
+    if safe_request:
+        text += ". Approved request: " + json.dumps(safe_request, ensure_ascii=False, sort_keys=True)
     return {
         "role": "TOOL",
-        "text": f"Approved one-time payment card last four: {safe_last4}",
+        "text": text,
         "metadata": {
             "toolName": "payment_card_ready",
             "toolStatus": "FINISHED",
@@ -5617,6 +5669,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
     payment_card_last4: Optional[str] = None
+    payment_card_request: Optional[Dict[str, Any]] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
@@ -5626,6 +5679,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
+        payment_card_request = _payment_card_request_evidence(
+            write_lock_resume_state.get("payment_card_request")
+        )
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -8573,7 +8629,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
-                        payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
+                        payment_card_evidence=_build_payment_card_verifier_evidence(
+                            payment_card_last4, payment_card_request
+                        ),
                         browser_checkpoints=verifier_checkpoints,
                     )
 
@@ -9545,6 +9603,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
+                    payment_card_evidence=_build_payment_card_verifier_evidence(
+                        payment_card_last4, payment_card_request
+                    ),
                     browser_checkpoints=verifier_checkpoints,
                 )
                 final_verifier_prompt = build_verifier_prompt(
@@ -10153,6 +10214,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         prior_resume = write_lock_resume_state or {}
                         prior_payment_refs = prior_resume.get("payment_card_refs")
                         prior_payment_last4 = prior_resume.get("payment_card_last4")
+                        prior_payment_request = prior_resume.get("payment_card_request")
                         current_approvals = apply_user_write_lock_grant(
                             result.get("write_lock_approvals"),
                             approval_type,
@@ -10179,6 +10241,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state["payment_card_refs"] = prior_payment_refs
                         if prior_payment_last4:
                             write_lock_resume_state["payment_card_last4"] = prior_payment_last4
+                        if prior_payment_request:
+                            write_lock_resume_state["payment_card_request"] = prior_payment_request
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
@@ -10683,6 +10747,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
+                        "payment_card_request": _payment_card_request_evidence(payment_payload),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
@@ -10776,6 +10841,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         if hasattr(workflow_instance, "_update_tree_state"):
                             await workflow_instance._update_tree_state(status="ACTIVE")
 
+                    prior_resume = write_lock_resume_state or {}
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": result.get("write_lock_approvals", {}),
@@ -10788,6 +10854,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
+                    for payment_field in (
+                        "payment_card_refs",
+                        "payment_card_last4",
+                        "payment_card_request",
+                    ):
+                        if prior_resume.get(payment_field):
+                            write_lock_resume_state[payment_field] = prior_resume[payment_field]
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 

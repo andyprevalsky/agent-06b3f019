@@ -18741,6 +18741,9 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_cvv": "123",
     }
     assert resume_state["payment_card_last4"] == "4242"
+    assert resume_state["payment_card_request"]["merchant"] == "Blick Art Materials"
+    assert resume_state["payment_card_request"]["totalCents"] == 636
+    assert [item["name"] for item in resume_state["payment_card_request"]["lineItems"]] == ["Brush"]
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
@@ -18748,22 +18751,82 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert final_event.status == MessageStatus.FINISHED
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
-def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
+def test_payment_card_verifier_evidence_links_approved_request_without_secrets():
     from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
 
-    evidence = _build_payment_card_verifier_evidence("4242")
+    request = {
+        "merchant": "Rose Labs Test Payment",
+        "currency": "USD",
+        "totalCents": 4396,
+        "lineItems": [
+            {"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200},
+            {"name": "Ceramic Mug", "quantity": 1, "lineTotalCents": 900},
+            {"name": "Canvas Tote", "quantity": 1, "lineTotalCents": 1500},
+        ],
+        "userId": "private-user",
+        "fingerprint": "private-fingerprint",
+        "card_number": "4242424242424242",
+        "card_cvv": "123",
+    }
+    evidence = _build_payment_card_verifier_evidence("4242", request)
     assert evidence == {
         "role": "TOOL",
-        "text": "Approved one-time payment card last four: 4242",
+        "text": "Approved one-time payment card last four: 4242. Approved request: "
+        + json.dumps(
+            {
+                "merchant": "Rose Labs Test Payment",
+                "currency": "USD",
+                "totalCents": 4396,
+                "lineItems": [
+                    {"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200},
+                    {"name": "Ceramic Mug", "quantity": 1, "lineTotalCents": 900},
+                    {"name": "Canvas Tote", "quantity": 1, "lineTotalCents": 1500},
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
         "metadata": {
             "toolName": "payment_card_ready",
             "toolStatus": "FINISHED",
             "paymentCardLast4": "4242",
         },
     }
+    assert "private-user" not in str(evidence)
+    assert "private-fingerprint" not in str(evidence)
+    assert "4242424242424242" not in str(evidence)
+    assert "123" not in str(evidence)
     assert _build_payment_card_verifier_evidence("4242424242424242") is None
     assert _build_payment_card_verifier_evidence("42x2") is None
     assert _build_payment_card_verifier_evidence(None) is None
+
+async def test_approved_payment_request_is_available_to_browser_verifier():
+    from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
+    from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
+
+    approved_request = {
+        "merchant": "Rose Labs Test Payment",
+        "currency": "USD",
+        "totalCents": 4396,
+        "lineItems": [{"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200}],
+    }
+    with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
+        context = await build_browser_verifier_context(
+            goal="Request a card and leave checkout unsubmitted",
+            current_url="https://example.com/checkout",
+            browser_state={"dom_tree": "Pay $43.96", "page_stats": {}, "scroll_position": {}},
+            action_history=SimpleNamespace(get_entries=lambda: []),
+            config=SimpleNamespace(),
+            session_id="session-1",
+            payment_card_evidence=_build_payment_card_verifier_evidence("4242", approved_request),
+        )
+    payment_evidence = next(
+        entry for entry in context if entry.get("metadata", {}).get("toolName") == "payment_card_ready"
+    )
+    assert "Rose Labs Test Payment" in payment_evidence["text"]
+    assert '"totalCents": 4396' in payment_evidence["text"]
+    assert '"name": "Aurora Notebook"' in payment_evidence["text"]
+    assert "4242" in payment_evidence["text"]
 
 async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
     from domains.spawn_browser_agent_v3.handler import _lookup_payment_purchase
@@ -19703,8 +19766,12 @@ async def run_all_tests():
     )
 
     r.record(
-        "payment_card_verifier_evidence_only_last_four",
-        test_payment_card_verifier_evidence_exposes_only_valid_last_four,
+        "payment_card_verifier_evidence_links_approved_request",
+        test_payment_card_verifier_evidence_links_approved_request_without_secrets,
+    )
+    await r.record_async(
+        "approved_payment_request_reaches_verifier",
+        test_approved_payment_request_is_available_to_browser_verifier,
     )
     await r.record_async(
         "payment_lookup_backend_matched_legacy_fingerprint",
