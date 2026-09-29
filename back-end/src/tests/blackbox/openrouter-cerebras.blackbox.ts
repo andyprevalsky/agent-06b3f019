@@ -89,6 +89,8 @@ async function run(): Promise<void> {
       only: ['cerebras'],
       allow_fallbacks: false,
       require_parameters: true,
+      zdr: true,
+      data_collection: 'deny',
     });
     assert.equal(chunks[0]?.actual_model, 'qwen/qwen3.8-27b');
     assert.equal(chunks[0]?.pool_name, 'openrouter-cerebras');

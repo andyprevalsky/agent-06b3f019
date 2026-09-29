@@ -1,7 +1,7 @@
 /** Single-integration CRUD kept separate from the browser-data repository. */
 
 import { EmailProvider, type Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { revokeGoogleGrant } from '../../providers/googleRevoke';
 
 export async function findIntegrationByUserAndName(userId: string, name: string) {
@@ -25,7 +25,7 @@ export async function deleteIntegration(integrationId: string) {
   for (const credential of credentials) {
     await revokeGoogleGrant(credential.refreshToken, credential.accessToken);
   }
-  return prisma.$transaction(async (tx) => {
+  return runTransactionWithRetry(async (tx) => {
     for (const credential of credentials) {
       if (credential.email !== null) {
         await tx.googleDataPurge.create({

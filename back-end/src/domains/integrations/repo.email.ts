@@ -4,7 +4,7 @@
  */
 
 import { type Prisma, EmailProvider, IntegrationStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
 import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
 import { revokeGoogleGrant } from '../../providers/googleRevoke';
@@ -67,7 +67,7 @@ export async function deleteEmailCredential(credentialId: string) {
   if (credential?.provider === EmailProvider.GMAIL) {
     await revokeGoogleGrant(credential.refreshToken, credential.accessToken);
   }
-  return prisma.$transaction(async (tx) => {
+  return runTransactionWithRetry(async (tx) => {
     if (credential?.provider === EmailProvider.GMAIL && credential.email !== null) {
       await tx.googleDataPurge.create({
         data: { userId: credential.userId, email: credential.email.toLowerCase() },

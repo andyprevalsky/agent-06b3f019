@@ -131,14 +131,21 @@ STACK_DB_EXPECTED=false
 SELECTED_DB_URL=""
 ISOLATED_DB_RESOLVED=false
 
-# Managed existing-backend callers (for example, run-coverage.sh) know the
-# exact database used by the backend they launched. Prefer that explicit
-# contract over every local discovery mechanism.
+# Managed callers (for example, run-coverage.sh) may know the exact isolated
+# database to use. Prefer that explicit contract over local discovery.
 EXPLICIT_TEST_DB_URL="${BLACKBOX_TEST_DATABASE_URL:-${CONTRACT_TEST_DATABASE_URL:-}}"
-if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
+if [[ -n "$EXPLICIT_TEST_DB_URL" ]]; then
   STACK_DB_EXPECTED=true
   if [[ ! "$EXPLICIT_TEST_DB_URL" =~ ^postgres(ql)?://([^/]*@)?(localhost|127\.0\.0\.1)(:[0-9]+)?/ ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
+    exit 1
+  fi
+  if [[ "$USE_EXISTING_BACKEND" != "1" ]] && ! node -e '
+    const url = new URL(process.env.BLACKBOX_TEST_DATABASE_URL || process.env.CONTRACT_TEST_DATABASE_URL);
+    const expectedName = `victoria_${process.argv[1]}`;
+    if (decodeURIComponent(url.pathname.slice(1)) !== expectedName || url.search !== "" || url.hash !== "") process.exit(1);
+  ' "$WORKSPACE_HINT"; then
+    echo "❌ Standalone blackbox DATABASE_URL must name the local victoria_$WORKSPACE_HINT database." >&2
     exit 1
   fi
   # Prisma accepts connection-pool tuning in the URL query string, but libpq
@@ -148,7 +155,7 @@ if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
   if psql "$EXPLICIT_TEST_PSQL_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     DB_FOUND=true
     SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
-    echo "Using database explicitly provided by the existing backend launcher"
+    echo "Using explicitly provided isolated test database"
   fi
 fi
 

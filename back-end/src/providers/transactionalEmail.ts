@@ -9,7 +9,6 @@
 import { EmailProvider } from '@prisma/client';
 
 import { getValidAccessToken } from '../services/integrations/gmailSync';
-import { GOOGLE_OAUTH_SCOPES } from '../domains/integrations/googleScopes';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -64,13 +63,13 @@ async function findTransactionalEmailCredential(input: {
       userId: input.ownerUserId,
       provider: EmailProvider.GMAIL,
       email: input.from,
-      scopes: { hasEvery: [...GOOGLE_OAUTH_SCOPES] },
     },
     select: {
       id: true,
       accessToken: true,
       refreshToken: true,
       expiresAt: true,
+      scopes: true,
     },
   });
 }

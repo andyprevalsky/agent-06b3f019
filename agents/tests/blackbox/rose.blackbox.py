@@ -72,6 +72,7 @@ from providers.rose.transport import (
     ANTHROPIC_FAST_MODE_BETA,
     OPENAI_RESPONSES_API_URL,
     _codex_extra_headers_from_body,
+    _openrouter_headers,
     _with_fast_mode_beta,
 )
 from providers.rose.transforms import (
@@ -3109,6 +3110,7 @@ def test_gpt_auth_text_format_preserves_nested_required_properties():
 
 
 def test_build_openrouter_body_includes_optionals():
+    assert _openrouter_headers("test-key")["X-OpenRouter-Cache"] == "false"
     body = build_openrouter_body(
         model="google/gemini-3-flash-preview",
         messages=[{"role": "user", "content": "hi"}],

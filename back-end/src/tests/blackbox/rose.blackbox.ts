@@ -1919,11 +1919,7 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
     }
 
     assert(thrown instanceof Error, 'invalid key should throw');
-    assert(
-      (thrown as Error).message.includes('OpenAI 401') &&
-        (thrown as Error).message.includes('invalid api key'),
-      `expected clear OpenAI auth error, got ${String(thrown)}`
-    );
+    assertEqual((thrown as Error).message, 'OpenAI 401', 'safe OpenAI auth error');
     assertEqual(JSON.stringify(calledUrls), JSON.stringify([OPENAI_RESPONSES_API_URL]), 'calls');
   } finally {
     restoreFetch();
