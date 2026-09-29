@@ -8216,8 +8216,16 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     # Guest cleanup and runtime capture are separate durable latches. A prior
     # recovery can clear the former while retaining the latter; reconnect only
     # post-start exact guests that still own an unfinished local transfer.
-    if [ -e "$registry/runtime-evidence-unconfirmed" ] \
-        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
+    # A failed run with a forensic archive can discharge the evidence latch
+    # without reconnecting stopped guests whose driver never sealed. The
+    # verifier below still checks the archive, exact owner, native stopped
+    # Machines, and the independently discharged guest-cleanup latch.
+    local forensic_manifest
+    forensic_manifest="$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)/_forensic/manifest.json"
+    if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
+        && { [ ! -f "$forensic_manifest" ] || [ -L "$forensic_manifest" ] \
+             || [ -e "$registry/guest-cleanup-unconfirmed" ]; }; then
         for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
             if [ -f "$_evidence_output/post-config-start.accepted" ] \
                 && [ -f "$_evidence_output/runtime-evidence.pending" ]; then
