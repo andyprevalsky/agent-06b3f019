@@ -66,6 +66,25 @@ DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 FORENSIC_RETIREMENT_SCRIPT = ROOT / "scripts" / "cloudbench-forensic-retirement.py"
 
 
+def test_forensic_clean_stack_status_is_bound_to_exact_run_token() -> None:
+    verifier = importlib.util.spec_from_file_location("cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT)
+    assert verifier is not None and verifier.loader is not None
+    module = importlib.util.module_from_spec(verifier)
+    verifier.loader.exec_module(module)
+    token = "a" * 32 + "-0"
+    original = (f"version=1\ntoken={token}\nstate=clean\n"
+                "stack_pid=979\nstack_birth=Tue Sep 29 17:33:56 2026\n").encode()
+    module.verify_clean_stack_status(original, token)
+    for bad in (
+        original.replace(b"state=clean", b"state=failed"),
+        original.replace(token.encode(), ("b" * 32 + "-0").encode()),
+        original + b"state=clean\n",
+        original.replace(b"stack_pid=979", b"stack_pid=0"),
+    ):
+        with pytest.raises((AssertionError, ValueError)):
+            module.verify_clean_stack_status(bad, token)
+
+
 def test_failed_started_pool_forensics_preserve_originals_without_proof_credit(tmp_path: Path) -> None:
     verifier = importlib.util.spec_from_file_location("cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT)
     assert verifier is not None and verifier.loader is not None

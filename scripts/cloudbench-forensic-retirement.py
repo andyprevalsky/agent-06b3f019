@@ -491,18 +491,34 @@ def verify_interrupted_pool_evidence(
                 "original/cloudbench-driver.pid" in row["missing"])
             assert "original/repo/.context/cloudbench/run.json" in row["files"] or (
                 "original/repo/.context/cloudbench/run.json" in row["missing"])
-            stopped = object_file(out / "guest-cleanup.machine-stopped.json")
-            receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
-            assert stopped["state"] == "stopped" and stopped["machine_id"] == machine
-            assert stopped["fleet_owner_token"] == owner
-            assert stopped["fleet_run_id"] == meta["run_id"]
-            assert receipt["machine_id"] == machine
-            assert receipt["fleet_owner_token"] == owner
-            assert receipt["fleet_run_id"] == meta["run_id"]
-            assert stopped["machine_status_sha256"] == hashlib.sha256(
-                regular_bytes(out / "guest-cleanup.machine-status.txt", 1048576)).hexdigest()
-            assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
-                json.dumps(stopped, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            stopped_path = out / "guest-cleanup.machine-stopped.json"
+            receipt_path = out / "guest-cleanup.recovery-receipt.json"
+            assert stopped_path.is_file() == receipt_path.is_file()
+            if stopped_path.is_file():
+                stopped = object_file(stopped_path)
+                receipt = object_file(receipt_path)
+                assert stopped["state"] == "stopped" and stopped["machine_id"] == machine
+                assert stopped["fleet_owner_token"] == owner
+                assert stopped["fleet_run_id"] == meta["run_id"]
+                assert receipt["machine_id"] == machine
+                assert receipt["fleet_owner_token"] == owner
+                assert receipt["fleet_run_id"] == meta["run_id"]
+                assert stopped["machine_status_sha256"] == hashlib.sha256(
+                    regular_bytes(out / "guest-cleanup.machine-status.txt", 1048576)).hexdigest()
+                assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
+                    json.dumps(stopped, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            else:
+                # A confirmed normal shutdown may finish before the driver
+                # writes run.json. Preserve its exact original clean ACK and
+                # stack-clean status; native inventory independently proves
+                # this owner's source Machine is stopped. This is still an
+                # interrupted archive and can never receive proof credit.
+                token = row["run_token"]
+                assert "original/cloudbench-driver.pid" in row["missing"]
+                assert "original/repo/.context/cloudbench/run.json" in row["missing"]
+                assert f"original/cloudbench-driver-clean-{token}.ack" in row["files"]
+                assert (f"original/repo/.context/cloudbench/"
+                        f"cloudbench-stack-cleanup-{token}.status") in row["files"]
         for rel, info in row["files"].items():
             assert safe_name(rel) and set(info) == {"bytes", "sha256"}
             assert type(info["bytes"]) is int and 0 <= info["bytes"] <= 64 * 1024 * 1024
@@ -531,6 +547,10 @@ def verify_interrupted_pool_evidence(
                 archived[member.name] = json.loads(data)
             if member.name.endswith("/original/cloudbench-driver.state"):
                 archived[member.name] = data.strip()
+            if "/original/cloudbench-driver-clean-" in member.name and member.name.endswith(".ack"):
+                archived[member.name] = data
+            if "/original/repo/.context/cloudbench/cloudbench-stack-cleanup-" in member.name and member.name.endswith(".status"):
+                archived[member.name] = data
             seen.add(member.name)
     assert seen == set(expected_files)
     for row in rows:
@@ -542,7 +562,15 @@ def verify_interrupted_pool_evidence(
             state = archived[prefix + "cloudbench-driver.state"]
             services = archived[prefix + "repo/.context/cloudbench/services.json"]
             if "original/cloudbench-driver.pid" in row["missing"]:
-                assert state == b"exited" and services["status"] == "failed"
+                assert state == b"exited"
+                if (run / row["task"] / "guest-cleanup.recovery-receipt.json").is_file():
+                    assert services["status"] == "failed"
+                else:
+                    assert services["status"] == "stopped"
+                    token = row["run_token"]
+                    assert archived[prefix + f"cloudbench-driver-clean-{token}.ack"] == (token + "\n").encode()
+                    status = archived[prefix + f"repo/.context/cloudbench/cloudbench-stack-cleanup-{token}.status"]
+                    verify_clean_stack_status(status, token)
             else:
                 assert state == b"running" and services["status"] == "running"
         if path in archived:
@@ -554,6 +582,16 @@ def verify_interrupted_pool_evidence(
             "incomplete_tasks": incomplete, "unallocated_workers": len(list(fresh.iterdir())),
             "files": len(seen), "archive_sha256": manifest["archive_sha256"],
             "proof_credit": 0}
+
+
+def verify_clean_stack_status(status: bytes, token: str) -> None:
+    pairs = [line.split(b"=", 1) for line in status.splitlines()]
+    assert all(len(pair) == 2 for pair in pairs)
+    clean = dict(pairs)
+    assert len(clean) == len(pairs)
+    assert clean[b"version"] == b"1" and clean[b"token"] == token.encode()
+    assert clean[b"state"] == b"clean"
+    assert int(clean[b"stack_pid"]) > 0 and clean[b"stack_birth"]
 
 
 def object_file_from_bytes(data: bytes):
