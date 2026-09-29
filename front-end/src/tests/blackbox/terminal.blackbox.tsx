@@ -6,7 +6,6 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Terminal from '@/pages/Terminal';
-import { ROSE_HOMEPAGE_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -196,10 +195,9 @@ describe('Terminal page', () => {
       expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
     });
 
-    it('renders the public app description with About, Privacy, and Terms links', async () => {
+    it('renders About, Privacy, and Terms links', async () => {
       renderWithProviders(<Terminal />);
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(legalLinks).toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
       expect(within(legalLinks).getByRole('link', { name: 'About' })).toHaveAttribute(
         'href',
         '/about',
@@ -214,13 +212,13 @@ describe('Terminal page', () => {
       );
     });
 
-    it('keeps the description in the visible mobile layout', async () => {
+    it('keeps legal links in the visible mobile layout', async () => {
       setViewport(390, 844);
 
       renderWithProviders(<Terminal />);
 
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(legalLinks).toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
+      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toBeInTheDocument();
       expect(legalLinks).not.toHaveClass('absolute');
       expect(legalLinks).toHaveClass('shrink-0');
     });
@@ -327,7 +325,6 @@ describe('Terminal page', () => {
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
       const legalLinks = screen.getByTestId('terminal-legal-links');
-      expect(legalLinks).not.toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
       expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
         'href',
         '/privacy',

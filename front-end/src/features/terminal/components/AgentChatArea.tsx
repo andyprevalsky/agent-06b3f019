@@ -15,15 +15,13 @@
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
  *
- * PUBLIC LANDING:
- *   The compact app description appears before an agent is selected. Legal
- *   links remain available while chatting.
+ * LEGAL LINKS:
+ *   About, Privacy, and Terms remain available while chatting.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
 import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
-import { ROSE_HOMEPAGE_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -127,18 +125,17 @@ export function AgentChatArea({
         tickerRef={tickerRef}
       />
 
-      <TerminalLegalFooter showDescription={!a.selectedAgentId} />
+      <TerminalLegalFooter />
     </>
   );
 }
 
-function TerminalLegalFooter({ showDescription }: { showDescription: boolean }) {
+function TerminalLegalFooter() {
   return (
     <footer
       data-testid="terminal-legal-links"
       className="relative z-10 w-full shrink-0 px-2 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] text-center text-[11px] leading-[1.25] text-foreground/60 md:pb-1 md:pl-20"
     >
-      {showDescription && <>{ROSE_HOMEPAGE_DESCRIPTION} &middot; </>}
       <Link
         to="/about"
         className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
