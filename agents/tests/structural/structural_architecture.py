@@ -11,12 +11,14 @@ Invariants tested here:
   7. Framework leak    — temporalio.workflow not in types/config/repo layers
   8. No circular imports — no cycles in the first-party module graph
   9. Wiring correctness — worker.py should import refactored domains from domains/
+  10. Cutover classification — every workflow.wait_condition/sleep is tagged
 
 All tests auto-discover domains. No hardcoded domain names.
 """
 
 import ast
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -453,6 +455,47 @@ def test_wiring_correctness():
     assert not violations, "\n".join(violations)
 
 
+_WORKFLOW_PARK_RE = re.compile(r"\b(?:workflow|wf)\.(wait_condition|sleep)\s*\(")
+_CUTOVER_CLASS_RE = re.compile(r"cutover-class:\s*(primitive|activity-bound|bounded|deploy-gate)")
+_CUTOVER_SCAN_DIRS = ("workflows", "domains", "loop", "helpers")
+
+
+def test_every_workflow_park_is_cutover_classified():
+    """Every Temporal workflow park must declare how cutover treats it.
+
+    Unbounded in-tool waits must use wait_condition_or_generation_handoff
+    (primitive). Activity-bound waits cannot continue_as_new until the
+    activity ends (force-clear replaces). Bounded 30s slices re-check at
+    the next run_agent checkpoint. Deploy-gate parks are isolated validation
+    runs, never user agents.
+    """
+    violations: list[str] = []
+    for dirname in _CUTOVER_SCAN_DIRS:
+        root = AGENTS_ROOT / dirname
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            if "test" in path.parts:
+                continue
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                stripped = line.lstrip()
+                if stripped.startswith("#"):
+                    continue
+                if not _WORKFLOW_PARK_RE.search(line):
+                    continue
+                window = "\n".join(lines[max(0, index - 3) : index + 1])
+                if _CUTOVER_CLASS_RE.search(window):
+                    continue
+                rel = path.relative_to(AGENTS_ROOT)
+                violations.append(f"{rel}:{index + 1}: {stripped}")
+    assert not violations, (
+        "Every workflow.wait_condition / workflow.sleep must be tagged "
+        "`# cutover-class: primitive|activity-bound|bounded|deploy-gate` "
+        "on the call or within the 3 preceding lines.\n" + "\n".join(violations)
+    )
+
+
 async def run_all_tests():
     print("structural-architecture tests:")
     r = BlackboxResult()
@@ -462,6 +505,7 @@ async def run_all_tests():
     r.record("no_framework_in_data_layers", test_no_framework_in_data_layers)
     r.record("no_circular_imports", test_no_circular_imports)
     r.record("wiring_correctness", test_wiring_correctness)
+    r.record("every_workflow_park_is_cutover_classified", test_every_workflow_park_is_cutover_classified)
     return r.all_passed
 
 

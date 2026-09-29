@@ -968,7 +968,17 @@ fi
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool
 # (the known P2024 timeout signature). A bigger local pool absorbs the burst.
-export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=50&pool_timeout=30"
+# Isolated --benchmark stacks also share system Postgres with the Step 5 stack
+# on Cloud. Keep the non-benchmark default at 50; size --benchmark above the
+# 50-child mass-agent for_each fan-out so concurrent post_agent_message
+# interactive txs do not P2028 ("Unable to start a transaction") and stall
+# the tree. 80 covers 50 children + parent + overlapping status/tool-usage.
+if $BENCHMARK_MODE; then
+    export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"
+else
+    export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"
+fi
+export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${LOCAL_DB_CONNECTION_LIMIT}&pool_timeout=30"
 export DIRECT_URL="$LOCAL_DB_URL"
 
 # Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and

@@ -38,10 +38,18 @@ from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
     transform_schema_for_remote_session,
 )
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
+from helpers.wait_condition_or_handoff import (
+    sleep_or_generation_handoff,
+    wait_condition_or_generation_handoff,
+)
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
@@ -10210,6 +10218,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # The workflow allocates task_id before starting the activity,
                     # so TRY_CANCEL cannot erase the ownership key along with the
                     # activity return value.
+                    # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
                     await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -10487,7 +10496,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 task_id=result.get("task_id"),
                                 retry_seconds=retry_seconds,
                             )
-                            await workflow.sleep(retry_seconds)
+                            await sleep_or_generation_handoff(
+                                workflow_instance, retry_seconds, workflow_mod=workflow
+                            )
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -10607,7 +10618,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             if agentcard_status_result.get("connected"):
                                 break
-                            await workflow.sleep(5)
+                            await sleep_or_generation_handoff(
+                                workflow_instance, 5, workflow_mod=workflow
+                            )
 
                         if not agentcard_status_result.get("connected"):
                             logger.info(
@@ -10912,11 +10925,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
 
-                    await workflow.wait_condition(
+                    await wait_condition_or_generation_handoff(
                         lambda request_id=request_id: (
                             request_id in getattr(workflow_instance, "_signal_responses", {})
                             or not workflow_instance.is_paused
-                        )
+                        ),
+                        workflow_instance,
+                        workflow_mod=workflow,
                     )
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         workflow_instance._signal_responses.pop(request_id, None)
@@ -11033,6 +11048,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Browser automation interrupted",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+            )
+            raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
