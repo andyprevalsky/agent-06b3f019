@@ -17,13 +17,41 @@ function canonicalizeReviewCount(value: unknown): unknown {
   return typeof value === 'string' ? value.replace(/(\p{Nd}),(?=\p{Nd})/gu, '$1') : value;
 }
 
+function asPositiveInt(value: unknown): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    return parsed > 0 ? parsed : 1;
+  }
+  return 1;
+}
+
+/**
+ * Strip a trailing ` x{quantity}` echo of the quantity field so order-summary
+ * prose ("Aurora Notebook x1") fingerprints the same as the product title.
+ */
+function canonicalizeLineItemName(name: unknown, quantity: unknown): unknown {
+  if (typeof name !== 'string') return name;
+  const match = /\s+x(\d+)\s*$/i.exec(name);
+  if (match === null) return name;
+  const qty = asPositiveInt(quantity);
+  if (Number.parseInt(match[1], 10) !== qty) return name;
+  return name.slice(0, match.index).trimEnd();
+}
+
 function canonicalizeLineItems(value: unknown): unknown[] | null {
   if (!Array.isArray(value)) return null;
   return value.map((rawItem) => {
     const item = asRecord(rawItem);
     return item === null
       ? rawItem
-      : { ...item, reviewCount: canonicalizeReviewCount(item.reviewCount) };
+      : {
+          ...item,
+          name: canonicalizeLineItemName(item.name, item.quantity),
+          reviewCount: canonicalizeReviewCount(item.reviewCount),
+        };
   });
 }
 
