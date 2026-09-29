@@ -30,6 +30,7 @@ import {
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
+import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
@@ -135,6 +136,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
     () => unansweredAgentIds(attention.requests),
     [attention.requests],
   );
+  if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} attention={attention} />;
   return (
     <AttentionRequestsProvider value={attention}>
       <div
@@ -208,6 +210,41 @@ function TerminalLayout(props: TerminalLayoutProps) {
         </div>
 
         <TerminalModals agents={agents} drip={drip} />
+      </div>
+    </AttentionRequestsProvider>
+  );
+}
+
+function SharedBenchmarkLayout({
+  attention,
+  agents,
+  drip,
+  derived,
+  models,
+  modelsLoading,
+}: TerminalLayoutProps & { attention: ReturnType<typeof useAttentionRequests> }) {
+  return (
+    <AttentionRequestsProvider value={attention}>
+      <div
+        className="h-screen w-screen bg-background dark:bg-navi-black"
+        style={{ height: '100dvh' }}
+      >
+        <div className="absolute left-5 top-5 z-50 text-base font-semibold">Rose</div>
+        <MainContent
+          agents={agents}
+          drip={drip}
+          currentView="agents"
+          models={models}
+          modelsLoading={modelsLoading}
+          pendingApproval={derived.pendingApproval}
+          pendingGates={derived.pendingGates}
+          hasActiveAttention={derived.hasActiveAttention}
+          browserStatusProps={derived.browserStatusProps}
+          systemMessages={derived.systemMessages}
+          BrowserStatusBarCarousel={BrowserStatusBarCarousel}
+          NetworkView={NetworkView}
+          sidebarWidthCollapsed={0}
+        />
       </div>
     </AttentionRequestsProvider>
   );

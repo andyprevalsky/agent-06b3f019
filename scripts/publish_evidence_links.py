@@ -26,12 +26,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -75,8 +78,24 @@ def _auth_headers() -> dict[str, str]:
     }
 
 
-def durable_fe_url(agent_id: str) -> str:
-    return f"{DURABLE_ORIGIN}/?agent-id={agent_id}"
+def benchmark_share_token(run_id: str) -> str:
+    key = os.getenv("BACKEND_API_KEY")
+    if not key:
+        raise SystemExit("BACKEND_API_KEY is required to sign benchmark share links")
+    expiry = int(time.time()) + 30 * 24 * 60 * 60
+    signature = hmac.new(
+        key.encode(),
+        f"benchmark-share:v1:{run_id.lower()}:{expiry}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{run_id.lower()}.{expiry}.{signature}"
+
+
+def durable_fe_url(agent_id: str, run_id: str, token: str) -> str:
+    query = urllib.parse.urlencode(
+        {"agent-id": agent_id, "benchmark-share": token}
+    )
+    return f"{DURABLE_ORIGIN}/?{query}"
 
 
 def upload_run_json(run_json: Path) -> str:
@@ -243,14 +262,19 @@ def validate_browser_agents_terminated_with_recording(
     return failures
 
 
-def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str, int]:
+def verify_agent_reachable(
+    agent_id: str, token: str, *, timeout: float = 60.0
+) -> tuple[str, int]:
     """Probe archive-backed agent detail; return (status_label, message_count).
 
     Fails closed when any browser agent on the FE link is still live or missing
     a correctly attached recording.
     """
-    url = f"{DEFAULT_HUB}/api/agents/{agent_id}"
-    request = urllib.request.Request(url, headers=_auth_headers(), method="GET")
+    url = (
+        f"{DEFAULT_HUB}/api/benchmarks/shared-agent/{agent_id}"
+        f"?share={urllib.parse.quote(token, safe='')}"
+    )
+    request = urllib.request.Request(url, method="GET")
     try:
         with _opener().open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")
@@ -272,15 +296,36 @@ def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str
         raise SystemExit(
             "FE link browser validation failed:\n- " + "\n- ".join(browser_failures)
         )
-    fe = durable_fe_url(agent_id)
+    run_id = token.split('.', 1)[0]
+    fe = durable_fe_url(agent_id, run_id, token)
     fe_req = urllib.request.Request(fe, method="GET")
     try:
         with _opener().open(fe_req, timeout=20) as fe_resp:
             if int(fe_resp.status) >= 400:
-                return "verified reachable", count
-    except Exception:
-        return "verified reachable", count
-    return "verified reachable", count
+                raise SystemExit(f"FE page returned HTTP {fe_resp.status}")
+    except Exception as exc:
+        raise SystemExit(f"FE page unreachable: {exc}") from exc
+    snippets = [
+        str(message.get("text") or "")[:60]
+        for message in messages
+        if isinstance(message, dict)
+        and message.get("role") in ("USER", "ASSISTANT")
+        and len(str(message.get("text") or "")) >= 15
+        and not _message_metadata(message).get("hidden")
+    ][:8]
+    if not snippets:
+        raise SystemExit("FE browser verification has no visible transcript snippets")
+    browser = subprocess.run(
+        ["node", str(REPO_ROOT / "scripts" / "verify_benchmark_share_link.cjs")],
+        input=json.dumps({"url": fe, "agentId": agent_id, "snippets": snippets}),
+        text=True,
+        capture_output=True,
+        timeout=90,
+        cwd=str(REPO_ROOT),
+    )
+    if browser.returncode != 0:
+        raise SystemExit(f"FE browser verification failed: {browser.stderr.strip()[:500]}")
+    return "verified in fresh browser", count
 
 
 def latest_dump_for_agent(agent_id: str) -> Path:
@@ -315,6 +360,7 @@ def write_manifest(
     *,
     agent_id: str,
     run_id: str,
+    token: str,
     fe_status: str,
     message_count: int,
     dump_html: Path,
@@ -325,7 +371,7 @@ def write_manifest(
     manifest = {
         "agent_id": agent_id,
         "run_id": run_id,
-        "fe_url": durable_fe_url(agent_id),
+        "fe_url": durable_fe_url(agent_id, run_id, token),
         "fe_verified": fe_status,
         "message_count": message_count,
         "llm_dump_artifact": str(dump_html),
@@ -341,6 +387,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--run-json", type=Path, help="Upload this run bundle to the durable Hub")
+    parser.add_argument("--run-id", help="Existing Hub run ID when --run-json is unavailable")
     parser.add_argument("--dump", type=Path, help="Specific LLM dump JSON (default: latest)")
     parser.add_argument("--skip-hub-upload", action="store_true")
     parser.add_argument("--skip-fe-verify", action="store_true")
@@ -350,26 +397,33 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     agent_id = _normalize_agent_id(args.agent_id)
-    run_id = ""
-    if args.run_json and not args.skip_hub_upload:
+    run_id = args.run_id or ""
+    if args.run_json:
         run_path = args.run_json.resolve()
-        run_id = upload_run_json(run_path)
-        dual_write_claude_code_sessions(run_path, agent_id)
+        if args.skip_hub_upload:
+            run_id = str(json.loads(run_path.read_text(encoding="utf-8")).get("run_id") or "")
+        else:
+            run_id = upload_run_json(run_path)
+            dual_write_claude_code_sessions(run_path, agent_id)
+    if not re.fullmatch(_AGENT_ID_RE, run_id):
+        raise SystemExit("a UUID run_id from --run-json or --run-id is required for a share link")
+    token = benchmark_share_token(run_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
     dump_html = publish_llm_dump(dump, agent_id)
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0
     else:
-        fe_status, message_count = verify_agent_reachable(agent_id)
+        fe_status, message_count = verify_agent_reachable(agent_id, token)
     manifest = write_manifest(
         agent_id=agent_id,
         run_id=run_id,
+        token=token,
         fe_status=fe_status,
         message_count=message_count,
         dump_html=dump_html,
         source_dump=dump,
     )
-    print(f"FE link: {durable_fe_url(agent_id)} — {fe_status} ({message_count} msgs)")
+    print(f"FE link: {durable_fe_url(agent_id, run_id, token)} — {fe_status} ({message_count} msgs)")
     print(f"LLM dump: {dump_html}")
     print(f"manifest: {manifest}")
     return 0

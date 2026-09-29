@@ -173,6 +173,40 @@ describe('useAgentProvider', () => {
     unmount();
   });
 
+  it('loads a shared benchmark transcript without a session or agent API auth', async () => {
+    localStorage.clear();
+    window.history.replaceState({}, '', '/?agent-id=shared-agent&benchmark-share=run.token');
+    server.use(
+      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('share')).toBe('run.token');
+        expect(request.headers.has('authorization')).toBe(false);
+        expect(request.headers.has('x-api-key')).toBe(false);
+        return HttpResponse.json({
+          agent: makeAgent({ agent_id: 'shared-agent', goal: 'shared recording' }),
+          messages: [
+            {
+              message_id: 'recorded-message',
+              timestamp: 't',
+              text: 'Recorded transcript',
+              role: 'ASSISTANT',
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        });
+      }),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
+    );
+    await waitFor(() => expect(result.current.messages[0]?.text).toBe('Recorded transcript'));
+    expect(result.current.agent?.agent_id).toBe('shared-agent');
+    expect(capturedRequests.some((request) => request.url.includes('/agents/shared-agent'))).toBe(
+      false,
+    );
+    unmount();
+  });
+
   it('auto-load clears selection on fetch error', async () => {
     window.history.replaceState({}, '', '/?agent-id=agent-err');
     server.use(

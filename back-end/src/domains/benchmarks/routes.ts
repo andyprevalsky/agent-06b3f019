@@ -5,6 +5,8 @@ import * as hubStore from '../../providers/benchmarkHubStore';
 import { BENCHMARK_HUB_ADMIN_USER_IDS } from '../../providers/benchmarkHubStore';
 import * as service from './service';
 import { TasksUnavailableError, UnknownTasksError } from './service';
+import { verifyBenchmarkShareToken } from './shareToken';
+import { benchmarkShareSecret } from './config';
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
@@ -239,6 +241,31 @@ router.get(
       return;
     }
     res.json(view);
+  })
+);
+
+/** Read-only access to a single run using a time-limited bearer link. */
+router.get(
+  '/shared-agent/:agentId',
+  asyncHandler(async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    const token = typeof req.query.share === 'string' ? req.query.share : '';
+    const runId = verifyBenchmarkShareToken(token, benchmarkShareSecret());
+    if (runId === null) {
+      res.status(403).json({ error: 'Invalid or expired benchmark share link' });
+      return;
+    }
+    const view = await hubStore.getRunAgent(runId, req.params.agentId);
+    if (!view) {
+      res.status(404).json({ error: 'Agent not found in shared run' });
+      return;
+    }
+    res.json({
+      agent: view.agent,
+      messages: view.messages,
+      pagination: { has_more: false, oldest_timestamp: null },
+    });
   })
 );
 
