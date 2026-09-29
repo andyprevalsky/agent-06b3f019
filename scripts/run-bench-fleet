@@ -7472,11 +7472,17 @@ assert re.fullmatch(r'[0-9a-f]{32}', owner)
 assert meta['fleet_owner_token'] == owner and meta['app'] == app
 audit = audit_root / owner
 assert Path(meta['audit_dir']) == audit and fields(audit / 'meta')['fleet_owner_token'] == owner
+assert audit.is_dir() and not audit.is_symlink()
 run = Path(meta['runs_root']) / meta['run_id']
+assert run.is_dir() and not run.is_symlink() and run.resolve() == run
 tasks = json.loads((run / '_batch/benches.json').read_text())
 outputs = {}
 for task in tasks:
-    out = run / task['name']
+    name = task['name']
+    assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9._-]+', name)
+    assert name not in ('.', '..')
+    out = run / name
+    assert out.is_dir() and not out.is_symlink()
     cid = out / '.cid'
     if not cid.is_file() or cid.is_symlink():
         continue
@@ -7487,6 +7493,7 @@ for task in tasks:
         outputs[parts[1]] = out
 claimed = {}
 audited = set()
+assert (audit / 'pool').is_dir() and not (audit / 'pool').is_symlink()
 for record in (audit / 'pool').iterdir():
     value = fields(record)
     assert value['machine_id'] == record.name and re.fullmatch(r'[0-9a-f]+', record.name)
@@ -7533,6 +7540,59 @@ PY
         esac
     done < "$plan"
     rm -f "$plan"
+}
+
+exact_recovery_is_pool_only() {  # <v2-registry>; no fresh donor topology exists
+    python3 - "$1" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+registry, audit_root = map(Path, sys.argv[1:3])
+app = sys.argv[3]
+
+def directory(path):
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode) and not path.is_symlink()
+    except OSError:
+        return False
+
+def fields(path):
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and not path.is_symlink() and info.st_size <= 65536
+    pairs = [line.split('=', 1) for line in path.read_text().splitlines()]
+    assert all(len(pair) == 2 for pair in pairs)
+    row = dict(pairs)
+    assert len(row) == len(pairs)
+    return row
+
+assert directory(registry) and directory(audit_root)
+meta = fields(registry / 'meta')
+owner = registry.name
+audit = audit_root / owner
+assert meta.get('version') == '2' and meta.get('fleet_owner_token') == owner
+assert meta.get('app') == app and Path(meta.get('audit_dir', '')) == audit
+assert directory(audit) and directory(registry / 'clones')
+audit_meta = fields(audit / 'meta')
+assert audit_meta.get('fleet_owner_token') == owner
+assert audit_meta.get('run_id') == meta.get('run_id') and audit_meta.get('app') == app
+assert not meta.get('source_manifest_sha256') and not audit_meta.get('source_manifest_sha256')
+assert not (registry / 'source-manifest.json').exists()
+assert not (registry / 'source-manifest.json').is_symlink()
+assert not (audit / 'source-manifest.json').exists()
+assert not (audit / 'source-manifest.json').is_symlink()
+for name in ('expected-fresh', 'fresh', 'by-machine-id'):
+    path = audit / name
+    assert directory(path) and not any(path.iterdir())
+assert not any((registry / 'clones').iterdir())
+pool = audit / 'pool'
+assert directory(pool) and any(pool.iterdir())
+for path in pool.iterdir():
+    value = fields(path)
+    assert value.get('source') == 'borrowed-pool'
+    assert value.get('fleet_owner_token') == owner
+    assert value.get('run_id') == meta.get('run_id') and value.get('app') == app
+PY
 }
 
 resolve_exact_recovery_warm_identity() {  # <v2-registry>; exact source Machine and mounted Volume
@@ -9144,9 +9204,18 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
             SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID <<< "$private_recovery_fields"
         [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
     fi
-    warm_pair="$(resolve_exact_recovery_warm_identity "$recovery_registry")" \
-        || recovery_status=1
-    if [ "$recovery_status" = "0" ]; then
+    warm_pair=""
+    if exact_recovery_is_pool_only "$recovery_registry" 2>/dev/null; then
+        # Pool claims bind their own Machine and Volume identities. No donor
+        # topology was allocated by this owner, so no warm source exists to
+        # resolve or to protect from fresh-clone teardown.
+        WARM_ID=""
+        WARM_VOLUME_ID=""
+    else
+        warm_pair="$(resolve_exact_recovery_warm_identity "$recovery_registry")" \
+            || recovery_status=1
+    fi
+    if [ "$recovery_status" = "0" ] && [ -n "${warm_pair:-}" ]; then
         WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
         WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $2}')"
         [ -n "$WARM_ID" ] && [ -n "$WARM_VOLUME_ID" ] || recovery_status=1

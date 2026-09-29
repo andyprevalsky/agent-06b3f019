@@ -9643,6 +9643,7 @@ reap_registry_clones() {{
   done
   printf 'provider-reap %s\\n' "$*" >> "$CALLS"
 }}
+fleet_recovery_confirm_pool_claims() {{ return 0; }}
 recover_exact_pool_claims() {{ printf 'pool-recovery\\n' >> "$CALLS"; }}
 capacity_release_stale_owner_reservations() {{ printf 'capacity-release\\n' >> "$CALLS"; }}
 fleet_audit_finalize_recovered_registry() {{ printf 'audit-finalize\\n' >> "$CALLS"; }}
@@ -9810,6 +9811,7 @@ reap_registry_clones() {{
   [ "$(cat {shlex.quote(str(output / "guest-shutdown.confirmed"))})" = {run_id} ] || return 93
   printf 'provider-reap\\n' >> "$CALLS"
 }}
+fleet_recovery_confirm_pool_claims() {{ return 0; }}
 recover_exact_pool_claims() {{ printf 'pool-recovery\\n' >> "$CALLS"; }}
 capacity_release_stale_owner_reservations() {{ printf 'capacity-release\\n' >> "$CALLS"; }}
 fleet_audit_finalize_recovered_registry() {{ printf 'audit-finalize\\n' >> "$CALLS"; }}
@@ -11636,6 +11638,76 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
     assert not plan.exists()
 
 
+def test_exact_pool_claim_confirmation_requires_guest_receipt(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "pool_claim_fs_transaction() {",
+            "fleet_recovery_confirm_pool_claims() {",
+        )
+    )
+    owner = "5f" * 16
+    machine = "deadbeef000004"
+    run_id = "fixture-run"
+    root = tmp_path / "pool-confirm"
+    registry = root / "ownership" / owner
+    registry.mkdir(parents=True)
+    audit_root = root / "audits"
+    audit = audit_root / owner
+    (audit / "pool").mkdir(parents=True)
+    claims = root / "claims"
+    claims.mkdir()
+    run = root / "runs" / run_id
+    out = run / "bench-owned"
+    out.mkdir(parents=True)
+    (registry / "meta").write_text(
+        f"fleet_owner_token={owner}\napp=bench-app\n"
+        f"audit_dir={audit}\nrun_id={run_id}\nruns_root={root / 'runs'}\n"
+        "host=fixture-host\npid=1234\npid_start=fixture-start\n"
+        "cleanup_policy=reap\n"
+    )
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\n")
+    (audit / "pool" / machine).write_text(
+        f"machine_id={machine}\nfleet_owner_token={owner}\n"
+        f"run_id={run_id}\napp=bench-app\nsource=borrowed-pool\n"
+        "disposition=claimed\n"
+    )
+    (claims / machine).write_text(
+        "host=fixture-host\npid=1234\npid_start=fixture-start\n"
+        f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+    )
+    (run / "_batch").mkdir()
+    (run / "_batch/benches.json").write_text('[{"name":"bench-owned"}]\n')
+    (out / ".cid").write_text(f"pool {machine}\n")
+    receipt = out / "guest-shutdown.confirmed"
+    receipt.write_text(run_id + "\n")
+    script = f"""set -euo pipefail
+APP=bench-app
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+POOL_CLAIMS_DIR={shlex.quote(str(claims))}
+exact_owner_pool_claim_ids() {{ printf '%s\\n' {machine}; }}
+registry_meta_value() {{ awk -F= -v wanted="$2" '$1 == wanted {{ print substr($0, index($0, "=") + 1); exit }}' "$1"; }}
+cloudbench_env_sha256() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
+{functions}
+fleet_recovery_confirm_pool_claims "$1"
+"""
+
+    def confirm() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", script, "confirm-pool", str(registry)],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+
+    receipt.write_text("wrong-run\n")
+    assert confirm().returncode != 0
+    assert "cleanup_state=unconfirmed" in (claims / machine).read_text()
+    receipt.write_text(run_id + "\n")
+    result = confirm()
+    assert result.returncode == 0, result.stderr
+    assert "cleanup_state=owned" in (claims / machine).read_text()
+
+
 def test_exact_guest_recovery_maps_autoscaler_workers_without_guest_ack(
     tmp_path: Path,
 ) -> None:
@@ -12479,6 +12551,55 @@ def test_exact_recovery_entrypoint_has_no_global_machine_or_proxy_sweep() -> Non
     assert "machines list" not in recovery_entrypoint
     assert "reap_orphaned_fleet_proxies" not in recovery_entrypoint
     assert "resolve_exact_recovery_warm_identity" in recovery_entrypoint
+    assert 'exact_recovery_is_pool_only "$recovery_registry"' in recovery_entrypoint
+
+
+def test_exact_recovery_pool_only_skips_nonexistent_warm_source(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    probe = _extract_fleet_function(fleet, "exact_recovery_is_pool_only() {")
+    owner = "a" * 32
+    app = "bench-app"
+    run_id = "fixture-run"
+    registry = tmp_path / "ownership" / owner
+    audit_root = tmp_path / "audits"
+    audit = audit_root / owner
+    (registry / "clones").mkdir(parents=True)
+    for name in ("expected-fresh", "fresh", "by-machine-id", "pool"):
+        (audit / name).mkdir(parents=True)
+    (registry / "meta").write_text(
+        f"version=2\napp={app}\nfleet_owner_token={owner}\n"
+        f"run_id={run_id}\naudit_dir={audit}\n"
+    )
+    (audit / "meta").write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n"
+    )
+    pool = audit / "pool" / "deadbeef001122"
+    pool.write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp={app}\n"
+        "source=borrowed-pool\n"
+    )
+    script = (
+        "set -uo pipefail\n"
+        f"APP={app}\n"
+        f"FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}\n"
+        f"{probe}\n"
+        f"exact_recovery_is_pool_only {shlex.quote(str(registry))}\n"
+    )
+
+    def check() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10,
+        )
+
+    assert check().returncode == 0
+    (audit / "expected-fresh" / "cloudbench-fresh").write_text("source_machine_id=neighbor\n")
+    assert check().returncode != 0
+    (audit / "expected-fresh" / "cloudbench-fresh").unlink()
+    (registry / "source-manifest.json").write_text("{}")
+    assert check().returncode != 0
+    (registry / "source-manifest.json").unlink()
+    pool.unlink()
+    assert check().returncode != 0
 
 
 def test_exact_recovery_resolves_warm_root_from_autoscaler_clone_graph(
@@ -12801,6 +12922,7 @@ fleet_audit_update_registry_clone() {{
     && [ "$4" = {volume_id} ] \
     && [ "$5" = destroyed-verified-absent ]
 }}
+fleet_recovery_confirm_pool_claims() {{ return 0; }}
 recover_exact_pool_claims() {{
   printf 'recover_exact_pool_claims\n' >> "$CALLS"
 }}
