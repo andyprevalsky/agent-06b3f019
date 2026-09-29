@@ -67,10 +67,7 @@ async function testQuantityEchoNameParity(): Promise<void> {
     totalCents: 1200,
   });
   assert(bareFp !== null && echoedFp !== null, 'quantity-echo receipts must fingerprint');
-  assert(
-    bareFp === echoedFp,
-    'trailing x{qty} on line-item names must match bare product titles'
-  );
+  assert(bareFp === echoedFp, 'trailing x{qty} on line-item names must match bare product titles');
   assert(
     bareFp === 'bc0508689ba5fa17a6cea3e6009bf84587ee26f67ac749d4c82f80ff17f4b2e9',
     'backend quantity-echo canonicalization must match the agents-side Python fingerprint'
