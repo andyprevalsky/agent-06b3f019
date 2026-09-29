@@ -1,12 +1,12 @@
 ---
 id: 2026-09-29-purchase-noun-markers-classified-offer-as-buy
 date: 2026-09-29
-title: Offer-message schema required order_confirmation_id because purchase-intent matched catalog nouns
+title: Offer-message schema required order_confirmation_id because a post-hoc classifier mutated the model schema
 surface: agents
 component: response-schema-generator
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: helpers/llm.py _normalize_response_schema_for_goal — purchase-proof fields were not derived from user-imperative acquire-intent
+first_bad_boundary: helpers/llm.py _normalize_response_schema_for_goal — a keyword classifier injected purchase-proof fields after the model chose the schema
 symptoms:
   - To populate order_confirmation_id, the agent needs a verifiable tool result showing an actual purchase
   - No tool result shows a purchase or supplies an order, receipt, or purchase-confirmation number
@@ -16,12 +16,13 @@ symptoms:
 tags:
   - response-schema
   - verifier
-  - purchase-intent
   - offer-message
   - order-confirmation-id
+  - schema-normalizer
 sources:
   - agent 2929bc93-8a53-45fb-a4af-30c482b03bbe
-repro: agents/tests/blackbox/llm.blackbox.py test_normalize_response_schema_does_not_require_confirmation_for_offer_message_goal
+  - PR #1324
+repro: agents/tests/blackbox/llm.blackbox.py test_set_response_schema_activity_persists_model_fields_for_offer_goal
 status: fixed
 ---
 
@@ -52,81 +53,50 @@ Archive searches (relative, not recurrence):
 
 - `order_confirmation_id required` →
   `2026-08-03-generic-purchase-schema-required-provider-order-id` (real DoorDash
-  purchase required a labeled ID; `purchase_completion_evidence` is gone from
-  current code). Same subsystem, different cause: that case was a true purchase
-  with the wrong proof shape. `purchase_completion_evidence` would still have
-  failed this iMessage.
+  purchase required a labeled ID). Same subsystem, different cause.
 - `response_schema required confirmation` → hotel payment-boundary relatives
-  that added a skip, not a classifier fix.
+  that added another skip on the same classifier.
 
 Critical path:
 
-1. Mac-app create stored the full 17,622-char catalog plus
+1. Mac-app create stored the full catalog plus
    `-> Send Aman all items over 10$...` as `Agent.goal`.
 2. Python startup `set_response_schema_activity([fast_cache_goal], include_title=True)`
-   used that persisted row. Title `Aman Offer Message` proves the Python path
-   (TS `setResponseSchema` does not generate titles).
-3. `_is_purchase_goal` substring-matched bare `"purchase"` and `"order"` against
-   catalog labels `Purchase Price Usd` / `Source Order Id`.
-4. `_normalize_response_schema_for_goal` injected required
-   `order_confirmation_id` (and/or the shopping prompt caused the LLM to emit
-   the same field — pre-normalize Rose payload was not captured).
+   used that persisted row.
+3. The model produced a send-offer schema (`recipient`, `message_body`).
+4. `_normalize_response_schema_for_goal` / `_is_purchase_goal` then injected
+   required `order_confirmation_id` because catalog labels contained
+   `"purchase"` and `"order"`.
 5. Verifier demanded purchase proof the send-offer goal never produced.
 
 Step 5a:
 
 - Why 1: schema required `order_confirmation_id`.
-- Why 2: normalizer kept/injected it because purchase-intent was true or the
-  LLM emitted it.
-- Why 3: intent used bare noun markers over the whole goal blob.
-- Why 4: purchase-proof contracts were not derived from user-imperative
-  acquire-intent, so incidental catalog nouns (or the shopping prompt) could
-  impose them on a send/offer goal.
-- Why 5 would be "the schema system was designed to force purchase proof" — a
-  documented decision for actual buy goals. Stop at Why 4.
+- Why 2: a post-hoc normalizer added it after the model chose the fields.
+- Why 3: the harness kept a second source of truth (keyword classifier) on top
+  of schema generation.
+- Why 4 would be "schema generation was designed to need a safety net" — that
+  is the rejected layer. Stop at Why 3: delete the classifier.
 
-Step 5b (not a prompt edit): next-deeper class tried was "never auto-inject
-schema fields via keyword heuristics." That fails to be coherent because real
-`Buy me a beanie` goals still need confirmation when the LLM under-specifies.
-The coherent class is: derive acquire-intent from the user imperative, and do
-not keep purchase-proof fields when that intent is absent.
-
-Local repro (pre-fix, identical captured-goal command):
-
-```
-is_purchase_goal: True
-matching_markers: ['purchase', 'order']
-normalized_fields: ['recipient', 'message_body', 'order_confirmation_id']
-AssertionError: FAIL: offer/message goal must not require order_confirmation_id
-```
-
-Post-fix, the same command (including when `order_confirmation_id` is already
-in the generated schema) returns `{recipient, message_body}`.
+An earlier pass on this RCA tightened the regex and added strip logic. That
+was the wrong depth: it kept the second source of truth.
 
 ## Solution
 
-`_is_purchase_goal` matches only imperative acquire phrases (`buy/purchase/order`
-+ `me/a/the/...`, `place an order`, `complete checkout`).
-`_normalize_response_schema_for_goal` injects confirmation only for acquire-intent
-or an explicit confirmation/receipt request, and strips confirmation-identifier
-fields otherwise so an LLM over-applying the shopping prompt cannot keep them.
+Deleted `_normalize_response_schema_for_goal`, `_is_purchase_goal`, and the
+confirmation inject/strip helpers. `set_response_schema_activity` persists
+exactly the fields the model emitted.
 
-Siblings also prevented: lookup/status goals whose payload mentions `Source Order
-Id` or `purchase status`; send goals that mention past orders but do not ask for
-a confirmation identifier.
-
-10k-agent behavior: O(1) regex + field filter per schema generation. No shared
-state, no per-user fan-in.
-
-Schema generation now logs `generated_fields` vs `normalized_fields` so the next
-incident can tell LLM emit from normalizer inject.
+10k-agent behavior: one schema-generation LLM call per agent, no extra
+per-goal regex mutation, no shared state.
 
 ## Human feedback
 
-None recorded.
+Do not add a purchase-intent classifier on top of schema generation. The
+model determines the schema. Tightening the keyword regex is still the
+rejected layer.
 
 ## Reusable lesson
 
-Do not impose purchase-proof schema fields unless the user-imperative asks to
-acquire an item or explicitly requests a confirmation identifier — catalog nouns
-are not buy-intent.
+Persist the model-generated response schema; do not mutate it with keyword
+classifiers.
