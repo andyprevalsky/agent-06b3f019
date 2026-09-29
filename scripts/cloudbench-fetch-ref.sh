@@ -135,7 +135,9 @@ if [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
     fi
 fi
 
+stage_started="$(date +%s)"
 maintain_object_store
+echo "[cloudbench] git-maintenance $(( $(date +%s) - stage_started ))s"
 
 remote_url="$(git_cmd remote get-url origin)"
 if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]; then
@@ -158,7 +160,9 @@ if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]
     [ -n "$APP_USER" ] && chown "$APP_USER" "$auth_config"
 fi
 
+stage_started="$(date +%s)"
 git_cmd fetch --no-tags origin "$REF" || fetch_status=$?
+echo "[cloudbench] git-fetch $(( $(date +%s) - stage_started ))s"
 if [ "${fetch_status:-0}" -ne 0 ]; then
     echo "[cloudbench] FATAL: could not fetch requested ref $REF" >&2
     exit 1
@@ -169,8 +173,12 @@ if [[ "$REF" =~ ^[0-9a-fA-F]{40}$ ]] \
     echo "[cloudbench] FATAL: fetched $fetched instead of requested SHA $REF" >&2
     exit 1
 fi
+stage_started="$(date +%s)"
 git_cmd checkout -f "$fetched"
+echo "[cloudbench] git-checkout $(( $(date +%s) - stage_started ))s"
+stage_started="$(date +%s)"
 git_cmd reset --hard "$fetched"
+echo "[cloudbench] git-reset $(( $(date +%s) - stage_started ))s"
 actual="$(git_cmd rev-parse HEAD)"
 if [ "$actual" != "$fetched" ]; then
     echo "[cloudbench] FATAL: checkout verification failed ($actual != $fetched)" >&2
