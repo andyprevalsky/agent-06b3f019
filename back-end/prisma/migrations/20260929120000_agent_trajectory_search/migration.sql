@@ -12,10 +12,13 @@ CREATE TABLE IF NOT EXISTS "AgentTrajectorySearch" (
   "agentGoal" TEXT NOT NULL DEFAULT '',
   "agentTitle" TEXT,
   "archivePath" TEXT,
-  "traceKind" TEXT NOT NULL DEFAULT 'message',
-  CONSTRAINT "AgentTrajectorySearch_userId_fkey"
-    FOREIGN KEY ("userId") REFERENCES "User"("userId") ON DELETE CASCADE ON UPDATE CASCADE
+  "traceKind" TEXT NOT NULL DEFAULT 'message'
 );
+
+-- Local db push may retain an earlier prototype FK. Operational agents can
+-- exist before a User row, and this derived projection must not block messages.
+ALTER TABLE "AgentTrajectorySearch"
+  DROP CONSTRAINT IF EXISTS "AgentTrajectorySearch_userId_fkey";
 
 CREATE INDEX IF NOT EXISTS "AgentTrajectorySearch_userId_createdAt_messageId_idx"
   ON "AgentTrajectorySearch"("userId", "createdAt" DESC, "messageId" DESC);
@@ -93,6 +96,18 @@ DROP TRIGGER IF EXISTS "Message_trajectory_search_delete" ON "Message";
 CREATE TRIGGER "Message_trajectory_search_delete"
 AFTER DELETE ON "Message"
 FOR EACH ROW EXECUTE FUNCTION delete_live_agent_trajectory_search();
+
+CREATE OR REPLACE FUNCTION delete_user_agent_trajectory_search() RETURNS trigger AS $$
+BEGIN
+  DELETE FROM "AgentTrajectorySearch" WHERE "userId" = OLD."userId";
+  RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS "User_trajectory_search_delete" ON "User";
+CREATE TRIGGER "User_trajectory_search_delete"
+AFTER DELETE ON "User"
+FOR EACH ROW EXECUTE FUNCTION delete_user_agent_trajectory_search();
 
 WITH RECURSIVE roots AS (
   SELECT a.id, a.id AS root_id FROM "Agent" a WHERE a."parentAgentId" IS NULL

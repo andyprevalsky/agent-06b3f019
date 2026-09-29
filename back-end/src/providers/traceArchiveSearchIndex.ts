@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import {
   decryptAndValidateArtifact,
   listArchivedObjectsStrict,
@@ -180,7 +180,7 @@ async function replaceArchivedRows(
   rootAgentId: string,
   rows: ArchivedTrajectoryRow[]
 ): Promise<void> {
-  await prisma.$transaction(
+  await runTransactionWithRetry(
     async (tx) => {
       await tx.agentTrajectorySearch.deleteMany({
         where: { rootAgentId, archivePath: { not: null } },

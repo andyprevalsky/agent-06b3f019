@@ -21,13 +21,13 @@ function isCanonicalPathInsideRoot(root: string, candidate: string): boolean {
 function resolveOpenDescriptorPath(descriptor: number): string {
   const descriptorPath =
     process.platform === 'linux' ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
-  try {
+  if (process.platform === 'linux') {
     const resolved = realpathSync.native(descriptorPath);
     if (resolved !== descriptorPath) return resolved;
-  } catch {
-    // Darwin's descriptor filesystem may not expose the vnode path to realpath.
   }
   if (process.platform === 'darwin') {
+    // realpath(/dev/fd/N) can return /dev/fd/<basename> on macOS, which is
+    // not the opened vnode. lsof resolves the descriptor's actual file path.
     const output = execFileSync(
       '/usr/sbin/lsof',
       ['-a', '-p', String(process.pid), '-d', String(descriptor), '-Fn'],

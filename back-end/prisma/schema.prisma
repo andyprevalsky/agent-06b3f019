@@ -205,7 +205,6 @@ model AgentTrajectorySearch {
   agentTitle  String?
   archivePath String?
   traceKind   String   @default("message")
-  user        User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
 
   @@index([userId, createdAt(sort: Desc), messageId(sort: Desc)])
   @@index([userId, rootAgentId, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_root_time_idx")
@@ -314,7 +313,6 @@ model ToolSideEffect {
 model User {
   id                          String                      @id @default(uuid())
   userId                      String                      @unique
-  trajectorySearchRows        AgentTrajectorySearch[]
   name                        String?
   email                       String?
   deliveryRecipientName       String?

@@ -77,7 +77,6 @@ from .challenge_recovery import (
     recover_from_challenge,
     verify_live_page_cleared_challenge,
 )
-from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     browser_start_to_close_timeout_minutes,
@@ -6539,10 +6538,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         t_nav = time.monotonic()
         if not write_lock_resume_state:
             from browser_use.browser.events import NavigateToUrlEvent
-
-            # Align browser-use's hardcoded 20s Page.navigate wait with our
-            # TIMEOUT_NavigateToUrlEvent budget before the first start_url hit.
-            apply_browser_use_navigate_timeout_patch()
 
             nav_url = start_url
             if not nav_url.startswith(("http://", "https://", "about:", "file:")):

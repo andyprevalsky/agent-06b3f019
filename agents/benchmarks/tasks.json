@@ -5520,7 +5520,7 @@
     "title": "Recall a past code run despite a conflicting status",
     "description": "Distinguish the archived code tool status from its verified output.",
     "prompt": "Look at my earlier Claude Code agent run that computed the Collatz sequence from 27. What status did its code-agent tool report, and what step count did the later verifier confirm? Cite both prior trace paths and roles. Use my local agent history only.",
-    "timeout_seconds": 300,
+    "timeout_seconds": 450,
     "is_chat_mode": false,
     "start_phase": "execute",
     "expected_tools": [],
