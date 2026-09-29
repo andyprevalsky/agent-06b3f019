@@ -805,6 +805,13 @@ BENCHES=()
 SIM_ON_CSV=""
 
 bench_needs_large_primary() {  # bench_needs_large_primary <task>
+    # An infra probe boots the isolated stack and emits DONE without executing
+    # the sampled task or its bundled frontend/browser workload. Use the
+    # proven default primary shape so preflight can borrow the stopped 20GB
+    # pool instead of restoring legacy 40GB warm volumes for task names that
+    # would need 8GB only during real execution. Real benches keep their
+    # catalog-specific shape below.
+    [ "${INFRA_PROBE:-0}" = "1" ] && return 1
     case "$1" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
             return 0
