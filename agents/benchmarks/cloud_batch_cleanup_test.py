@@ -307,6 +307,91 @@ async def test_missing_create_response_never_proves_zero_allocation():
             await bench._finalize_owned_cloud_batch("http://localhost:1", results, {})
 
 
+@async_case
+async def test_composite_result_finalizes_each_exact_root_without_changing_verdict():
+    """A prerequisite gate and its task are two roots of one benchmark record."""
+    row = result(f"{ROOT},{CHILD}")
+    row.name = "minted-agent-accounts-x"
+    row.logs = {
+        "auth_bundle_biometrics": {"worker_logs": [json.dumps({"agent_id": ROOT})]},
+        "post": {"worker_logs": [json.dumps({"agent_id": CHILD})]},
+        "worker_logs": [],
+    }
+    events = []
+
+    def query(_url, aid, *, require_deleted=False):
+        assert aid in {ROOT, CHILD}
+        events.append(("query", aid))
+        return {"root_user_id": ROOT, "tree_agent_ids": [aid],
+                "browser_sessions": [], "purchase_cleanup": []}
+
+    async def pause(_url, aid):
+        events.append(("pause", aid))
+        return True
+
+    async def snapshot(_url, aid, _data, logs, **_kwargs):
+        events.append(("snapshot", aid))
+        logs["tree"] = {aid: {"parent_agent_id": None}}
+        return {"messages": []}
+
+    async def archive(_url, aid, _task, **_kwargs):
+        events.append(("archive", aid))
+        return f"archive-{aid}", {}
+
+    async def delete(_url, aid):
+        events.append(("delete", aid))
+
+    def close(_url, aid, _before, **_kwargs):
+        events.append(("provider", aid))
+        return {"root_agent_id": aid, "root_deleted": True}
+
+    async def payments(_url, aid, _evidence):
+        events.append(("payment", aid))
+        return {"root_agent_id": aid, "purchases": []}
+
+    with (
+        patch.object(cleanup, "exact_root_sessions", query),
+        patch.object(bench, "pause_agent", pause),
+        patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),
+        patch.object(bench, "finalize_archive_and_score_world_model", archive),
+        patch.object(bench, "delete_agent", delete),
+        patch.object(cleanup, "close_exact_root_sessions", close),
+        patch.object(bench, "_finalize_owned_root_payments", payments),
+    ):
+        await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+
+    for aid, key in ((ROOT, "auth_bundle_biometrics"), (CHILD, "post")):
+        assert ("pause", aid) in events
+        assert ("archive", aid) in events
+        assert ("delete", aid) in events
+        assert ("provider", aid) in events
+        assert ("payment", aid) in events
+        assert row.logs[key]["cloud_cleanup_evidence"]["root_agent_id"] == aid
+        assert row.logs[key]["cloud_provider_cleanup"]["root_agent_id"] == aid
+        assert row.logs[key]["cloud_payment_cleanup"]["root_agent_id"] == aid
+    assert row.logs["post"]["cloud_archive_manifest_ref"] == f"archive-{CHILD}"
+    assert row.agent_id == f"{ROOT},{CHILD}"
+    assert row.benchmark_status == "FAILED" and row.passed is False
+
+
+@async_case
+async def test_minted_dispatch_preserves_live_root_observer_for_interrupt_cleanup():
+    task = bench.get_task_by_name("minted-agent-accounts-x")
+    observed = []
+
+    async def composite(_url, _task, _keep_failed, *, on_agent_created):
+        on_agent_created("gate-stage", ROOT)
+        on_agent_created("post-stage", CHILD)
+        return result(f"{ROOT},{CHILD}")
+
+    with patch.object(bench, "run_minted_agent_account_task", composite):
+        await bench.run_single_task(
+            "http://localhost:1", task,
+            on_agent_created=lambda name, aid: observed.append((name, aid)),
+        )
+    assert observed == [("gate-stage", ROOT), ("post-stage", CHILD)]
+
+
 def test_provider_cleanup_rejects_drift_and_requires_sealed_descendants():
     before = {
         "root_exists": True,

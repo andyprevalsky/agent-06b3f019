@@ -37,6 +37,8 @@ headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
            "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
 url = f"http://127.0.0.1:{port}/runtime-evidence"
 shutdown_url = f"http://127.0.0.1:{port}/shutdown-health"
+driver_url = f"http://127.0.0.1:{port}/driver-health"
+ack_url = f"http://127.0.0.1:{port}/cloudbench-driver-clean-{run_token}.ack"
 def request(suffix=""):
     return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=6)
 def manifest():
@@ -44,6 +46,22 @@ def manifest():
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
         return json.loads(data)
+def exited_without_ack():
+    # /shutdown-health is 409 until the controller sends POST /shutdown, even
+    # when a failed driver's boot supervisor has already sealed state=exited.
+    # Read both exact guest facts before deciding the runtime can never seal.
+    try:
+        with opener.open(urllib.request.Request(driver_url, headers=headers), timeout=6):
+            return False
+    except urllib.error.HTTPError as error:
+        if error.code != 410:
+            return False
+    try:
+        with opener.open(urllib.request.Request(ack_url, headers=headers), timeout=6) as response:
+            return response.read(256).strip() != run_token.encode()
+    except urllib.error.HTTPError as error:
+        return error.code == 404
+unacked_exits = 0
 # DONE is emitted before the guest's EXIT trap drains the worker and seals the
 # runtime. A 409 at this boundary means the exact guest is still cleaning up;
 # it is not an immutable artifact failure. The alarm bounds seal wait and the
@@ -72,6 +90,9 @@ while True:
                 raise RuntimeError("driver exited without cleanup acknowledgement") from shutdown_error
             if shutdown_error.code not in (409, 503):
                 raise
+        unacked_exits = unacked_exits + 1 if exited_without_ack() else 0
+        if unacked_exits >= 2:
+            raise RuntimeError("driver exited without cleanup acknowledgement")
         time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]

@@ -20280,7 +20280,7 @@ def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None
     assert "Never re-enter Machines-API SSH after DONE" in collection
 
 
-@pytest.mark.parametrize("fault", ["none", "missing-worker", "missing-backend", "auth", "run", "machine", "unsealed", "symlink", "oversize", "fifo", "stack-token", "stack-state", "extra-worker", "hash", "length", "manifest-drift", "short-read", "early-driver", "missing-owner", "wrong-owner", "result-mismatch", "standalone", "durability", "directory-fsync", "infra-probe", "held-demo"])
+@pytest.mark.parametrize("fault", ["none", "missing-worker", "missing-backend", "auth", "run", "machine", "unsealed", "symlink", "oversize", "fifo", "stack-token", "stack-state", "extra-worker", "hash", "length", "manifest-drift", "short-read", "early-driver", "driver-exited-no-request", "missing-owner", "wrong-owner", "result-mismatch", "standalone", "durability", "directory-fsync", "infra-probe", "held-demo"])
 def test_boot_terminal_runtime_evidence_collects_complete_logs(tmp_path: Path, fault: str) -> None:
     """A terminal FAILED task still needs every raw worker/backend log before destruction."""
     guest = tmp_path / "guest"
@@ -20298,6 +20298,8 @@ def test_boot_terminal_runtime_evidence_collects_complete_logs(tmp_path: Path, f
         (logs / name).write_bytes(data)
     if fault == "early-driver":
         (context / "run.json").unlink()
+    elif fault == "driver-exited-no-request":
+        (guest / "cloudbench-driver-clean-run-token.ack").unlink()
     elif fault == "missing-worker":
         (logs / "worker.1.log").unlink()
     elif fault == "missing-backend":
@@ -20432,7 +20434,21 @@ cloudbench_prepare_runtime_evidence
 candidate_run="$OUT_DIR/candidate.json"
 {binding}
 '''
+            started_at = time.monotonic()
             result = subprocess.run(["bash", "-c", script], env=environment, text=True, capture_output=True, timeout=15)
+            if fault == "driver-exited-no-request":
+                assert time.monotonic() - started_at < 2, "terminal driver consumed the whole evidence deadline"
+                assert "driver exited without cleanup acknowledgement" in result.stderr
+                helper_started = time.monotonic()
+                helper = subprocess.run(
+                    [sys.executable, str(CLOUD_SCRIPT.parent / "cloudbench-collect-runtime-evidence.py"),
+                     str(output / "remote-logs"), str(int(ready.read_text())),
+                     "run-token", "fixture-machine", "3"],
+                    env=environment, text=True, capture_output=True, timeout=5,
+                )
+                assert helper.returncode != 0
+                assert time.monotonic() - helper_started < 2
+                assert "driver exited without cleanup acknowledgement" in helper.stderr
             manifest_path = output / "remote-logs/runtime-evidence/manifest.json"
             assert (output / "remote-logs/cloudbench-driver.log").read_bytes() == driver.read_bytes()
             if fault in {"infra-probe", "held-demo"}:

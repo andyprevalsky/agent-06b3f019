@@ -5600,10 +5600,62 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
 
 async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
     """Finalize each owned root after all tasks, while workers can still persist cleanup."""
-    by_id = {result.agent_id: result for result in results if result.agent_id}
-    owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
     # A missing create response cannot prove that no root was allocated.
     failures = []
+    by_id = {}
+    stage_logs = {}
+    primary_ids = set()
+    for result in results:
+        if not result.agent_id:
+            continue
+        root_ids = result.agent_id.split(",")
+        if len(root_ids) == 1:
+            bindings = [(root_ids[0], result.logs)]
+        else:
+            # Composite tasks record one benchmark result for independent
+            # prerequisite/task roots. Preserve that evaluator result while
+            # finalizing each root's own archive and external ownership.
+            try:
+                valid_roots = (len(root_ids) == len(set(root_ids)) and all(
+                    str(uuid.UUID(aid)) == aid for aid in root_ids
+                ))
+            except ValueError:
+                valid_roots = False
+            if not valid_roots:
+                failures.append(f"{result.name}: malformed composite root identity")
+                continue
+            nested = [logs for logs in (result.logs or {}).values()
+                      if isinstance(logs, dict) and isinstance(logs.get("worker_logs"), list)]
+            if len(nested) != len(root_ids):
+                failures.append(f"{result.name}: composite root evidence is incomplete")
+                continue
+            bindings = list(zip(root_ids, nested))
+            for aid, logs in bindings:
+                # The stage ordering comes from the same composite routine
+                # that joined agent_id. Check the log/tree anchor so a swapped
+                # or foreign stage cannot silently receive another root's
+                # cleanup receipt.
+                tree = logs.get("tree") or {}
+                observed = set()
+                for raw in logs["worker_logs"]:
+                    try:
+                        event = json.loads(raw) if isinstance(raw, str) else raw
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(event, dict) and isinstance(event.get("agent_id"), str):
+                        observed.add(event["agent_id"])
+                if aid not in tree and aid not in observed:
+                    failures.append(f"{result.name}: composite stage lacks exact root {aid}")
+                if (set(root_ids) - {aid}) & (set(tree) | observed):
+                    failures.append(f"{result.name}: composite stage contains a foreign root")
+        for aid, logs in bindings:
+            if aid in by_id:
+                failures.append(f"{result.name}: duplicate exact root {aid}")
+                continue
+            by_id[aid] = result
+            stage_logs[aid] = logs if isinstance(logs, dict) else {}
+        primary_ids.add(root_ids[-1])
+    owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
     if any(not r.agent_id and r.status != "SKIPPED" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
@@ -5629,7 +5681,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         before = snapshots.get(aid)
         identity = _owned_cleanup_user_id.set(before["root_user_id"]) if before is not None else None
         try:
-            logs = result.logs if result is not None and isinstance(result.logs, dict) else {}
+            logs = stage_logs.get(aid, {})
             evidence = {"root_agent_id": aid, "errors": []}
             logs["cloud_cleanup_evidence"] = evidence
             try:
@@ -5652,13 +5704,18 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 )
                 if result is None:
                     raise RuntimeError("owned cloud root did not produce a task result")
-                result.logs = logs
-                result.message_count = len(data.get("messages") or [])
-                result.archive_manifest_ref, result.world_model_fidelity = await finalize_archive_and_score_world_model(
+                if aid in primary_ids and "," not in result.agent_id:
+                    result.message_count = len(data.get("messages") or [])
+                archive_ref, world_model_fidelity = await finalize_archive_and_score_world_model(
                     base_url, aid, result.name, force=True, owned_batch_final=True, benchmark_passed=result.passed,
                     benchmark_status=result.benchmark_status, failure_reason=result.failure_reason,
                 )
-                if not result.archive_manifest_ref:
+                logs["cloud_archive_manifest_ref"] = archive_ref
+                logs["cloud_world_model_fidelity"] = world_model_fidelity
+                if aid in primary_ids:
+                    result.archive_manifest_ref = archive_ref
+                    result.world_model_fidelity = world_model_fidelity
+                if not archive_ref:
                     raise RuntimeError("owned cloud root final archive was not confirmed")
             except Exception as error:
                 detail = str(error) or type(error).__name__
@@ -5721,7 +5778,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                             evidence["worker_logs_observed_at"] = datetime.now(timezone.utc).isoformat()
                         except Exception as capture_error:
                             evidence["worker_logs_capture_error"] = str(capture_error) or type(capture_error).__name__
-                    result.logs = logs
+                    if "," not in result.agent_id:
+                        result.logs = logs
         finally:
             if identity is not None:
                 _owned_cleanup_user_id.reset(identity)
@@ -8913,11 +8971,15 @@ def _auth_bundle_biometrics_gate_enabled() -> bool:
 async def _run_auth_bundle_biometrics_gate(
     base_url: str,
     keep_failed_agents: bool,
+    on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run the most sensitive public biometrics score gate before auth-bundle probes."""
     gate_task = get_task_by_name(BIOMETRICS_WEBDECOY_TASK_NAME)
     print("    🧬 Auth bundle biometrics gate: WebDecoy FCaptcha score must be 0.00")
-    return await run_single_task(base_url, gate_task, keep_failed_agents=keep_failed_agents)
+    return await run_single_task(
+        base_url, gate_task, keep_failed_agents=keep_failed_agents,
+        on_agent_created=on_agent_created,
+    )
 
 
 def _aggregate_benchmark_status(passed: bool, *results: TaskResult) -> str:
@@ -8940,6 +9002,7 @@ async def run_minted_agent_account_task(
     base_url: str,
     task: BenchmarkTask,
     keep_failed_agents: bool = False,
+    on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run the stateful minted-account benchmark: signup task, DB assertion, booking task."""
     if "localhost" not in base_url and "127.0.0.1" not in base_url:
@@ -8955,6 +9018,10 @@ async def run_minted_agent_account_task(
             message_count=0,
             failure_reason="Minted account benchmark is local-only because it deletes local DB rows.",
         )
+
+    def remember_owned_root(_stage_name: str, agent_id: str) -> None:
+        if on_agent_created is not None:
+            on_agent_created(task.name, agent_id)
 
     start = time.time()
     target_url = os.environ.get("BENCHMARK_MINTED_TARGET_URL") or _default_minted_target_url(base_url, task.name)
@@ -8996,6 +9063,7 @@ async def run_minted_agent_account_task(
         auth_bundle_biometrics_result = await _run_auth_bundle_biometrics_gate(
             base_url,
             keep_failed_agents,
+            on_agent_created=remember_owned_root,
         )
         if not auth_bundle_biometrics_result.passed:
             benchmark_status = _aggregate_benchmark_status(False, auth_bundle_biometrics_result)
@@ -9080,7 +9148,10 @@ async def run_minted_agent_account_task(
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
         try:
-            post_result = await run_single_task(base_url, post_task, keep_failed_agents=keep_failed_agents)
+            post_result = await run_single_task(
+                base_url, post_task, keep_failed_agents=keep_failed_agents,
+                on_agent_created=remember_owned_root,
+            )
         finally:
             if previous_write_lock is None:
                 del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
@@ -9176,7 +9247,10 @@ async def run_minted_agent_account_task(
         previous_signup_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "false"
         try:
-            signup_result = await run_single_task(base_url, signup_task, keep_failed_agents=keep_failed_agents)
+            signup_result = await run_single_task(
+                base_url, signup_task, keep_failed_agents=keep_failed_agents,
+                on_agent_created=remember_owned_root,
+            )
         finally:
             if previous_signup_write_lock is None:
                 del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
@@ -9263,7 +9337,10 @@ async def run_minted_agent_account_task(
             previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
             os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
             try:
-                post_result = await run_single_task(base_url, post_task, keep_failed_agents=keep_failed_agents)
+                post_result = await run_single_task(
+                    base_url, post_task, keep_failed_agents=keep_failed_agents,
+                    on_agent_created=remember_owned_root,
+                )
             finally:
                 if previous_write_lock is None:
                     del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
@@ -9430,7 +9507,10 @@ async def run_minted_agent_account_task(
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
         os.environ["BENCHMARK_WRITE_LOCK_ENABLED"] = "true"
         try:
-            booking_result = await run_single_task(base_url, booking_task, keep_failed_agents=keep_failed_agents)
+            booking_result = await run_single_task(
+                base_url, booking_task, keep_failed_agents=keep_failed_agents,
+                on_agent_created=remember_owned_root,
+            )
         finally:
             if previous_write_lock is None:
                 del os.environ["BENCHMARK_WRITE_LOCK_ENABLED"]
@@ -12359,7 +12439,10 @@ async def run_single_task(
         await _preflight_close_purchase_reuse_gate(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
-        return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
+        return await run_minted_agent_account_task(
+            base_url, task, keep_failed_agents,
+            on_agent_created=on_agent_created,
+        )
 
     if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode() and _is_local_base_url(base_url):
         auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
