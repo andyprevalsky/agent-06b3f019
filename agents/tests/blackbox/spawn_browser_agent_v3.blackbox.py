@@ -582,6 +582,10 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
     assert not structured_response_covers_schema({}, optional_only)
     assert not structured_response_covers_schema({"notes": ""}, optional_only)
     assert structured_response_covers_schema({"notes": "seen"}, optional_only)
+    # Unknown keys (e.g. error) must not satisfy an optional-only schema.
+    assert not structured_response_covers_schema(
+        {"error": "extraction failed"}, optional_only
+    )
     # Score changes reset the streak even when reasoning matches.
     fingerprint, streak = next_identical_reject_streak(
         previous_fingerprint=fingerprint,

@@ -58,11 +58,27 @@ async function bindThenReuseIsUserPersistent(): Promise<void> {
 
   const created = await getOrCreateBenchmarkKernelProfile(client as never, 'agent-b');
   assert.equal(created.profileSource, 'new_user_persistent');
-  markBenchmarkKernelProfileBound('agent-b');
+  await markBenchmarkKernelProfileBound('agent-b', 'profile-bound');
 
   const rotated = await getOrCreateBenchmarkKernelProfile(client as never, 'agent-b');
   assert.equal(rotated.profileId, 'profile-bound');
   assert.equal(rotated.profileSource, 'user_persistent');
+}
+
+async function mismatchedProfileIdDoesNotBind(): Promise<void> {
+  resetBenchmarkKernelProfilesForTests();
+  const client = fakeClient(async () => ({ id: 'profile-in-memory' }));
+
+  await getOrCreateBenchmarkKernelProfile(client as never, 'agent-d');
+  // Recreate can pass a persisted remote.profileId that is not this reservation.
+  await markBenchmarkKernelProfileBound('agent-d', 'profile-from-db');
+
+  const retry = await getOrCreateBenchmarkKernelProfile(client as never, 'agent-d');
+  assert.equal(
+    retry.profileSource,
+    'new_user_persistent',
+    'mismatched profileId must not mark the in-memory reservation bound'
+  );
 }
 
 async function createFailureClearsReservation(): Promise<void> {
@@ -88,6 +104,7 @@ async function createFailureClearsReservation(): Promise<void> {
 async function run(): Promise<void> {
   await retryBeforeBindKeepsNewUserPersistent();
   await bindThenReuseIsUserPersistent();
+  await mismatchedProfileIdDoesNotBind();
   await createFailureClearsReservation();
   process.stdout.write('PASS benchmark Kernel profile isolation labeling\n');
 }

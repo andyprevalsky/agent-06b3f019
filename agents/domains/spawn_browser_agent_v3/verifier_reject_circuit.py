@@ -95,8 +95,13 @@ def structured_response_covers_schema(
         if isinstance(value, (list, dict)) and len(value) == 0:
             return False
     if not saw_required:
-        # Optional-only schema: require at least one non-empty field value.
-        for value in structured_response.values():
+        # Optional-only schema: require at least one named optional field
+        # with a non-empty value (ignore unrelated keys like "error").
+        for field in fields:
+            name = field.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            value = structured_response.get(name)
             if value is None:
                 continue
             if isinstance(value, str) and not value.strip():

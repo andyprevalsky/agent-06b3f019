@@ -79,6 +79,22 @@
       }
     },
     {
+      "name": "foreach_child_historical_suffixed_dropped",
+      "is_internal": true,
+      "message": {
+        "role": "TOOL",
+        "text": "Pre-marker for_each child rows still use parent:idx toolCallIds.",
+        "metadata": {
+          "toolName": "spawn_general_purpose_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "foreach-base:3",
+          "subAgentIds": ["child-a", "child-b"],
+          "busId": "bus-1",
+          "spawnGroupId": "foreach-base"
+        }
+      }
+    },
+    {
       "name": "provider_numeric_suffixed_toolCallId_kept",
       "is_internal": false,
       "message": {

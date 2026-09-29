@@ -6,7 +6,23 @@ classification fixtures: shared/context-scope/fixtures.json.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List
+
+_PROVIDER_NUMERIC_TOOL_CALL_ID = re.compile(r"^(toolu|tooluse):\d+$", re.IGNORECASE)
+_HISTORICAL_FOR_EACH_SUFFIX = re.compile(r":[0-9]+$")
+
+
+def _is_provider_numeric_tool_call_id(tool_call_id: str) -> bool:
+    """Provider-native ids that look like ``base:digits`` but are not for_each children."""
+    return _PROVIDER_NUMERIC_TOOL_CALL_ID.fullmatch(tool_call_id) is not None
+
+
+def _has_historical_for_each_child_suffix(tool_call_id: str) -> bool:
+    """Historical for_each child UI rows use ``<parent>:<idx>`` (ASCII digit idx)."""
+    if _HISTORICAL_FOR_EACH_SUFFIX.search(tool_call_id) is None:
+        return False
+    return not _is_provider_numeric_tool_call_id(tool_call_id)
 
 
 def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
@@ -16,12 +32,13 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     For_each child tree rows are producer-marked with ``forEachChild: true``
     plus plural ``subAgentIds``; those UI rows are hidden because the parent
     receives one aggregate result under the original toolCallId (and
-    ``forEachAggregate: true``). A numeric ``toolCallId`` suffix alone is not
-    enough — provider IDs like ``toolu:123`` must stay parent-visible.
+    ``forEachAggregate: true``). Historical rows (pre-marker) still use a
+    ``<parent>:<idx>`` toolCallId with nonempty ``subAgentIds`` and are also
+    dropped. A bare provider id like ``toolu:123`` must stay parent-visible.
     Direct ``spawn_general_purpose_agent`` results also use plural
-    ``subAgentIds`` but omit ``forEachChild``, so they remain visible.
-    Parent spawn FINISHED / task_complete terminals omit ``subAgentId`` so the
-    result body stays in parent/chat context.
+    ``subAgentIds`` but omit ``forEachChild`` and the child suffix, so they
+    remain visible. Parent spawn FINISHED / task_complete terminals omit
+    ``subAgentId`` so the result body stays in parent/chat context.
     """
     if not isinstance(message, dict):
         return False
@@ -40,7 +57,11 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     if not isinstance(sub_agent_ids, list) or len(sub_agent_ids) == 0:
         return False
 
-    return metadata.get("forEachChild") is True
+    if metadata.get("forEachChild") is True:
+        return True
+
+    tool_call_id = str(metadata.get("toolCallId") or "")
+    return _has_historical_for_each_child_suffix(tool_call_id)
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

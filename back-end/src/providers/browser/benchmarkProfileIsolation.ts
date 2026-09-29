@@ -56,10 +56,21 @@ export async function getOrCreateBenchmarkKernelProfile(
   }
 }
 
-/** Mark the agent's isolated Kernel profile as successfully bound to a session. */
-export function markBenchmarkKernelProfileBound(agentId: string): void {
+/**
+ * Mark the agent's isolated Kernel profile as successfully bound to a session.
+ * Only binds when `profileId` matches the in-memory reservation (recreate can
+ * reuse a persisted remote.profileId that differs).
+ */
+export async function markBenchmarkKernelProfileBound(
+  agentId: string,
+  profileId: string
+): Promise<void> {
   const entry = kernelProfilesByAgent.get(agentId);
   if (entry === undefined) return;
+  const entryProfileId = await entry.profileIdPromise.catch(() => undefined);
+  if (entryProfileId !== profileId) return;
+  const current = kernelProfilesByAgent.get(agentId);
+  if (current !== entry) return;
   entry.boundToSession = true;
 }
 

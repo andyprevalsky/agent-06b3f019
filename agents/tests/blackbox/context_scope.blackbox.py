@@ -38,7 +38,9 @@ def test_shared_fixtures() -> None:
     assert "parent_spawn_finished_result_kept" in kept_names
     assert "general_purpose_aggregate_unsuffixed_toolCallId_kept" in kept_names
     assert "explore_web_fetch_with_subAgentId_dropped" not in kept_names
-    assert "foreach_child_suffixed_toolCallId_dropped" not in kept_names
+    assert "foreach_child_producer_marked_dropped" not in kept_names
+    assert "foreach_child_historical_suffixed_dropped" not in kept_names
+    assert "provider_numeric_suffixed_toolCallId_kept" in kept_names
 
 
 async def run_all_tests() -> dict:

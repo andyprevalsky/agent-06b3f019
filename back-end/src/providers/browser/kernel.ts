@@ -471,7 +471,7 @@ export async function createKernelSessionWithContext(
   // Bind only after the session row is durable so a failed persist leaves the
   // in-memory profile as new_user_persistent for the next create attempt.
   if (remote.profileId !== null) {
-    markBenchmarkKernelProfileBound(agentId);
+    await markBenchmarkKernelProfileBound(agentId, remote.profileId);
   }
 
   let validationBrowser: Browser | null = remote.validationBrowser;
@@ -605,7 +605,7 @@ async function recreateKernelSession(
     throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
   }
   if (remote.profileId !== null) {
-    markBenchmarkKernelProfileBound(oldSession.agentId);
+    await markBenchmarkKernelProfileBound(oldSession.agentId, remote.profileId);
   }
 
   // Evict the superseded Kernel browser so we never leak a paid session. On the
