@@ -448,6 +448,7 @@ class GrepTool(BaseModel):
                 "whatsapp",
                 "network",
                 "agent_network",
+                "agent_trajectories",
                 "transactions",
                 "documents",
                 "summary",
@@ -466,6 +467,9 @@ class GrepTool(BaseModel):
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
+            "agent_trajectories searches prior user-owned agent runs across chat, SMS, and "
+            "Temporal; it excludes the current agent tree. Cite its returned path and message "
+            "role exactly; root or child is an agent hierarchy label, not a message role. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
@@ -487,6 +491,7 @@ class GrepTool(BaseModel):
             "whatsapp",
             "network",
             "agent_network",
+            "agent_trajectories",
             "transactions",
             "documents",
             "summary",
@@ -551,6 +556,7 @@ class GrepTool(BaseModel):
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
             "  agent_network: path\n"
+            "  agent_trajectories: path, since, until, role, surface\n"
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"

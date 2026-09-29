@@ -8,12 +8,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
+TRAJECTORY_SQL="$BACKEND_DIR/prisma/migrations/20260929120000_agent_trajectory_search/migration.sql"
 DATABASE_TARGET="${DIRECT_URL:-${DATABASE_URL:-}}"
 START_MARKER="-- Protect the rolling-deploy window"
 END_MARKER="-- Prefer explicit logical-iteration checkpoints"
 
 if [[ ! -f "$MIGRATION_SQL" ]]; then
   echo "Workflow migration is missing: $MIGRATION_SQL" >&2
+  exit 1
+fi
+if [[ ! -f "$TRAJECTORY_SQL" ]]; then
+  echo "Trajectory migration is missing: $TRAJECTORY_SQL" >&2
   exit 1
 fi
 
@@ -44,11 +49,16 @@ if [[ -n "${DB_CONTAINER:-}" ]] &&
       -U "${LOCAL_DB_USER:-postgres}" \
       -d "${LOCAL_DB_NAME:-victoria}" \
       -v ON_ERROR_STOP=1 >/dev/null
+  docker exec -i "$DB_CONTAINER" psql \
+    -U "${LOCAL_DB_USER:-postgres}" \
+    -d "${LOCAL_DB_NAME:-victoria}" \
+    -v ON_ERROR_STOP=1 < "$TRAJECTORY_SQL" >/dev/null
 elif [[ -n "$DATABASE_TARGET" ]] && command -v psql >/dev/null 2>&1; then
   printf '%s\n' "$DDL_SQL" | psql "$DATABASE_TARGET" -v ON_ERROR_STOP=1 >/dev/null
+  psql "$DATABASE_TARGET" -v ON_ERROR_STOP=1 < "$TRAJECTORY_SQL" >/dev/null
 else
   echo "A running DB_CONTAINER or host psql with DATABASE_URL/DIRECT_URL is required." >&2
   exit 1
 fi
 
-echo "Applied local workflow functions and triggers."
+echo "Applied local workflow and trajectory search functions and triggers."

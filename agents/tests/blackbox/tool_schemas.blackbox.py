@@ -256,6 +256,7 @@ def test_grep_tool_schema_exact_contract():
         "whatsapp",
         "network",
         "agent_network",
+        "agent_trajectories",
         "transactions",
         "documents",
         "summary",

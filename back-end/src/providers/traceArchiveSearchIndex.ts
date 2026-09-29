@@ -1,0 +1,285 @@
+/** Materialized, user-scoped grep index for encrypted trace bundles in R2. */
+
+import { createHash } from 'node:crypto';
+import { Prisma } from '@prisma/client';
+import { prisma } from './database';
+import {
+  decryptAndValidateArtifact,
+  listArchivedObjectsStrict,
+  readArchivedArtifactStrict,
+} from './traceArchive';
+import { withArchiveManifestLock } from './traceArchiveManifest';
+import type { ScopedDbFixture } from './traceArchiveFixture';
+
+const END_FIXTURE_PATH = 'db/end.fixture.json.gz.enc';
+const TRACE_ROLES = new Set(['USER', 'ASSISTANT', 'TOOL']);
+const WRITE_BATCH_SIZE = 100;
+
+type RecordValue = Record<string, unknown>;
+
+export interface ArchivedTrajectoryRow {
+  messageId: string;
+  userId: string;
+  rootAgentId: string;
+  agentId: string;
+  surface: string;
+  role: string;
+  createdAt: Date;
+  searchText: string;
+  agentGoal: string;
+  agentTitle: string | null;
+  archivePath: string;
+  traceKind: string;
+}
+
+function record(value: unknown): RecordValue | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as RecordValue)
+    : null;
+}
+
+function string(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value : null;
+}
+
+function date(value: unknown, fallback: Date): Date {
+  const candidate = value instanceof Date
+    ? value
+    : typeof value === 'number' ? new Date(value) : new Date(String(value ?? ''));
+  return Number.isNaN(candidate.getTime()) ? fallback : candidate;
+}
+
+function textParts(value: unknown, depth = 0): string[] {
+  if (depth > 8 || value === null || value === undefined) return [];
+  if (typeof value === 'string') {
+    return value.startsWith('data:image/') || value.startsWith('data:audio/') ? [] : [value];
+  }
+  if (Array.isArray(value)) return value.flatMap((item) => textParts(item, depth + 1));
+  const object = record(value);
+  if (object === null || ['image', 'image_url', 'audio', 'video'].includes(String(object.type))) {
+    return [];
+  }
+  return ['text', 'content', 'output', 'arguments', 'result']
+    .flatMap((key) => textParts(object[key], depth + 1));
+}
+
+function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] {
+  const rootAgentId = fixture.root_agent_id;
+  const agents = new Map(
+    (fixture.rows.Agent ?? [])
+      .map(record)
+      .filter((agent): agent is RecordValue => agent !== null && string(agent.id) !== null)
+      .map((agent) => [String(agent.id), agent])
+  );
+  const fallback = date(fixture.captured_at, new Date(0));
+  return (fixture.rows.Message ?? []).flatMap((entry) => {
+    const message = record(entry);
+    const id = string(message?.id);
+    const agentId = string(message?.agentId);
+    const role = string(message?.role)?.toUpperCase();
+    const searchText = string(message?.text);
+    if (!id || !agentId || !role || !TRACE_ROLES.has(role) || !searchText) return [];
+    const agent = agents.get(agentId);
+    return [{
+      messageId: id,
+      userId: fixture.user_id,
+      rootAgentId,
+      agentId,
+      surface: string(agent?.source) ?? 'WEB',
+      role,
+      createdAt: date(message?.createdAt ?? message?.timestamp, fallback),
+      searchText,
+      agentGoal: string(agent?.goal) ?? '',
+      agentTitle: string(agent?.title),
+      archivePath: END_FIXTURE_PATH,
+      traceKind: 'message',
+    }];
+  });
+}
+
+function llmRows(
+  fixture: ScopedDbFixture,
+  artifactPath: string,
+  payload: unknown,
+  seen: Set<string>,
+  partialArchive: boolean
+): ArchivedTrajectoryRow[] {
+  const wrapper = record(payload);
+  const dump = wrapper?.kind === 'legacy-llm-dump' ? record(wrapper.payload) : wrapper;
+  if (dump === null) return [];
+  if (string(dump.root_agent_id) !== null && dump.root_agent_id !== fixture.root_agent_id) return [];
+  const agentId = string(dump.agent_id) ?? fixture.root_agent_id;
+  if (!(fixture.agent_ids ?? []).includes(agentId) &&
+      !(partialArchive && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(agentId))) return [];
+  const agent = (fixture.rows.Agent ?? []).map(record).find((row) => row?.id === agentId);
+  const createdAt = date(
+    dump.ts_ms ?? dump.ingested_ms ?? dump.created_at,
+    date(fixture.captured_at, new Date(0))
+  );
+  const candidates: Array<{ role: string; kind: string; text: string }> = [];
+  for (const message of Array.isArray(dump.messages) ? dump.messages : []) {
+    const entry = record(message);
+    const role = string(entry?.role)?.toUpperCase();
+    if (!role || !TRACE_ROLES.has(role)) continue;
+    const text = textParts(entry?.content ?? entry?.text).join('\n').trim();
+    if (text) candidates.push({ role, kind: 'llm_context', text });
+  }
+  const output = textParts(dump.output).join('\n').trim();
+  if (output) candidates.push({ role: 'ASSISTANT', kind: 'llm_output', text: output });
+  return candidates.flatMap((candidate) => {
+    const digest = createHash('sha256')
+      .update(`${fixture.root_agent_id}\0${agentId}\0${candidate.role}\0${candidate.text}`)
+      .digest('hex');
+    if (seen.has(digest)) return [];
+    seen.add(digest);
+    return [{
+      messageId: `llm-${digest}`,
+      userId: fixture.user_id,
+      rootAgentId: fixture.root_agent_id,
+      agentId,
+      surface: string(agent?.source) ?? 'WEB',
+      role: candidate.role,
+      createdAt,
+      searchText: candidate.text,
+      agentGoal: string(agent?.goal) ?? '',
+      agentTitle: string(agent?.title),
+      archivePath: artifactPath,
+      traceKind: candidate.kind,
+    }];
+  });
+}
+
+async function readJson(rootAgentId: string, objectPath: string): Promise<unknown> {
+  const artifact = await readArchivedArtifactStrict({ rootAgentId, objectPath });
+  if (artifact === null) throw new ArchivedTraceNotFoundError(rootAgentId, objectPath);
+  return JSON.parse(decryptAndValidateArtifact(artifact).toString('utf8')) as unknown;
+}
+
+export class ArchivedTraceNotFoundError extends Error {
+  constructor(rootAgentId: string, objectPath: string) {
+    super(`Missing archived trace ${rootAgentId}/${objectPath}`);
+    this.name = 'ArchivedTraceNotFoundError';
+  }
+}
+
+async function replaceArchivedRows(rootAgentId: string, rows: ArchivedTrajectoryRow[]): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.agentTrajectorySearch.deleteMany({
+      where: { rootAgentId, archivePath: { not: null } },
+    });
+    for (let start = 0; start < rows.length; start += WRITE_BATCH_SIZE) {
+      const batch = rows.slice(start, start + WRITE_BATCH_SIZE);
+      await tx.$executeRaw(Prisma.sql`
+      INSERT INTO "AgentTrajectorySearch" (
+        "messageId", "userId", "rootAgentId", "agentId", surface, role,
+        "createdAt", "searchText", "agentGoal", "agentTitle", "archivePath", "traceKind"
+      ) VALUES ${Prisma.join(batch.map((row) => Prisma.sql`(
+        ${row.messageId}, ${row.userId}, ${row.rootAgentId}, ${row.agentId},
+        ${row.surface}, ${row.role}, ${row.createdAt}, ${row.searchText},
+        ${row.agentGoal}, ${row.agentTitle}, ${row.archivePath}, ${row.traceKind}
+      )`))}
+      ON CONFLICT ("messageId") DO UPDATE SET
+        "userId" = EXCLUDED."userId",
+        "rootAgentId" = EXCLUDED."rootAgentId",
+        "agentId" = EXCLUDED."agentId",
+        surface = EXCLUDED.surface,
+        role = EXCLUDED.role,
+        "createdAt" = EXCLUDED."createdAt",
+        "searchText" = EXCLUDED."searchText",
+        "agentGoal" = EXCLUDED."agentGoal",
+        "agentTitle" = EXCLUDED."agentTitle",
+        "archivePath" = EXCLUDED."archivePath",
+        "traceKind" = EXCLUDED."traceKind"
+      `);
+    }
+  }, { timeout: 60_000 });
+}
+
+/** Index one finalized bundle. Grep then reads PostgreSQL, never scans R2. */
+export async function indexArchivedTrace(
+  rootAgentId: string,
+  fixture: ScopedDbFixture,
+  artifactPaths: string[],
+  partialArchive = false
+): Promise<number> {
+  if (fixture.root_agent_id !== rootAgentId || !string(fixture.user_id)) {
+    throw new Error(`Trace fixture owner/root mismatch for ${rootAgentId}`);
+  }
+  const rows = archivedMessageRows(fixture);
+  const seen = new Set<string>();
+  const llmPaths = [...new Set(artifactPaths)].filter(
+    (path) => /^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(path)
+  ).sort();
+  const failures: Array<{ path: string; error: string }> = [];
+  for (let start = 0; start < llmPaths.length; start += 4) {
+    const paths = llmPaths.slice(start, start + 4);
+    const results = await Promise.allSettled(paths.map((path) => readJson(rootAgentId, path)));
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        rows.push(...llmRows(fixture, paths[index], result.value, seen, partialArchive));
+      } else {
+        failures.push({
+          path: paths[index],
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        });
+      }
+    });
+  }
+  if (failures.length > 0) {
+    throw new Error(`Could not read ${failures.length} LLM artifacts for ${rootAgentId}: ${failures.slice(0, 3).map((failure) => `${failure.path} (${failure.error})`).join(', ')}`);
+  }
+  await replaceArchivedRows(rootAgentId, rows);
+  return rows.length;
+}
+
+/** One-time and retry backfill for R2 bundles absent from the current DB. */
+export async function indexArchivedTraceFromR2(
+  rootAgentId: string,
+  expectedUserId?: string
+): Promise<number> {
+  return withArchiveManifestLock(rootAgentId, () =>
+    indexArchivedTraceFromR2Unlocked(rootAgentId, expectedUserId)
+  );
+}
+
+async function indexArchivedTraceFromR2Unlocked(
+  rootAgentId: string,
+  expectedUserId?: string
+): Promise<number> {
+  const manifest = record(await readJson(rootAgentId, 'manifest.json.gz.enc'));
+  const correlations = record(manifest?.correlations);
+  if (expectedUserId !== undefined && correlations?.user_id !== expectedUserId) return 0;
+  const archiveUserId = string(correlations?.user_id);
+  if (archiveUserId === null) {
+    throw new Error(`Trace archive has no owner for ${rootAgentId}`);
+  }
+  const owner = await prisma.user.findUnique({
+    where: { userId: archiveUserId },
+    select: { userId: true },
+  });
+  if (owner === null) return 0;
+  const finalized = manifest?.finalized === true;
+  const fixture = await readJson(
+    rootAgentId,
+    finalized ? END_FIXTURE_PATH : 'db/start.fixture.json.gz.enc'
+  ) as ScopedDbFixture;
+  if (
+    manifest?.root_agent_id !== rootAgentId ||
+    correlations?.user_id !== fixture.user_id ||
+    correlations.root_agent_id !== rootAgentId ||
+    fixture.root_agent_id !== rootAgentId
+  ) {
+    throw new Error(`Trace archive ownership/finalization check failed for ${rootAgentId}`);
+  }
+  if (!finalized) {
+    const liveRoot = await prisma.agent.findUnique({
+      where: { id: rootAgentId },
+      select: { status: true },
+    });
+    if (liveRoot !== null && ['STARTING_UP', 'ACTIVE', 'PAUSED'].includes(liveRoot.status)) {
+      return 0;
+    }
+  }
+  const objects = await listArchivedObjectsStrict(rootAgentId);
+  return indexArchivedTrace(rootAgentId, fixture, objects.map((object) => object.path), !finalized);
+}

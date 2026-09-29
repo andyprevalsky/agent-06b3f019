@@ -1,6 +1,8 @@
 /**
  * Data domain types — Zod schemas, interfaces, type aliases.
  */
+import type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters } from './types.agent';
+export type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters } from './types.agent';
 
 export const DATA_SOURCE_CONFIGS = {
   messages: {
@@ -65,6 +67,15 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'text',
     groupBy: 'agentId',
     filters: ['path'] as const,
+    connector: null,
+    channel: null,
+  },
+  agent_trajectories: {
+    description: 'User-owned agent runs outside the current agent tree',
+    table: 'AgentTrajectorySearch' as const,
+    searchField: 'searchText',
+    groupBy: 'rootAgentId',
+    filters: ['path', 'since', 'until', 'role', 'surface'] as const,
     connector: null,
     channel: null,
   },
@@ -171,6 +182,8 @@ export interface GrepLocation {
   source: ValidSource;
   path: string;
   agent_id?: string;
+  root_agent_id?: string;
+  surface?: string;
   message_id?: string;
   role?: 'SYSTEM' | 'ASSISTANT' | 'USER' | 'TOOL';
   thread?: string;
@@ -258,13 +271,6 @@ export interface NetworkGrepFilters {
   pathContact?: string;
 }
 
-/** `agent_network` narrowing. `path` addresses a depth/agent/role/message subtree. */
-export interface AgentNetworkGrepFilters {
-  pathAgentId?: string;
-  pathRole?: string;
-  pathMessageId?: string;
-}
-
 // Normalized, validated grep input shared by the service (validation) and the
 // formatter (snippet rendering).
 export interface ValidatedGrepInput {
@@ -283,6 +289,7 @@ export interface ValidatedGrepInput {
     messages?: MessageGrepFilters;
     network?: NetworkGrepFilters;
     agentNetwork?: AgentNetworkGrepFilters;
+    agentTrajectories?: AgentTrajectoryGrepFilters;
     transactions?: TransactionGrepFilters;
     documents?: DocumentGrepFilters;
   };

@@ -480,6 +480,20 @@ export async function readArchivedArtifact(params: {
   return readLocalObject(params.rootAgentId, objectPath);
 }
 
+/** Preserve R2 transport failures for callers that must distinguish an outage from a missing object. */
+export async function readArchivedArtifactStrict(params: {
+  rootAgentId: string;
+  objectPath: string;
+}): Promise<StoredEncryptedArtifact | null> {
+  if (!archiveEnabled()) throw new Error('Trace archive is disabled');
+  const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
+  const objectPath = safeArchivePath(params.objectPath);
+  if (backend === 'r2' || (isProduction() && backend !== 'local')) {
+    return readR2ObjectStrict(params.rootAgentId, objectPath);
+  }
+  return readLocalObject(params.rootAgentId, objectPath);
+}
+
 export function decryptAndValidateArtifact(params: {
   ciphertext: Buffer;
   metadata: EncryptedArtifactMetadata;

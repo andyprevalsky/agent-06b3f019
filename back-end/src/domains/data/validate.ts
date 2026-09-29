@@ -9,6 +9,7 @@ import { checkPatternSafety, extractInlineFlags, stripNamedGroups } from './rege
 import {
   parseBoundedNumber,
   parseAgentNetworkFilters,
+  parseAgentTrajectoryFilters,
   parseDocumentFilters,
   parseMessageFilters,
   parseNetworkFilters,
@@ -29,6 +30,7 @@ interface ResolvedSourceSelection {
   hasDocuments: boolean;
   hasNetwork: boolean;
   hasAgentNetwork: boolean;
+  hasAgentTrajectories: boolean;
   mergeTopLevelNarrowing: boolean;
 }
 import {
@@ -107,6 +109,7 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const hasDocuments = resolvedSources.includes('documents');
   const hasNetwork = resolvedSources.includes('network');
   const hasAgentNetwork = resolvedSources.includes('agent_network');
+  const hasAgentTrajectories = resolvedSources.includes('agent_trajectories');
 
   // Reject filters that NO resolved source can consume. Message/transaction/
   // document families reject unsupported keys inside their own parse step; the
@@ -126,6 +129,7 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     hasDocuments,
     hasNetwork,
     hasAgentNetwork,
+    hasAgentTrajectories,
     // Merge top-level `person`/`since` into message filters whenever a message-
     // family source is EXPLICITLY selected — via singular `source` OR `sources`.
     // (Not for the implicit default trio, matching historical behavior.)
@@ -152,6 +156,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     hasDocuments,
     hasNetwork,
     hasAgentNetwork,
+    hasAgentTrajectories,
     mergeTopLevelNarrowing,
   } = resolveSourceSelection(params);
 
@@ -180,8 +185,12 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     symmetricContext !== undefined ? parseBoundedNumber(symmetricContext, 0, 0, 25) : undefined;
   const contextBefore =
     symmetric !== undefined ? symmetric : parseBoundedNumber(params['-B'], 0, 0, 25);
+  const trajectoryDefaultAfter =
+    resolvedSources.length === 1 && resolvedSources[0] === 'agent_trajectories' ? 3 : 0;
   const contextAfter =
-    symmetric !== undefined ? symmetric : parseBoundedNumber(params['-A'], 0, 0, 25);
+    symmetric !== undefined
+      ? symmetric
+      : parseBoundedNumber(params['-A'], trajectoryDefaultAfter, 0, 25);
 
   return {
     pattern,
@@ -202,6 +211,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
       documents: hasDocuments ? parseDocumentFilters(params) : undefined,
       network: hasNetwork ? parseNetworkFilters(params) : undefined,
       agentNetwork: hasAgentNetwork ? parseAgentNetworkFilters(params) : undefined,
+      agentTrajectories: hasAgentTrajectories ? parseAgentTrajectoryFilters(params) : undefined,
     },
   };
 }

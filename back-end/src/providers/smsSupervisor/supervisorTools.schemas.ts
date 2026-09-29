@@ -112,7 +112,8 @@ Usage:
 - Do not use this for the public web, use web_search instead.
 - \`pattern\` is a regular expression. Plain text works for literal searches.
 - \`source\` is optional. Omit it to search messages and network.
-- Supported sources: messages, network, transactions, documents.
+- Supported sources: messages, network, agent_trajectories, transactions, documents. agent_trajectories searches this user's prior agent runs across chat, SMS, and Temporal.
+- For agent trajectory citations, copy the returned path and message role exactly. Root or child identifies the agent's place in a tree, not the message role.
 - Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
@@ -131,9 +132,9 @@ Returns:
         },
         source: {
           type: 'string' as const,
-          enum: ['messages', 'network', 'transactions', 'documents'],
+          enum: ['messages', 'network', 'agent_trajectories', 'transactions', 'documents'],
           description:
-            'Optional source bucket. Omit to search messages and network. messages searches user communication records. network searches contact records. transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents.',
+            "Optional source bucket. Omit to search messages and network. agent_trajectories searches this user's agent history across chat, SMS, and Temporal. Other sources: messages, network, transactions, documents.",
         },
         '-B': {
           type: 'number' as const,
@@ -193,6 +194,8 @@ Returns:
               enum: ['chatgpt', 'claude', 'apple_notes', 'obsidian'],
             },
             path: { type: 'string' as const },
+            role: { type: 'string' as const, enum: ['USER', 'ASSISTANT', 'TOOL'] },
+            surface: { type: 'string' as const, enum: ['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'] },
             tag: { type: 'string' as const },
           },
         },

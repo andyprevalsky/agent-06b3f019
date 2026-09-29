@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
 UTC_CLEANUP_MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260724002500_temporal_cleanup_utc_grace/migration.sql"
+TRAJECTORY_SQL="$BACKEND_DIR/prisma/migrations/20260929120000_agent_trajectory_search/migration.sql"
 
 validate_local_database_url() {
   local variable_name=$1
@@ -35,3 +36,4 @@ awk '
   emit { print }
 ' "$MIGRATION_SQL" | psql "$DATABASE_URL" -v ON_ERROR_STOP=1
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$UTC_CLEANUP_MIGRATION_SQL"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$TRAJECTORY_SQL"

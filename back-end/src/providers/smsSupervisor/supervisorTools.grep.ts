@@ -6,7 +6,8 @@
  * goes in-process through the userDataSearch bridge (registered from
  * server.ts) and the LLM gets the same JSON. One asymmetry: the supervisor is
  * not an agent, so the agent_network source (which requires an agent_id) is
- * unavailable; an omitted source searches messages + network instead of the
+ * unavailable. agent_trajectories needs only the authenticated user and is
+ * available here; an omitted source searches messages + network instead of the
  * explore default of messages + network + agent_network.
  */
 
@@ -101,7 +102,7 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
       success: false,
       result: '',
       error:
-        "source 'agent_network' is not available in this surface. Supported sources: messages, network, transactions, documents.",
+        "source 'agent_network' is not available in this surface. Supported sources: messages, network, agent_trajectories, transactions, documents.",
     };
   }
 
@@ -114,7 +115,7 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
         success: false,
         result: '',
         error:
-          'filters require an explicit source. Pick one of: messages, network, transactions, documents.',
+          'filters require an explicit source. Pick one of: messages, network, agent_trajectories, transactions, documents.',
       };
     }
     const perSource = await Promise.all(

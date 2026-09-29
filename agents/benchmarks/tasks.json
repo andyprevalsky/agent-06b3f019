@@ -5398,5 +5398,179 @@
     ],
     "memory": "on",
     "success_on_plan": true
+  },
+  {
+    "name": "grep-agent-trajectories-cross-surface",
+    "title": "Recall browser and code agent history",
+    "description": "Retrieve grounded facts from two archived prior agent traces.",
+    "prompt": "From my earlier agent runs, what document title did the browser find at example.com, and how many steps did the Collatz program starting at 27 take? Cite the earlier agent trace paths and message roles. Use my local agent history only.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-browser-and-code-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer gives Example Domain as the document title and 111 as the Collatz step count.",
+          "Both facts are grounded in agent_trajectories grep results from prior R2-backed runs, with paths and roles.",
+          "The answer does not substitute general knowledge or invent a source."
+        ],
+        "judge_prompt": "Pass only if the completed answer says the earlier browser run found the title Example Domain and the earlier Claude Code Collatz-27 run reported 111 total steps. Require actual agent_trajectories grep evidence for both facts in the trajectory, with distinct prior agent paths and roles cited in the answer. Do not infer either fact from general knowledge, the task prompt, other grep sources, or a fabricated citation."
+      }
+    ],
+    "label_eval": "Grounded prior browser title and Collatz step count with two archived trace paths."
+  },
+  {
+    "name": "grep-agent-trajectories-followup",
+    "title": "Recall a prior research agent result",
+    "description": "Recover a specific finding from an archived multi-city research trace.",
+    "prompt": "In my earlier agent comparison of cities to live in, which three cities did I compare, and what approximate monthly cost for one person excluding rent did the Denver research find? Cite the prior agent trace path and role. Use my local agent history only.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-city-comparison-facts",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer names Austin, Denver, and Lisbon.",
+          "The answer reports approximately $1,304 per month for one person in Denver excluding rent.",
+          "The cost and city list are grounded in an agent_trajectories grep result with a prior agent path and role."
+        ],
+        "judge_prompt": "Pass only if the answer names Austin TX, Denver CO, and Lisbon Portugal and gives the Denver single-person monthly cost excluding rent as approximately $1,303.8 (reasonable rounding to $1,304). The archived prior agent_trajectories grep evidence must support both the compared cities and the Denver cost. Require a cited prior agent path and message role. Fail if the agent uses live web estimates, guesses, or cites only the current run."
+      }
+    ],
+    "label_eval": "Grounded city list and Denver amount from the archived research run."
+  },
+  {
+    "name": "grep-agent-trajectories-isolation",
+    "title": "Recall a past code run despite a conflicting status",
+    "description": "Distinguish the archived code tool status from its verified output.",
+    "prompt": "Look at my earlier Claude Code agent run that computed the Collatz sequence from 27. What status did its code-agent tool report, and what step count did the later verifier confirm? Cite both prior trace paths and roles. Use my local agent history only.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": [
+      "grep"
+    ],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "db_fixtures": [],
+      "services": [
+        "grep"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses historical R2 trace content materialized in the canonical base image search index; no task-specific fixture."
+    },
+    "enforce_declared_evaluators": true,
+    "source": [
+      "feature:agent-trajectories"
+    ],
+    "evaluators": [
+      {
+        "id": "prior-code-status-and-verification",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer reports that the code-agent tool displayed FAILED (despite exit_code=0).",
+          "The later verifier confirmed 111 total Collatz steps.",
+          "Both claims are grounded in prior agent_trajectories grep results and cited paths and roles; the answer acknowledges the differing signals."
+        ],
+        "judge_prompt": "Pass only if the final answer distinguishes the earlier code-agent tool status of FAILED from the later verifier finding that the Collatz-27 program produced 111 steps. Require both observations to be present in agent_trajectories tool evidence from the archived prior run, and require cited prior agent trace paths and roles. Fail if the answer silently resolves the conflict, invents a successful tool status, or relies on general knowledge."
+      }
+    ],
+    "label_eval": "Grounded status and step-count distinction from the archived Collatz run."
   }
 ]

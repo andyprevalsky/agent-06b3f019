@@ -19,6 +19,7 @@ import { AgentNotFoundError, InvalidPatternError, MissingAgentIdError } from './
 import { validateGrepInput } from './validate';
 import * as repo from './repo';
 import * as grepRepo from './grepRepo';
+import { searchTrajectorySource } from './trajectorySearchService';
 import { searchMessageSource } from './messageSearchService';
 import { searchNetworkSource } from './networkSearchService';
 import { createLogger } from '../../providers/logger';
@@ -130,6 +131,8 @@ async function searchSource(
     ]);
     return { total, matches: rows.map((row) => buildDocumentMatch(row, input)) };
   }
+
+  if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
 
   const agentIds = await agentTreeIdsForGrep(userId, agentId);
   const agentNetworkFilters = input.filters.agentNetwork;

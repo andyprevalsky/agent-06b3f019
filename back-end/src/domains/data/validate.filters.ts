@@ -11,6 +11,7 @@ import { parseGrepPath } from './path';
 import {
   DATA_SOURCE_CONFIGS,
   type AgentNetworkGrepFilters,
+  type AgentTrajectoryGrepFilters,
   type DocumentGrepFilters,
   type GrepParams,
   type MessageGrepFilters,
@@ -180,6 +181,41 @@ export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFi
     ...(parsed.agentId !== undefined ? { pathAgentId: parsed.agentId } : {}),
     ...(parsed.role !== undefined ? { pathRole: parsed.role } : {}),
     ...(parsed.messageId !== undefined ? { pathMessageId: parsed.messageId } : {}),
+  };
+}
+
+export function parseAgentTrajectoryFilters(
+  params: GrepParams
+): AgentTrajectoryGrepFilters | undefined {
+  const raw = requireFilterObject(params);
+  if (Object.keys(raw).length === 0) return undefined;
+  rejectUnsupportedFilters('agent_trajectories', raw);
+  const rawPath = parseFilterString(raw, 'path');
+  const parsed = rawPath === undefined ? undefined : parseGrepPath(rawPath);
+  if (rawPath !== undefined && parsed?.source !== 'agent_trajectories') {
+    throw new InvalidGrepParamError('filters.path');
+  }
+  const path = parsed?.source === 'agent_trajectories' ? parsed : undefined;
+  const role = parseFilterString(raw, 'role');
+  const surface = parseFilterString(raw, 'surface');
+  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
+    throw new InvalidGrepParamError('filters.role');
+  }
+  if (path?.role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
+    throw new InvalidGrepParamError('filters.path');
+  }
+  if (surface !== undefined && !['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'].includes(surface)) {
+    throw new InvalidGrepParamError('filters.surface');
+  }
+  return {
+    ...(path?.rootAgentId !== undefined ? { pathRootAgentId: path.rootAgentId } : {}),
+    ...(path?.agentId !== undefined ? { pathAgentId: path.agentId } : {}),
+    ...(path?.role !== undefined ? { pathRole: path.role } : {}),
+    ...(path?.messageId !== undefined ? { pathMessageId: path.messageId } : {}),
+    since: parseFilterSince(raw, 'since'),
+    until: parseFilterDate(raw, 'until'),
+    ...(role !== undefined ? { role: role as AgentTrajectoryGrepFilters['role'] } : {}),
+    ...(surface !== undefined ? { surface: surface as AgentTrajectoryGrepFilters['surface'] } : {}),
   };
 }
 

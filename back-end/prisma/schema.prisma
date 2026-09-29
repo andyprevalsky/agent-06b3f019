@@ -189,6 +189,28 @@ model Message {
   @@index([createdAt])
 }
 
+/// Search projection of live messages and finalized R2 trace bundles. Archive
+/// rows deliberately have no FK to Message: archived traces remain searchable
+/// after operational Agent/Message rows are purged.
+model AgentTrajectorySearch {
+  messageId   String   @id
+  userId      String
+  rootAgentId String
+  agentId     String
+  surface     String
+  role        String
+  createdAt   DateTime
+  searchText  String
+  agentGoal   String   @default("")
+  agentTitle  String?
+  archivePath String?
+  traceKind   String   @default("message")
+  user        User     @relation(fields: [userId], references: [userId], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc), messageId(sort: Desc)])
+  @@index([userId, rootAgentId, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_root_time_idx")
+}
+
 model Waitlist {
   id           String    @id @default(uuid())
   name         String    @default("")
@@ -292,6 +314,7 @@ model ToolSideEffect {
 model User {
   id                          String                      @id @default(uuid())
   userId                      String                      @unique
+  trajectorySearchRows        AgentTrajectorySearch[]
   name                        String?
   email                       String?
   deliveryRecipientName       String?

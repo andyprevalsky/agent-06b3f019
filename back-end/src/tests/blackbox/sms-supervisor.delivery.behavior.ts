@@ -263,6 +263,37 @@ export async function testGrep_fanOutPaginationMetadataAligns(prisma: PrismaClie
   }
 }
 
+export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient) {
+  const userId = await provisionUserWithPhone(prisma, uniqueSmsPhone());
+  const token = captureToken('sms-prior-agent-trajectory');
+  try {
+    const prior = await prisma.agent.create({
+      data: { userId, goal: 'Prior SMS agent decision', source: 'SMS', status: 'COMPLETED' },
+    });
+    await prisma.message.create({
+      data: { agentId: prior.id, role: 'ASSISTANT', text: `Earlier decision ${token}` },
+    });
+    registerUserDataGrep(userDataGrep);
+    const result = await executeGrepTool(
+      { pattern: token, source: 'agent_trajectories', filters: { surface: 'SMS' } },
+      userId
+    );
+    if (!result.success) throw new Error(`Expected SMS trajectory grep success: ${result.error}`);
+    const payload = JSON.parse(result.result) as {
+      matches: Array<{ path: string; content: string }>;
+    };
+    if (
+      payload.matches.length !== 1 ||
+      !payload.matches[0].path.startsWith(`agent_trajectories/${prior.id}/`) ||
+      !payload.matches[0].content.includes(token)
+    ) {
+      throw new Error(`SMS supervisor did not retrieve the prior agent message: ${result.result}`);
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 /**
  * Regression: a lifecycle SMS a spawned agent sent must show up on the
  * supervisor's own transcript, otherwise the supervisor re-narrates progress the
@@ -408,6 +439,10 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'grep -- mixed-source pagination metadata stays aligned',
       fn: () => testGrep_fanOutPaginationMetadataAligns(prisma),
+    },
+    {
+      name: 'grep -- SMS supervisor can retrieve a prior agent trajectory',
+      fn: () => testGrep_priorAgentTrajectoryFromSms(prisma),
     },
     {
       name: 'send -- progress SMS continues to a later substantive result',
