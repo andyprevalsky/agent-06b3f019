@@ -596,6 +596,7 @@ bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/verify-successful-llm-queries.test.py
+python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
@@ -609,7 +610,7 @@ if [ -z "$CHANGED_AGENTS" ]; then
 fi
 ```
 
-The ten controller commands must pass. The agents `benchmark` blackbox domain
+The eleven controller commands must pass. The agents `benchmark` blackbox domain
 must also pass exactly once: Step 4g's agents coverage already runs it whenever
 `$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
 coverage was skipped. Never launch the same controller-owning domain in both

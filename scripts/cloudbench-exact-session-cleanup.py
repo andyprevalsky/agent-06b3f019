@@ -212,7 +212,15 @@ def parse_run_identity(path: Path, bench: str) -> tuple[str, str]:
     if len(tasks) != 1 or len(matches) != 1:
         raise CleanupEvidenceError("run record is not bound to exactly one benchmark")
     root_agent_id = matches[0].get("agent_id")
-    if not isinstance(root_agent_id, str) or SAFE_AGENT.fullmatch(root_agent_id) is None:
+    # A composite benchmark can run a prerequisite gate and then its task as
+    # two separate roots. The sealed run records both IDs in this field. Keep
+    # their order and exact spelling so receipts stay bound to the run bytes.
+    roots = root_agent_id.split(",") if isinstance(root_agent_id, str) else []
+    if (
+        not roots
+        or len(roots) != len(set(roots))
+        or any(SAFE_AGENT.fullmatch(root) is None for root in roots)
+    ):
         raise CleanupEvidenceError("run record has no exact root agent")
     return root_agent_id.lower(), sha256_bytes(payload)
 
@@ -292,8 +300,16 @@ def read_backend_evidence(path: Path, root_agent_id: str) -> tuple[str, str]:
         text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise CleanupEvidenceError("backend log is not UTF-8") from error
-    if root_agent_id.lower() not in text.lower():
+    roots = root_agent_id.split(",")
+    if len(roots) == 1 and roots[0].lower() not in text.lower():
         raise CleanupEvidenceError("backend log is not bound to the exact root agent")
+    if len(roots) > 1 and any(
+        re.search(rf"\bpath=/api/agents/{re.escape(root)}(?:\b|/)", text, re.IGNORECASE) is None
+        for root in roots
+    ):
+        raise CleanupEvidenceError("backend log is not bound to the exact root agent")
+    if len(roots) > 1 and text.count("[HTTP] POST /api/agents -> 201") < len(roots):
+        raise CleanupEvidenceError("backend log lacks the composite root creations")
     return text, sha256_bytes(payload)
 
 
