@@ -257,8 +257,10 @@ volume's size, and a 40 GB snapshot cannot be restored into a smaller volume.
 This is provisioned capacity, not a 40 GB upload by the controller. The stopped
 20 GB capability pool is claimed and returned across sequential slices.
 Task-free infra probes use the default 4 GB primary shape so they can borrow
-that pool even when sampled names are browser/payment tasks; real browser and
-payment benches retain their 8 GB shape. A fresh large-primary clone still
+that pool even when sampled names are browser/payment tasks; they also skip
+the payment-only bundled frontend build, since no sampled task executes. Real
+browser and payment benches retain their 8 GB shape and frontend contract. A
+fresh large-primary clone still
 inherits the legacy donor's 40 GB volume until a verified 20 GB donor replaces
 it. Keep `waiting_for_detach` volumes in the exact-owner ledger: Fly has
 accepted deletion but has not confirmed a terminal state.

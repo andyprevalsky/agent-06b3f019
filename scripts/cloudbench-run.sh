@@ -450,6 +450,14 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
     esac
 done
 
+# An infra probe boots the isolated stack but never runs its sampled task.
+# Payment task names otherwise request a production frontend build that needs
+# the real task's 8 GB primary; the probe deliberately borrows a 4 GB pool
+# primary. Keep bundled frontend builds for real payment runs only.
+if [ "${CLOUDBENCH_INFRA_PROBE:-0}" = "1" ]; then
+    BENCH_NEEDS_BUNDLED_FRONTEND=0
+fi
+
 render_task_worker_exports() {
     local entry
     if [ "${#TASK_WORKER_ENV[@]}" -eq 0 ]; then
