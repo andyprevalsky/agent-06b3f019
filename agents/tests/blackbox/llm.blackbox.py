@@ -1274,35 +1274,98 @@ def test_build_verifier_response_model_requires_nested_object_properties():
 
 
 
-def test_normalize_response_schema_preserves_explicit_confirmation_identifier_request():
-    """An identifier remains required when the user explicitly requests it."""
-    from helpers.llm import _normalize_response_schema_for_goal
+_OFFER_MESSAGE_GOAL = (
+    "1. Quantity: 1\n"
+    "Item Name: RECCI AirFrame California King bed frame, beige chenille\n"
+    "Photo Url: https://m.media-amazon.com/images/I/81t-SHWNBGL._SS284_.jpg\n"
+    "Amazon Url: https://www.amazon.com/dp/B0FR8VJXW5\n"
+    "Price Basis: provided purchase price; tax treatment unspecified\n"
+    "Source Order Id: 114-1660202-2405000\n"
+    "Quote Source Url\n"
+    "Purchase Price Usd: 399.99\n"
+    "General Price Quote Usd\n"
+    "->\n"
+    "Send Aman all items over 10$, the speaker combo just tell him 1k all in, "
+    "for the other items tell him I offer 80% of amazon price (include the links)\n"
+)
 
-    result = _normalize_response_schema_for_goal(
-        "Purchase the selected cable and return the order confirmation ID.",
-        {"fields": [{"name": "purchased_cable", "type": "str", "required": True}]},
+
+async def _schema_activity_result(goal: str, model_fields: list[dict]) -> dict:
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-schema:generation-1",
+        workflow_run_id="run-1",
+        activity_id="set-response-schema",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
     )
 
-    assert [field["name"] for field in result["fields"]] == [
-        "purchased_cable",
-        "order_confirmation_id",
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Fields from the model.",
+                        "title": "Aman Offer Message",
+                        "fields": model_fields,
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        return await set_response_schema_activity("agent-schema", [goal], include_title=True)
+
+
+async def test_set_response_schema_activity_persists_model_fields_for_offer_goal():
+    """Model schema is the source of truth — no post-hoc confirmation injection.
+
+    Reproduces agent 2929bc93-8a53-45fb-a4af-30c482b03bbe. The user asked to
+    send Aman an 80% offer. The model returned recipient + message_body. A
+    purchase-intent classifier then injected required order_confirmation_id
+    because the attached catalog contained "Purchase Price Usd" / "Source Order
+    Id". The verifier rejected the successful iMessage at 50%.
+    """
+    import helpers.llm as llm_mod
+
+    assert not hasattr(llm_mod, "_normalize_response_schema_for_goal")
+    assert not hasattr(llm_mod, "_is_purchase_goal")
+
+    result = await _schema_activity_result(
+        _OFFER_MESSAGE_GOAL,
+        [{"name": "recipient", "type": "str"}, {"name": "message_body", "type": "str"}],
+    )
+    assert [field["name"] for field in result["schema"]["fields"]] == [
+        "recipient",
+        "message_body",
     ]
 
 
-def test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal():
-    """Payment-boundary harness goals must not auto-inject purchase confirmation ids."""
-    from helpers.llm import _normalize_response_schema_for_goal
-    from utils.payment_boundary_goal import payment_boundary_operational_suffix
-
-    goal = (
-        "Book Hotel Kabuki on hotels.com guest checkout."
-        + payment_boundary_operational_suffix()
+async def test_set_response_schema_activity_does_not_inject_confirmation_on_buy_me_goal():
+    """Buy-me goals also persist exactly the fields the model emitted."""
+    result = await _schema_activity_result(
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made.",
+        [
+            {"name": "selected_beanie_url", "type": "str"},
+            {"name": "selected_beanie_price_usd", "type": "float"},
+        ],
     )
-    result = _normalize_response_schema_for_goal(
-        goal,
-        {"fields": [{"name": "hotel_name", "type": "str", "required": True}]},
-    )
-    assert [field["name"] for field in result["fields"]] == ["hotel_name"]
+    assert [field["name"] for field in result["schema"]["fields"]] == [
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+    ]
 
 
 def test_fill_missing_verifier_output_accepts_matching_idempotent_card_last4():
@@ -8600,13 +8663,13 @@ async def run_all_tests():
         "stream_fast_cache_writes_only_after_validation",
         test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
-    r.record(
-        "normalize_response_schema_explicit_confirmation_identifier",
-        test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
+    await r.record_async(
+        "set_response_schema_persists_model_fields_for_offer_goal",
+        test_set_response_schema_activity_persists_model_fields_for_offer_goal,
     )
-    r.record(
-        "normalize_response_schema_payment_boundary_skip_confirmation",
-        test_normalize_response_schema_skips_confirmation_for_payment_boundary_goal,
+    await r.record_async(
+        "set_response_schema_does_not_inject_confirmation_on_buy_me",
+        test_set_response_schema_activity_does_not_inject_confirmation_on_buy_me_goal,
     )
     r.record(
         "fill_missing_verifier_output_matching_idempotent_card_last4",

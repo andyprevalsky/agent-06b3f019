@@ -23,12 +23,12 @@ import { createLogger } from '../logger';
 import type { ChatLlmUsage } from './routerLlm';
 import type { ChatProviderRoute } from './phaseModels';
 import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
-import { extractPartialStringField as extractPartialChatStringField } from './routerJsonStream';
 import {
   createGeneratorAttentionLifecycle,
   type GeneratorAttentionLifecycle,
 } from './generatorAttentionStream';
 import { ensureVerbatimIncludes } from './ensureVerbatimIncludes';
+import { extractPartialStringField } from './routerJsonStream';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
@@ -215,14 +215,6 @@ export const GENERATOR_JSON_SCHEMA = {
   required: ['reasoning', 'response'],
   additionalProperties: false,
 };
-
-// ============================================
-// Extract partial string content from JSON stream
-// Unlike the old regex approach, this can extract content BEFORE the closing quote
-// ============================================
-function extractPartialStringField(json: string, fieldName: string): string | null {
-  return extractPartialChatStringField(json, fieldName) || null;
-}
 
 // ============================================
 // Extract reasoning only. Final-answer response text streams through the keyed

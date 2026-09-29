@@ -659,75 +659,6 @@ def _normalize_generated_agent_title(raw: str) -> Optional[str]:
     return cleaned[:80].rstrip() or None
 
 
-_PURCHASE_GOAL_MARKERS = (
-    "buy me",
-    "purchase",
-    "order",
-    "place an order",
-    "complete checkout",
-    "checkout",
-)
-
-
-def _is_purchase_goal(goal: str) -> bool:
-    normalized = f" {goal.lower()} "
-    return any(marker in normalized for marker in _PURCHASE_GOAL_MARKERS)
-
-
-def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool:
-    fields = schema.get("fields", []) if isinstance(schema, dict) else []
-    for field in fields:
-        name = str(field.get("name", "")).lower()
-        description = str(field.get("description", "")).lower()
-        searchable = f"{name} {description}"
-        if any(
-            token in searchable
-            for token in (
-                "order_id",
-                "order id",
-                "order number",
-                "order_confirmation_id",
-                "order confirmation id",
-                "order confirmation number",
-                "confirmation_id",
-                "confirmation id",
-                "confirmation number",
-                "receipt_number",
-                "receipt number",
-                "purchase_confirmation_id",
-                "purchase confirmation id",
-                "purchase confirmation number",
-            )
-        ):
-            return True
-    return False
-
-
-def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure goal-critical fields are present when the model under-specifies a schema."""
-    from utils.payment_boundary_goal import goal_has_payment_boundary_operational_constraints
-
-    if goal_has_payment_boundary_operational_constraints(goal):
-        return schema
-    if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
-        return schema
-
-    normalized = {"fields": list(schema.get("fields", []))}
-    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
-
-    if "order_confirmation_id" not in field_names:
-        normalized["fields"].append(
-            {
-                "name": "order_confirmation_id",
-                "type": "str",
-                "required": True,
-                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
-            }
-        )
-
-    return normalized
-
-
 async def _generate_response_schema_with_rose(
     goal: str,
     *,
@@ -781,7 +712,12 @@ async def _generate_response_schema_with_rose(
                 prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
                 completion_tokens = int(usage.get("completion_tokens", 0) or 0)
                 total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
-                schema = _normalize_response_schema_for_goal(goal, _schema_from_generated_model(generated))
+                schema = _schema_from_generated_model(generated)
+                logger.info(
+                    "Generated response schema",
+                    agent_id=agent_id,
+                    fields=[str(field.get("name", "")) for field in schema.get("fields", [])],
+                )
                 title = (
                     _normalize_generated_agent_title(generated.title)
                     if isinstance(generated, _GeneratedResponseSchemaWithTitle)
