@@ -120,6 +120,7 @@ def verify_prestart_evidence(
         assert not (out / "remote-logs/runtime-evidence/run.json").exists()
         files = row["files"]
         assert isinstance(files, dict)
+        assert "repo/.context/cloudbench/run.json" not in files
         mandatory = {"bench.log", "repo/.context/cloudbench/services.json",
                      "repo/.context/cloudbench/stack.log",
                      "repo/.context/cloudbench/logs/backend.log"}
