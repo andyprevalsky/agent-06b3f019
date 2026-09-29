@@ -7018,7 +7018,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 # passkey CTA Amazon already rendered — or is about to probe —
                 # sees a live authenticator, not the dead environment usage
                 # readback keeps logging between ceremony-capable actions.
-                await dom_service.ensure_browser_overlays_suppressed()
+                # Soft-timeout: passkey re-arm can hang on a frozen renderer
+                # (Runtime.evaluate / Page.reload); do not block the guarded
+                # state fetch / supervisor recovery path indefinitely.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        dom_service.ensure_browser_overlays_suppressed(),
+                        timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
+                    )
                 observe_page_state = await asyncio.wait_for(
                     dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -8702,14 +8709,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     # actionable "need more evidence" — soft-accept so the
                     # browser agent completes instead of looping until hub pause
                     # (browser-smoke 9f53aed4: identical H1-absent rejects ×4).
+                    soft_accept_structured_response = (
+                        progress_result.get("structured_response")
+                        or latest_structured_response
+                    )
                     if (
                         float(score or 0.0) < 1.0
                         and should_soft_accept_identical_verifier_reject(
                             consecutive_identical=identical_verifier_reject_streak,
-                            structured_response=(
-                                progress_result.get("structured_response")
-                                or latest_structured_response
-                            ),
+                            structured_response=soft_accept_structured_response,
                             response_schema=remote_session_schema,
                         )
                     ):
@@ -8751,7 +8759,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     if score >= 1.0:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
-                        structured_response = progress_result.get("structured_response")
+                        # Soft-accept may validate latest_structured_response
+                        # when this verifier call omitted structured_response.
+                        structured_response = (
+                            progress_result.get("structured_response")
+                            or soft_accept_structured_response
+                        )
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(

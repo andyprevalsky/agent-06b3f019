@@ -16,7 +16,7 @@ function isNonEmptySubAgentIds(value: unknown): boolean {
 
 /** for_each child UI rows use `<base>:<idx>` toolCallIds (idx is digits). */
 function hasForEachChildToolCallSuffix(toolCallId: string): boolean {
-  return /:\d+$/.test(toolCallId);
+  return /:[0-9]+$/.test(toolCallId);
 }
 
 export function isInternalSubagentMessage(message: ChatMessage): boolean {

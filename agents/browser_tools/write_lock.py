@@ -731,8 +731,12 @@ _AMAZON_RETURN_VISA_RE = re.compile(
     r"Visa(?:\s+card)?\s+ending\s+in\s+(\d{4})",
     re.IGNORECASE,
 )
-_AMAZON_RETURN_REFUND_RE = re.compile(
-    r"(?:Estimated total refund|total refund|Refund subtotal)\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+_AMAZON_RETURN_REFUND_TOTAL_RE = re.compile(
+    r"(?:Estimated\s+)?total\s+refund\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
+_AMAZON_RETURN_REFUND_SUBTOTAL_RE = re.compile(
+    r"Refund\s+subtotal\s*[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)",
     re.IGNORECASE,
 )
 
@@ -750,10 +754,18 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
     if shipping:
         fields["drop_off"] = re.sub(r"\s+", " ", shipping.group(1)).strip(" -:")
     else:
-        # Prefer a drop-off mentioned with selected/checked nearby.
-        for match in _AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text):
-            window_start = max(0, match.start() - 120)
-            window = text[window_start : match.end() + 80].lower()
+        # Prefer a drop-off whose own option/control is selected. Bound the
+        # selection window to this match (and before the next drop-off) so a
+        # later option's [checked] cannot select an earlier one.
+        drop_matches = list(_AMAZON_RETURN_SELECTED_DROPOFF_RE.finditer(text))
+        for index, match in enumerate(drop_matches):
+            next_start = (
+                drop_matches[index + 1].start()
+                if index + 1 < len(drop_matches)
+                else len(text)
+            )
+            option_end = min(next_start, match.end() + 40)
+            window = text[match.start() : option_end].lower()
             if "checked" in window or "selected" in window or "pressed" in window:
                 fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
                 break
@@ -766,11 +778,40 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
     if visa:
         fields["payment_method"] = f"Visa ending in {visa.group(1)}"
 
-    refund = _AMAZON_RETURN_REFUND_RE.search(text)
-    if refund:
-        fields["refund_amount"] = f"${refund.group(1)}"
+    # Prefer the displayed total; never promote a subtotal as the total refund.
+    refund_total = _AMAZON_RETURN_REFUND_TOTAL_RE.search(text)
+    if refund_total:
+        fields["refund_amount"] = f"${refund_total.group(1)}"
+        fields["refund_label"] = "Estimated total refund"
+    else:
+        refund_subtotal = _AMAZON_RETURN_REFUND_SUBTOTAL_RE.search(text)
+        if refund_subtotal:
+            fields["refund_amount"] = f"${refund_subtotal.group(1)}"
+            fields["refund_label"] = "Refund subtotal"
 
     return fields
+
+
+def _amazon_return_dropoff_terms(page_text: str, drop_off: str) -> str:
+    """Describe free/no-box/no-label only when the page establishes those terms."""
+    lower = (page_text or "").lower()
+    terms: list[str] = []
+    shipping_free = bool(
+        re.search(
+            r"shipping\s*\([^)]*drop[\s-]?off[^)]*\)\s*:\s*\$0\.00",
+            lower,
+        )
+        or re.search(r"\bfree\s+(?:drop[\s-]?off|return\s+shipping)\b", lower)
+    )
+    if shipping_free:
+        terms.append("free")
+    if "no box" in lower or "no-box" in lower:
+        terms.append("no-box")
+    if "no label" in lower or "no-label" in lower:
+        terms.append("no-label")
+    if not terms:
+        return f"Selected drop-off: {drop_off}."
+    return f"Selected {'/'.join(terms)} drop-off: {drop_off}."
 
 
 def enrich_return_write_lock_question(
@@ -788,16 +829,15 @@ def enrich_return_write_lock_question(
 
     payment = fields.get("payment_method") or "original payment method"
     amount = fields.get("refund_amount") or "the refund amount shown"
+    refund_label = fields.get("refund_label") or "Refund"
+    drop_off_line = _amazon_return_dropoff_terms(page_text, drop_off)
     domain = urlparse(url).netloc if url else "Amazon"
     lines = [
         "**Approval Needed**",
         "",
         f"{system_name} wants to confirm a return on **{domain}**.",
         "Action: Confirm return",
-        (
-            f"Change: Refund {amount} to {payment}. "
-            f"Selected free no-box/no-label drop-off: {drop_off}."
-        ),
+        f"Change: {refund_label} {amount} to {payment}. {drop_off_line}",
     ]
     if url:
         lines.append(f"**Page:** {url}")

@@ -21,9 +21,14 @@ import os
 import re
 from typing import Any, Mapping, Optional
 
-MAX_IDENTICAL_VERIFIER_REJECTIONS = int(
-    os.getenv("BROWSER_MAX_IDENTICAL_VERIFIER_REJECTIONS", "3")
-)
+def _read_max_identical_verifier_rejections() -> int:
+    try:
+        return int(os.getenv("BROWSER_MAX_IDENTICAL_VERIFIER_REJECTIONS", "3"))
+    except ValueError:
+        return 3
+
+
+MAX_IDENTICAL_VERIFIER_REJECTIONS = _read_max_identical_verifier_rejections()
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -40,7 +45,12 @@ def structured_response_covers_schema(
     structured_response: Any,
     response_schema: Optional[Mapping[str, Any]],
 ) -> bool:
-    """True when every required schema field has a non-empty grounded value."""
+    """True when every required schema field is present and non-empty.
+
+    Presence-only: this circuit does not verify tool-grounded evidence. Only
+    the literal ``required is False`` makes a field optional; any other
+    ``required`` value (including non-booleans) is treated as required.
+    """
     if not isinstance(structured_response, Mapping):
         return False
     fields = []

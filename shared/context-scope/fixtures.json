@@ -120,6 +120,21 @@
       }
     },
     {
+      "name": "non_ascii_digit_suffix_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Non-ASCII digit suffixes must not match for_each child routing.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "provider:٣",
+          "subAgentIds": ["gp-child-1"],
+          "agentType": "general_purpose"
+        }
+      }
+    },
+    {
       "name": "task_complete_terminal_omits_subAgentId_kept",
       "is_internal": false,
       "message": {

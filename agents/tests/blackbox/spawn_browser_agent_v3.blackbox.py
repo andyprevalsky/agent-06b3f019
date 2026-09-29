@@ -13833,11 +13833,13 @@ def test_amazon_return_approval_fields_name_selected_dropoff():
         "Estimated total refund: $10.85\n"
         "$10.85 will be sent to the original payment method Visa ending in 9616\n"
         "Confirm your return\n"
+        "No box needed. No label needed.\n"
     )
     fields = extract_amazon_return_approval_fields(page)
     assert fields["drop_off"].lower().startswith("whole foods")
     assert fields["payment_method"] == "Visa ending in 9616"
     assert fields["refund_amount"] == "$10.85"
+    assert fields["refund_label"] == "Estimated total refund"
     enriched = enrich_return_write_lock_question(
         "Approve return?",
         page,
@@ -13847,7 +13849,49 @@ def test_amazon_return_approval_fields_name_selected_dropoff():
     assert "Whole Foods" in enriched
     assert "9616" in enriched
     assert "$10.85" in enriched
+    assert "Estimated total refund" in enriched
+    assert "free" in enriched.lower()
+    assert "no-box" in enriched.lower()
     assert "drop-off" in enriched.lower()
+
+    # A later option's [checked] must not select an earlier drop-off.
+    misordered = (
+        "Whole Foods Dropoff - Open 7 Days a Week\n"
+        "UPS Store Dropoff (checked=true)\n"
+        "Shipping (UPS Store Dropoff): $0.00\n"
+        "Estimated total refund: $15.00\n"
+        "Visa ending in 1234\n"
+    )
+    mis_fields = extract_amazon_return_approval_fields(misordered)
+    assert "ups" in mis_fields["drop_off"].lower()
+    assert "whole foods" not in mis_fields["drop_off"].lower()
+
+    # Prefer total over an earlier larger subtotal; label subtotal when alone.
+    subtotal_first = (
+        "UPS Store Dropoff (checked=true)\n"
+        "Refund subtotal: $18.00\n"
+        "Estimated total refund: $15.00\n"
+        "Visa ending in 1234\n"
+    )
+    total_fields = extract_amazon_return_approval_fields(subtotal_first)
+    assert total_fields["refund_amount"] == "$15.00"
+    assert total_fields["refund_label"] == "Estimated total refund"
+    subtotal_only = (
+        "UPS Store Dropoff (checked=true)\n"
+        "Refund subtotal: $18.00\n"
+        "Visa ending in 1234\n"
+    )
+    sub_fields = extract_amazon_return_approval_fields(subtotal_only)
+    assert sub_fields["refund_amount"] == "$18.00"
+    assert sub_fields["refund_label"] == "Refund subtotal"
+    sub_enriched = enrich_return_write_lock_question(
+        "Approve return?",
+        subtotal_only,
+        url="https://www.amazon.com/spr/returns/contract/abc",
+    )
+    assert "Refund subtotal $18.00" in sub_enriched
+    assert "free no-box/no-label" not in sub_enriched.lower()
+    assert "Selected drop-off:" in sub_enriched
 
 
 def test_amazon_return_self_service_block_detection_and_prompt():

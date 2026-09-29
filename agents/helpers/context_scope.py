@@ -39,7 +39,7 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     tool_call_id = str(metadata.get("toolCallId") or "")
     # for_each child UI rows use `<base>:<idx>` (idx digits); unsuffixed
     # aggregates and provider IDs that merely contain ":" stay visible.
-    return bool(re.search(r":\d+$", tool_call_id))
+    return bool(re.search(r":[0-9]+$", tool_call_id))
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

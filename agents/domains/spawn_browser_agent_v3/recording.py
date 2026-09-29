@@ -3532,7 +3532,11 @@ class BrowserNetworkRecorder:
                     document_url=entry.get("document_url"),
                 )
             ):
-                self._clear_api_challenge_rejections_for_origin(entry_url)
+                self._clear_api_challenge_rejections_for_origin(
+                    entry_url,
+                    success_ts_ms=entry.get("response_ts_ms"),
+                    success_generation=generation,
+                )
 
             entry.update(
                 {
@@ -3607,8 +3611,14 @@ class BrowserNetworkRecorder:
             return True
         return False
 
-    def _clear_api_challenge_rejections_for_origin(self, url: str) -> None:
-        """Drop pending API-challenge HTML exits once same-origin API traffic succeeds."""
+    def _clear_api_challenge_rejections_for_origin(
+        self,
+        url: str,
+        *,
+        success_ts_ms: Any = None,
+        success_generation: int | None = None,
+    ) -> None:
+        """Drop API-challenge exits only when a later same-generation 2xx supersedes them."""
         rejections = list(getattr(self, "_provider_exit_rejections", []) or [])
         if not rejections:
             return
@@ -3621,7 +3631,15 @@ class BrowserNetworkRecorder:
                 kept.append(dict(rejection))
                 continue
             rejection_url = str(rejection.get("url") or "")
-            if rejection_url and _same_origin(rejection_url, url):
+            superseded = bool(rejection_url) and _same_origin(rejection_url, url)
+            if superseded and success_generation is not None:
+                superseded = rejection.get("browser_generation") == success_generation
+            if superseded:
+                try:
+                    superseded = int(success_ts_ms) > int(rejection.get("response_ts_ms"))
+                except (TypeError, ValueError):
+                    superseded = False
+            if superseded:
                 with contextlib.suppress(TypeError, ValueError):
                     cleared_generations.add(int(rejection.get("browser_generation")))
                 continue

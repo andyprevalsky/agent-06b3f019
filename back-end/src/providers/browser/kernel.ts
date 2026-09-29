@@ -415,12 +415,10 @@ async function createRemoteSession(
         remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
       }
     }
-    // Only after a live Kernel session is up. A prior timed-out init that only
-    // reserved the in-memory profile must not flip later retries to
-    // user_persistent (breaks webdecoy isolation metadata proofs).
-    if (!options.omitProfile && remote.profileId !== null) {
-      markBenchmarkKernelProfileBound(agentId);
-    }
+    // Do not mark the profile bound here — persistBrowserSessionRow (or the
+    // recreate row update) may still fail and release the remote session. A
+    // premature bind would label the next retry user_persistent instead of
+    // new_user_persistent (breaks webdecoy isolation metadata proofs).
     return remote;
   } catch (error) {
     if (error instanceof RateLimitError) {
@@ -469,6 +467,11 @@ export async function createKernelSessionWithContext(
       remote.validationBrowser.close(),
     ]);
     throw error;
+  }
+  // Bind only after the session row is durable so a failed persist leaves the
+  // in-memory profile as new_user_persistent for the next create attempt.
+  if (remote.profileId !== null) {
+    markBenchmarkKernelProfileBound(agentId);
   }
 
   let validationBrowser: Browser | null = remote.validationBrowser;
@@ -600,6 +603,9 @@ async function recreateKernelSession(
       remote.validationBrowser.close(),
     ]);
     throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
+  }
+  if (remote.profileId !== null) {
+    markBenchmarkKernelProfileBound(oldSession.agentId);
   }
 
   // Evict the superseded Kernel browser so we never leak a paid session. On the
