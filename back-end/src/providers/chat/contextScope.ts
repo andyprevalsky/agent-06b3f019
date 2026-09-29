@@ -24,10 +24,20 @@ function isProviderNumericToolCallId(toolCallId: string): boolean {
   return /^(toolu|tooluse):\d+$/i.test(toolCallId);
 }
 
-/** Historical for_each child UI rows use ``<parent>:<idx>`` (ASCII digit idx). */
-function hasHistoricalForEachChildSuffix(toolCallId: string): boolean {
-  if (!/:[0-9]+$/.test(toolCallId)) return false;
-  return !isProviderNumericToolCallId(toolCallId);
+/**
+ * Historical for_each child UI rows use ``{spawnGroupId}:{idx}`` without the
+ * modern ``forEachChild`` marker. Require the group prefix match so a direct
+ * spawn whose provider id happens to end in ``:digits`` (e.g. ``custom:7``)
+ * stays parent-visible when it carries ``agentType`` like other GP results.
+ */
+function hasHistoricalForEachChildSuffix(
+  toolCallId: string,
+  spawnGroupId: unknown
+): boolean {
+  if (typeof spawnGroupId !== 'string' || !spawnGroupId) return false;
+  if (isProviderNumericToolCallId(toolCallId)) return false;
+  const escaped = spawnGroupId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}:[0-9]+$`).test(toolCallId);
 }
 
 export function isInternalSubagentMessage(message: ChatMessage): boolean {
@@ -39,8 +49,11 @@ export function isInternalSubagentMessage(message: ChatMessage): boolean {
 
   if (metadata.forEachChild === true) return true;
 
+  // Direct spawn terminals stamp agentType; historical for_each child rows did not.
+  if (metadata.agentType != null && metadata.agentType !== '') return false;
+
   const toolCallId = String(metadata.toolCallId ?? '');
-  return hasHistoricalForEachChildSuffix(toolCallId);
+  return hasHistoricalForEachChildSuffix(toolCallId, metadata.spawnGroupId);
 }
 
 export function filterInternalSubagentMessages(messages: ChatMessage[]): ChatMessage[] {

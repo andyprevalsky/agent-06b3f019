@@ -1673,10 +1673,14 @@ class DOMService:
         ceremony can happen on any target we armed, so take the max across all of
         them rather than trusting a single handle.
         """
+        # Seed from observed maxima first: invalidate_passkey_state_for_live_target
+        # may have removed the authenticator after saving an advanced signCount.
+        # Disconnect / get_used_passkey_credential_ids must still see that count
+        # when reinject fails and _passkey_authenticator_by_target is empty.
+        counts: Dict[str, int] = dict(self._passkey_observed_max_counts)
         session = self._session
         if session is None or not self._passkey_authenticator_by_target:
-            return {}
-        counts: Dict[str, int] = {}
+            return counts
         for target_id in list(self._passkey_authenticator_by_target):
             try:
                 cdp_session = await session.get_or_create_cdp_session(target_id, focus=False)
@@ -1688,9 +1692,6 @@ class DOMService:
             for cid, value in target_counts.items():
                 if value > counts.get(cid, -1):
                     counts[cid] = value
-        for cid, value in self._passkey_observed_max_counts.items():
-            if value > counts.get(cid, -1):
-                counts[cid] = value
         return counts
 
     async def get_used_passkey_credential_ids(self) -> List[str]:

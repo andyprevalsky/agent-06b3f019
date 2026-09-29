@@ -586,6 +586,11 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
     assert not structured_response_covers_schema(
         {"error": "extraction failed"}, optional_only
     )
+    # Malformed fields collections must not fall through to schema-less accept.
+    assert not structured_response_covers_schema(
+        {"main_heading": "x"}, {"fields": {"name": "main_heading"}}
+    )
+    assert not structured_response_covers_schema({"main_heading": "x"}, {"fields": []})
     # Score changes reset the streak even when reasoning matches.
     fingerprint, streak = next_identical_reject_streak(
         previous_fingerprint=fingerprint,
@@ -10343,6 +10348,16 @@ async def test_stale_api_challenge_html_exit_superseded_by_later_same_origin_suc
     assert recorder.pop_provider_exit_rejection() is None
     assert 3 not in recorder._rejected_network_generations
 
+    # Missing challenge timestamp must not treat any same-endpoint 2xx as success
+    # (console-derived 403s omit response_ts_ms).
+    assert not recorder._same_origin_api_succeeded_after(
+        movie_url,
+        challenge_response_ts_ms=None,
+        generation=3,
+        method="GET",
+        resource_type="document",
+    )
+
 
 async def test_api_challenge_requires_same_endpoint_not_merely_same_origin():
     """Unrelated same-origin 2xx must not suppress a challenged XHR/fetch POST.
@@ -13947,6 +13962,9 @@ def test_write_lock_return_continue_on_amazon_contract_url():
     assert not is_return_button("Continue", cart)
     assert not is_return_button("submit\nContinue", cart)
     assert not is_return_button("Continue")  # no URL → phrase-only path
+    # Bare type=submit without a return-commit label must not mint approval.
+    assert not is_return_button("submit", contract)
+    assert not is_return_button("submit", confirm)
     assert not is_return_button("Refund to your Visa ending in 9616", contract)
     assert not is_return_button("View return/refund status", contract)
     assert is_return_button("Confirm your return", confirm)
@@ -14021,6 +14039,20 @@ def test_amazon_return_approval_fields_name_selected_dropoff():
     mis_fields = extract_amazon_return_approval_fields(misordered)
     assert "ups" in mis_fields["drop_off"].lower()
     assert "whole foods" not in mis_fields["drop_off"].lower()
+
+    # False-valued / negated markers must not count as selection.
+    for negated in (
+        "Whole Foods Dropoff (checked=false)\nUPS Store Dropoff (checked=true)\n",
+        "Whole Foods Dropoff (selected=false)\nUPS Store Dropoff (selected=true)\n",
+        "Whole Foods Dropoff (aria-pressed=false)\nUPS Store Dropoff (pressed)\n",
+        "Whole Foods Dropoff (not checked)\nUPS Store Dropoff (checked)\n",
+        "Whole Foods Dropoff (not selected)\nUPS Store Dropoff (selected)\n",
+    ):
+        neg_fields = extract_amazon_return_approval_fields(
+            negated + "Shipping (UPS Store Dropoff): $0.00\nEstimated total refund: $15.00\n"
+        )
+        assert "ups" in neg_fields["drop_off"].lower(), negated
+        assert "whole foods" not in neg_fields["drop_off"].lower(), negated
 
     # Prefer total over an earlier larger subtotal; label subtotal when alone.
     subtotal_first = (

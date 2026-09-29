@@ -71,10 +71,15 @@ def structured_response_covers_schema(
     if not structured_response:
         return False
     fields = []
-    if isinstance(response_schema, Mapping):
+    if isinstance(response_schema, Mapping) and "fields" in response_schema:
         raw_fields = response_schema.get("fields")
-        if isinstance(raw_fields, list):
-            fields = [f for f in raw_fields if isinstance(f, Mapping)]
+        if not isinstance(raw_fields, list):
+            # Malformed schema: do not fall through to the schema-less path.
+            return False
+        fields = [f for f in raw_fields if isinstance(f, Mapping)]
+        if not fields:
+            # Declared fields list but none usable — reject soft-accept.
+            return False
     if not fields:
         # Schema-less agents: any non-empty structured dict is usable output.
         return True

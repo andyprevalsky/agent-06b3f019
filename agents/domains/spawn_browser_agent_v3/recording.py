@@ -3661,12 +3661,16 @@ class BrowserNetworkRecorder:
             ):
                 continue
             other_ts = other.get("response_ts_ms")
-            if challenge_ts is not None and other_ts is not None:
-                try:
-                    if int(other_ts) <= challenge_ts:
-                        continue
-                except (TypeError, ValueError):
-                    pass
+            # Require both timestamps (same contract as
+            # _clear_api_challenge_rejections_for_origin). A console-derived
+            # 403 without response_ts_ms must not be suppressed by any 2xx.
+            if challenge_ts is None or other_ts is None:
+                continue
+            try:
+                if int(other_ts) <= challenge_ts:
+                    continue
+            except (TypeError, ValueError):
+                continue
             return True
         return False
 

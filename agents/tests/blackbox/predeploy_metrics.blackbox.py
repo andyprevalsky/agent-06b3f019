@@ -324,7 +324,9 @@ def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:
         fake_runner = fixture / "scripts/run-bench"
         fake_runner.write_text(
             "#!/usr/bin/env bash\n"
-            f"trap 'sleep 6; printf cleaned > \"{cleanup_sentinel}\"; exit 143' TERM\n"
+            # Short deliberate delay so cleanup is observable without starving
+            # communicate() under parallel deploy-gate load.
+            f"trap 'sleep 2; printf cleaned > \"{cleanup_sentinel}\"; exit 143' TERM\n"
             f"printf '%s\\n' $$ > '{local_pid_file}'\n"
             "while :; do sleep 1; done\n"
         )
@@ -346,7 +348,7 @@ def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:
         _wait_for_file(local_pid_file)
         local_child_pid = int(local_pid_file.read_text())
         local_process.terminate()
-        local_output, _ = local_process.communicate(timeout=10)
+        local_output, _ = local_process.communicate(timeout=20)
         local_summary = json.loads(
             (fixture / ".context/predeploy-runs/signal-local/summary.json").read_text()
         )

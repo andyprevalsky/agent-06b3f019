@@ -766,7 +766,7 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
             )
             option_end = min(next_start, match.end() + 40)
             window = text[match.start() : option_end].lower()
-            # Reject negated markers (unchecked / aria-checked=false / not selected).
+            # Reject negated markers (unchecked / aria-*-false / not selected).
             has_selection = False
             for marker in re.finditer(
                 r"\b(checked|selected|pressed)\b",
@@ -775,16 +775,14 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
                 token = marker.group(1)
                 start = marker.start()
                 prefix = window[max(0, start - 12) : start]
-                if token == "checked" and (
-                    prefix.endswith("un")
-                    or "checked=false" in window[start : start + 14]
-                    or "checked=\"false\"" in window[start : start + 16]
-                    or "checked='false'" in window[start : start + 16]
-                ):
-                    continue
-                if token == "selected" and (
-                    prefix.endswith("un") or prefix.rstrip().endswith("not")
-                ):
+                suffix = window[start : start + 18]
+                negated_prefix = prefix.endswith("un") or prefix.rstrip().endswith("not")
+                false_attr = (
+                    f"{token}=false" in suffix
+                    or f'{token}="false"' in suffix
+                    or f"{token}='false'" in suffix
+                )
+                if negated_prefix or false_attr:
                     continue
                 has_selection = True
                 break
@@ -901,9 +899,10 @@ def _is_return_commit_continue_signal(element_text: str) -> bool:
     token_set = set(tokens)
     if "confirm" in token_set:
         return True
+    # Require submit+continue (form submit CTA). A bare type=submit token on a
+    # return-commit URL is not enough — an unrelated unlabeled submit must not
+    # mint a domain-scoped return approval that later lets the real commit through.
     if "submit" in token_set and "continue" in token_set:
-        return True
-    if token_set == {"submit"}:
         return True
     return False
 

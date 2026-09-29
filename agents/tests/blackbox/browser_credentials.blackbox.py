@@ -917,6 +917,10 @@ async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
 
     await dom.invalidate_passkey_state_for_live_target()
     assert dom._passkey_observed_max_counts.get("credential-amazon") == 12
+    # After invalidate the authenticator map is empty; observed maxima must still
+    # surface so disconnect/usage capture works when reinject fails.
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 12}
+    assert "credential-amazon" in await dom.get_used_passkey_credential_ids()
 
     assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
     # Re-seed must use max(base, observed) so RP never sees a rolled-back counter.
@@ -1108,6 +1112,10 @@ async def run_all_tests():
     await runner.record_async(
         "invalidate_forces_rebuild_when_health_check_would_trust_stale",
         test_invalidate_forces_rebuild_when_health_check_would_trust_stale,
+    )
+    await runner.record_async(
+        "invalidate_preserves_advanced_signcounts_for_usage",
+        test_invalidate_preserves_advanced_signcounts_for_usage,
     )
     await runner.record_async(
         "passkey_environment_not_enabled_rebuilds_immediately",

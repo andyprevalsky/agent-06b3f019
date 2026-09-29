@@ -110,6 +110,23 @@
       }
     },
     {
+      "name": "direct_spawn_numeric_suffixed_toolCallId_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Direct spawn results with numeric-suffixed ids (custom:7) stay parent-visible.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "custom:7",
+          "subAgentIds": ["gp-child-1"],
+          "agentType": "general_purpose",
+          "spawnGroupId": "custom",
+          "busId": "bus-direct-1"
+        }
+      }
+    },
+    {
       "name": "general_purpose_aggregate_unsuffixed_toolCallId_kept",
       "is_internal": false,
       "message": {
