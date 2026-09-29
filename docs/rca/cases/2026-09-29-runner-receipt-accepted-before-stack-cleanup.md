@@ -130,6 +130,12 @@ endpoint correctly returns 409 forever in that state, while authenticated
 `/shutdown-health` returns 204. Both normal and recovery collectors now fail
 closed immediately on that combination, leaving the runtime-evidence latch
 for zero-credit forensic capture instead of waiting 600 seconds per guest.
+The same case leaves the original driver `exited`, services `stopped`, and
+`run.json` absent. The interrupted-pool verifier now accepts this state only
+with the exact run-token driver ACK, the matching original clean stack status,
+the controller's guest confirmation, and independent native stopped-Machine
+inventory. It still requires an exact stop/provider receipt when stack cleanup
+failed and still awards zero proof credit to either interrupted case.
 
 At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or
