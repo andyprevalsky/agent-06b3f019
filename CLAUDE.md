@@ -259,12 +259,14 @@ This is provisioned capacity, not a 40 GB upload by the controller. The stopped
 Task-free infra probes use the default 4 GB primary shape so they can borrow
 that pool even when sampled names are browser/payment tasks; they also skip
 the payment-only bundled frontend build and launch one worker, since no sampled
-task executes. Real
-browser and payment benches retain their 8 GB shape and frontend contract. A
-fresh large-primary clone still
-inherits the legacy donor's 40 GB volume until a verified 20 GB donor replaces
-it. Keep `waiting_for_detach` volumes in the exact-owner ledger: Fly has
-accepted deletion but has not confirmed a terminal state.
+task executes. Real browser and payment benches retain their 8 GB shape and
+frontend contract. A fresh large-primary clone still inherits the legacy
+donor's 40 GB volume until a verified 20 GB donor replaces it. Keep
+`waiting_for_detach` volumes in the exact-owner ledger: Fly has accepted
+deletion but has not confirmed a terminal state. If a fleet is canceled before
+its boot-config barrier releases, only the exact stopped-Machine, unreleased
+barrier and preallocated runtime-owner proof can discharge guest cleanup; the
+`guest-never-started.confirmed` receipt is not a benchmark result.
 For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
 `CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
 nondefault machine uses its own git-common dependency/snapshot proof file, so

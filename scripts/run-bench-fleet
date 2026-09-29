@@ -679,6 +679,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench_result.py" \
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
@@ -7238,6 +7239,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local guest_barrier_token details detail_status state actual_name configuration
     local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
     local recovery_index shutdown_status proxy_cleanup_status
+    local prestart_inventory prestart_log prestart_status
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
@@ -7247,6 +7249,40 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     if [ -e "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ] \
         || [ -L "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ]; then
         fleet_registry_resume_volume_migrations "$registry" || return 1
+    fi
+
+    # A canceled boot-config barrier can own stopped pool Machines without
+    # having started a guest or published any status proxy. Prove the *whole*
+    # exact pool-only run never crossed that barrier before clearing its guest
+    # cleanup latch. A partial/mixed run falls through to authenticated guest
+    # recovery and remains quarantined if that cannot be proven.
+    prestart_inventory="$(mktemp "${TMPDIR:-/tmp}/cloudbench-prestart-machines.XXXXXX")" \
+        || return 1
+    prestart_log="$FLEET_AUDIT_ROOT/${registry##*/}/prestart-recovery.log"
+    prestart_status=1
+    if fly_with_timeout 30 machines list -a "$APP" --json > "$prestart_inventory" 2> "$prestart_log" \
+        && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+            --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+            --claims-root "$POOL_CLAIMS_DIR" --machines-json "$prestart_inventory" \
+            --app "$APP" >> "$prestart_log" 2>&1; then
+        prestart_status=0
+    fi
+    rm -f "$prestart_inventory"
+    if [ "$prestart_status" = "0" ]; then
+        echo "✅ exact pool owner never started a guest; no guest cleanup is owed"
+        FLEET_REGISTRY_DIR="$registry"
+        FLEET_REGISTRY_PUBLISHED=1
+        KEEP_CLONES=0
+        if ! fleet_registry_confirm_guest_teardown; then
+            FLEET_REGISTRY_DIR="$save_registry"
+            FLEET_REGISTRY_PUBLISHED="$save_published"
+            KEEP_CLONES="$save_keep"
+            return 1
+        fi
+        FLEET_REGISTRY_DIR="$save_registry"
+        FLEET_REGISTRY_PUBLISHED="$save_published"
+        KEEP_CLONES="$save_keep"
+        return 0
     fi
 
     STALE_OWNER_RECOVERY_PLAN_FILE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-guest-recovery.XXXXXX")" \
@@ -7564,12 +7600,36 @@ PY
         return 1
     fi
     while IFS=$'\t' read -r id out; do
-        [ -f "$out/guest-shutdown.confirmed" ] \
+        if [ -f "$out/guest-shutdown.confirmed" ] \
             && [ ! -L "$out/guest-shutdown.confirmed" ] \
-            && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ] || {
-            rm -f "$plan"
-            return 1
-        }
+            && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ]; then
+            :
+        else
+            volume_id="$(registry_meta_value "$FLEET_AUDIT_ROOT/$owner/pool/$id" volume_id)"
+            python3 - "$out/guest-never-started.confirmed" "$owner" "$run_id" \
+                "${out##*/}" "$id" "$volume_id" <<'PY' || { rm -f "$plan"; return 1; }
+import json
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+expected = {
+    "version": 1,
+    "kind": "no-guest-start",
+    "fleet_owner_token": sys.argv[2],
+    "run_id": sys.argv[3],
+    "bench": sys.argv[4],
+    "machine_id": sys.argv[5],
+    "volume_id": sys.argv[6],
+    "provider_state": "stopped",
+    "barrier": "unreleased",
+}
+info = path.lstat()
+assert stat.S_ISREG(info.st_mode) and info.st_size <= 4096
+assert json.loads(path.read_text()) == expected
+PY
+        fi
         claim="$POOL_CLAIMS_DIR/$id"
         state="$(registry_meta_value "$claim" cleanup_state)"
         case "$state" in
@@ -7955,6 +8015,7 @@ fresh = {row['machine_id'] for p in (audit / 'fresh').iterdir() if (row := field
 pool_dir = audit / 'pool'
 assert pool_dir.is_dir() and not pool_dir.is_symlink()
 pool = set()
+pool_volumes = {}
 for record in pool_dir.iterdir():
     row = fields(record)
     assert (row.get('version') == '1'
@@ -7965,11 +8026,34 @@ for record in pool_dir.iterdir():
             and row.get('machine_id') == record.name)
     if row.get('disposition') == 'claimed':
         pool.add(record.name)
+        pool_volumes[record.name] = row.get('volume_id')
 for index, task in enumerate(tasks):
     name = task['name']
     assert re.fullmatch(r'[A-Za-z0-9._-]+', name) and name not in ('.', '..')
     out = run / name
     assert not out.is_symlink()
+    no_start = out / 'guest-never-started.confirmed'
+    if no_start.exists() or no_start.is_symlink():
+        assert no_start.is_file() and not no_start.is_symlink() and no_start.stat().st_size <= 4096
+        identity = out / '.cid'
+        assert identity.is_file() and not identity.is_symlink()
+        source, machine = identity.read_text().split()
+        assert source == 'pool' and machine in pool
+        assert json.loads(no_start.read_text()) == {
+            'version': 1,
+            'kind': 'no-guest-start',
+            'fleet_owner_token': registry.name,
+            'run_id': meta['run_id'],
+            'bench': name,
+            'machine_id': machine,
+            'volume_id': pool_volumes[machine],
+            'provider_state': 'stopped',
+            'barrier': 'unreleased',
+        }
+        assert not (out / 'post-config-start.accepted').exists()
+        assert not (out / 'cloudbench-run.json').exists()
+        assert not (out / 'worker-runtime-evidence').exists()
+        continue
     admitted = (out / 'runtime-evidence.owner.json').exists() or (out / 'post-config-start.accepted').exists()
     if not admitted:
         assert not (out / 'worker-runtime-evidence').exists()
