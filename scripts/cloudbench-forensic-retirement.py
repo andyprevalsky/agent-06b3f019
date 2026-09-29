@@ -443,6 +443,9 @@ def verify_interrupted_pool_evidence(
         assert task["name"] == name and row["ordinal"] == ordinal
         assert row["run_token"] == f"{owner}-{ordinal}"
         assert row["proof_credit"] == 0 and row["kind"] in {"sealed", "interrupted"}
+        assert isinstance(row["files"], dict) and isinstance(row["missing"], list)
+        assert len(row["missing"]) == len(set(row["missing"]))
+        assert set(row["files"]).isdisjoint(row["missing"])
         machine, volume = row["machine_id"], row["volume_id"]
         assert re.fullmatch(r"[0-9a-f]+", machine)
         assert re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
@@ -480,11 +483,12 @@ def verify_interrupted_pool_evidence(
             assert object_file(out / "runtime-evidence.pending") == evidence_owner
             assert not (out / "remote-logs/runtime-evidence/run.json").exists()
             assert {"original/bench.log", "original/cloudbench-driver.state",
-                    "original/cloudbench-driver.pid",
                     "original/repo/.context/cloudbench/services.json",
                     "original/repo/.context/cloudbench/stack.log",
                     "original/repo/.context/cloudbench/logs/backend.log",
                     "original/repo/.context/cloudbench/logs/worker.log"} <= set(row["files"])
+            assert "original/cloudbench-driver.pid" in row["files"] or (
+                "original/cloudbench-driver.pid" in row["missing"])
             assert "original/repo/.context/cloudbench/run.json" in row["files"] or (
                 "original/repo/.context/cloudbench/run.json" in row["missing"])
             stopped = object_file(out / "guest-cleanup.machine-stopped.json")
@@ -524,15 +528,23 @@ def verify_interrupted_pool_evidence(
                     "/original/repo/.context/cloudbench/run.json"):
                 archived[member.name] = json.loads(data)
             if member.name.endswith("/original/repo/.context/cloudbench/services.json"):
-                assert json.loads(data)["status"] == "running"
+                archived[member.name] = json.loads(data)
             if member.name.endswith("/original/cloudbench-driver.state"):
-                assert data.strip() == b"running"
+                archived[member.name] = data.strip()
             seen.add(member.name)
     assert seen == set(expected_files)
     for row in rows:
         path = f"{row['task']}/" + (
             "sealed/run.json" if row["kind"] == "sealed"
             else "original/repo/.context/cloudbench/run.json")
+        if row["kind"] == "interrupted":
+            prefix = f"{row['task']}/original/"
+            state = archived[prefix + "cloudbench-driver.state"]
+            services = archived[prefix + "repo/.context/cloudbench/services.json"]
+            if "original/cloudbench-driver.pid" in row["missing"]:
+                assert state == b"exited" and services["status"] == "failed"
+            else:
+                assert state == b"running" and services["status"] == "running"
         if path in archived:
             results = archived[path].get("tasks")
             assert isinstance(results, list) and len(results) == 1

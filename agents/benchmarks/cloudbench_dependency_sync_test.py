@@ -12257,6 +12257,7 @@ def test_exact_guest_recovery_retains_quarantine_on_proxy_or_health_failure(
         calls = case_root / "calls"
         script = f"""set -uo pipefail
 MODE="$1"
+APP=bench-app
 REGISTRY="$2"
 OUTPUT="$3"
 UNEXPECTED="$4"
@@ -12344,6 +12345,78 @@ fi
             assert any(line.endswith("/shutdown-health") for line in call_lines)
         else:
             assert all("/shutdown" not in line for line in call_lines)
+
+
+def test_exact_guest_cleanup_latch_survives_separate_runtime_capture_failure(
+    tmp_path: Path,
+) -> None:
+    """A stopped guest's missing runtime bundle must not re-quarantine cleanup."""
+    fleet = FLEET_SCRIPT.read_text()
+    reconnect = _extract_fleet_function(fleet, "fleet_recovery_reconnect_guest_shutdowns() {")
+    confirm = _extract_fleet_function(fleet, "fleet_registry_confirm_guest_teardown() {")
+    owner = "7c" * 16
+    registry = tmp_path / "ownership" / owner
+    (registry / "clones").mkdir(parents=True)
+    run = tmp_path / "runs" / "failed-run"
+    output = run / "interrupted-bench"
+    output.mkdir(parents=True)
+    (tmp_path / "audits" / owner).mkdir(parents=True)
+    (registry / "meta").write_text(
+        f"run_id=failed-run\nruns_root={run.parent}\ncleanup_policy=retain\n"
+    )
+    (registry / "guest-cleanup-unconfirmed").touch()
+    (registry / "runtime-evidence-unconfirmed").touch()
+    (output / "guest-shutdown.confirmed").write_text("failed-run\n")
+    (output / "runtime-evidence.pending").write_text("pending\n")
+    helper = tmp_path / "collector.py"
+    helper.write_text("raise SystemExit(2)\n")
+    script = f"""set -uo pipefail
+APP=bench-app
+REGISTRY={shlex.quote(str(registry))}
+OUTPUT={shlex.quote(str(output))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
+FLEET_REGISTRY_DIR=""
+FLEET_REGISTRY_PUBLISHED=0
+KEEP_CLONES=0
+RUN_ID=outer-run
+CLOUDBENCH_BARRIER_TOKEN=outer-token
+RUNTIME_EVIDENCE_RECOVERY_HELPER={shlex.quote(str(helper))}
+STALE_OWNER_RECOVERY_PROXY_PIDS=()
+STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
+STALE_OWNER_RECOVERY_PLAN_FILE=""
+STALE_OWNER_RECOVERY_PORTS_FILE=""
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+cloudbench_fsync_directory() {{ return 0; }}
+fly_with_timeout() {{ return 1; }}
+fleet_registry_build_guest_recovery_plan() {{
+  printf 'pool-guest\\tinterrupted-bench\\tpool-machine\\tdeadbeef000001\\tvol_owned\\t%s\\t61001\\n' "$OUTPUT" > "$2"
+}}
+registry_machine_details() {{ printf 'started pool-machine fdaa::101\\n'; }}
+machine_guest_recovery_configuration() {{ printf 'barrier-token\\tguest-token\\t8011\\n'; }}
+claim_recovery_status_proxy_ports() {{ printf '62001\\n' > "$1"; }}
+start_data_plane_proxy() {{ sleep 60 & printf -v "$5" '%s' "$!"; }}
+cleanup_stale_owner_recovery_proxies() {{
+  for pid in "${{STALE_OWNER_RECOVERY_PROXY_PIDS[@]}}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  return 0
+}}
+cloudbench_confirm_guest_shutdowns() {{ return 0; }}
+cloudbench_recover_guest_cleanup_receipts() {{ return 99; }}
+{confirm}
+{reconnect}
+if fleet_recovery_reconnect_guest_shutdowns "$REGISTRY"; then exit 90; fi
+[ ! -e "$REGISTRY/guest-cleanup-unconfirmed" ] || exit 91
+[ -e "$REGISTRY/runtime-evidence-unconfirmed" ] || exit 92
+[ -e "$OUTPUT/runtime-evidence.pending" ] || exit 93
+[ "$(registry_meta_value "$REGISTRY/meta" cleanup_policy)" = reap ] || exit 94
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_exact_recovery_releases_only_its_capacity_and_proxy_leases(

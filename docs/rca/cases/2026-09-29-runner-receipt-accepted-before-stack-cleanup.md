@@ -45,6 +45,13 @@ recovery exposed a second gap: the guest state was `exited`, with no driver
 descendants, but its services manifest still said `failed`. The quiescence
 helper correctly rejected this as not durably stopped, while the fleet refused
 to enter its existing exact Machine-stop/provider-cleanup fallback.
+After exact Machine stop and provider cleanup succeeded, recovery still tried
+to recapture sealed runtime evidence from that stopped guest before clearing
+the independent guest-cleanup latch. This prevented the failed-run forensic
+archive from being built, even though the original volume and exact cleanup
+receipts remained available. The interrupted driver's original state was
+`exited`, its PID file was absent, and its services manifest was `failed`;
+the older archive verifier only accepted the pre-interrupt `running` state.
 No task prompt, evaluator, scoring rule, or execution timeout was changed.
 
 ## Diagnosis
@@ -94,7 +101,12 @@ fails immediately on its terminal HTTP 500; ordinary delayed sealing retains
 its existing bounded wait. A validated unquiesced `exited` driver now joins
 the existing exact Machine-stop/provider-cleanup fallback. Blackbox tests
 cover failed, healthy, and previously persisted runner receipts, terminal
-collector failure, and stop-before-provider-cleanup ordering. A live recovery and
+collector failure, and stop-before-provider-cleanup ordering. Exact guest
+cleanup now releases only its own latch before attempting runtime recapture;
+the runtime-evidence latch and pool claims remain retained until the original
+bytes are archived and verified. The zero-credit interrupted archive accepts
+an absent original driver PID only with original `exited` state, `failed`
+services, and exact stopped-Machine/provider receipts. A live recovery and
 ten consecutive complete slices are still required before this case can be
 marked fixed.
 

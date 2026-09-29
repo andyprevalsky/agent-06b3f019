@@ -7574,6 +7574,23 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             shutdown_status=$?
         fi
     fi
+    # Guest cleanup and runtime capture are separate ownership latches. Once
+    # every exact guest acknowledgement or recovery receipt is validated,
+    # discharge the cleanup latch before attempting runtime recapture. A guest
+    # stopped by exact recovery cannot serve that capture; preserving its
+    # runtime latch lets the interrupted-volume forensic archive handle it.
+    if [ "$shutdown_status" -eq 0 ] \
+        && [ -e "$registry/guest-cleanup-unconfirmed" ]; then
+        FLEET_REGISTRY_DIR="$registry"
+        FLEET_REGISTRY_PUBLISHED=1
+        KEEP_CLONES=0
+        if ! fleet_registry_confirm_guest_teardown; then
+            shutdown_status=1
+        fi
+        FLEET_REGISTRY_DIR="$save_registry"
+        FLEET_REGISTRY_PUBLISHED="$save_published"
+        KEEP_CLONES="$save_keep"
+    fi
     # A cancelled child may lose its local data-plane collector after the guest
     # sealed shutdown. Reuse the exact recovered proxy while it is still owned
     # here; later verification must never treat a missing local copy as proof
@@ -7664,20 +7681,6 @@ PY
         return 1
     fi
 
-    FLEET_REGISTRY_DIR="$registry"
-    FLEET_REGISTRY_PUBLISHED=1
-    KEEP_CLONES=0
-    if ! fleet_registry_confirm_guest_teardown; then
-        FLEET_REGISTRY_DIR="$save_registry"
-        FLEET_REGISTRY_PUBLISHED="$save_published"
-        KEEP_CLONES="$save_keep"
-        RUN_ID="$save_run"
-        CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
-        return 1
-    fi
-    FLEET_REGISTRY_DIR="$save_registry"
-    FLEET_REGISTRY_PUBLISHED="$save_published"
-    KEEP_CLONES="$save_keep"
     RUN_ID="$save_run"
     CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
 }

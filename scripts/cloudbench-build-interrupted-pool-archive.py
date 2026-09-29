@@ -105,6 +105,13 @@ def main() -> None:
                     run_json = "repo/.context/cloudbench/run.json"
                     if run_json not in seen:
                         entry["missing"].append("original/" + run_json)
+                    # An interrupted driver removes its PID file when it
+                    # exits, even if stack cleanup subsequently fails. Keep
+                    # that absence explicit; the verifier binds it to the
+                    # original exited/failed state and exact stop receipt.
+                    driver_pid = "cloudbench-driver.pid"
+                    if driver_pid not in seen:
+                        entry["missing"].append("original/" + driver_pid)
                 rows.append(entry)
         archive_bytes = archive_path.stat().st_size
         assert archive_bytes <= 512 * 1024 * 1024
