@@ -62,6 +62,28 @@ export interface SyncAndyClaudeResult {
   integrationAccountEmails: string[];
 }
 
+/** Prod row shape used by the Andy Claude smoke eligibility filter. */
+export type AndyClaudeProdIntegrationCandidate = {
+  isActive: boolean;
+  status: string;
+  config: unknown;
+};
+
+/**
+ * Never seed revoked/expired rows into local benches — an inactive Anthropic
+ * OAuth token (401 on /v1/models) will poison Claude Code spawn for the whole
+ * k-run if it lands in the pool ahead of good keys.
+ */
+export function isEligibleAndyClaudeProdIntegration(
+  integration: AndyClaudeProdIntegrationCandidate
+): boolean {
+  if (!integration.isActive || integration.status !== 'CONNECTED') return false;
+  const config = integration.config;
+  if (!config || typeof config !== 'object') return false;
+  const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
+  return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
+}
+
 function normalizePhoneDigits(phone: string | null | undefined): string {
   return (phone ?? '').replace(/\D/g, '');
 }
@@ -165,16 +187,7 @@ export async function syncAndyClaudeTokensFromProd(options?: {
           })
         ).map((row) => ({ ...row, accountId: '', accountEmail: null }));
 
-    const credentialed = integrations.filter((integration) => {
-      // Never seed revoked/expired rows into local benches — an inactive
-      // Anthropic OAuth token (401 on /v1/models) will poison Claude Code
-      // spawn for the whole k-run if it lands in the pool ahead of good keys.
-      if (!integration.isActive || integration.status !== 'CONNECTED') return false;
-      const config = integration.config;
-      if (!config || typeof config !== 'object') return false;
-      const encryptedCredentials = (config as Record<string, unknown>).encryptedCredentials;
-      return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
-    });
+    const credentialed = integrations.filter(isEligibleAndyClaudeProdIntegration);
 
     if (credentialed.length === 0) {
       // Clear stale local rows before failing — otherwise revoked/expired

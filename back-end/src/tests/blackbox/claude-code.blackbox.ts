@@ -62,7 +62,10 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
-import { syncAndyClaudeTokensFromProd } from '../../../scripts/sync-andy-claude-tokens-from-prod';
+import {
+  isEligibleAndyClaudeProdIntegration,
+  syncAndyClaudeTokensFromProd,
+} from '../../../scripts/sync-andy-claude-tokens-from-prod';
 import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
@@ -398,9 +401,18 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
 
 async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
   console.log(`    [info] ${reason} — syncing Andy (+19729777432) claude_code keys from prod…`);
-  await syncAndyClaudeTokensFromProd({
-    localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
-  });
+  try {
+    await syncAndyClaudeTokensFromProd({
+      localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
+    });
+  } catch (error) {
+    // Prod OAuth rows are often EXPIRED mid-deploy; Linux smoke must still reach
+    // the funded ANTHROPIC_API_KEY fallback instead of failing closed here.
+    const detail = error instanceof Error ? error.message : String(error);
+    console.log(
+      `    [warn] Andy prod Claude sync failed (${detail}); continuing to local/API-key fallback`
+    );
+  }
 }
 
 /**
@@ -563,6 +575,38 @@ function testResolveAuthEnvs_apiKeyFallback() {
     'falls back to api-key when no OAuth credential'
   );
   assert(envs.CLAUDE_CODE_OAUTH_TOKEN === undefined, 'no OAuth token in fallback');
+}
+
+/**
+ * Cement: expired/inactive Andy prod OAuth rows must NOT be treated as syncable.
+ * Linux Claude E2B smoke soft-fails the prod sync and falls through to the funded
+ * ANTHROPIC_API_KEY path (see syncAndyProdClaudeTokensForSmoke).
+ */
+function testAndyProdClaudeEligibility_rejectsExpiredAndInactive() {
+  assert(
+    isEligibleAndyClaudeProdIntegration({
+      isActive: true,
+      status: 'CONNECTED',
+      config: { encryptedCredentials: 'enc-blob' },
+    }) === true,
+    'active CONNECTED row with encryptedCredentials must be eligible'
+  );
+  assert(
+    isEligibleAndyClaudeProdIntegration({
+      isActive: false,
+      status: 'EXPIRED',
+      config: { encryptedCredentials: 'enc-blob' },
+    }) === false,
+    'EXPIRED inactive row must be rejected (do not poison the local pool)'
+  );
+  assert(
+    isEligibleAndyClaudeProdIntegration({
+      isActive: true,
+      status: 'CONNECTED',
+      config: {},
+    }) === false,
+    'CONNECTED row without encryptedCredentials must be rejected'
+  );
 }
 
 function testResolveAuthEnvs_apiKeyFallbackRecordsSharedSource() {
@@ -1577,6 +1621,10 @@ async function runAll() {
     {
       name: 'authEnvs -- api-key fallback when no OAuth',
       fn: async () => testResolveAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'andy prod sync -- rejects EXPIRED/inactive OAuth rows',
+      fn: async () => testAndyProdClaudeEligibility_rejectsExpiredAndInactive(),
     },
     {
       name: 'authEnvs -- api-key fallback records shared source',
