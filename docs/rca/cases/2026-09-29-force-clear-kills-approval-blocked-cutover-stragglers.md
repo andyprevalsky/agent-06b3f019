@@ -67,11 +67,10 @@ Binary search:
 2. Cooperative cutover cannot `continue_as_new` while an activity is parked on
    an in-tool wait — the workflow remaining after 45m is expected, not dead.
 3. Force-clear was the first write that mutated user-visible agent state to
-   FAILED and sealed the workflow id (first-bad boundary).
-4. Late `reply_to_agent` could not recover: `claimReplacementGeneration` skipped
-   `status===FAILED` when a snapshot `deploymentAttempt` was present, and the
-   user-initiated path still inherited that skip for FAILED cutover rows.
-   The sealed id made the Temporal signal a no-op.
+   FAILED and sealed the workflow id (first-bad boundary). That kill is the
+   bug — not the later SMS approve.
+4. After the kill, `reply_to_agent` could only signal a tombstone. That is a
+   consequence, not a second root cause.
 
 Local repro (identical command pre/post):
 
@@ -87,31 +86,30 @@ FAILED+sealed SMS approve recovery.
 ## Solution
 
 Owned stragglers on a superseded generation queue are replaced onto the live
-generation (`clearSupersededGenerationWorkflow` → `restartAgent`), the same
-path as `POST /restart`. Orphan Temporal executions with no Agent row are still
-terminated.
+generation (`clearSupersededGenerationWorkflow` → `restartAgent`). Force-clear
+must not write `Agent.status=FAILED`. The agent stays alive on the new
+generation; in-flight tools use the existing `DEPLOY_INTERRUPTED` retry
+contract. Orphan Temporal executions with no Agent row are still terminated.
 
-Sibling recoveries for agents already killed by the old force-clear:
-
-- user-initiated `claimReplacementGeneration` (no `deploymentAttempt`) no
-  longer skips FAILED cutover rows; snapshot/deploy claims still do
-- `commitReplyToAgent` skips signaling `:deployment-sealed:` ids and restarts
-  when the agent is cutover-FAILED or the attention row is
-  `DEPLOY_INTERRUPTED`
-- SMS supervisor hierarchy keeps `FAILED` + `Generation cutover:` roots visible
-  so a late approve has a target
+Already-killed rows from the old force-clear can still be revived by
+user-initiated `POST /restart` / `reply_to_agent` (claim no longer skips
+FAILED when `deploymentAttempt` is absent). That is a backstop for the
+already-dead prod agent, not the product fix.
 
 10k-agent behavior: force-clear iterates only workflows still Running on the
 superseded queue after the 45m drain (bounded stragglers, not live fleet size).
-Each owned id is one restart. SMS recovery is one agent per inbound reply. No
-shared fan-in, no per-user firehose.
+Each owned id is one restart. No shared fan-in, no per-user firehose.
 
 ## Human feedback
 
-None recorded.
+Rejected framing the fix as "keep cutover-FAILED agents in SMS supervisor
+context so a late approve can recover them." The question is why force-clear
+marked the parent FAILED at all — we should never kill parked approval-wait
+agents this way. Replace onto the live generation; do not paper over the kill
+with post-failure SMS visibility.
 
 ## Reusable lesson
 
-A workflow still on the old generation queue after the drain SLO is parked, not
-dead — replace it onto the live generation; never mark an approval-blocked
-agent FAILED.
+Never mark an owned agent FAILED to drain a superseded generation queue —
+replace it onto the live generation; a parked approval-wait is not a dead
+straggler.

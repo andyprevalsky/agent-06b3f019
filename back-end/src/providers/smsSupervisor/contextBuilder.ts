@@ -13,10 +13,6 @@ import { prisma } from '../database';
 import { CompletionMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../rose';
 import { createLogger } from '../logger';
 import { extractFingerprintTimeZone, formatUserTemporalContext } from './timeContext';
-import {
-  agentNeedsCutoverRecovery,
-  GENERATION_CUTOVER_STATUS_PREFIX,
-} from '../generationQueueCutover';
 
 const log = createLogger('SmsContext');
 
@@ -171,8 +167,7 @@ export async function buildSmsContext(
       const isActive = ['ACTIVE', 'PAUSED', 'STARTING_UP', 'COST_LIMIT_REACHED'].includes(a.status);
       const isRetainedCompletion =
         a.status === 'COMPLETED' && ageMs < COMPLETED_ROOT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-      const isCutoverFailed = agentNeedsCutoverRecovery(a);
-      return isRecent || isActive || isRetainedCompletion || isCutoverFailed;
+      return isRecent || isActive || isRetainedCompletion;
     })
     .map((a) => a.id);
 
@@ -290,10 +285,6 @@ async function fetchAgentHierarchy(userId: string) {
         {
           status: 'COMPLETED',
           updatedAt: { gte: completedSince },
-        },
-        {
-          status: 'FAILED',
-          statusMessage: { startsWith: GENERATION_CUTOVER_STATUS_PREFIX },
         },
       ],
     },
