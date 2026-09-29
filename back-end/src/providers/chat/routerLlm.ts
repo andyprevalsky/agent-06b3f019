@@ -303,9 +303,10 @@ export async function callRouterLlm(params: {
       if (isCloudAgentLifecycleTool(msg.metadata) || !msg.text || msg.text.trim() === '') {
         continue;
       }
-      // Convert TOOL to system message with content (matches worker pattern)
+      // Convert TOOL to user message — Qwen/Cerebras rejects mid-conversation
+      // system turns ("System message must be at the beginning").
       openaiMessages.push({
-        role: 'system',
+        role: 'user',
         content: `[Tool Result]\n${msg.text}`,
       });
     } else if (msg.role === 'USER') {

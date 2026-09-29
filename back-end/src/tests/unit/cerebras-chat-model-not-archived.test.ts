@@ -61,4 +61,28 @@ describe('cerebras chat model inventory', () => {
     assert.equal(body.reasoning_effort, 'low');
     assert.equal(body.stream, true);
   });
+
+  it('coerces mid-conversation system tool results to user (Qwen chat template)', () => {
+    // Repro 2026-09-29 semantic web_search: GeneratorLLM converted TOOL →
+    // role=system after user/assistant, Cerebras Qwen 400'd
+    // "System message must be at the beginning", forced waterfall, and one
+    // sample missed the CHATWEBSEARCH marker inside the 5s ratchet.
+    const body = buildCerebrasChatBody({
+      messages: [
+        { role: 'system', content: 'generator system' },
+        { role: 'user', content: 'Search and include CHATWEBSEARCHabc verbatim.' },
+        { role: 'assistant', content: 'routing to web_search' },
+        { role: 'system', content: '[Tool Result]\nParallel Search Turbo announced today.' },
+      ],
+    });
+    const roles = (body.messages as Array<{ role: string }>).map((message) => message.role);
+    assert.deepEqual(
+      roles,
+      ['system', 'user', 'assistant', 'user'],
+      'only the leading system prefix may stay system for Qwen'
+    );
+    const tool = (body.messages as Array<{ role: string; content: string }>).at(-1);
+    assert.equal(tool?.role, 'user');
+    assert.match(tool?.content ?? '', /\[Tool Result\]/);
+  });
 });

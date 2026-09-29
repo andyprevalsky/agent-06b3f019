@@ -22,7 +22,7 @@ import {
 } from './errors';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
-import { normalizeOpenAiToolCalls } from './transforms';
+import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
 /** Must match rose-1-flash waterfall[0] / direct Cerebras chat inventory. */
@@ -35,7 +35,7 @@ export function buildOpenRouterCerebrasBody(
 ): Record<string, unknown> {
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
-    messages: normalizeOpenAiToolCalls(options.messages),
+    messages: coerceLeadingOnlySystemMessages(normalizeOpenAiToolCalls(options.messages)),
     stream: true,
     stream_options: { include_usage: true },
     // Keep effort low so OpenRouter spill matches the direct-chat stall budget.

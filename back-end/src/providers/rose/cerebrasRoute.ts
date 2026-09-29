@@ -25,7 +25,7 @@ import {
   RoseStallError,
 } from './errors';
 import { parseOpenAISSE } from './streaming';
-import { normalizeOpenAiToolCalls } from './transforms';
+import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import { postCerebrasStream } from './transport';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
@@ -88,9 +88,13 @@ export function buildCerebrasChatBody(
   // this migration exists to leave.
   // Cerebras also 400s Anthropic/OpenRouter cache_control on content parts
   // (live qwen-3.8-27b 2026-09-28: property unsupported).
+  // Mid-conversation system turns (chat TOOL→system) are coerced to user —
+  // Qwen's template only allows a leading system prefix (2026-09-29).
   return {
     model,
-    messages: stripCerebrasCacheControl(normalizeOpenAiToolCalls(options.messages)),
+    messages: stripCerebrasCacheControl(
+      coerceLeadingOnlySystemMessages(normalizeOpenAiToolCalls(options.messages))
+    ),
     stream: true,
     stream_options: { include_usage: true },
     reasoning_effort: reasoningEffort,
