@@ -406,6 +406,28 @@ export function extractToolsFromResponseFormat(
 }
 
 /**
+ * Qwen's Cerebras chat template allows system messages only as a leading
+ * prefix. Chat Generator/Router historically converted TOOL rows to mid-
+ * conversation `role: system` (`[Tool Result]\n…`); that 400s with
+ * `System message must be at the beginning` and forces the waterfall
+ * (web_search lifecycle breach, 2026-09-29). Keep the leading system
+ * prefix; coerce every later system turn to user.
+ */
+export function coerceLeadingOnlySystemMessages(
+  messages: CompletionMessage[]
+): CompletionMessage[] {
+  let seenNonSystem = false;
+  return messages.map((message) => {
+    if (message.role !== 'system') {
+      seenNonSystem = true;
+      return message;
+    }
+    if (!seenNonSystem) return message;
+    return { ...message, role: 'user' as const };
+  });
+}
+
+/**
  * Stamp the OpenAI `type: "function"` discriminator onto every assistant
  * tool_call before an OpenAI-dialect request goes out.
  *

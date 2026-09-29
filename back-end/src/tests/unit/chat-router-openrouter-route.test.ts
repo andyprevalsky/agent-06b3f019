@@ -90,7 +90,7 @@ async function run(): Promise<void> {
 
     assert.deepEqual(calls, [OPENROUTER_API_URL]);
     assert.equal(calls.includes(CEREBRAS_API_URL), false);
-    assert.equal(capturedBody.model, 'openai/gpt-oss-120b');
+    assert.equal(capturedBody.model, 'qwen/qwen3.8-27b');
     assert.equal(capturedBody.stream, true);
     assert.deepEqual(capturedBody.reasoning, { effort: 'low', exclude: true });
     assert.deepEqual(capturedBody.provider, {
@@ -108,7 +108,7 @@ async function run(): Promise<void> {
     assert.equal(format.json_schema?.name, 'router_decision');
     assert.equal(format.json_schema?.strict, true);
     assert.equal(capturedHeaders.Authorization, 'Bearer openrouter-cerebras-priority');
-    assert.equal(chunks[0]?.actual_model, 'openai/gpt-oss-120b');
+    assert.equal(chunks[0]?.actual_model, 'qwen/qwen3.8-27b');
     assert.equal(chunks[0]?.pool_name, 'openrouter-cerebras');
     assert.notEqual(ANTHROPIC_API_URL, CEREBRAS_API_URL);
 
@@ -120,7 +120,7 @@ async function run(): Promise<void> {
       if (url === OPENROUTER_API_URL) {
         const model = (JSON.parse(String(init?.body)) as { model?: string }).model ?? '';
         openRouterModels.push(model);
-        if (model === 'openai/gpt-oss-120b') {
+        if (model === 'qwen/qwen3.8-27b') {
           // The Cerebras-pinned attempt is rate limited pre-content...
           return new Response('{"error":{"message":"Cerebras rate limited"}}', {
             status: 429,
@@ -155,11 +155,11 @@ async function run(): Promise<void> {
       'the fallback must leave Cerebras, not retry the same provider'
     );
     assert.ok(
-      openRouterModels.includes('openai/gpt-oss-120b'),
+      openRouterModels.includes('qwen/qwen3.8-27b'),
       'the Cerebras-pinned attempt should run first'
     );
     assert.ok(
-      openRouterModels.some((model) => model !== 'openai/gpt-oss-120b' && model.length > 0),
+      openRouterModels.some((model) => model !== 'qwen/qwen3.8-27b' && model.length > 0),
       'must fall through to a different waterfall model'
     );
   } finally {

@@ -2271,8 +2271,8 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   //   OpenAI/Codex Responses → reasoning.effort (default xhigh)
   //   OpenRouter waterfall → reasoning.effort (default xhigh)
   //   OpenRouter fast chat → reasoning.effort (default xhigh)
-  //   Cerebras direct → reasoning_effort: 'low' (gpt-oss-120b minimum)
-  //   OpenRouter→Cerebras → reasoning.effort: 'low' (gpt-oss-120b minimum)
+  //   Cerebras direct → reasoning_effort: 'low' (rose-fast Qwen stall budget)
+  //   OpenRouter→Cerebras → reasoning.effort: 'low' (same Qwen stall budget)
   const messages: CompletionMessage[] = [
     { role: 'system', content: 'be helpful' },
     { role: 'user', content: 'hi' },
@@ -2369,7 +2369,7 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     );
   }
 
-  // Latency chat routes: effort still ALWAYS set (low for Cerebras/gpt-oss; xhigh default for OR-fast).
+  // Latency chat routes: effort still ALWAYS set (low for Cerebras/Qwen; xhigh default for OR-fast).
   const cerebras = buildCerebrasChatBody({ messages });
   assertEqual(cerebras.reasoning_effort, 'low', 'cerebras stamps reasoning_effort=low');
   const cerebrasCached = buildCerebrasChatBody({

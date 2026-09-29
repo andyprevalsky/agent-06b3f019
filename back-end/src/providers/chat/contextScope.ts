@@ -30,10 +30,7 @@ function isProviderNumericToolCallId(toolCallId: string): boolean {
  * spawn whose provider id happens to end in ``:digits`` (e.g. ``custom:7``)
  * stays parent-visible when it carries ``agentType`` like other GP results.
  */
-function hasHistoricalForEachChildSuffix(
-  toolCallId: string,
-  spawnGroupId: unknown
-): boolean {
+function hasHistoricalForEachChildSuffix(toolCallId: string, spawnGroupId: unknown): boolean {
   if (typeof spawnGroupId !== 'string' || !spawnGroupId) return false;
   if (isProviderNumericToolCallId(toolCallId)) return false;
   const escaped = spawnGroupId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
