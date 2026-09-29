@@ -6993,6 +6993,30 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         esac
 
         if [ "$machine_state" = "stopped" ]; then
+            # A previous recovery attempt may have stopped this exact guest
+            # after quiescence failed, then exited before sealing the stopped
+            # receipt. Resume from the provider's current stopped status;
+            # never treat the earlier stop request itself as cleanup proof.
+            if [ ! -s "$stopped_proof" ]; then
+                machine_status_temporary="$machine_status_evidence.tmp.$$"
+                if ! machine_status_exact_read "$machine_id" \
+                        >"$machine_status_temporary" 2>>"$guest_log" \
+                    || ! cloudbench_seal_guest_evidence_file \
+                        "$machine_status_temporary" "$machine_status_evidence" 1048576 \
+                    || ! python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                        publish-stopped-machine-proof \
+                        "${identity_args[@]}" \
+                        --backend-log "$backend_evidence" \
+                        --manifest "$manifest" \
+                        --clone-name "$clone_name" \
+                        --machine-status "$machine_status_evidence" \
+                        --stopped-proof "$stopped_proof"; then
+                    rm -f "$machine_status_temporary"
+                    echo "❌ [$bench] stopped exact Machine has no sealed provider-state proof" >&2
+                    failed=1
+                    continue
+                fi
+            fi
             if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                     cleanup-sealed-provider-sessions \
                     "${identity_args[@]}" \
