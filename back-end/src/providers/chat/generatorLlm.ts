@@ -27,6 +27,7 @@ import {
   createGeneratorAttentionLifecycle,
   type GeneratorAttentionLifecycle,
 } from './generatorAttentionStream';
+import { ensureVerbatimIncludes } from './ensureVerbatimIncludes';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
@@ -737,14 +738,27 @@ async function callGeneratorLlmCore(
     responseLength: parsed.response?.length || 0,
   });
 
-  await attention.complete(parsed.response || '');
+  const userTexts = params.messages
+    .filter((message) => message.role === 'USER' && typeof message.text === 'string')
+    .map((message) => message.text);
+  const response = ensureVerbatimIncludes(userTexts, parsed.response || '');
+  if (response !== (parsed.response || '')) {
+    log.warn('[GeneratorLLM] Appended missing Include-verbatim token(s)', {
+      agentId: params.agentId,
+      streamId,
+      beforeLength: (parsed.response || '').length,
+      afterLength: response.length,
+    });
+  }
+
+  await attention.complete(response);
 
   usage.model = actualModel || params.model;
   usage.from_fast_cache = fcCacheWon;
 
   return {
     reasoning: parsed.reasoning || '',
-    response: parsed.response || '',
+    response,
     streamId,
     toolCallId: attention.toolCallId,
     usage,
