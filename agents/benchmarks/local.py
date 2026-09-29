@@ -1589,6 +1589,11 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
         _kill_scoped_processes_by_run_id(stack)
 
 
+# Isolated --benchmark Prisma pool. Must stay in lockstep with run.sh
+# `LOCAL_DB_CONNECTION_LIMIT:-80` (50-child mass-agent fan-out + parent).
+BENCHMARK_DB_CONNECTION_LIMIT = 80
+
+
 def apply_manifest_environment(manifest: dict) -> None:
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
@@ -1601,7 +1606,12 @@ def apply_manifest_environment(manifest: dict) -> None:
     )
     if has_db_port:
         database_url = manifest_database_url(manifest)
-        os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
+        # Must stay above the 50-child mass-agent fan-out (see run.sh
+        # LOCAL_DB_CONNECTION_LIMIT:-80). A 50-conn pool P2028s under
+        # concurrent post_agent_message interactive txs and the tree stalls.
+        os.environ["DATABASE_URL"] = (
+            f"{database_url}?connection_limit={BENCHMARK_DB_CONNECTION_LIMIT}&pool_timeout=30"
+        )
         os.environ["DIRECT_URL"] = database_url
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:

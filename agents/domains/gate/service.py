@@ -20,6 +20,11 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent
 
 from .config import (
@@ -139,10 +144,24 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
     # approval flow uses; the backend fans a resolve out to every waiter).
     # Also wake on pause: pause does not populate _signal_responses, so a
     # response-only wait would block forever past the caller's pause branch.
-    await workflow.wait_condition(
-        lambda: request_id in workflow_instance._signal_responses
-        or bool(getattr(workflow_instance, "is_paused", False))
-    )
+    try:
+        await wait_condition_or_generation_handoff(
+            lambda: request_id in workflow_instance._signal_responses
+            or bool(getattr(workflow_instance, "is_paused", False)),
+            workflow_instance,
+            workflow_mod=workflow,
+        )
+    except GenerationHandoffRequested:
+        closed_gate = {**gate, "status": "RESOLVED"}
+        close_event = ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Gate interrupted by deploy",
+            message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+            status=MessageStatus.FINISHED,
+            metadata={"gate": closed_gate, "attentionRequestId": request_id},
+        )
+        await workflow_instance._handle_tool_event(close_event, request_id, TOOL_NAME)
+        raise
     # Pause wins over a queued resolution: if both arrived before this waiter
     # resumed, leave any response in the inbox and keep the gate PENDING.
     if bool(getattr(workflow_instance, "is_paused", False)):

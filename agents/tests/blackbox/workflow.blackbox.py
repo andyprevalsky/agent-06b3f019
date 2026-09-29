@@ -3926,6 +3926,51 @@ async def test_workflow_generation_handoff_continue_as_new_onto_live_queue():
         args, task_queue = continued[0]
         assert task_queue == "navi-agent-tasks@newgen"
         assert args[6] == context
+        assert args[11] == "execute_continued"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_plan_phase_resumes_plan():
+    """PLAN-phase cutover must continue_as_new with start_phase=plan, not execute."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-plan-handoff"
+    wf.user_id = "user-1"
+    wf.goal = "finish planning after cutover"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "still planning"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="PLAN",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        assert args[6] == context
+        assert args[11] == "plan"
     finally:
         _restore_workflow(original)
 
@@ -5552,6 +5597,55 @@ async def test_workflow_mark_complete_happy_path():
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_does_not_forward_full_context():
+    """Huge Fast Mode context must not ride the mark_finished Temporal payload.
+
+    ed9a3b6e scheduled mark_finished with a 638092-byte payload (TMPRL1103
+    limit 524288). The activity sat 17 minutes, timed out, and the verified
+    root stayed ACTIVE until the 900s smoke cap. mark_finished only reads the
+    first USER text as the goal; message_count still records the real length.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-slim-finished"
+    wf.user_id = "u-slim"
+    wf.goal = "Analyze the top 50 creators"
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.root_agent_id = "root-slim-finished"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 100
+    wf.tokens_in = 70
+    wf.tokens_out = 30
+    wf.context_size = 500
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+
+    huge_context = [{"role": "USER", "text": wf.goal}] + [{"role": "ASSISTANT", "text": "x" * 2000} for _ in range(400)]
+    assert len(json.dumps(huge_context)) > 512 * 1024
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "All done",
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=huge_context, structured_response={"ok": True})
+        mark_finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        steps = mark_finished_args[1]
+        payload = json.dumps(steps)
+        assert steps == [{"role": "USER", "text": wf.goal}]
+        assert len(payload) < 4096, (
+            f"mark_finished steps_taken is {len(payload)} bytes; "
+            "full conversation must not be forwarded (ed9a3b6e leftover-ACTIVE)"
+        )
+        assert mark_finished_args[4] == len(huge_context)
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_no_parent_no_signal():
     """A WEB-source root sends one completion SMS with verified outputs."""
     wf = _bare_workflow_instance()
@@ -6721,6 +6815,40 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
         _restore_workflow(original)
 
 
+async def test_workflow_execute_tool_handoff_includes_task_queue():
+    """_execute_tool must pass the live queue through so run_agent can CAN now."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a-handoff"
+    wf.user_id = "u1"
+    wf.current_phase = "EXECUTE"
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_spawn_agent(workflow_instance, tool_call, tool_call_id):
+        raise GenerationHandoffRequested("navi-agent-tasks@new")
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["spawn_agent"]
+    workflow_module.TOOL_EXECUTORS["spawn_agent"] = fake_spawn_agent
+    try:
+        result = await wf._execute_tool(
+            "spawn_agent",
+            {"type": "explore", "goal": "parked child"},
+            "tc-handoff",
+        )
+        assert result.get("success") is True
+        assert result.get("generation_handoff") is True
+        assert result.get("handoff_task_queue") == "navi-agent-tasks@new"
+        assert result.get("message") == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+        assert result.get("error") is not True
+    finally:
+        workflow_module.TOOL_EXECUTORS["spawn_agent"] = original_executor
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     """web_fetch auth kwargs must merge with, not replace, Fast Mode cache kwargs."""
     wf = _bare_workflow_instance()
@@ -7754,6 +7882,10 @@ async def run_all_tests():
         test_workflow_generation_handoff_continue_as_new_onto_live_queue,
     )
     await r.record_async(
+        "wf_generation_handoff_plan_resumes_plan",
+        test_workflow_generation_handoff_plan_phase_resumes_plan,
+    )
+    await r.record_async(
         "wf_paused_handoff_continue_as_new",
         test_workflow_paused_handoff_continue_as_new_onto_live_queue,
     )
@@ -7850,6 +7982,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async(
+        "wf_mark_complete_does_not_forward_full_context",
+        test_workflow_mark_complete_does_not_forward_full_context,
+    )
+    await r.record_async(
         "wf_mark_complete_materializes_oai_demo_report_files",
         test_workflow_mark_complete_materializes_oai_demo_root_report_files,
     )
@@ -7921,6 +8057,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_legacy_spawn_agent_phase",
         test_workflow_execute_tool_legacy_spawn_agent_receives_phase,
+    )
+    await r.record_async(
+        "wf_execute_tool_handoff_includes_task_queue",
+        test_workflow_execute_tool_handoff_includes_task_queue,
     )
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
