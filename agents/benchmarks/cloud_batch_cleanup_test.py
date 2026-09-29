@@ -486,6 +486,42 @@ async def test_failed_batch_retains_ownership_and_each_failure_cause():
 
 
 @async_case
+async def test_multi_browser_archive_keeps_root_until_recordings_are_ready():
+    sessions = [
+        {"agent_id": ROOT, "provider": "kernel", "session_id": f"owned-{index}"}
+        for index in range(4)
+    ]
+    before = {
+        "root_user_id": ROOT,
+        "tree_agent_ids": [ROOT],
+        "browser_sessions": sessions,
+        "purchase_cleanup": [],
+    }
+    row = result(ROOT)
+    delete = AsyncMock()
+
+    async def archive_snapshot(_base, _agent, _data, _logs, **kwargs):
+        # Four replay stop/read cycles outlasted the former 60s fixed bound in
+        # a real cloud guest. The root must remain writable until they land.
+        assert kwargs["timeout_seconds"] == 180.0
+        assert not delete.called
+        return {"messages": browser_rows()}
+
+    with (
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(cleanup, "exact_root_sessions", return_value=before),
+        patch.object(bench, "_refresh_browser_archive_snapshot", archive_snapshot),
+        patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("r2://fixture", {}))),
+        patch.object(bench, "delete_agent", delete),
+        patch.object(cleanup, "close_exact_root_sessions", return_value={"root_agent_id": ROOT}),
+    ):
+        await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+
+    delete.assert_awaited_once_with("http://localhost:1", ROOT)
+    assert row.logs["cloud_cleanup_evidence"]["errors"] == []
+
+
+@async_case
 async def test_failed_batch_retains_worker_logs_through_provider_release():
     before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "browser_sessions": [], "purchase_cleanup": []}
     row = result(ROOT)

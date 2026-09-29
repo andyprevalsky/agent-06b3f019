@@ -5611,8 +5611,19 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 if before is None:
                     raise RuntimeError("exact provider ownership was not established")
                 evidence["before"] = before
+                # Pausing a root starts browser recording finalization in the
+                # worker. Each owned Kernel session can take a separate replay
+                # stop/read cycle; deleting the root after the old fixed 60s
+                # bound makes late recording messages return 404. Keep the
+                # root alive for a bounded, session-scaled archive wait. The
+                # refresh returns immediately when all recordings are ready.
+                archive_timeout_seconds = min(
+                    600.0, 60.0 + 30.0 * len(before["browser_sessions"])
+                )
                 data = await _refresh_browser_archive_snapshot(
-                    base_url, aid, {}, logs, expected_agent_ids=set(before["tree_agent_ids"]),
+                    base_url, aid, {}, logs,
+                    expected_agent_ids=set(before["tree_agent_ids"]),
+                    timeout_seconds=archive_timeout_seconds,
                 )
                 if result is None:
                     raise RuntimeError("owned cloud root did not produce a task result")
