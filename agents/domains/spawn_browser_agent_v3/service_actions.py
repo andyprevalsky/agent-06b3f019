@@ -1739,24 +1739,39 @@ def _element_write_lock_signal(element: Any) -> str:
     # input while rendering the accessible action label as a sibling. The DOM
     # tree preserves that relationship through parent_node, so take only the
     # first short ancestor label instead of absorbing a whole checkout page.
+    #
+    # Always keep walking for ancestor id/name markers even after a label is
+    # found. Amazon SPR mid-wizard Continues put the exclusion id on a parent
+    # span (`resolutions-section-continue-button`) while the click target is a
+    # shadow `<input type=submit>` — agent cf4935f5 (2026-09-29
+    # browser-amazon-return) locked before drop-off because the signal was only
+    # `submit\nContinue` without that id.
     has_local_label = bool(local_text) or any(
         attrs.get(attr_name) for attr_name in ("value", "aria-label", "title", "alt")
     )
-    if not has_local_label:
-        current = getattr(element, "parent_node", None)
-        depth = 1
-        while current is not None and depth < 4:
-            node_name = str(getattr(current, "node_name", "") or "").lower()
-            if node_name in {"html", "body", "main"}:
-                break
+    collected_text = has_local_label
+    current = getattr(element, "parent_node", None)
+    depth = 1
+    while current is not None and depth < 6:
+        node_name = str(getattr(current, "node_name", "") or "").lower()
+        if node_name in {"html", "body", "main"}:
+            break
 
+        ancestor_attrs = getattr(current, "attributes", None) or {}
+        if isinstance(ancestor_attrs, dict):
+            for attr_name in ("id", "name"):
+                value = ancestor_attrs.get(attr_name)
+                if value:
+                    parts.append(str(value))
+
+        if not collected_text:
             ancestor_text = node_text(current)
             if ancestor_text and len(ancestor_text) <= 500:
                 parts.append(ancestor_text)
-                break
+                collected_text = True
 
-            current = getattr(current, "parent_node", None)
-            depth += 1
+        current = getattr(current, "parent_node", None)
+        depth += 1
 
     return "\n".join(part for part in parts if part)[:20000]
 

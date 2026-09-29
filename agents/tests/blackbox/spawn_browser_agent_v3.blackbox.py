@@ -13488,6 +13488,7 @@ async def test_execute_click_write_lock_amazon_contract_continue_triggers_approv
     element = MagicMock()
     element.attributes = {"type": "submit", "role": "button"}
     element.get_all_children_text = MagicMock(return_value="submit\nContinue")
+    element.parent_node = None
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
@@ -13513,6 +13514,116 @@ async def test_execute_click_write_lock_amazon_contract_continue_triggers_approv
     assert out["approval_type"] == "return"
     assert "Continue" in out["element_text"]
     ah.record_action.assert_not_awaited()
+
+
+async def test_execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked():
+    """Shadow submit under resolutions-section-continue must not lock before drop-off.
+
+    RCA agent cf4935f5 (2026-09-29 browser-amazon-return): DOM was
+    ``span#resolutions-section-continue-button > span > SHADOW input[type=submit]``
+    with sibling announce text ``Continue``. Indexed click collected only
+    ``submit\\nContinue`` (no ancestor id), wrote write_lock with
+    \"drop-off … chosen in the next step\", and the judge failed. Ancestor ids
+    must join the signal so the exclusion marker keeps this wizard Continue open.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    announce = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button-announce"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    host = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    wrapper = SimpleNamespace(
+        attributes={},
+        parent_node=host,
+        node_name="SPAN",
+        get_all_children_text=lambda: "",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=wrapper,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+        tag_name="input",
+    )
+    # Keep announce reachable if signal walk ever includes siblings via host text.
+    _ = announce
+
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=None)
+    dom = MagicMock()
+    dom.get_click_coordinates = AsyncMock(return_value=(40, 60))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=50647,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url=(
+            "https://www.amazon.com/spr/returns/contract/"
+            "b641f39a-9f22-490a-af1e-97736b7bb809"
+        ),
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    assert out.get("status") != "needs_write_approval"
+    hu.click_at_coords.assert_awaited_once_with(40, 60)
+    ah.record_action.assert_awaited()
+
+
+def test_element_write_lock_signal_includes_ancestor_exclusion_ids():
+    """Shadow submit must surface parent resolutions-section-continue id."""
+    from domains.spawn_browser_agent_v3.service_actions import _element_write_lock_signal
+
+    host = SimpleNamespace(
+        attributes={"id": "resolutions-section-continue-button"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    wrapper = SimpleNamespace(
+        attributes={},
+        parent_node=host,
+        node_name="SPAN",
+        get_all_children_text=lambda: "",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=wrapper,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+    )
+
+    signal = _element_write_lock_signal(element)
+
+    assert "submit" in signal
+    assert "Continue" in signal
+    assert "resolutions-section-continue-button" in signal
+    from browser_tools.write_lock import is_return_button
+
+    contract = (
+        "https://www.amazon.com/spr/returns/contract/"
+        "b641f39a-9f22-490a-af1e-97736b7bb809"
+    )
+    assert not is_return_button(signal, contract)
 
 
 async def test_execute_click_write_lock_amazon_cart_continue_does_not_trigger():
@@ -21553,6 +21664,10 @@ async def run_all_tests():
         test_execute_click_write_lock_amazon_contract_continue_triggers_approval,
     )
     await r.record_async(
+        "execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked",
+        test_execute_click_write_lock_amazon_resolutions_shadow_continue_unlocked,
+    )
+    await r.record_async(
         "execute_click_write_lock_amazon_cart_continue_open",
         test_execute_click_write_lock_amazon_cart_continue_does_not_trigger,
     )
@@ -21563,6 +21678,10 @@ async def run_all_tests():
     r.record(
         "element_write_lock_signal_nearest_bounded_ancestor_text",
         test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text,
+    )
+    r.record(
+        "element_write_lock_signal_includes_ancestor_exclusion_ids",
+        test_element_write_lock_signal_includes_ancestor_exclusion_ids,
     )
     r.record(
         "write_lock_purchase_button_order_controls",

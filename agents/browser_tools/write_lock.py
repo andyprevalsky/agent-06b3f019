@@ -284,8 +284,10 @@ RETURN_COMMIT_CONTINUE_LABELS = frozenset({
 # ``resolutions-section-continue-button`` (Continue after picking Visa refund)
 # intending to reach drop-off selection; write_lock treated it as the final
 # commit, so the approval lacked a named drop-off and the judge failed.
-# These machine ids must keep Continue unlocked; phrase-only Continues on the
-# same URL still lock (agent 785a3207 final commit).
+# Agent cf4935f5 (2026-09-29): same button via shadow ``input type=submit``;
+# signal was only ``submit\nContinue`` until ancestor ids were joined into
+# ``_element_write_lock_signal``. These machine ids must keep Continue unlocked;
+# phrase-only Continues on the same URL still lock (agent 785a3207 final commit).
 RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS = (
     "resolutions-section-continue",
     "productconditioncontinue",
