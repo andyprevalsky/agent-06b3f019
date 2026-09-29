@@ -316,11 +316,6 @@ def last_real_completion_text(
             continue
         if _is_plumbing_tool_text(text):
             continue
-        if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
-            "FINISHED",
-            "",
-        }:
-            return text
         if tool_name in _EVIDENCE_TOOLS and status in {"FINISHED", ""} and len(text) >= 200:
             return text
         if (
