@@ -6504,30 +6504,29 @@ async def test_init_browser_session_transient_failure_returns_retryable():
 async def test_init_browser_session_timeout_returns_retryable():
     """Worker httpx ReadTimeout on /init must be transient, not ActivityError.
 
-    Prod webdecoy 2a421e78: Kernel allocate hung past the 180s client timeout,
-    the activity failed closed, and the root agent spawned a second browser.
-    Retrying inside the init loop keeps one browser instance and avoids the
-    empty first trajectory + user_persistent metadata poison.
+    Kernel create can exceed the 180s client budget (webdecoy 2a421e78 /
+    biometrics 05823816). httpx.ReadTimeout must NOT raise out of
+    init_browser_session — that fails the Temporal activity, forces an
+    LLM-level respawn of spawn_browser_agent, and burns the smoke dynamic
+    cap. Classify as transient_init_failure so the handler's bounded
+    fresh-proxy retry loop reallocates in-activity.
     """
     import httpx
-    from domains.spawn_browser_agent_v3.repo import init_browser_session
+    from domains.spawn_browser_agent_v3 import repo
 
-    class _TimeoutClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
+    class _Client:
         async def __aenter__(self):
             return self
 
-        async def __aexit__(self, *args):
+        async def __aexit__(self, *a):
             return False
 
-        async def post(self, *args, **kwargs):
-            raise httpx.ReadTimeout("")
+        async def post(self, *a, **kw):
+            raise httpx.ReadTimeout("simulated kernel create stall")
 
-    cfg = _fake_config()
-    with patch("domains.spawn_browser_agent_v3.repo.httpx.AsyncClient", _TimeoutClient):
-        out = await init_browser_session(cfg, "u", "a", "https://example.com")
+    with patch.object(repo.httpx, "AsyncClient", return_value=_Client()):
+        out = await repo.init_browser_session(_fake_config(), "u", "a", "https://example.com")
+
     assert out["transient_init_failure"] is True
     assert out["status_code"] == 0
     assert "ReadTimeout" in out["detail"]

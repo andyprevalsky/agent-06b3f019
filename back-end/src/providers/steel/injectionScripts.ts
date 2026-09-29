@@ -144,22 +144,6 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                     return String(u);
                   }
                 };
-                // Read blob:/data: (and http) script bodies while the URL is
-                // still alive. FCaptcha PoW does createObjectURL → new Worker
-                // → revokeObjectURL immediately; importScripts(originalBlob)
-                // then throws NetworkError and the page shows
-                // "Verification unavailable" (agent b08b5bd4).
-                const _readScriptSync = (url) => {
-                  try {
-                    const xhr = new XMLHttpRequest();
-                    xhr.open('GET', url, false);
-                    xhr.send(null);
-                    if (xhr.status === 200 || xhr.status === 0) {
-                      return String(xhr.responseText || '');
-                    }
-                  } catch (e) {}
-                  return null;
-                };
                 const _wrapWorkerCtor = (Native, name) => {
                   if (typeof Native !== 'function') return Native;
                   const Wrapped = function (...args) {
@@ -173,37 +157,37 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                         (typeof URL !== 'undefined' && scriptURL instanceof URL)
                           ? _absUrl(scriptURL)
                           : String(scriptURL);
-                      const isBlobOrData =
-                        url.startsWith('blob:') || url.startsWith('data:');
-                      let wrappedSrc;
-                      if (isBlobOrData) {
-                        // Inline the body into our preamble blob so a post-
-                        // construct revokeObjectURL cannot break the worker.
-                        const body = _readScriptSync(url);
-                        if (body == null) {
+                      // Only wrap classic blob/data workers. FCaptcha PoW uses
+                      // blob: workers; importScripts(blob:) from a wrapper blob
+                      // fails with NetworkError on Kernel Chromium (opaque
+                      // origin). Inline via sync XHR + navigator preamble.
+                      // http(s)/module workers keep Native so relative
+                      // importScripts/fetch and module hoist semantics stay
+                      // intact (and SharedWorker identity stays shareable).
+                      if (isModule || !(url.startsWith('blob:') || url.startsWith('data:'))) {
+                        return new Native(...args);
+                      }
+                      try {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', url, false);
+                        xhr.send();
+                        if (xhr.status !== 0 && xhr.status !== 200) {
                           return new Native(...args);
                         }
-                        wrappedSrc = _workerNavPreamble + '\\n' + body;
-                      } else if (isModule) {
-                        wrappedSrc =
-                          _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';';
-                      } else {
-                        wrappedSrc =
-                          _workerNavPreamble +
-                          '\\nimportScripts(' +
-                          JSON.stringify(url) +
-                          ');';
+                        const wrappedSrc = _workerNavPreamble + '\\n' + xhr.responseText;
+                        const blobUrl = _blobUrl(wrappedSrc);
+                        const worker = new Native(blobUrl, options);
+                        try {
+                          setTimeout(() => {
+                            try {
+                              URL.revokeObjectURL(blobUrl);
+                            } catch (e) {}
+                          }, 60_000);
+                        } catch (e) {}
+                        return worker;
+                      } catch (e) {
+                        return new Native(...args);
                       }
-                      const blobUrl = _blobUrl(wrappedSrc);
-                      const worker = new Native(blobUrl, options);
-                      try {
-                        setTimeout(() => {
-                          try {
-                            URL.revokeObjectURL(blobUrl);
-                          } catch (e) {}
-                        }, 60_000);
-                      } catch (e) {}
-                      return worker;
                     } catch (e) {
                       return new Native(...args);
                     }
@@ -218,10 +202,9 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                   } catch (e) {}
                   return Wrapped;
                 };
+                // Classic Worker only — wrapping SharedWorker would mint a new
+                // blob URL per construction and break same-URL worker sharing.
                 window.Worker = _wrapWorkerCtor(window.Worker, 'Worker');
-                if (typeof window.SharedWorker === 'function') {
-                  window.SharedWorker = _wrapWorkerCtor(window.SharedWorker, 'SharedWorker');
-                }
               } catch (e) {}
 
               // Override navigator.plugins with user's plugins

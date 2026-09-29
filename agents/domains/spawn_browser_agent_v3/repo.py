@@ -493,7 +493,16 @@ async def init_browser_session(
     *,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Initialize a browser session via backend. Returns session data dict."""
+    """Initialize a browser session via backend. Returns session data dict.
+
+    Transport timeouts (httpx ReadTimeout / ConnectTimeout / WriteTimeout /
+    PoolTimeout) are classified as ``transient_init_failure`` so the caller's
+    bounded fresh-proxy retry loop can reallocate instead of failing the
+    activity. Otherwise a slow Kernel create (~180s) bubbles as ActivityError,
+    the LLM respawns ``spawn_browser_agent``, and the second init burns the
+    remainder of a ~420s smoke budget (browser-biometrics-webdecoy agents
+    a6a7e375 / 05823816).
+    """
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(
@@ -511,15 +520,18 @@ async def init_browser_session(
                 },
             )
     except httpx.TimeoutException as exc:
-        # Worker-side ReadTimeout / ConnectTimeout while the backend is still
-        # allocating Kernel (profile create + browsers.create). Treat as the
-        # same class of infra hiccup as a 5xx so the init loop retries with a
-        # fresh allocation instead of failing the activity and forcing the
-        # root agent to spawn a second empty browser (webdecoy smoke 2a421e78).
+        # TimeoutException covers ReadTimeout, ConnectTimeout, WriteTimeout,
+        # and PoolTimeout. Same retry path as a 5xx / unhealthy-proxy 400.
+        logger.warning(
+            "Browser session init timed out; classifying as transient",
+            agent_id=agent_id,
+            error_type=type(exc).__name__,
+            error=str(exc) or type(exc).__name__,
+        )
         return {
             "transient_init_failure": True,
             "status_code": 0,
-            "detail": f"browser-session init {type(exc).__name__}",
+            "detail": f"init transport timeout: {type(exc).__name__}",
         }
     if response.status_code in [200, 201]:
         return response.json()

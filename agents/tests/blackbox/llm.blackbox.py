@@ -2080,6 +2080,49 @@ async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
 
 
+async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
+    """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE
+
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    goal = f"{OAI_DEMO_ROOT_GOAL_PREFIX} analyze the top 50 creators"
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            raise RuntimeError(
+                "Strict read-only benchmark cache miss for response_schema; live fallback is disabled"
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-mass-title-fail",
+            [goal],
+            include_title=True,
+        )
+
+    assert result is None
+    schema_save = next(
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-mass-title-fail" in request["url"]
+    )
+    body = json.loads(schema_save["requestBody"])
+    assert body["generated_title"] == OAI_DEMO_ROOT_TITLE
+    assert "response_schema" not in body
+
+
 async def test_set_response_schema_activity_uses_internal_auth_only():
     """set_response_schema_activity defaults to no direct compute auth."""
     setup_mock(
@@ -8151,6 +8194,10 @@ async def run_all_tests():
     await r.record_async(
         "set_response_schema_activity_dual_reads_lite_pool_alias",
         test_set_response_schema_activity_dual_reads_lite_pool_alias,
+    )
+    await r.record_async(
+        "set_response_schema_activity_mass_agent_title_when_generation_fails",
+        test_set_response_schema_activity_mass_agent_title_when_generation_fails,
     )
     await r.record_async(
         "set_response_schema_activity_uses_internal_auth_only",

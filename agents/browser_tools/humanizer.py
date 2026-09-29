@@ -978,9 +978,10 @@ class BrowserHumanizer:
         if self._last_pos == (x, y):
             angle = random.uniform(0, 2 * math.pi)
             dist = random.uniform(14, 28)
+            vw, vh = self._viewport_size()
             origin = (
-                int(x - dist * math.cos(angle)),
-                int(y - dist * math.sin(angle)),
+                max(0, min(vw - 1, int(x - dist * math.cos(angle)))),
+                max(0, min(vh - 1, int(y - dist * math.sin(angle)))),
             )
             self._last_pos = origin
             # Fall through into the normal path synthesizer from the offset.
