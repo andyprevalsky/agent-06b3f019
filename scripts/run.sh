@@ -2613,6 +2613,18 @@ fi
 FRONTEND_PID=$!
 PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
+# On isolated cloud benches, eight workers and the backend otherwise import at
+# once on a shared-CPU guest. The workers can starve the backend past its
+# readiness bound even though both services are healthy in isolation. Let the
+# backend finish booting before starting workers; the task barrier still waits
+# for the full worker/autoscaler readiness contract below.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    wait_for_isolated_backend_ready || {
+        echo "❌ isolated backend failed both supervised startup attempts" >&2
+        exit 1
+    }
+fi
+
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
     run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
@@ -2639,13 +2651,6 @@ fi
 # trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.
 start_world_model_harness
-
-if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-    wait_for_isolated_backend_ready || {
-        echo "❌ isolated backend failed both supervised startup attempts" >&2
-        exit 1
-    }
-fi
 
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
