@@ -16,15 +16,14 @@
  *   transition without changing interaction or visual behavior.
  *
  * MOBILE CHROME:
- *   Legal links sit below the mobile visual viewport so Safari's bottom URL bar
- *   occludes them, while desktop keeps the links visible above the bottom edge.
- *   The input stack hugs the mobile visual viewport bottom; desktop keeps the
- *   roomier bottom padding.
+ *   The public app description and legal links remain in the visible layout,
+ *   with safe-area padding below them on mobile.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
 import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
+import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -128,18 +127,23 @@ export function AgentChatArea({
         tickerRef={tickerRef}
       />
 
-      <div
+      <footer
         data-testid="terminal-legal-links"
-        className="absolute -bottom-8 left-0 right-0 z-10 flex justify-center gap-2 text-[11px] text-muted-foreground/50 md:bottom-1"
+        className="relative z-10 w-full shrink-0 px-3 pb-[calc(0.5rem+var(--safe-area-inset-bottom))] text-center text-[12px] leading-[1.4] text-foreground/75 md:pb-2 md:pl-20"
       >
-        <Link to="/privacy" className="hover:text-muted-foreground transition-colors">
+        <span>{ROSE_APP_DESCRIPTION}</span>{' '}
+        <Link to="/about" className="underline-offset-2 hover:underline hover:text-foreground">
+          About
+        </Link>{' '}
+        &middot;{' '}
+        <Link to="/privacy" className="underline-offset-2 hover:underline hover:text-foreground">
           Privacy
-        </Link>
-        <span>&middot;</span>
-        <Link to="/terms" className="hover:text-muted-foreground transition-colors">
+        </Link>{' '}
+        &middot;{' '}
+        <Link to="/terms" className="underline-offset-2 hover:underline hover:text-foreground">
           Terms
         </Link>
-      </div>
+      </footer>
     </>
   );
 }
