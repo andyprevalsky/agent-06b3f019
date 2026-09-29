@@ -426,6 +426,33 @@ def test_fingerprint_ignores_display_only_review_formatting():
     )
 
 
+def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
+    """Order-summary names like 'Aurora Notebook x1' must reuse the bare-title card."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    bare = _sample_tool_call()
+    bare["line_items"][0]["name"] = "Aurora Notebook"
+    bare["line_items"][0]["quantity"] = 1
+    echoed = _sample_tool_call()
+    echoed["line_items"][0]["name"] = "Aurora Notebook x1"
+    echoed["line_items"][0]["quantity"] = 1
+
+    bare_payload = normalize_payment_payload(bare, "user-123")
+    echoed_payload = normalize_payment_payload(echoed, "user-123")
+
+    assert bare_payload["lineItems"][0]["name"] == "Aurora Notebook"
+    assert echoed_payload["lineItems"][0]["name"] == "Aurora Notebook x1"
+    assert bare_payload["fingerprint"] == echoed_payload["fingerprint"]
+
+    mismatched = _sample_tool_call()
+    mismatched["line_items"][0]["name"] = "Aurora Notebook x2"
+    mismatched["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(mismatched, "user-123")["fingerprint"]
+        != bare_payload["fingerprint"]
+    )
+
+
 def test_fingerprint_keeps_material_receipt_changes_distinct():
     from domains.request_payment_card.service import normalize_payment_payload
 
@@ -808,6 +835,10 @@ async def run_all_tests():
     result.record(
         "fingerprint_display_metadata_stability",
         test_fingerprint_ignores_display_only_review_formatting,
+    )
+    result.record(
+        "fingerprint_quantity_echo_stability",
+        test_fingerprint_ignores_trailing_quantity_echo_on_item_name,
     )
     result.record(
         "fingerprint_material_changes_distinct",

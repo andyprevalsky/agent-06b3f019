@@ -21,6 +21,7 @@
 import { prisma } from '../database';
 import { ensureChatContextWithinBudget } from './chatCompaction';
 import { projectModelContextAfterCompaction } from './contextCompaction';
+import { filterInternalSubagentMessages } from './contextScope';
 
 export interface ChatDatabaseMessage {
   role: string;
@@ -73,7 +74,13 @@ export async function loadChatModelMessages(
   config: StartInitialChatContextConfig,
   dependencies: InitialChatContextDependencies = defaultDependencies
 ): Promise<ChatMessage[]> {
-  const rawMessages = mapChatDatabaseMessages(await dependencies.findMessages(config.agentId));
+  // Match the agent loop: drop spawned-agent work streams before budget math
+  // and Router/Generator assembly. Compaction's estimator already ignores
+  // subAgentId rows (mirroring agents/helpers/summarize.py); leaving them in
+  // the chat path means ~800k real tokens can miss a 167k compact trigger.
+  const rawMessages = filterInternalSubagentMessages(
+    mapChatDatabaseMessages(await dependencies.findMessages(config.agentId))
+  );
   const ensureWithinBudget = dependencies.ensureWithinBudget;
   if (!ensureWithinBudget) {
     return projectModelContextAfterCompaction(rawMessages);

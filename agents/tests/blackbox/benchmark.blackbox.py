@@ -639,6 +639,32 @@ def test_biometrics_fixture_stays_exclusive_under_isolated_profiles():
     ]
 
 
+def test_payment_setup_resume_stays_exclusive_beside_event_ticket():
+    """AgentCard reset must finish before siblings overlay shared-user integrations."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str):
+            self.name = name
+            self.requires_browser_agent = True
+            self.browser_auth_realm = None
+            self.browser_profile_mode = "persistent"
+            self.environment = {}
+
+    phases = bench._parallel_task_phases(
+        [
+            Task("browser-event-ticket"),
+            Task("agent-payment-setup-resume"),
+            Task("browser-smoke"),
+        ]
+    )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["agent-payment-setup-resume"]),
+        ("parallel", ["browser-event-ticket", "browser-smoke"]),
+    ]
+
+
 def test_biometrics_fixture_stays_exclusive_beside_shared_auth_task():
     """A saved-auth benchmark must not observe WebDecoy's temporary DB clearing."""
     from benchmarks import run_benchmark as bench
@@ -2406,6 +2432,12 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     ]
     assert setup.agentcard_setup_action == "complete"
     assert setup.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    from benchmarks import run_benchmark as bench
+
+    assert setup.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
+        "setup-resume mutates the shared-user AgentCard Integration fixture and must "
+        "not overlap siblings whose live overlays could race that reset"
+    )
 
     production = get_task_by_name("agent-payment-production-abandonment")
     assert production.production_only is True
@@ -15959,7 +15991,7 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
                 "toolCallId": "browser-root",
                 "task_id": "browser-task",
                 "toolStatus": "FINISHED",
-                "structured_response": {"main_heading_text": "Example Domain"},
+                "structured_response": {"document_title": "Example Domain"},
             },
         },
     ]
@@ -15970,8 +16002,31 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
+def test_browser_smoke_prompt_targets_document_title_not_h1():
+    """Live example.com dropped its H1; smoke must ask for the stable <title>."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-smoke")
+    prompt = (task.prompt or "").lower()
+    assert "document title" in prompt or "<title>" in prompt
+    assert "main heading" not in prompt
+    assert "h1" not in prompt
+
+
+def test_cache_coverage_prompt_targets_document_title_not_h1():
+    """cache-coverage browser step must not require the removed example.com H1."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    prompt = (task.prompt or "").lower()
+    assert "document title" in prompt or "<title>" in prompt
+    assert "main heading" not in prompt
+    assert "browser_page_title" in prompt
+    assert "browser_heading_text" not in prompt
+
+
 def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
-    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    """cache-coverage's example.com title read is goto+evaluate; default min_steps=5 is wrong."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _agent_class_step_counts,
@@ -16286,6 +16341,133 @@ def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
     assert reason is not None
     assert "recorded 0 trajectory step(s)" in reason
 
+
+def test_browser_min_steps_ignores_init_timeout_retry_before_session():
+    """A ReadTimeout init that never reached session_init must not fail min_steps.
+
+    Mirrors webdecoy 2a421e78: first browser task_id died during initialization
+    (0 steps, no session metadata); the retry completed with a full trajectory.
+    """
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    failed_task = "14184300-1f13-5a2b-a0ef-9aef1cf004b2"
+    ok_task = "b0c386f7-f95a-51ac-9066-d1acb2d23c9b"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "browser", "tool_call_id": "spawn_agent:0"},
+                    {"tool": "spawn_agent", "type": "browser", "tool_call_id": "spawn_agent:1"},
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "**Status**: ❌ FAILED\n\n**Outcome**: ReadTimeout",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "spawn_agent:0",
+                "toolStatus": "ERROR",
+                "task_id": failed_task,
+                "action_type": "task_complete",
+                "browser_last_action": "initialization",
+                "browser_error_type": "ReadTimeout",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Browser session connected and ready.",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "session-ready",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "session_init",
+                "browser_session_metadata": {
+                    "provider": "kernel",
+                    "profile_source": "new_user_persistent",
+                    "auth_source": "none",
+                    "cookies_injected": False,
+                    "cookies_count": 0,
+                },
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Navigated",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "goto-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "goto",
+                "steps_taken": 1,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Clicked",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "click-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "click",
+                "steps_taken": 2,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Typed",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "type-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "input_text",
+                "steps_taken": 3,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Submitted",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "click-2",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "click",
+                "steps_taken": 4,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "Done",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "wait-1",
+                "toolStatus": "FINISHED",
+                "task_id": ok_task,
+                "subAgentId": ok_task,
+                "action_type": "wait",
+                "steps_taken": 5,
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert failed_task not in counts.get("browser", {})
+    assert counts["browser"][ok_task] >= 5
+    assert _validate_agent_class_min_steps({"browser": 5}, counts) is None
 
 
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
@@ -19125,6 +19307,14 @@ async def run_all_tests():
         test_browser_smoke_accepts_captured_single_step_trajectory,
     )
     r.record(
+        "browser_smoke_prompt_targets_document_title",
+        test_browser_smoke_prompt_targets_document_title_not_h1,
+    )
+    r.record(
+        "cache_coverage_prompt_targets_document_title",
+        test_cache_coverage_prompt_targets_document_title_not_h1,
+    )
+    r.record(
         "cache_coverage_two_step_browser_trajectory",
         test_cache_coverage_accepts_captured_two_step_browser_trajectory,
     )
@@ -19163,6 +19353,10 @@ async def run_all_tests():
     r.record(
         "browser_min_steps_rejects_terminal_claim",
         test_browser_min_steps_rejects_terminal_claim_without_trajectory,
+    )
+    r.record(
+        "browser_min_steps_ignores_init_timeout_retry",
+        test_browser_min_steps_ignores_init_timeout_retry_before_session,
     )
     r.record(
         "browser_min_steps_per_instance",

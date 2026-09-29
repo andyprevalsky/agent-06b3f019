@@ -256,10 +256,16 @@ def _supports_anthropic_fast_mode(model: str) -> bool:
     return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
 
 
-def _supports_anthropic_effort(model: str) -> bool:
-    # Haiku 4.5 accepts extended thinking but rejects output_config.effort.
-    # Include its dated API ID alongside the alias used by rose-1-mini.
-    return not model.startswith("claude-haiku-4-5")
+def _model_supports_output_config_effort(model: str) -> bool:
+    """Return whether Anthropic accepts ``output_config.effort`` for ``model``.
+
+    ``claude-haiku-4-5`` (rose-1-mini claudeAuth) 400s with
+    "This model does not support the effort parameter." Stamping effort on
+    every body (DoorDash xhigh default) therefore fails every mini claudeAuth
+    call, forcing summarize_web_fetch onto a paid waterfall that can burn the
+    full TTFT budget (90s) per fetch — enough to time out spawn-sub-agents.
+    """
+    return "haiku" not in model.lower()
 
 
 def _model_rejects_forced_tool_choice(model: str) -> bool:
@@ -398,12 +404,21 @@ def build_anthropic_body(
     _add_tool_cache_breakpoint(body)
     _enforce_cache_control_cap(body)
 
-    # Default to xhigh on models that support effort. Haiku 4.5 rejects the
-    # parameter, including on structured-output calls such as web_fetch.
-    if _supports_anthropic_effort(pool_spec.claude_auth_model):
+    # Stamp output_config.effort when the model accepts it (default xhigh;
+    # planner_llm still passes "max" → xhigh). Haiku rejects effort — omit
+    # rather than 400 every rose-1-mini claudeAuth call (see helper docstring).
+    if _model_supports_output_config_effort(pool_spec.claude_auth_model):
         oc = body.get("output_config") or {}
         oc["effort"] = _normalize_reasoning_effort(effort)
         body["output_config"] = oc
+    else:
+        oc = body.get("output_config")
+        if isinstance(oc, dict) and "effort" in oc:
+            oc = {k: v for k, v in oc.items() if k != "effort"}
+            if oc:
+                body["output_config"] = oc
+            else:
+                body.pop("output_config", None)
 
     def _h(obj: Any) -> str:
         return hashlib.md5(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()[:8]

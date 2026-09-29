@@ -7,10 +7,7 @@ import {
 } from '@/features/terminal-component-group/components/browserBorderGlow/tones';
 import type { Message } from '@/features/terminal-component-group/hooks';
 
-function msg(
-  taskId: string,
-  overrides: Record<string, unknown> = {},
-): Message {
+function msg(taskId: string, overrides: Record<string, unknown> = {}): Message {
   return {
     message_id: `m-${Math.random()}`,
     role: 'TOOL',

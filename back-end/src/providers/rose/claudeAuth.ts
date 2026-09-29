@@ -85,6 +85,18 @@ function normalizeReasoningEffort(effort?: string): string {
   return effort ?? DEFAULT_REASONING_EFFORT;
 }
 
+function modelSupportsOutputConfigEffort(model: string): boolean {
+  // claude-haiku-4-5 (rose-1-mini) 400s: "This model does not support the
+  // effort parameter." Mirror agents/providers/rose/claude_auth.py.
+  return !model.toLowerCase().includes('haiku');
+}
+
+function modelSupportsAdaptiveThinking(model: string): boolean {
+  // claude-haiku-4-5 400s on thinking.type=adaptive. Mirror agents rose
+  // claude_auth (never default adaptive thinking onto Haiku).
+  return !model.toLowerCase().includes('haiku');
+}
+
 function modelRejectsForcedToolChoice(model: string): boolean {
   // Official Claude API IDs are claude-fable-5-1 / claude-mythos-5-1.
   // OpenRouter uses a dot (claude-fable-5.1). Do not match leftover Fable 5.
@@ -114,11 +126,6 @@ function downgradeForcedToolChoiceIfUnsupported(
 
 function supportsAnthropicFastMode(model: string): boolean {
   return ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].includes(model);
-}
-
-function supportsAdaptiveControls(model: string): boolean {
-  // Haiku 4.5 supports neither adaptive thinking nor output_config.effort.
-  return !model.startsWith('claude-haiku-4-5');
 }
 
 function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
@@ -265,8 +272,11 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     system: systemBlocks,
     temperature: 1,
   };
-  if (supportsAdaptiveControls(opts.poolSpec.claudeAuthModel)) {
+  if (modelSupportsAdaptiveThinking(opts.poolSpec.claudeAuthModel)) {
     body.thinking = { type: 'adaptive' };
+  }
+  if (modelSupportsOutputConfigEffort(opts.poolSpec.claudeAuthModel)) {
+    body.output_config = { effort: normalizeReasoningEffort(opts.effort) };
   }
   if (opts.providerFastMode === true && supportsAnthropicFastMode(opts.poolSpec.claudeAuthModel)) {
     body.speed = 'fast';
@@ -307,12 +317,20 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     }
   }
 
-  // Set effort once, after tool config has selected the output format. Haiku
-  // 4.5 rejects it even when a structured response is requested.
-  if (supportsAdaptiveControls(opts.poolSpec.claudeAuthModel)) {
+  // Set effort AFTER applyAnthropicToolConfig (which may drop output_config
+  // for json_schema reasons). Haiku rejects effort — omit rather than 400.
+  if (modelSupportsOutputConfigEffort(opts.poolSpec.claudeAuthModel)) {
     const oc = (body.output_config as Record<string, unknown> | undefined) ?? {};
     oc.effort = normalizeReasoningEffort(opts.effort);
     body.output_config = oc;
+  } else {
+    const oc = body.output_config as Record<string, unknown> | undefined;
+    if (oc && 'effort' in oc) {
+      delete oc.effort;
+      if (Object.keys(oc).length === 0) {
+        delete body.output_config;
+      }
+    }
   }
 
   enforceCacheBlockBudget(body);

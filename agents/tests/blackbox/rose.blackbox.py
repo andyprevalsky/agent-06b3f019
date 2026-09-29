@@ -6529,6 +6529,42 @@ def test_build_anthropic_body_native_tools_force_any_with_parallel():
     )
 
 
+def test_build_anthropic_body_omits_effort_for_haiku():
+    """rose-1-mini claudeAuth is claude-haiku-4-5, which 400s on
+    output_config.effort. summarize_web_fetch uses mini; stamping effort
+    forced every fetch onto a 90s TTFT waterfall and timed out
+    spawn-sub-agents (agent e6b39a7f). Non-haiku pools still stamp xhigh."""
+    msgs = [
+        {"role": "system", "content": "be helpful"},
+        {"role": "user", "content": "hi"},
+    ]
+    mini = build_anthropic_body(
+        pool_spec=get_pool("rose-1-mini"),
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+        effort="xhigh",
+    )
+    assert mini["model"] == "claude-haiku-4-5"
+    oc = mini.get("output_config")
+    assert oc is None or "effort" not in oc, (
+        "haiku must not receive output_config.effort; Anthropic 400s with "
+        "'This model does not support the effort parameter.'"
+    )
+
+    flash = build_anthropic_body(
+        pool_spec=get_pool("rose-1-flash"),
+        messages=msgs,
+        tools=None,
+        tool_choice=None,
+        response_format=None,
+        max_tokens=128,
+    )
+    assert flash["output_config"]["effort"] == "xhigh"
+
+
 def test_build_anthropic_body_never_sets_thinking_by_default():
     """`thinking` is an anti-pattern: never set it by default. Adaptive thinking
     400s on claude-haiku-4-5 ('adaptive thinking is not supported on this model'),

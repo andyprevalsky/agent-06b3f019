@@ -26,7 +26,7 @@ import { resolveBrowserBorderGlowTone } from '../browserBorderGlow/resolveTone';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { resolveBrowserControlState } from '../browserControlState';
 import { LiveViewFrame } from '../browser-status-bar/BrowserLiveViewFrame';
-import { resolveLiveViewDisplaySize } from '../browser-status-bar/liveViewFrame';
+import { resolveLiveViewDisplaySize } from '../browser-status-bar/liveViewDisplay';
 import { StatusOverlay } from './StatusOverlay';
 import type { Message } from '../../hooks';
 

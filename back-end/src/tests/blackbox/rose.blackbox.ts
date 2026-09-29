@@ -2410,6 +2410,43 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   }
 }
 
+async function testClaudeAuth_omitsEffortForHaiku() {
+  // rose-1-mini claudeAuth is claude-haiku-4-5, which 400s on
+  // output_config.effort. Mirror agents rose.blackbox (spawn-sub-agents
+  // timeout e6b39a7f — summarize_web_fetch burned 90s TTFT after invalid_request).
+  const messages: CompletionMessage[] = [
+    { role: 'system', content: 'be helpful' },
+    { role: 'user', content: 'hi' },
+  ];
+  const mini = buildAnthropicBody({
+    poolSpec: getPool('rose-1-mini'),
+    messages,
+    effort: 'xhigh',
+  });
+  assertEqual(mini.model, 'claude-haiku-4-5', 'mini model');
+  const miniOc = mini.output_config as Record<string, unknown> | undefined;
+  assert(
+    miniOc === undefined || miniOc.effort === undefined,
+    'haiku must not receive output_config.effort'
+  );
+  assert(mini.thinking === undefined, 'haiku must not receive thinking.type=adaptive');
+
+  const flash = buildAnthropicBody({
+    poolSpec: getPool('rose-1-flash'),
+    messages,
+  });
+  assertEqual(
+    (flash.output_config as Record<string, unknown>).effort,
+    'xhigh',
+    'non-haiku still stamps xhigh'
+  );
+  assertEqual(
+    (flash.thinking as Record<string, unknown> | undefined)?.type,
+    'adaptive',
+    'non-haiku still stamps adaptive thinking'
+  );
+}
+
 async function testWaterfall_firstFailsSecondSucceeds() {
   process.env.OPENROUTER_API_KEY = 'or-test-key';
   const callModels: string[] = [];
@@ -4041,6 +4078,10 @@ async function main(): Promise<void> {
     {
       name: 'waterfall / body builders always stamp effort=xhigh',
       fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
+    },
+    {
+      name: 'claudeAuth / omits effort for haiku (rose-1-mini)',
+      fn: testClaudeAuth_omitsEffortForHaiku,
     },
     { name: 'waterfall / first 500 → second succeeds', fn: testWaterfall_firstFailsSecondSucceeds },
     { name: 'waterfall / all fail → RoseAllFailed', fn: testWaterfall_allFailRaisesRoseAllFailed },

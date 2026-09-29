@@ -107,10 +107,31 @@ def _canonicalize_review_count(value: str) -> str:
     return re.sub(r"(?<=\d),(?=\d)", "", value)
 
 
-def _payment_payload_with_review_counts(
-    payload: Dict[str, Any],
-    transform: Any,
-) -> Dict[str, Any]:
+_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+x(\d+)\s*$", re.IGNORECASE)
+
+
+def _canonicalize_line_item_name(name: Any, quantity: Any) -> Any:
+    """Strip a trailing ` x{quantity}` echo of the quantity field.
+
+    Browser agents often copy order-summary prose ("Aurora Notebook x1") into
+    `name` while also setting `quantity: 1`. That display-only suffix must not
+    mint a second card for the same cart (agent-payment-idempotent-abandonment).
+    """
+    if not isinstance(name, str):
+        return name
+    match = _LINE_ITEM_QTY_SUFFIX_RE.search(name)
+    if match is None:
+        return name
+    qty = quantity if isinstance(quantity, int) and not isinstance(quantity, bool) else _to_int(quantity)
+    if qty <= 0:
+        qty = 1
+    if int(match.group(1)) != qty:
+        return name
+    return name[: match.start()].rstrip()
+
+
+def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy line items with display-only fields canonicalized for hashing."""
     candidate = {**payload, "lineItems": []}
     for raw_item in payload.get("lineItems") or []:
         if not isinstance(raw_item, dict):
@@ -118,17 +139,18 @@ def _payment_payload_with_review_counts(
         item = dict(raw_item)
         review_count = item.get("reviewCount")
         if isinstance(review_count, str):
-            item["reviewCount"] = transform(review_count)
+            item["reviewCount"] = _canonicalize_review_count(review_count)
+        item["name"] = _canonicalize_line_item_name(item.get("name"), item.get("quantity"))
         candidate["lineItems"].append(item)
     return candidate
 
 
 def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
-    """Hash purchase identity while canonicalizing equivalent review-count punctuation."""
+    """Hash purchase identity while canonicalizing equivalent display-only drift."""
     # Browser extraction may preserve or omit thousands separators for the
-    # same visible count. Only punctuation between digits is removed;
-    # materially different review text remains distinct.
-    canonical = _payment_payload_with_review_counts(payload, _canonicalize_review_count)
+    # same visible count, and may echo `x{qty}` onto the product name. Only
+    # those display-only forms are normalized; material receipt text stays distinct.
+    canonical = _payment_payload_for_fingerprint(payload)
     return _hash_payment_identity(canonical)
 
 

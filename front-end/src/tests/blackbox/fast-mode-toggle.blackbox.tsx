@@ -223,9 +223,7 @@ describe('Fast Mode account gating', () => {
     expect(screen.getByTestId('fast-mode-toggle')).toBeInTheDocument();
     expect(screen.getByTestId('fast-mode-toggle')).toHaveAccessibleName('Fast Mode Off');
     expect(screen.getByTestId('fast-mode-toggle')).not.toHaveTextContent('Fast Mode');
-    expect(canUseFastMode({ id: 'not-an-allowlisted-admin-id', phone: '+19729777432' })).toBe(
-      true,
-    );
+    expect(canUseFastMode({ id: 'not-an-allowlisted-admin-id', phone: '+19729777432' })).toBe(true);
     expect(ADMIN_PHONE_DIGITS).toContain('19729777432');
   });
 

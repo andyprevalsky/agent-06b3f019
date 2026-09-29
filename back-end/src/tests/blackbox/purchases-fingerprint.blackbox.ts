@@ -51,6 +51,43 @@ function fixtureReceipt(
   };
 }
 
+async function testQuantityEchoNameParity(): Promise<void> {
+  const bare = fixtureReceipt('Aurora Notebook', '1,284 reviews');
+  const echoed = fixtureReceipt('Aurora Notebook x1', '1,284 reviews');
+  const bareFp = canonicalStoredPurchaseFingerprint({
+    userId: 'fixture-user',
+    merchant: 'Rose Labs Test Payment',
+    lineItemsJson: bare,
+    totalCents: 1200,
+  });
+  const echoedFp = canonicalStoredPurchaseFingerprint({
+    userId: 'fixture-user',
+    merchant: 'Rose Labs Test Payment',
+    lineItemsJson: echoed,
+    totalCents: 1200,
+  });
+  assert(bareFp !== null && echoedFp !== null, 'quantity-echo receipts must fingerprint');
+  assert(bareFp === echoedFp, 'trailing x{qty} on line-item names must match bare product titles');
+  assert(
+    bareFp === 'bc0508689ba5fa17a6cea3e6009bf84587ee26f67ac749d4c82f80ff17f4b2e9',
+    'backend quantity-echo canonicalization must match the agents-side Python fingerprint'
+  );
+
+  const mismatchedQty = {
+    ...echoed,
+    lineItems: [{ ...(echoed.lineItems[0] as object), name: 'Aurora Notebook x2', quantity: 1 }],
+  };
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: mismatchedQty,
+      totalCents: 1200,
+    }) !== bareFp,
+    'x{n} that does not match quantity must remain a distinct cart'
+  );
+}
+
 async function testUnicodeParity(): Promise<void> {
   const unicodeReceipt = fixtureReceipt(
     'Lámpara 🪔',
@@ -300,6 +337,7 @@ async function testChargingMintGuard(): Promise<void> {
 
 async function main(): Promise<void> {
   try {
+    await testQuantityEchoNameParity();
     await testUnicodeParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();

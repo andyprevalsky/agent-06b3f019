@@ -108,7 +108,13 @@ describe('ExploreActiveToolCarousel', () => {
     const { container, rerender } = render(
       <ExploreActiveToolCarousel
         iconClassName="h-3 w-3"
-        items={[{ key: 'fetch-a', text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma', icon: Search }]}
+        items={[
+          {
+            key: 'fetch-a',
+            text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma',
+            icon: Search,
+          },
+        ]}
       />,
     );
 
@@ -118,7 +124,11 @@ describe('ExploreActiveToolCarousel', () => {
       <ExploreActiveToolCarousel
         iconClassName="h-3 w-3"
         items={[
-          { key: 'fetch-a', text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma', icon: Search },
+          {
+            key: 'fetch-a',
+            text: 'Fetching https://api.github.com/repos/CHAI-MAGMA/magma',
+            icon: Search,
+          },
           {
             key: 'fetch-b',
             text: 'Fetching https://api.github.com/repos/icl-utk-edu/magma',

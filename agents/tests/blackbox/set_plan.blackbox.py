@@ -456,7 +456,12 @@ def test_build_planner_messages_skips_subagent_work_messages():
         {
             "role": "TOOL",
             "text": "Child fanout tree summary",
-            "metadata": {"toolName": "spawn_general_purpose_agent", "toolCallId": "tc:0", "subAgentIds": ["child-1"]},
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent",
+                "toolCallId": "tc:0",
+                "subAgentIds": ["child-1"],
+                "forEachChild": True,
+            },
         },
         {
             "role": "TOOL",
