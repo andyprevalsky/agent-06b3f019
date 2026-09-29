@@ -537,12 +537,15 @@ FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
-async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
+async def mock_resolve_fast_cache_goal_activity(
+    agent_id: str,
+) -> Optional[dict[str, Optional[str]]]:
     # DEMO-tagged mass-agent root prompt (stable cache namespace).
-    return (
+    persisted = (
         "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
         " — persisted DB goal"
     )
+    return {"goal": persisted, "root_goal": persisted}
 
 
 @activity.defn(name="call_llm_activity")
