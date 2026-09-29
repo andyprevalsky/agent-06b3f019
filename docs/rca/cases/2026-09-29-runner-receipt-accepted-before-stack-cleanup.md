@@ -21,6 +21,7 @@ tags:
 sources:
   - PR #1299
   - fleet run 20260929-161610-10375
+  - fleet run 20260929-183257-2121
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -136,6 +137,22 @@ with the exact run-token driver ACK, the matching original clean stack status,
 the controller's guest confirmation, and independent native stopped-Machine
 inventory. It still requires an exact stop/provider receipt when stack cleanup
 failed and still awards zero proof credit to either interrupted case.
+
+A subsequent smoke-inclusive slice reached nine ready stacks, but
+`wait-for-trigger` held the start barrier with 82.10% CPU pressure and no
+benchmark result. It received the same resource-only large primary shape.
+Its cancellation exposed one more recovery boundary: the task never created a
+root agent, so the older provider manifest required a root that could not
+exist. Exact recovery now accepts a prestart zero-provider manifest only when
+the authenticated guest state shows an exited driver, no run record or live
+process, the backend log proves no root or external provider allocation, and
+the exact Machine is stopped with matching recovery receipts. The other nine
+guests had their original clean ACKs. All ten original volumes were captured
+and the 125,129-byte zero-credit archive passed exact-owner and fresh native
+Machine/volume verification. A direct read of selected files from stopped
+pool Machines avoided ten full-volume snapshot forks; each Machine's original
+configuration was restored and checked after capture. This optimization only
+changes forensic transfer, not benchmark execution or evaluation.
 
 At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or
