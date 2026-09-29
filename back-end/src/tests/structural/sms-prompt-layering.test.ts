@@ -174,6 +174,13 @@ runCheck(
   SMS_SURFACE_OVERLAY.includes('primarily through grep'),
   'grep grounding sentence missing from the SMS overlay'
 );
+runCheck(
+  'block 3 requires a first-turn user response',
+  SMS_SURFACE_OVERLAY.includes(
+    'Respond to the user on your first turn, failing to respond quickly risks disengagement from the user.'
+  ),
+  'first-turn response rule missing from the SMS overlay'
+);
 // Tool-specific delivery mechanics belong to the tool description, where the
 // model sees them at the decision boundary, rather than in the global surface
 // prompt. The completion tool owns the other half of the send/stop contract.
