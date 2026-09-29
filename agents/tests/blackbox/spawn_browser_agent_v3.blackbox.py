@@ -20132,6 +20132,28 @@ async def test_manager_payment_gate_subscription_checkout_failure_still_raises_g
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
     assert cancelled.metadata["action_type"] == "purchase_cancelled"
 
+async def test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate():
+    from tools.base import MessageStatus
+
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "purchase_above_max_limit",
+                "error": "Purchase is above max limit of 63288",
+                "code": "purchase_above_max_limit",
+                "maxPurchaseCents": 63288,
+            }
+        ],
+    )
+    assert gate_keys == []
+    assert "mint_subscription_checkout_activity" not in activity_calls
+    errored = next(e for e in events if getattr(e, "title", "") == "Purchase above max limit")
+    assert errored.status == MessageStatus.ERROR
+    assert errored.metadata["action_type"] == "purchase_above_max_limit"
+    assert errored.metadata["maxPurchaseCents"] == 63288
+    assert "above max limit of 63288" in errored.message
+    assert activity_calls.count("mint_purchase_card_activity") == 1
+
 async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
     events, _, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "kyc_required"}],
@@ -22693,6 +22715,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
         test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
+    )
+    await r.record_async(
+        "manager_payment_gate_above_max_limit_errors_without_subscribe_gate",
+        test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate,
     )
     await r.record_async(
         "manager_payment_gate_kyc_rejected",

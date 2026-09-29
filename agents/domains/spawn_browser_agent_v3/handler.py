@@ -10654,6 +10654,32 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         card = await mint_payment_card()
 
+                    # Over-limit: mint exceeded MAX_PURCHASE_CENTS. Hard tool error —
+                    # do NOT raise a subscribe gate (that mislabel hung agents that
+                    # simply asked for a cart larger than the org-wallet float).
+                    if card.get("status") == "purchase_above_max_limit":
+                        limit = card.get("maxPurchaseCents")
+                        limit_text = (
+                            f" of {limit}" if isinstance(limit, int) else ""
+                        )
+                        message = str(
+                            card.get("error")
+                            or f"Purchase is above max limit{limit_text}."
+                        )
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Purchase above max limit",
+                            message=message,
+                            status=MessageStatus.ERROR,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "purchase_above_max_limit",
+                                "maxPurchaseCents": limit,
+                            },
+                        )
+                        return
+
                     # Subscription gate: minting real money requires an active
                     # plan. If the backend says so, raise a subscription gate
                     # ORGANICALLY (not injected) and retry once it's resolved.

@@ -463,13 +463,31 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       const userId = await createUser('over-limit');
       const fingerprint = `over-limit-${randomUUID()}`;
+      const { MAX_PURCHASE_CENTS, PURCHASE_ABOVE_MAX_LIMIT_CODE } = await import(
+        '../../domains/purchases/config'
+      );
       const response = await request('/api/purchases/mint', {
         method: 'POST',
         headers: apiKeyHeaders(userId),
-        body: JSON.stringify(validMintBody({ fingerprint, totalCents: 2_147_483_647 })),
+        body: JSON.stringify(
+          validMintBody({ fingerprint, totalCents: MAX_PURCHASE_CENTS + 1 })
+        ),
       });
-      assertStatus(response.status, 402, response.data);
-      assertSchema(ErrorResponse, response.data, 'over-limit mint');
+      assertStatus(response.status, 400, response.data);
+      const body = assertSchema(ErrorResponse, response.data, 'over-limit mint');
+      assert(
+        body.code === PURCHASE_ABOVE_MAX_LIMIT_CODE,
+        `expected code ${PURCHASE_ABOVE_MAX_LIMIT_CODE}, got ${body.code}`
+      );
+      assert(
+        body.error === `Purchase is above max limit of ${MAX_PURCHASE_CENTS}`,
+        `expected over-limit message, got ${body.error}`
+      );
+      const details = response.data as { maxPurchaseCents?: unknown };
+      assert(
+        details.maxPurchaseCents === MAX_PURCHASE_CENTS,
+        `expected maxPurchaseCents ${MAX_PURCHASE_CENTS}, got ${details.maxPurchaseCents}`
+      );
 
       const rows = await prisma.purchaseSpend.findMany({ where: { userId, fingerprint } });
       assert(rows.length === 0, 'over-limit mint should not create a purchase spend row');

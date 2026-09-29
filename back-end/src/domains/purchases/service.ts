@@ -6,6 +6,7 @@ import { tryGetLiveCardDetails } from './cardLiveness';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
+  PURCHASE_ABOVE_MAX_LIMIT_CODE,
   PURCHASE_APPROVAL_CACHE_HOURS,
   PURCHASE_STALE_CHARGING_MS,
 } from './config';
@@ -267,9 +268,13 @@ export async function mintPurchaseCard(
   normalizeCurrency(input.currency);
 
   if (input.totalCents > MAX_PURCHASE_CENTS) {
+    // Distinct from subscription 402s: the browser tool surfaces this as a hard
+    // error ("purchase is above max limit of X"), not a subscribe gate.
     throw new PurchaseError(
-      `Purchase exceeds max purchase limit of ${MAX_PURCHASE_CENTS} cents`,
-      402
+      `Purchase is above max limit of ${MAX_PURCHASE_CENTS}`,
+      400,
+      PURCHASE_ABOVE_MAX_LIMIT_CODE,
+      { maxPurchaseCents: MAX_PURCHASE_CENTS }
     );
   }
 
