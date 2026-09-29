@@ -415,6 +415,7 @@ async def _run_execute_dag(
     param_usage=None,
     execute_activity_calls=None,
     pending_context_seen=None,
+    context=None,
     **execute_dag_kwargs,
 ):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
@@ -481,7 +482,7 @@ async def _run_execute_dag(
             agent_id="agent-1",
             user_id="user-1",
             model="rose-flash",
-            context=[],
+            context=list(context or []),
             execute_activity=execute_activity,
             post_message=post_message,
             execute_tool=execute_tool_impl,
@@ -1145,25 +1146,42 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
     assert sibling_terminal[0]["metadata"].get("canceled") is True
 
 
-def test_fan_in_synthesis_goal_detection():
-    from loop.dag_executor import is_fan_in_synthesis_goal
-
-    assert is_fan_in_synthesis_goal(
-        "Consolidate the complete evidence returned by tasks 0 through 4 into a final candidate universe."
+def test_oai_demo_reasoning_fast_mode_step_uses_july_slot():
+    """Leftover GPs must not shift catalog-demo assemble-final off July p:6."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from loop.dag_executor import (
+        DAGTask,
+        OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP,
+        TaskDAG,
+        TaskState,
+        _oai_demo_reasoning_fast_mode_step,
     )
-    assert is_fan_in_synthesis_goal("Merge ranked results and produce the final artifact")
-    assert is_fan_in_synthesis_goal("Create the 90-day content calendar using the 50 per-creator analyses.")
-    assert is_fan_in_synthesis_goal("Generate 30 hook-tested openings using the ranked research.")
-    assert is_fan_in_synthesis_goal("Select the 20 creators Andy should engage with weekly.")
-    assert not is_fan_in_synthesis_goal("Search GitHub for CUDA kernel repositories")
-    assert not is_fan_in_synthesis_goal("Write a report that independently validates the deployment")
-    # Keyword hits alone are not enough for rewrite; still detectable as wording.
-    assert is_fan_in_synthesis_goal("Implement merge sort")
-    assert is_fan_in_synthesis_goal("Finalize the OAuth flow")
+
+    dag = TaskDAG(
+        {
+            "tasks": [
+                {"goal": "Analyze 50 creators", "tool_name": "spawn_general_purpose_agent_for_each"},
+                {"goal": "Final assembly and quality assurance", "tool_name": "reasoning"},
+            ],
+            "dependencies": {"1": [0]},
+        }
+    )
+    dag.tasks[0].state = TaskState.COMPLETED
+    reasoning = dag.tasks[1]
+    demo_ctx = [{"role": "USER", "message": OAI_DEMO_ROOT_GOAL_PREFIX}]
+    assert _oai_demo_reasoning_fast_mode_step(reasoning, dag, demo_ctx) == OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+    assert _oai_demo_reasoning_fast_mode_step(reasoning, dag, [{"role": "USER", "message": "other"}]) == reasoning.index
+    leftover = DAGTask(index=3, goal="calendar", tool_name="spawn_general_purpose_agent")
+    assert _oai_demo_reasoning_fast_mode_step(leftover, dag, demo_ctx) == leftover.index
 
 
-def test_rewrite_recursive_gp_synthesis_task_to_reasoning():
-    from loop.dag_executor import DAGTask, maybe_rewrite_recursive_gp_synthesis_task
+def test_planned_general_purpose_tool_is_not_rewritten_from_goal_text():
+    """Synthesis-shaped goals stay on the planned tool. No keyword rewrite."""
+    import loop.dag_executor as dag_executor
+    from loop.dag_executor import DAGTask
+
+    assert not hasattr(dag_executor, "is_fan_in_synthesis_goal")
+    assert not hasattr(dag_executor, "maybe_rewrite_recursive_gp_synthesis_task")
 
     task = DAGTask(
         index=6,
@@ -1171,46 +1189,149 @@ def test_rewrite_recursive_gp_synthesis_task_to_reasoning():
         tool_name="spawn_general_purpose_agent",
         depends_on=[0, 1, 2, 3, 4],
     )
-    assert maybe_rewrite_recursive_gp_synthesis_task(task) is True
-    assert task.tool_name == "reasoning"
+    assert task.tool_name == "spawn_general_purpose_agent"
 
-    for index, goal in enumerate(
-        (
-            "Create the 90-day content calendar using the 50 per-creator analyses.",
-            "Generate 30 hook-tested video script openings using the completed research.",
-            "Select the 20 creators Andy should engage with weekly.",
-        ),
-        start=7,
-    ):
-        derived = DAGTask(
-            index=index,
-            goal=goal,
-            tool_name="spawn_general_purpose_agent",
-            depends_on=[2],
-        )
-        assert maybe_rewrite_recursive_gp_synthesis_task(derived) is True
-        assert derived.tool_name == "reasoning"
 
-    keep = DAGTask(
-        index=1,
-        goal="Search GitHub for CUDA kernel repositories with Triton examples",
-        tool_name="spawn_general_purpose_agent",
-        depends_on=[0],
+async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
+    """A Fast Mode read-only populate miss skips the leftover node; no ERROR chip.
+
+    Mass-agent July cache has explore + for_each populate rows. The leftover
+    post-for_each GP is not in that cache. Strict read-only correctly refuses
+    a live param-populator call (FastCacheLookupError). That miss must not
+    become a toolStatus=ERROR chip — t10-no-tool-failures treats ERROR as a
+    failed run even when execute_loop later replays the leftover from cache.
+    """
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+
+    leftover_goal = "Produce fresh tool-grounded evidence for remaining deliverables"
+    plan_data = {
+        "tasks": [
+            {"goal": "search first", "tool_name": "web_search"},
+            {"goal": leftover_goal, "tool_name": "spawn_general_purpose_agent"},
+        ],
+        "dependencies": {"1": [0]},
+    }
+    executed: list[str] = []
+
+    def param_tool_calls(args):
+        extra = args[10] if args and len(args) > 10 else ""
+        if leftover_goal in extra:
+            inner = FastCacheLookupError(
+                "Strict read-only benchmark cache miss for dag_param_populator; live fallback is disabled"
+            )
+            wrapped = RuntimeError("Activity task failed")
+            wrapped.cause = inner
+            raise wrapped
+        return [{"tool": "web_search", "query": "ok"}]
+
+    async def execute_tool(name, params, tool_call_id):
+        executed.append(name)
+        return {"message": f"{name} done"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
     )
-    assert maybe_rewrite_recursive_gp_synthesis_task(keep) is False
-    assert keep.tool_name == "spawn_general_purpose_agent"
 
-    # Negative controls: synthesis keywords without fan-in deps must NOT rewrite
-    # (preserve GP spawn + output_schema contract).
-    for goal in ("Implement merge sort", "Finalize the OAuth flow"):
-        false_pos = DAGTask(
-            index=2,
-            goal=goal,
-            tool_name="spawn_general_purpose_agent",
-            depends_on=[],
-        )
-        assert maybe_rewrite_recursive_gp_synthesis_task(false_pos) is False
-        assert false_pos.tool_name == "spawn_general_purpose_agent"
+    assert result["status"] == "completed"
+    assert all(t.state.value == "COMPLETED" for t in dag.tasks)
+    assert executed == ["web_search"]
+    leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
+    assert leftover_events, f"leftover chip missing: {events}"
+    assert any(e["status"] == "IN_PROGRESS" for e in leftover_events)
+    terminal = [e for e in leftover_events if e["status"] not in (None, "IN_PROGRESS")]
+    assert len(terminal) >= 1
+    assert terminal[0]["status"] == "FINISHED"
+    assert terminal[0]["metadata"].get("fastModeCacheSkip") is True
+    assert not any(e["status"] == "ERROR" for e in leftover_events)
+
+
+async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
+    """Catalog demo leftover GPs after for_each must not spawn — they desync assemble-final cache."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+    leftover_goal = "Create a 90-day content calendar for Andy Prevalsky"
+    plan_data = {
+        "tasks": [
+            {"goal": "Analyze 50 creators", "tool_name": "spawn_general_purpose_agent_for_each"},
+            {"goal": leftover_goal, "tool_name": "spawn_general_purpose_agent"},
+            {"goal": "Final assembly and quality assurance", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"1": [0], "2": [1]},
+    }
+    executed: list[str] = []
+    activity_calls: list[dict] = []
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True, "properties": []}]}
+
+    def param_tool_calls(args):
+        extra = args[10] if args and len(args) > 10 else ""
+        if leftover_goal in extra:
+            return [
+                {
+                    "tool": "spawn_agent",
+                    "type": "general_purpose",
+                    "start_phase": "EXECUTE",
+                    "goal": leftover_goal,
+                    "output_schema": schema,
+                }
+            ]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "for_each",
+                "start_phase": "EXECUTE",
+                "goal": "Analyze 50 creators",
+                "items": [{"name": "Huberman"}],
+                "output_schema": schema,
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        executed.append(params.get("type") or name)
+        return {"message": f"{name} done"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        context=[{"role": "USER", "message": OAI_DEMO_ROOT_GOAL_PREFIX}],
+        reasoning_result={"content": "# positioning_statement\n\nAndy as the founder-operator.", "usage": {}},
+        execute_activity_calls=activity_calls,
+    )
+
+    assert result["status"] == "completed"
+    assert executed == ["for_each"]
+    leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
+    assert leftover_events == [], f"leftover GP must not post chips (desyncs assemble-final): {leftover_events}"
+    assert dag.tasks[1].state.value == "COMPLETED"
+    from loop.dag_executor import OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+
+    reasoning_call = next(c for c in activity_calls if "reasoning" in c["fn"])
+    # Leftover GPs shift task.index to 2; July assemble-final is still p:6.
+    assert dag.tasks[2].index == 2
+    assert reasoning_call["args"][-2] == OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+
+
+async def test_execute_dag_transport_lookup_error_still_fails():
+    """A FastCacheLookupError that is not a clean read-only miss stays a failure."""
+    from providers.fast_cache.rose_cache import FastCacheLookupError
+
+    plan_data = {
+        "tasks": [{"goal": "search first", "tool_name": "web_search"}],
+        "dependencies": {},
+    }
+
+    def param_tool_calls(_args):
+        raise FastCacheLookupError("fast_cache.get_error: ReadTimeout after retries")
+
+    result, events, dag = await _run_execute_dag(plan_data, param_tool_calls=param_tool_calls)
+
+    assert result["status"] == "needs_llm"
+    assert dag.tasks[0].state.value == "FAILED"
+    error_events = [e for e in events if e["type"] == "tool_event" and e["status"] == "ERROR"]
+    assert error_events, f"transport lookup error must still ERROR: {events}"
 
 
 async def run_all_tests():
@@ -1235,8 +1356,26 @@ async def run_all_tests():
         "dag_foreach_alias_override_passes_spawn_agent_validation",
         test_dag_foreach_alias_override_passes_spawn_agent_validation,
     )
-    r.record("fan_in_synthesis_goal_detection", test_fan_in_synthesis_goal_detection)
-    r.record("rewrite_recursive_gp_synthesis_task_to_reasoning", test_rewrite_recursive_gp_synthesis_task_to_reasoning)
+    r.record(
+        "oai_demo_reasoning_fast_mode_step_uses_july_slot",
+        test_oai_demo_reasoning_fast_mode_step_uses_july_slot,
+    )
+    r.record(
+        "planned_general_purpose_tool_is_not_rewritten_from_goal_text",
+        test_planned_general_purpose_tool_is_not_rewritten_from_goal_text,
+    )
+    await r.record_async(
+        "execute_dag_strict_readonly_populate_miss_skips_without_error",
+        test_execute_dag_strict_readonly_populate_miss_skips_without_error,
+    )
+    await r.record_async(
+        "execute_dag_skips_oai_demo_leftover_gp_after_for_each",
+        test_execute_dag_skips_oai_demo_leftover_gp_after_for_each,
+    )
+    await r.record_async(
+        "execute_dag_transport_lookup_error_still_fails",
+        test_execute_dag_transport_lookup_error_still_fails,
+    )
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record(
         "build_param_population_message_spawn",
