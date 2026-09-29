@@ -769,10 +769,9 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
             if "checked" in window or "selected" in window or "pressed" in window:
                 fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
                 break
-        if "drop_off" not in fields:
-            first = _AMAZON_RETURN_SELECTED_DROPOFF_RE.search(text)
-            if first and ("no box" in text.lower() or "no-box" in text.lower()):
-                fields["drop_off"] = re.sub(r"\s+", " ", first.group(1)).strip(" -:")
+        # Do not guess the first listed drop-off from "no box" alone — multiple
+        # options can share that copy. Require shipping summary or selection
+        # evidence before naming a drop-off in the approval question.
 
     visa = _AMAZON_RETURN_VISA_RE.search(text)
     if visa:

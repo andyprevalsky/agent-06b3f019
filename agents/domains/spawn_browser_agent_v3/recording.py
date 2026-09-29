@@ -2255,6 +2255,44 @@ def _resource_type_is_api_challenge_candidate(resource_type: str) -> bool:
     return not resource or resource in _API_CHALLENGE_RESOURCE_TYPES
 
 
+def _normalize_http_method(method: Any) -> str:
+    return str(method or "").strip().upper()
+
+
+def _api_challenge_locator(url: str) -> str:
+    """Scheme/host/path identity for matching a challenge to its superseding 2xx."""
+    return _redact_url_query(url or "")
+
+
+def _api_challenge_success_matches(
+    *,
+    challenge_url: str,
+    challenge_method: Any,
+    challenge_resource_type: Any,
+    success_url: str,
+    success_method: Any,
+    success_resource_type: Any,
+) -> bool:
+    """True when a 2xx is the same endpoint (locator + method) as the challenge.
+
+    Document navigations must not clear XHR/fetch challenges — pages routinely
+    emit same-origin document/config 2xx traffic between browser-loop steps.
+    """
+    if not challenge_url or not success_url:
+        return False
+    if _api_challenge_locator(challenge_url) != _api_challenge_locator(success_url):
+        return False
+    challenge_method_norm = _normalize_http_method(challenge_method)
+    success_method_norm = _normalize_http_method(success_method)
+    if challenge_method_norm and success_method_norm and challenge_method_norm != success_method_norm:
+        return False
+    challenge_resource = str(challenge_resource_type or "").lower()
+    success_resource = str(success_resource_type or "").lower()
+    if challenge_resource in {"xhr", "fetch"} and success_resource == "document":
+        return False
+    return True
+
+
 def _status_is_http_success(status: Any) -> bool:
     try:
         code = int(status)
@@ -3475,12 +3513,14 @@ class BrowserNetworkRecorder:
                     entry_url,
                     entry.get("response_ts_ms"),
                     generation=generation,
+                    method=entry.get("method"),
+                    resource_type=entry_resource_type,
                 ):
                     # Delayed body capture of an earlier soft-block must not
-                    # rotate the browser after the same-origin API already
+                    # rotate the browser after the same endpoint already
                     # succeeded (AMC createOrder retry → live checkout).
                     logger.info(
-                        "API challenge HTML provider-exit ignored: superseded by later same-origin success",
+                        "API challenge HTML provider-exit ignored: superseded by later same-endpoint success",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=generation,
@@ -3507,6 +3547,8 @@ class BrowserNetworkRecorder:
                             {
                                 "reason": _API_CHALLENGE_HTML_REASON,
                                 "url": _redact_url_query(entry_url),
+                                "method": _normalize_http_method(entry.get("method")) or None,
+                                "resource_type": entry_resource_type or None,
                                 "browser_generation": generation,
                                 "status": entry.get("status"),
                                 "response_ts_ms": entry.get("response_ts_ms"),
@@ -3537,6 +3579,8 @@ class BrowserNetworkRecorder:
                     entry_url,
                     success_ts_ms=entry.get("response_ts_ms"),
                     success_generation=generation,
+                    success_method=entry.get("method"),
+                    success_resource_type=entry_resource_type,
                 )
 
             entry.update(
@@ -3587,8 +3631,10 @@ class BrowserNetworkRecorder:
         url: str,
         challenge_response_ts_ms: Any,
         generation: int | None = None,
+        method: Any = None,
+        resource_type: Any = None,
     ) -> bool:
-        """True when a later same-origin XHR/fetch/document already returned 2xx."""
+        """True when a later same-endpoint XHR/fetch/document already returned 2xx."""
         try:
             challenge_ts = int(challenge_response_ts_ms) if challenge_response_ts_ms is not None else None
         except (TypeError, ValueError):
@@ -3604,6 +3650,15 @@ class BrowserNetworkRecorder:
             if not _resource_type_is_api_challenge_candidate(str(other.get("resource_type") or "")):
                 continue
             if not _status_is_http_success(other.get("status")):
+                continue
+            if not _api_challenge_success_matches(
+                challenge_url=url,
+                challenge_method=method,
+                challenge_resource_type=resource_type,
+                success_url=other_url,
+                success_method=other.get("method"),
+                success_resource_type=other.get("resource_type"),
+            ):
                 continue
             other_ts = other.get("response_ts_ms")
             if challenge_ts is not None and other_ts is not None:
@@ -3621,8 +3676,10 @@ class BrowserNetworkRecorder:
         *,
         success_ts_ms: Any = None,
         success_generation: int | None = None,
+        success_method: Any = None,
+        success_resource_type: Any = None,
     ) -> None:
-        """Drop API-challenge exits only when a later same-generation 2xx supersedes them."""
+        """Drop API-challenge exits only when a later same-endpoint 2xx supersedes them."""
         rejections = list(getattr(self, "_provider_exit_rejections", []) or [])
         if not rejections:
             return
@@ -3635,7 +3692,14 @@ class BrowserNetworkRecorder:
                 kept.append(dict(rejection))
                 continue
             rejection_url = str(rejection.get("url") or "")
-            superseded = bool(rejection_url) and _same_origin(rejection_url, url)
+            superseded = _api_challenge_success_matches(
+                challenge_url=rejection_url,
+                challenge_method=rejection.get("method"),
+                challenge_resource_type=rejection.get("resource_type"),
+                success_url=url,
+                success_method=success_method,
+                success_resource_type=success_resource_type,
+            )
             if superseded and success_generation is not None:
                 superseded = rejection.get("browser_generation") == success_generation
             if superseded:
@@ -3670,7 +3734,7 @@ class BrowserNetworkRecorder:
         """Consume one explicit rejection verdict for the active browser exit.
 
         API-challenge HTML exits that were already superseded by a later
-        same-origin 2xx are dropped here too — the success clear can race the
+        same-endpoint 2xx are dropped here too — the success clear can race the
         next browser-loop ``pop`` after a soft-block retries cleanly.
         """
         rejections = getattr(self, "_provider_exit_rejections", [])
@@ -3687,6 +3751,8 @@ class BrowserNetworkRecorder:
                     str(rejection.get("url") or ""),
                     rejection.get("response_ts_ms"),
                     generation=rejection_generation,
+                    method=rejection.get("method"),
+                    resource_type=rejection.get("resource_type"),
                 )
             ):
                 api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))

@@ -9,10 +9,11 @@ the same reasoning while already emitting a fully populated ``output``
 timeout).
 
 When the verifier returns the same <1.0 judgment N times in a row AND its
-structured ``output`` already satisfies every required schema field, treat
-that as terminal acceptance. A stuck 0.5 with a complete extraction is not
-a request for more evidence — continuing burns the smoke budget and ends
-PAUSED instead of COMPLETED.
+structured ``output`` already satisfies every required schema field, break
+the loop with an *unverified* completion (structured output preserved,
+``success=False``). A stuck 0.5 with a complete extraction is not a request
+for more evidence — continuing burns the smoke budget and ends PAUSED —
+but the parent must still be able to tell this apart from a verified pass.
 """
 
 from __future__ import annotations
@@ -33,12 +34,23 @@ MAX_IDENTICAL_VERIFIER_REJECTIONS = _read_max_identical_verifier_rejections()
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
-def normalize_verifier_rejection_fingerprint(reasoning: Any) -> str:
-    """Collapse whitespace/case so identical reject reasons match."""
+def normalize_verifier_rejection_fingerprint(reasoning: Any, score: float | None = None) -> str:
+    """Collapse whitespace/case so identical reject reasons match.
+
+    When ``score`` is provided it is quantized into the fingerprint so a streak
+    only grows when both reasoning and score stay the same.
+    """
     text = str(reasoning or "").strip().lower()
     if not text:
         return ""
-    return _WHITESPACE_RE.sub(" ", text)
+    normalized = _WHITESPACE_RE.sub(" ", text)
+    if score is None:
+        return normalized
+    try:
+        score_key = f"{float(score):.2f}"
+    except (TypeError, ValueError):
+        score_key = "nan"
+    return f"{score_key}|{normalized}"
 
 
 def structured_response_covers_schema(
@@ -50,8 +62,13 @@ def structured_response_covers_schema(
     Presence-only: this circuit does not verify tool-grounded evidence. Only
     the literal ``required is False`` makes a field optional; any other
     ``required`` value (including non-booleans) is treated as required.
+
+    An optional-only schema still requires a non-empty structured response so
+    an empty dict cannot soft-complete after the reject streak.
     """
     if not isinstance(structured_response, Mapping):
+        return False
+    if not structured_response:
         return False
     fields = []
     if isinstance(response_schema, Mapping):
@@ -60,7 +77,8 @@ def structured_response_covers_schema(
             fields = [f for f in raw_fields if isinstance(f, Mapping)]
     if not fields:
         # Schema-less agents: any non-empty structured dict is usable output.
-        return bool(structured_response)
+        return True
+    saw_required = False
     for field in fields:
         name = field.get("name")
         if not isinstance(name, str) or not name:
@@ -68,6 +86,7 @@ def structured_response_covers_schema(
         required = field.get("required", True)
         if required is False:
             continue
+        saw_required = True
         value = structured_response.get(name)
         if value is None:
             return False
@@ -75,6 +94,17 @@ def structured_response_covers_schema(
             return False
         if isinstance(value, (list, dict)) and len(value) == 0:
             return False
+    if not saw_required:
+        # Optional-only schema: require at least one non-empty field value.
+        for value in structured_response.values():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            if isinstance(value, (list, dict)) and len(value) == 0:
+                continue
+            return True
+        return False
     return True
 
 
@@ -85,7 +115,11 @@ def should_soft_accept_identical_verifier_reject(
     response_schema: Optional[Mapping[str, Any]],
     threshold: int = MAX_IDENTICAL_VERIFIER_REJECTIONS,
 ) -> bool:
-    """Accept completion after N identical <1.0 rejects with complete output."""
+    """Break the reject loop after N identical <1.0 rejects with complete output.
+
+    Callers must treat a True result as *unverified* completion (preserve
+    structured output, do not report verified ``success=True``).
+    """
     if consecutive_identical < max(1, int(threshold)):
         return False
     return structured_response_covers_schema(structured_response, response_schema)
@@ -101,7 +135,7 @@ def next_identical_reject_streak(
     """Update identical-reject streak for a verifier score < 1.0."""
     if float(score) >= 1.0:
         return "", 0
-    fingerprint = normalize_verifier_rejection_fingerprint(reasoning)
+    fingerprint = normalize_verifier_rejection_fingerprint(reasoning, score)
     if not fingerprint:
         return "", 0
     if fingerprint == previous_fingerprint:

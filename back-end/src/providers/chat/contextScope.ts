@@ -6,6 +6,10 @@
  * agents context_scope blackboxes). Parent-visible spawn FINISHED / task_complete
  * rows omit subAgentId on purpose so their result bodies survive this filter;
  * explore/browser work-stream rows carry subAgentId and are dropped.
+ *
+ * for_each child UI rows are producer-marked with ``forEachChild: true`` (see
+ * agents/domains/spawn_sub_agents). A numeric ``toolCallId`` suffix alone is
+ * not enough — provider IDs like ``toolu:123`` must stay parent-visible.
  */
 
 import type { ChatMessage } from './initialContext';
@@ -14,17 +18,15 @@ function isNonEmptySubAgentIds(value: unknown): boolean {
   return Array.isArray(value) && value.length > 0;
 }
 
-/** for_each child UI rows use `<base>:<idx>` toolCallIds (idx is digits). */
-function hasForEachChildToolCallSuffix(toolCallId: string): boolean {
-  return /:[0-9]+$/.test(toolCallId);
-}
-
 export function isInternalSubagentMessage(message: ChatMessage): boolean {
   const metadata = message.metadata ?? {};
   if (metadata.subAgentId) return true;
 
-  const toolCallId = String(metadata.toolCallId ?? '');
-  return isNonEmptySubAgentIds(metadata.subAgentIds) && hasForEachChildToolCallSuffix(toolCallId);
+  if (metadata.forEachAggregate === true) return false;
+  if (metadata.forEachChild === true && isNonEmptySubAgentIds(metadata.subAgentIds)) {
+    return true;
+  }
+  return false;
 }
 
 export function filterInternalSubagentMessages(messages: ChatMessage[]): ChatMessage[] {

@@ -8706,13 +8706,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         score=float(score or 0.0),
                     )
                     # Stuck 0.5 with a fully populated structured output is not
-                    # actionable "need more evidence" — soft-accept so the
-                    # browser agent completes instead of looping until hub pause
-                    # (browser-smoke 9f53aed4: identical H1-absent rejects ×4).
+                    # actionable "need more evidence" — break the loop so the
+                    # browser agent stops instead of hub-pausing (browser-smoke
+                    # 9f53aed4: identical H1-absent rejects ×4). Soft-accept is
+                    # *unverified*: keep structured output for the parent but
+                    # never report verified success=True.
                     soft_accept_structured_response = (
                         progress_result.get("structured_response")
                         or latest_structured_response
                     )
+                    verifier_soft_accepted = False
+                    soft_accept_original_score = float(score or 0.0)
                     if (
                         float(score or 0.0) < 1.0
                         and should_soft_accept_identical_verifier_reject(
@@ -8724,15 +8728,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         logger.warning(
                             "Soft-accepting browser attempt_completion after "
                             f"{identical_verifier_reject_streak} identical "
-                            "verifier rejects with complete structured output",
+                            "verifier rejects with complete structured output "
+                            "(unverified)",
                             agent_id=agent_id,
                             task_id=task_id,
                             score=score,
                         )
+                        verifier_soft_accepted = True
                         score = 1.0
                         v_reasoning = (
-                            "Identical verifier reject circuit: accepting "
-                            "completion with already-populated structured "
+                            "Identical verifier reject circuit: completing "
+                            "unverified with already-populated structured "
                             f"output. Original score was "
                             f"{progress_result.get('score', 0.0)}; "
                             f"reasoning: {v_reasoning}"
@@ -8765,6 +8771,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             progress_result.get("structured_response")
                             or soft_accept_structured_response
                         )
+                        completion_success = not verifier_soft_accepted
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(
@@ -8825,7 +8832,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         await close_browser_session(config, session_id, pause=False)
 
                         context_message = build_context_summary(
-                            success=True,
+                            success=completion_success,
                             close_reasoning=close_reasoning,
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
@@ -8836,10 +8843,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_url=current_url,
                             structured_response=structured_response,
                         )
+                        if verifier_soft_accepted:
+                            context_message = (
+                                f"{context_message}\n\n"
+                                "[verifier_soft_accepted] Completion is unverified "
+                                f"(original verifier score "
+                                f"{soft_accept_original_score:.2f}). Structured "
+                                "output is preserved for the parent; do not treat "
+                                "this as a verified success."
+                            )
 
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            title="\u2713 Task Completed",
+                            title=(
+                                "\u2713 Task Completed (unverified)"
+                                if verifier_soft_accepted
+                                else "\u2713 Task Completed"
+                            ),
                             task_id=task_id,
                             message=context_message,
                             status=MessageStatus.FINISHED,
@@ -8864,13 +8884,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             task_id=task_id,
                             browser_url=browser_url,
                             status="completed",
-                            success=True,
+                            success=completion_success,
                             message=context_message,
                         )
 
                         return {
                             "status": "completed",
-                            "success": True,
+                            "success": completion_success,
+                            "verifier_soft_accepted": verifier_soft_accepted,
                             "message": context_message,
                             "browser_url": browser_url,
                             "task_id": task_id,
@@ -10934,11 +10955,20 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
-            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
+            # Soft-accepted verifier rejects complete with success=False but still
+            # terminate cleanly (FINISHED + structured_response) so the parent can
+            # decide — do not surface ERROR (which historically triggered respawns).
+            final_status = (
+                MessageStatus.FINISHED
+                if result.get("success", True) or result.get("verifier_soft_accepted")
+                else MessageStatus.ERROR
+            )
             # Declare terminality explicitly. The front-end must never have to
             # infer "this browser task is over" from a missing action_type — a
             # workflow-scope progress event would look identical.
             final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+            if result.get("verifier_soft_accepted"):
+                final_metadata["verifierSoftAccepted"] = True
             for key in (
                 "task_id",
                 "world_model_simulated",

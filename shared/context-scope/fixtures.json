@@ -62,16 +62,34 @@
       }
     },
     {
-      "name": "foreach_child_suffixed_toolCallId_dropped",
+      "name": "foreach_child_producer_marked_dropped",
       "is_internal": true,
       "message": {
         "role": "TOOL",
         "text": "Child tree step",
         "metadata": {
-          "toolName": "web_search",
+          "toolName": "spawn_general_purpose_agent",
           "toolStatus": "FINISHED",
           "toolCallId": "foreach-base:3",
-          "subAgentIds": ["child-a", "child-b"]
+          "subAgentIds": ["child-a", "child-b"],
+          "forEachChild": true,
+          "busId": "bus-1",
+          "spawnGroupId": "foreach-base"
+        }
+      }
+    },
+    {
+      "name": "provider_numeric_suffixed_toolCallId_kept",
+      "is_internal": false,
+      "message": {
+        "role": "TOOL",
+        "text": "Provider IDs like toolu:123 must not be treated as for_each children.",
+        "metadata": {
+          "toolName": "spawn_agent",
+          "toolStatus": "FINISHED",
+          "toolCallId": "toolu:123",
+          "subAgentIds": ["gp-child-1"],
+          "agentType": "general_purpose"
         }
       }
     },

@@ -6,7 +6,6 @@ classification fixtures: shared/context-scope/fixtures.json.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, Iterable, List
 
 
@@ -14,13 +13,15 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     """Return True for intermediate work messages emitted by a spawned agent.
 
     ``subAgentId`` rows belong to one child agent's own work stream.
-    For_each child tree rows use plural ``subAgentIds`` plus suffixed
-    ``toolCallId`` values like ``<base>:<idx>``; those UI rows are also hidden
-    because the parent receives one aggregate result under the original
-    toolCallId. Direct ``spawn_general_purpose_agent`` results also use plural
-    ``subAgentIds`` but keep the original, unsuffixed toolCallId, so they remain
-    visible to the parent context. Parent spawn FINISHED / task_complete
-    terminals omit ``subAgentId`` so the result body stays in parent/chat context.
+    For_each child tree rows are producer-marked with ``forEachChild: true``
+    plus plural ``subAgentIds``; those UI rows are hidden because the parent
+    receives one aggregate result under the original toolCallId (and
+    ``forEachAggregate: true``). A numeric ``toolCallId`` suffix alone is not
+    enough — provider IDs like ``toolu:123`` must stay parent-visible.
+    Direct ``spawn_general_purpose_agent`` results also use plural
+    ``subAgentIds`` but omit ``forEachChild``, so they remain visible.
+    Parent spawn FINISHED / task_complete terminals omit ``subAgentId`` so the
+    result body stays in parent/chat context.
     """
     if not isinstance(message, dict):
         return False
@@ -32,14 +33,14 @@ def is_internal_subagent_message(message: Dict[str, Any]) -> bool:
     if metadata.get("subAgentId"):
         return True
 
+    if metadata.get("forEachAggregate") is True:
+        return False
+
     sub_agent_ids = metadata.get("subAgentIds")
     if not isinstance(sub_agent_ids, list) or len(sub_agent_ids) == 0:
         return False
 
-    tool_call_id = str(metadata.get("toolCallId") or "")
-    # for_each child UI rows use `<base>:<idx>` (idx digits); unsuffixed
-    # aggregates and provider IDs that merely contain ":" stay visible.
-    return bool(re.search(r":[0-9]+$", tool_call_id))
+    return metadata.get("forEachChild") is True
 
 
 def filter_internal_subagent_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

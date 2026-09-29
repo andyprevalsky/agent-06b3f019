@@ -841,7 +841,13 @@ def test_convert_context_to_messages_skip_subagent_and_inprogress():
             "role": "TOOL",
             "text": "hidden fanout tree row",
             "timestamp": "2024-01-01T00:00:00Z",
-            "metadata": {"subAgentIds": ["sub-1"], "busId": "bus-1", "toolCallId": "tc:0", "toolStatus": "FINISHED"},
+            "metadata": {
+                "subAgentIds": ["sub-1"],
+                "busId": "bus-1",
+                "toolCallId": "tc:0",
+                "toolStatus": "FINISHED",
+                "forEachChild": True,
+            },
         },
         {
             "role": "TOOL",

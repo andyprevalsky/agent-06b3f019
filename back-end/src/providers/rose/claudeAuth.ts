@@ -91,6 +91,12 @@ function modelSupportsOutputConfigEffort(model: string): boolean {
   return !model.toLowerCase().includes('haiku');
 }
 
+function modelSupportsAdaptiveThinking(model: string): boolean {
+  // claude-haiku-4-5 400s on thinking.type=adaptive. Mirror agents rose
+  // claude_auth (never default adaptive thinking onto Haiku).
+  return !model.toLowerCase().includes('haiku');
+}
+
 function modelRejectsForcedToolChoice(model: string): boolean {
   // Official Claude API IDs are claude-fable-5-1 / claude-mythos-5-1.
   // OpenRouter uses a dot (claude-fable-5.1). Do not match leftover Fable 5.
@@ -264,9 +270,11 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
     max_tokens: opts.maxTokens ?? 8192,
     stream: true,
     system: systemBlocks,
-    thinking: { type: 'adaptive' },
     temperature: 1,
   };
+  if (modelSupportsAdaptiveThinking(opts.poolSpec.claudeAuthModel)) {
+    body.thinking = { type: 'adaptive' };
+  }
   if (modelSupportsOutputConfigEffort(opts.poolSpec.claudeAuthModel)) {
     body.output_config = { effort: normalizeReasoningEffort(opts.effort) };
   }

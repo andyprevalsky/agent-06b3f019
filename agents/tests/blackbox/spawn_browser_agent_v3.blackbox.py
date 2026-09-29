@@ -526,10 +526,12 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
     Live example.com had no H1; verifier kept scoring 0.5 with the same
     reasoning while already emitting main_heading + page_url. Soft-accept
     after the streak so the browser agent completes instead of hub-pause.
+    Soft-accept is unverified (handler must not report success=True).
     """
     from domains.spawn_browser_agent_v3.verifier_reject_circuit import (
         next_identical_reject_streak,
         should_soft_accept_identical_verifier_reject,
+        structured_response_covers_schema,
     )
 
     schema = {
@@ -571,6 +573,23 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
         structured_response={"page_url": "https://example.com/"},
         response_schema=schema,
     )
+    # Optional-only schema must still require non-empty usable output.
+    optional_only = {
+        "fields": [
+            {"name": "notes", "type": "str", "required": False},
+        ]
+    }
+    assert not structured_response_covers_schema({}, optional_only)
+    assert not structured_response_covers_schema({"notes": ""}, optional_only)
+    assert structured_response_covers_schema({"notes": "seen"}, optional_only)
+    # Score changes reset the streak even when reasoning matches.
+    fingerprint, streak = next_identical_reject_streak(
+        previous_fingerprint=fingerprint,
+        previous_streak=streak,
+        reasoning=reason,
+        score=0.9,
+    )
+    assert streak == 1
     # Different reason resets the streak.
     fingerprint, streak = next_identical_reject_streak(
         previous_fingerprint=fingerprint,
@@ -586,6 +605,18 @@ def test_identical_verifier_reject_circuit_soft_accepts_complete_output():
         score=1.0,
     )
     assert streak == 0
+
+
+def test_handler_soft_accept_reports_unverified_not_verified_success():
+    """Soft-accept must not collapse into a verified success=True completion."""
+    from pathlib import Path
+
+    source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    assert "completion_success = not verifier_soft_accepted" in source
+    assert '"verifier_soft_accepted": verifier_soft_accepted' in source
+    assert "Identical verifier reject circuit: completing " in source
+    assert "unverified with already-populated structured" in source
+    assert 'result.get("verifier_soft_accepted")' in source
 
 
 def test_handler_wires_identical_verifier_reject_circuit():
@@ -10154,13 +10185,13 @@ async def test_api_challenge_html_triggers_provider_exit_rejection():
                     return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
 
     await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
-    assert recorder.pop_provider_exit_rejection() == {
-        "reason": _API_CHALLENGE_HTML_REASON,
-        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
-        "browser_generation": 1,
-        "status": 403,
-        "response_ts_ms": 100,
-    }
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _API_CHALLENGE_HTML_REASON
+    assert rejection["url"] == "https://wl.eventim.us/event/_/692405/order/checkaddtocart"
+    assert rejection["browser_generation"] == 1
+    assert rejection["status"] == 403
+    assert rejection["response_ts_ms"] == 100
 
 
 async def test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success():
@@ -10303,6 +10334,123 @@ async def test_stale_api_challenge_html_exit_superseded_by_later_same_origin_suc
     }
     assert recorder.pop_provider_exit_rejection() is None
     assert 3 not in recorder._rejected_network_generations
+
+
+async def test_api_challenge_requires_same_endpoint_not_merely_same_origin():
+    """Unrelated same-origin 2xx must not suppress a challenged XHR/fetch POST.
+
+    Document/config polls commonly return 200 between browser-loop steps; matching
+    only on origin would drop real API-challenge exits (checkaddtocart 403).
+    """
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    challenge_url = "https://wl.eventim.us/event/_/692405/order/checkaddtocart"
+    other_url = "https://wl.eventim.us/api/config"
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r-challenge": {
+            "browser_generation": 1,
+            "url": challenge_url,
+            "method": "POST",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+            "response_ts_ms": 200,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+        "1:r-unrelated": {
+            "browser_generation": 1,
+            "url": other_url,
+            "method": "GET",
+            "resource_type": "fetch",
+            "mime_type": "application/json",
+            "status": 200,
+            "response_ts_ms": 300,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+        "1:r-document": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405",
+            "method": "GET",
+            "resource_type": "document",
+            "mime_type": "text/html",
+            "status": 200,
+            "response_ts_ms": 350,
+            "document_url": "https://wl.eventim.us/event/_/692405",
+        },
+    }
+
+    class _ChallengeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r-challenge", "r-challenge", "cdp-1", _ChallengeCdp())
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection is not None
+    assert rejection["reason"] == _API_CHALLENGE_HTML_REASON
+    assert rejection["url"] == challenge_url
+    assert rejection["method"] == "POST"
+
+    # Same-endpoint retry success may clear; unrelated origin traffic must not.
+    recorder._provider_exit_rejections = [
+        {
+            "reason": _API_CHALLENGE_HTML_REASON,
+            "url": challenge_url,
+            "method": "POST",
+            "resource_type": "xhr",
+            "browser_generation": 1,
+            "status": 403,
+            "response_ts_ms": 200,
+        }
+    ]
+    recorder._api_challenge_provider_exits = 1
+    recorder._rejected_network_generations = {1}
+    recorder._clear_api_challenge_rejections_for_origin(
+        other_url,
+        success_ts_ms=400,
+        success_generation=1,
+        success_method="GET",
+        success_resource_type="fetch",
+    )
+    assert recorder._provider_exit_rejections
+    recorder.entries["1:r-retry"] = {
+        "browser_generation": 1,
+        "url": challenge_url,
+        "method": "POST",
+        "resource_type": "xhr",
+        "mime_type": "application/json",
+        "status": 200,
+        "response_ts_ms": 500,
+        "document_url": "https://wl.eventim.us/event/_/692405",
+    }
+    assert recorder.pop_provider_exit_rejection() is None
 
 
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
@@ -13892,6 +14040,22 @@ def test_amazon_return_approval_fields_name_selected_dropoff():
     assert "Refund subtotal $18.00" in sub_enriched
     assert "free no-box/no-label" not in sub_enriched.lower()
     assert "Selected drop-off:" in sub_enriched
+
+    # Multiple drop-offs + shared "no box" copy without selection/shipping
+    # evidence must not invent a selected drop-off for the approval question.
+    ambiguous = (
+        "How would you like to return the items?\n"
+        "Whole Foods Dropoff - Open 7 Days a Week\n"
+        "UPS Store Dropoff\n"
+        "No box needed. No label needed.\n"
+        "Confirm your return\n"
+    )
+    ambiguous_fields = extract_amazon_return_approval_fields(ambiguous)
+    assert "drop_off" not in ambiguous_fields
+    assert (
+        enrich_return_write_lock_question("Approve return?", ambiguous)
+        == "Approve return?"
+    )
 
 
 def test_amazon_return_self_service_block_detection_and_prompt():
@@ -20701,6 +20865,10 @@ async def run_all_tests():
         test_identical_verifier_reject_circuit_soft_accepts_complete_output,
     )
     r.record(
+        "handler_soft_accept_reports_unverified_not_verified_success",
+        test_handler_soft_accept_reports_unverified_not_verified_success,
+    )
+    r.record(
         "handler_wires_identical_verifier_reject_circuit",
         test_handler_wires_identical_verifier_reject_circuit,
     )
@@ -21475,6 +21643,10 @@ async def run_all_tests():
     await r.record_async(
         "stale_api_challenge_html_exit_superseded",
         test_stale_api_challenge_html_exit_superseded_by_later_same_origin_success,
+    )
+    await r.record_async(
+        "api_challenge_requires_same_endpoint_not_merely_same_origin",
+        test_api_challenge_requires_same_endpoint_not_merely_same_origin,
     )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(

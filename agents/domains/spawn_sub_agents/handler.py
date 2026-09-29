@@ -8,6 +8,7 @@ signal-based completion wait, and result/error reporting.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict
 
@@ -30,6 +31,19 @@ logger = structlog.get_logger()
 
 USER_FACING_TOOL_NAME = "spawn_general_purpose_agent"
 CHILD_FAILURE_STATUSES = {"failed", "error", "max_iterations"}
+_FOR_EACH_CHILD_TOOL_CALL_SUFFIX_RE = re.compile(r":[0-9]+$")
+
+
+def _is_for_each_child_tool_call_id(tool_call_id: str) -> bool:
+    """True for producer for_each child ids (``<parent>:<idx>``)."""
+    return bool(_FOR_EACH_CHILD_TOOL_CALL_SUFFIX_RE.search(tool_call_id or ""))
+
+
+def _with_for_each_child_marker(metadata: Dict[str, Any], child_tool_id: str) -> Dict[str, Any]:
+    """Stamp ``forEachChild`` so context-scope can drop child rows without guessing."""
+    if _is_for_each_child_tool_call_id(child_tool_id):
+        metadata["forEachChild"] = True
+    return metadata
 
 
 def _child_result_is_failure(child_result: Dict[str, Any]) -> bool:
@@ -294,12 +308,15 @@ class SpawnSubAgentManager(ToolManager):
             title="Spawning sub-agent",
             message="",
             status=MessageStatus.IN_PROGRESS,
-            metadata={
-                "toolName": USER_FACING_TOOL_NAME,
-                "subAgentIds": [child_agent_id],
-                "busId": bus_id,
-                "spawnGroupId": group_id,
-            },
+            metadata=_with_for_each_child_marker(
+                {
+                    "toolName": USER_FACING_TOOL_NAME,
+                    "subAgentIds": [child_agent_id],
+                    "busId": bus_id,
+                    "spawnGroupId": group_id,
+                },
+                child_tool_id,
+            ),
         )
 
         logger.info(f"⏳ Waiting for sub-agent {child_agent_id} to complete...")
@@ -334,14 +351,17 @@ class SpawnSubAgentManager(ToolManager):
             title="Spawning sub-agent",
             message=child_summary,
             status=MessageStatus.FINISHED,
-            metadata={
-                "toolName": USER_FACING_TOOL_NAME,
-                "subAgentIds": [child_agent_id],
-                "busId": bus_id,
-                "spawnGroupId": group_id,
-                "structured_response": structured_response,
-                "childToolCounts": child_tool_counts,
-            },
+            metadata=_with_for_each_child_marker(
+                {
+                    "toolName": USER_FACING_TOOL_NAME,
+                    "subAgentIds": [child_agent_id],
+                    "busId": bus_id,
+                    "spawnGroupId": group_id,
+                    "structured_response": structured_response,
+                    "childToolCounts": child_tool_counts,
+                },
+                child_tool_id,
+            ),
         )
         if file_pointers:
             for fp in file_pointers:
@@ -406,14 +426,17 @@ class SpawnSubAgentManager(ToolManager):
 
         error_message = "\n".join(error_parts)
 
-        metadata = {
-            "toolName": USER_FACING_TOOL_NAME,
-            "subAgentIds": [child_agent_id],
-            "busId": bus_id,
-            "spawnGroupId": group_id or spawn_group_id(child_tool_id),
-            "error_reason": error_reason,
-            "failure_context": failure_context,
-        }
+        metadata = _with_for_each_child_marker(
+            {
+                "toolName": USER_FACING_TOOL_NAME,
+                "subAgentIds": [child_agent_id],
+                "busId": bus_id,
+                "spawnGroupId": group_id or spawn_group_id(child_tool_id),
+                "error_reason": error_reason,
+                "failure_context": failure_context,
+            },
+            child_tool_id,
+        )
         if best_effort_response:
             metadata["best_effort_response"] = best_effort_response
         if partial_structured_response is not None:
