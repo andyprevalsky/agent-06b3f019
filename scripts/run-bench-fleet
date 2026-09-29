@@ -829,6 +829,11 @@ primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
     fi
 }
 
+bench_uses_default_pool_shape() {  # <task>; pool machines must already match
+    [ "$(primary_vm_size_for_bench "$1")" = "$FLEET_PRIMARY_VM_SIZE" ] \
+        && [ "$(primary_vm_memory_for_bench "$1")" = "$FLEET_PRIMARY_VM_MEMORY" ]
+}
+
 shared_cpu_units_for_vm_size() {  # shared_cpu_units_for_vm_size <vm-size>
     local vm_size="$1" units
     case "$vm_size" in
@@ -6046,7 +6051,7 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
-    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" <<'PY'
+    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" "${POOL_CLAIMS_DIR:-}" <<'PY'
 import hashlib
 import json
 import os
@@ -6062,6 +6067,7 @@ plan = Path(sys.argv[2])
 expected_app = sys.argv[3]
 audit_root = Path(sys.argv[4]) if sys.argv[4] else None
 source_helper = sys.argv[5]
+claims_root = Path(sys.argv[6]) if sys.argv[6] else None
 safe_key = re.compile(r"[A-Za-z0-9._-]+")
 safe_machine = re.compile(r"[0-9a-f]+")
 safe_volume = re.compile(r"[A-Za-z0-9_-]+")
@@ -6208,6 +6214,7 @@ clones_dir = registry / "clones"
 if not plain_directory(clones_dir):
     raise ValueError("missing canonical clone registry")
 machine_records: dict[str, tuple[str, str]] = {}
+pool_ids: set[str] = set()
 volume_ids: set[str] = set()
 for record in clones_dir.iterdir():
     if not regular_file(record) or not safe_key.fullmatch(record.name):
@@ -6235,6 +6242,64 @@ for record in clones_dir.iterdir():
     elif set(value) != {"name", "volume_id"}:
         raise ValueError("noncanonical volume-only registry identity")
 
+pool_dir = audit / "pool" if audit is not None else None
+if pool_dir is not None and pool_dir.exists():
+    if not plain_directory(pool_dir) or claims_root is None or not plain_directory(claims_root):
+        raise ValueError("unsafe stale-owner pool recovery root")
+    if audit_meta.get("fleet_owner_token") != owner or audit_meta.get("run_id") != run_id:
+        raise ValueError("mismatched stale-owner pool audit identity")
+    for record in pool_dir.iterdir():
+        value = fields(record, allowed={
+            "version", "fleet_owner_token", "run_id", "app", "source",
+            "machine_id", "volume_id", "pool_ledger_file", "pool_meta_file",
+            "pool_meta_sha256", "disposition",
+        })
+        machine_id = value.get("machine_id", "")
+        volume_id = value.get("volume_id", "")
+        if (
+            not safe_machine.fullmatch(machine_id)
+            or record.name != machine_id
+            or not safe_volume.fullmatch(volume_id)
+            or value.get("version") != "1"
+            or value.get("fleet_owner_token") != owner
+            or value.get("run_id") != run_id
+            or value.get("app") != expected_app
+            or value.get("source") != "borrowed-pool"
+            or value.get("disposition") not in {
+                "claimed", "returned-stopped-claim-released", "destroyed-removed-from-pool"
+            }
+        ):
+            raise ValueError("noncanonical stale-owner pool audit")
+        if value["disposition"] != "claimed":
+            continue
+        if machine_id in machine_records or volume_id in volume_ids:
+            raise ValueError("ambiguous stale-owner pool identity")
+        ledger = Path(value.get("pool_ledger_file", ""))
+        pool_meta = Path(value.get("pool_meta_file", ""))
+        if (
+            not ledger.is_absolute() or not regular_file(ledger)
+            or pool_meta != Path(str(ledger) + ".deps")
+            or not regular_file(pool_meta)
+            or not re.fullmatch(r"[0-9a-f]{64}", value.get("pool_meta_sha256", ""))
+            or hashlib.sha256(pool_meta.read_bytes()).hexdigest() != value["pool_meta_sha256"]
+            or machine_id not in ledger.read_text().splitlines()
+        ):
+            raise ValueError("unbound stale-owner pool ledger")
+        claim = fields(claims_root / machine_id, allowed={
+            "host", "pid", "pid_start", "fleet_owner_token", "cleanup_state"
+        })
+        if (
+            claim.get("fleet_owner_token") != owner
+            or claim.get("host") != meta.get("host")
+            or claim.get("pid") != meta.get("pid")
+            or claim.get("pid_start") != meta.get("pid_start")
+            or claim.get("cleanup_state") != "unconfirmed"
+        ):
+            raise ValueError("unbound stale-owner pool claim")
+        machine_records[machine_id] = (f"cloudbench-pool-{machine_id}", volume_id)
+        pool_ids.add(machine_id)
+        volume_ids.add(volume_id)
+
 output_by_machine: dict[str, tuple[str, Path, int]] = {}
 for candidate in run_dir.iterdir():
     if not plain_directory(candidate):
@@ -6245,9 +6310,11 @@ for candidate in run_dir.iterdir():
     if not safe_key.fullmatch(candidate.name) or not regular_file(cid):
         raise ValueError("unsafe stale-owner output mapping")
     cid_parts = cid.read_text(encoding="utf-8").split()
-    if len(cid_parts) != 2 or cid_parts[0] != "clone":
+    if len(cid_parts) != 2 or cid_parts[0] not in {"clone", "pool"}:
         raise ValueError("noncanonical stale-owner machine mapping")
     machine_id = cid_parts[1]
+    if (cid_parts[0] == "pool") != (machine_id in pool_ids):
+        raise ValueError("stale-owner machine kind does not match owner audit")
     if machine_id not in machine_records or machine_id in output_by_machine:
         raise ValueError("stale-owner output does not map one-to-one to registry")
     port_path = candidate / "status-proxy.port"
@@ -6364,9 +6431,10 @@ if worker_by_machine:
 
     root_sources = {
         audit_sources[machine_id] for machine_id in output_by_machine
+        if machine_id not in pool_ids
     }
     if (
-        len(root_sources) != 1
+        len(root_sources) > 1
         or any(source_id in machine_records for source_id in root_sources)
         or any(
             audit_sources[machine_id] != primary_id
@@ -6381,7 +6449,7 @@ for machine_id, (clone_name, volume_id) in machine_records.items():
         continue
     bench, output, preferred_port = output_by_machine[machine_id]
     values = (
-        "guest",
+        "pool-guest" if machine_id in pool_ids else "guest",
         bench,
         clone_name,
         machine_id,
@@ -7147,7 +7215,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     while IFS=$'\t' read -r kind bench clone_name machine_id volume_id output \
         preferred_port; do
         case "$kind" in
-            guest)
+            guest|pool-guest)
                 if details="$(registry_machine_details "$machine_id")"; then
                     detail_status=0
                 else
@@ -7159,7 +7227,8 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                     return 1
                 }
                 read -r state actual_name private_ip <<< "$details"
-                [ "$actual_name" = "$clone_name" ] || {
+                { [ "$kind" = "pool-guest" ] && [[ "$actual_name" == cloudbench-* ]]; } \
+                    || [ "$actual_name" = "$clone_name" ] || {
                     echo "❌ [$bench] exact owned Machine identity/state is unsafe for guest recovery" >&2
                     cleanup_stale_owner_recovery_proxies || true
                     return 1
@@ -7180,12 +7249,21 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                         return 1
                         ;;
                 esac
-                configuration="$(machine_guest_recovery_configuration \
-                    "$machine_id" "$volume_id" "$registry" "$clone_name")" || {
+                if [ "$kind" = "pool-guest" ]; then
+                    configuration="$(machine_guest_recovery_configuration \
+                        "$machine_id" "$volume_id")" || {
+                        echo "❌ [$bench] exact pool guest shutdown configuration is unsafe" >&2
+                        cleanup_stale_owner_recovery_proxies || true
+                        return 1
+                    }
+                else
+                    configuration="$(machine_guest_recovery_configuration \
+                        "$machine_id" "$volume_id" "$registry" "$clone_name")" || {
                     echo "❌ [$bench] exact guest shutdown configuration is unsafe" >&2
                     cleanup_stale_owner_recovery_proxies || true
                     return 1
-                }
+                    }
+                fi
                 IFS=$'\t' read -r guest_barrier_token guest_run_token remote_port \
                     <<< "$configuration"
                 [ -n "$guest_barrier_token" ] && [ -n "$guest_run_token" ] \
@@ -10289,7 +10367,7 @@ enforce_app_capacity_guard() {
                 ;;
             esac
             requested_shared=$(( requested_shared + bench_shared_units ))
-            if ! bench_needs_large_primary "$bench"; then
+            if bench_uses_default_pool_shape "$bench"; then
                 requested_pool_eligible_machines=$(( requested_pool_eligible_machines + 1 ))
             fi
         done
@@ -11892,11 +11970,14 @@ for bench in "${BENCHES[@]}"; do
         # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
         # fall back to cloning fresh (bounded + retried) if the pool is empty.
         #
-        # Large-memory tasks cannot safely claim the default 4GB stopped pool.
-        if bench_needs_large_primary "$bench"; then
-            echo "  ↪️  [$bench] using large primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
-        else
+        # A task may claim a stopped pool machine only when its requested shape
+        # exactly matches the shape verified for this pool. A 4GB pool cannot
+        # silently host an 8GB browser/payment guest; a deliberately larger
+        # pool can serve both without another snapshot-volume restore.
+        if bench_uses_default_pool_shape "$bench"; then
             pcid="$(claim_pool_machine)"
+        else
+            echo "  ↪️  [$bench] using distinct primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
         fi
         if [ -n "$pcid" ]; then
             printf 'pool %s\n' "$pcid" > "$out/.cid"

@@ -8122,12 +8122,16 @@ def _terminate_test_owned_central_hubs(hub_context: Path, runs_root: Path) -> No
 
 
 def _fleet_primary_shape_helpers(source: str) -> str:
-    return "".join(
+    return """FLEET_PRIMARY_VM_MEMORY=${FLEET_PRIMARY_VM_MEMORY:-4096}
+FLEET_BUNDLED_FRONTEND_VM_SIZE=${FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}
+FLEET_BUNDLED_FRONTEND_VM_MEMORY=${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}
+""" + "".join(
         _extract_fleet_function(source, signature)
         for signature in (
             "bench_needs_large_primary() {",
             "primary_vm_size_for_bench() {",
             "primary_vm_memory_for_bench() {",
+            "bench_uses_default_pool_shape() {",
             "shared_cpu_units_for_vm_size() {",
         )
     )
@@ -8508,8 +8512,8 @@ def test_fleet_provisions_clones_concurrently() -> None:
     assert "reap_registry_clones" in fleet
 
 
-def test_large_primary_provisioning_bypasses_default_pool() -> None:
-    """A 4GB stopped pool Machine must not be assigned to a bundled Vite build."""
+def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
+    """A 4GB pool cannot host an 8GB task; a matching 8GB pool can."""
     fleet = FLEET_SCRIPT.read_text()
     assert 'FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"' in fleet
     assert 'FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"' in fleet
@@ -8528,10 +8532,29 @@ def test_large_primary_provisioning_bypasses_default_pool() -> None:
     prov = fleet.index("# ── Phase 1:")
     wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
     phase1 = fleet[prov:wait_all]
-    assert 'bench_needs_large_primary "$bench"' in phase1
+    assert 'bench_uses_default_pool_shape "$bench"' in phase1
     assert 'pcid="$(claim_pool_machine)"' in phase1
     assert 'clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory"' in phase1
-    assert phase1.index('bench_needs_large_primary "$bench"') < phase1.index('pcid="$(claim_pool_machine)"')
+    assert phase1.index('bench_uses_default_pool_shape "$bench"') < phase1.index('pcid="$(claim_pool_machine)"')
+
+    shape_helpers = _fleet_primary_shape_helpers(fleet)
+    result = subprocess.run(
+        ["bash", "-c", f'''set -u
+FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
+FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
+{shape_helpers}
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+FLEET_PRIMARY_VM_MEMORY=4096
+bench_uses_default_pool_shape polar-bu-009 || exit 1
+if bench_uses_default_pool_shape browser-biometrics-webdecoy; then exit 2; fi
+FLEET_PRIMARY_VM_SIZE=shared-cpu-4x
+FLEET_PRIMARY_VM_MEMORY=8192
+bench_uses_default_pool_shape browser-biometrics-webdecoy || exit 3
+bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
+'''],
+        text=True, capture_output=True, check=False, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
@@ -11535,6 +11558,82 @@ fleet_registry_build_guest_recovery_plan "$1" "$2"
         else:
             assert result.returncode != 0, f"{label} unexpectedly passed"
             assert not plan.exists()
+
+
+def test_exact_guest_recovery_maps_only_bound_pool_claims(tmp_path: Path) -> None:
+    """A borrowed guest needs the exact owner audit, ledger, and live claim."""
+    fleet = FLEET_SCRIPT.read_text()
+    start = fleet.index("fleet_registry_build_guest_recovery_plan() {")
+    end = fleet.index("\nPY\n}", start) + len("\nPY\n}")
+    build_plan = fleet[start:end]
+    owner = "5e" * 16
+    machine_id = "deadbeef000003"
+    volume_id = "vol_pool_owned"
+    run_id = "fixture-run"
+    root = tmp_path / "pool-owner"
+    registry = root / "ownership" / owner
+    (registry / "clones").mkdir(parents=True)
+    output = root / "runs" / run_id / "bench-owned"
+    output.mkdir(parents=True)
+    audit_root = root / "audits"
+    pool_audit = audit_root / owner / "pool"
+    pool_audit.mkdir(parents=True)
+    claims = root / "claims"
+    claims.mkdir()
+    ledger = root / "pool.ids"
+    ledger.write_text(f"{machine_id}\n")
+    pool_meta = root / "pool.ids.deps"
+    pool_meta.write_text("snapshot=test\n")
+    import hashlib
+
+    pool_meta_hash = hashlib.sha256(pool_meta.read_bytes()).hexdigest()
+    (registry / "meta").write_text(
+        "version=2\napp=bench-app\n"
+        f"fleet_owner_token={owner}\n"
+        "host=fixture-host\npid=1234\npid_start=fixture-start\n"
+        f"run_id={run_id}\nruns_root={root / 'runs'}\n"
+        f"audit_dir={audit_root / owner}\ncleanup_policy=retain\n"
+    )
+    (audit_root / owner / "meta").write_text(
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+    )
+    (pool_audit / machine_id).write_text(
+        "version=1\n"
+        f"fleet_owner_token={owner}\nrun_id={run_id}\napp=bench-app\n"
+        f"source=borrowed-pool\nmachine_id={machine_id}\nvolume_id={volume_id}\n"
+        f"pool_ledger_file={ledger}\npool_meta_file={pool_meta}\n"
+        f"pool_meta_sha256={pool_meta_hash}\ndisposition=claimed\n"
+    )
+    claim = claims / machine_id
+    claim.write_text(
+        f"host=fixture-host\npid=1234\npid_start=fixture-start\n"
+        f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+    )
+    (output / ".cid").write_text(f"pool {machine_id}\n")
+    (output / "status-proxy.port").write_text("61001\n")
+    plan = root / "plan"
+
+    def build() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", f"""set -uo pipefail
+APP=bench-app
+FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+POOL_CLAIMS_DIR={shlex.quote(str(claims))}
+{build_plan}
+fleet_registry_build_guest_recovery_plan "$1" "$2"
+""", "pool-recovery-plan", str(registry), str(plan)],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+
+    result = build()
+    assert result.returncode == 0, result.stderr
+    assert plan.read_text().splitlines() == [
+        f"pool-guest\tbench-owned\tcloudbench-pool-{machine_id}\t{machine_id}\t{volume_id}\t{output}\t61001"
+    ]
+    plan.unlink()
+    claim.write_text(claim.read_text().replace("cleanup_state=unconfirmed", "cleanup_state=confirmed"))
+    assert build().returncode != 0
+    assert not plan.exists()
 
 
 def test_exact_guest_recovery_maps_autoscaler_workers_without_guest_ack(
