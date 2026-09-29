@@ -13292,6 +13292,40 @@ def test_local_stop_services_removes_pre_manifest_owned_database():
     ] in commands
 
 
+def test_local_isolated_stack_uses_docker_on_mac_by_default():
+    """Mac benchmarks keep their DB connections in an isolated Docker container."""
+    from types import SimpleNamespace
+
+    from benchmarks import local as local_bench
+
+    args = SimpleNamespace(
+        use_existing=False,
+        shared_stack=False,
+        run_id="mac-docker-default",
+        base_port=55120,
+    )
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": ""}),
+        patch.object(local_bench.sys, "platform", "darwin"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is False
+
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": "true"}),
+        patch.object(local_bench.sys, "platform", "darwin"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is True
+
+    with (
+        patch.dict(os.environ, {"ROSE_USE_SYSTEM_PG": ""}),
+        patch.object(local_bench.sys, "platform", "linux"),
+        patch.object(local_bench, "allocate_port_range", return_value=55120),
+    ):
+        assert local_bench.build_service_stack(args).use_system_postgres is True
+
+
 def test_local_system_postgres_pre_manifest_cleanup_skips_docker():
     """An isolated system-Postgres stack has no Docker DB to reap on abort."""
     from types import SimpleNamespace
@@ -18556,6 +18590,10 @@ async def run_all_tests():
     r.record(
         "local_stop_services_pre_manifest_database_cleanup",
         test_local_stop_services_removes_pre_manifest_owned_database,
+    )
+    r.record(
+        "local_isolated_stack_uses_docker_on_mac_by_default",
+        test_local_isolated_stack_uses_docker_on_mac_by_default,
     )
     r.record(
         "local_system_postgres_pre_manifest_cleanup_skips_docker",

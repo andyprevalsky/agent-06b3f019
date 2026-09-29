@@ -372,7 +372,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         workspace_name=workspace_name,
         base_port=allocate_port_range(preferred_base),
         use_system_postgres=(
-            os.name != "nt"
+            sys.platform.startswith("linux")
             or os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() in {"1", "true", "yes"}
         ),
     )
