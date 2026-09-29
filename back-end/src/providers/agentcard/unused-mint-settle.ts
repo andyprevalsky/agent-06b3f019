@@ -29,8 +29,7 @@ export function isFullyReclaimedTransfer(
 }
 
 export type UnusedMintSettleOutcome =
-  | { done: true; via: 'transfer'; settledCents: number; status: string }
-  | { done: false };
+  { done: true; via: 'transfer'; settledCents: number; status: string } | { done: false };
 
 /**
  * Decide whether an unused-mint settle poll can stop.

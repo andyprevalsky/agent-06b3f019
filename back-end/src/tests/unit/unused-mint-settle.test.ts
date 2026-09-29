@@ -31,10 +31,7 @@ async function main(): Promise<void> {
   console.log('Unused-mint settle decisions');
 
   await check('consumed transfer with released_cents=0 is not settled', () => {
-    assert.equal(
-      isFullyReclaimedTransfer({ status: 'consumed', releasedCents: 0 }, 1300),
-      false
-    );
+    assert.equal(isFullyReclaimedTransfer({ status: 'consumed', releasedCents: 0 }, 1300), false);
     assert.deepEqual(unusedMintSettleOutcome({ status: 'consumed', releasedCents: 0 }, 1300), {
       done: false,
     });
