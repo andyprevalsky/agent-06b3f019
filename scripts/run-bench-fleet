@@ -7792,13 +7792,15 @@ if source_manifest is None and roots:
     # only when every topology root is an exact claimed pool record of this
     # owner. Fresh children are still reaped by their own clone ledger below.
     pool = audit / "pool"
-    if not plain_directory(pool):
+    if (pool.exists() or pool.is_symlink()) and not plain_directory(pool):
         raise ValueError("unsafe exact recovery pool source directory")
+    if len(roots) > 1 and not plain_directory(pool):
+        raise ValueError("multiple exact recovery roots lack pool claims")
     if (registry / "source-manifest.json").exists() or (audit / "source-manifest.json").exists():
         raise ValueError("unbound exact recovery source manifest")
     if (registry / "source-manifest.json").is_symlink() or (audit / "source-manifest.json").is_symlink():
         raise ValueError("unsafe exact recovery source manifest")
-    pool_bound = True
+    pool_bound = plain_directory(pool)
     for machine_id in roots:
         record = pool / machine_id
         if not regular_file(record):
@@ -7818,6 +7820,9 @@ if source_manifest is None and roots:
     if pool_bound:
         print("__POOL_BOUND__")
         raise SystemExit(0)
+    if len(roots) > 1 or any((pool / machine_id).exists() or (pool / machine_id).is_symlink()
+                             for machine_id in roots):
+        raise ValueError("exact recovery pool claim is incomplete")
 if len(roots) != 1:
     raise ValueError("exact owner does not identify one external source root")
 root = next(iter(roots))
