@@ -1,5 +1,4 @@
-import type Kernel from '@onkernel/sdk';
-import { APIConnectionTimeoutError } from '@onkernel/sdk';
+import Kernel, { APIConnectionTimeoutError } from '@onkernel/sdk';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 

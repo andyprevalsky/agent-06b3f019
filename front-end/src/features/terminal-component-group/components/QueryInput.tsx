@@ -32,7 +32,11 @@ import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { cn } from '@/lib/utils';
 import { useAuth, useToast } from '../hooks';
-import { IS_DEV_MODE, DEFAULT_RESTART_THRESHOLD, DEFAULT_PENDING_PRICE_LIMIT_CENTS } from '../config';
+import {
+  IS_DEV_MODE,
+  DEFAULT_RESTART_THRESHOLD,
+  DEFAULT_PENDING_PRICE_LIMIT_CENTS,
+} from '../config';
 import { type QueryInputProps, DEFAULT_DRIP_STYLES } from './query-input/types';
 import { useAttachments } from './query-input/useAttachments';
 import { usePriceLimit, type UsePriceLimitResult } from './query-input/usePriceLimit';
@@ -106,10 +110,7 @@ function useSubmitHandler(
   };
 }
 
-function getQueryInputVisibility(
-  isMobile: boolean,
-  user: { id?: string; phone?: string } | null,
-) {
+function getQueryInputVisibility(isMobile: boolean, user: { id?: string; phone?: string } | null) {
   const userId = user?.id;
   return {
     showTestPrompts: !isMobile && (IS_DEV_MODE || isAdminOperator(user)),

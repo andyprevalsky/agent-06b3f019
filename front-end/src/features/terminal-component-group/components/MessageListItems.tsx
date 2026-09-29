@@ -85,7 +85,10 @@ export function MessageListItems({
     <>
       {filteredMessages.map((message) => {
         const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
-        const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
+        const thinkingMetrics = resolveMessageThinkingMetrics(
+          message,
+          streamingMetricsBySubAgentId,
+        );
         const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
         const toolCallId =
           typeof message.metadata?.toolCallId === 'string'

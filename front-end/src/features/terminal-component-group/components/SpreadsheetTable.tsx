@@ -25,9 +25,9 @@ export function SpreadsheetTable({
     return <p className="p-4 text-sm text-muted-foreground">This sheet has no rows.</p>;
   }
 
-  const previewRows = rows.slice(0, SPREADSHEET_PREVIEW_MAX_ROWS + 1).map((row) =>
-    row.slice(0, SPREADSHEET_PREVIEW_MAX_COLS),
-  );
+  const previewRows = rows
+    .slice(0, SPREADSHEET_PREVIEW_MAX_ROWS + 1)
+    .map((row) => row.slice(0, SPREADSHEET_PREVIEW_MAX_COLS));
   const colCount = previewRows.reduce((max, row) => Math.max(max, row.length), 1);
   const header = previewRows[0] ?? [];
   const body = previewRows.slice(1);
@@ -56,10 +56,7 @@ export function SpreadsheetTable({
               {Array.from({ length: colCount }).map((_, colIndex) => (
                 <td
                   key={`c-${rowIndex}-${colIndex}`}
-                  className={cn(
-                    'border-b border-border/60 align-top text-foreground/90',
-                    tdPad,
-                  )}
+                  className={cn('border-b border-border/60 align-top text-foreground/90', tdPad)}
                 >
                   {row[colIndex] ?? ''}
                 </td>

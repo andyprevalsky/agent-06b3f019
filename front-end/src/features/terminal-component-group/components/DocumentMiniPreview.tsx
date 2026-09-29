@@ -72,13 +72,7 @@ export function DocumentMiniPreview({ filename, loadState, className }: Document
   );
 }
 
-function MiniBody({
-  filename,
-  payload,
-}: {
-  filename: string;
-  payload: DocumentPreviewPayload;
-}) {
+function MiniBody({ filename, payload }: { filename: string; payload: DocumentPreviewPayload }) {
   const { kind } = payload;
 
   if (kind === 'html' && payload.html !== undefined) {
