@@ -32,35 +32,9 @@ import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
+import { isValidFilePointer, type FilePointer } from './generatorFilePointer';
 
 const log = createLogger('GeneratorLLM');
-
-// FilePointer interface for type safety when processing
-interface FilePointer {
-  id: string;
-  storage_path: string;
-  original_filename: string;
-  mime_type: string;
-  size_bytes: number;
-  created_at: string;
-}
-
-// Runtime validation — DB JSON must match the FilePointer shape before we
-// trust it enough to call downloadFromStorage() or build a multimodal block.
-function isValidFilePointer(value: unknown): value is FilePointer {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.storage_path === 'string' &&
-    v.storage_path.length > 0 &&
-    typeof v.mime_type === 'string' &&
-    v.mime_type.length > 0 &&
-    typeof v.size_bytes === 'number' &&
-    Number.isFinite(v.size_bytes) &&
-    v.size_bytes >= 0 &&
-    typeof v.original_filename === 'string'
-  );
-}
 
 // ============================================
 // Message format for LLM calls

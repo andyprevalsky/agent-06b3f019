@@ -47,7 +47,8 @@ does not itself prove server-side retention or cache hit behavior.
 ## Configure and verify
 
 1. Resource `a-4989-resource` in `rg-roselabs-ai-prod` already serves the
-   `gpt-6-sol` deployment: authenticated Responses calls passed on 2026-09-28.
+   `gpt-6-sol` deployment: authenticated Responses calls passed on 2026-09-28
+   and 2026-09-29.
    The inference endpoint is `https://a-4989-resource.openai.azure.com`,
    while the Foundry project URL under `/api/projects/a-4989` is for project
    management. The project-scoped deployments list is empty, but the resource
@@ -79,7 +80,7 @@ does not itself prove server-side retention or cache hit behavior.
    agents/tests/e2e/test_foundry_live.py` and, from `back-end/`,
    `RUN_FOUNDRY_LIVE=1 npx tsx src/tests/unit/rose-foundry-live.test.ts`.
    These verify text, forced function calling, strict JSON, and a full Rose
-   Ultra route through the actual deployment. Both passed on 2026-09-28 with
+   Ultra route through the actual deployment. Both passed again on 2026-09-29 with
    `actual_model=gpt-6-sol-foundry`. They read local `.env` files without
    printing credentials.
 
@@ -146,7 +147,8 @@ Local `agents/.env` and `back-end/.env` contain the endpoint, key, and deploymen
 name. Render's stored values were read back and matched, its env-only deploy
 completed, and `/health` returned 200. Fly lists all three secrets as Deployed,
 and every started worker checked had the matching runtime values. Production
-must serve a commit containing this fallback before the route is active there.
+serves this route only after a commit containing the fallback deploys to both
+Render and Fly.
 The repo also requires these backend secrets mirrored to its
 Codex-cloud `rose` environment through that environment's settings UI; this
 workspace has no setter for it, so that mirror remains to be verified.
