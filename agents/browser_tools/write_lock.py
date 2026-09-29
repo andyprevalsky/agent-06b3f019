@@ -718,21 +718,52 @@ def _has_return_commit_continue_exclusion(element_text: str) -> bool:
     return any(marker in haystack for marker in RETURN_COMMIT_CONTINUE_EXCLUSION_MARKERS)
 
 
+def _return_commit_label_tokens(element_text: str) -> list[str]:
+    """Visible/type tokens from a click signal, excluding DOM id/name lines."""
+    tokens: list[str] = []
+    for signal in (element_text or "").split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            continue
+        text_lower = normalize_write_lock_text(signal)
+        if text_lower:
+            tokens.append(text_lower)
+    return tokens
+
+
+def _is_return_commit_continue_signal(element_text: str) -> bool:
+    """True for irreversible Continue/Submit/Confirm on a return commit URL.
+
+    Agent 785a3207: final commit was ``submit\\nContinue`` (form submit).
+    Agent 13e735c9: mid-wizard span ``Continue`` (no submit type) after picking
+    Visa refund — must stay unlocked so drop-off can be selected first.
+    Exclusion markers (resolutions-section-continue, …) also keep Continues open.
+    """
+    if _has_return_commit_continue_exclusion(element_text):
+        return False
+    tokens = _return_commit_label_tokens(element_text)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    if "confirm" in token_set:
+        return True
+    if "submit" in token_set and "continue" in token_set:
+        return True
+    if token_set == {"submit"}:
+        return True
+    return False
+
+
 def is_return_button(element_text: str, url: str = "") -> bool:
     """Check if element text indicates a return/refund confirmation control.
 
     Phrase matches ("Confirm your return", …) apply on any URL. On Amazon SPR
-    contract/confirm commit URLs, a bare Continue/Submit/Confirm label is also
-    a return commit — those pages use Continue as the irreversible CTA — unless
-    the signal carries a mid-wizard exclusion marker (resolution/method step).
+    contract/confirm commit URLs, form-submit Continues also lock; plain span
+    Continues used mid-wizard do not.
     """
     if not element_text:
         return False
 
     on_return_commit_url = is_return_commit_url(url)
-    exclude_bare_continue = on_return_commit_url and _has_return_commit_continue_exclusion(
-        element_text
-    )
 
     for signal in element_text.split("\n"):
         if is_dom_identifier_write_lock_signal(signal):
@@ -747,15 +778,12 @@ def is_return_button(element_text: str, url: str = "") -> bool:
             if normalize_write_lock_text(phrase) in text_lower:
                 logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
                 return True
-        if (
-            on_return_commit_url
-            and not exclude_bare_continue
-            and text_lower in RETURN_COMMIT_CONTINUE_LABELS
-        ):
-            logger.debug(
-                f"Element text '{signal[:80]}' matched return-commit Continue on {url[:80]}"
-            )
-            return True
+
+    if on_return_commit_url and _is_return_commit_continue_signal(element_text):
+        logger.debug(
+            f"Element text '{element_text[:80]}' matched return-commit Continue on {url[:80]}"
+        )
+        return True
     return False
 
 

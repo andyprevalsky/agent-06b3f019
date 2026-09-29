@@ -13672,18 +13672,22 @@ def test_write_lock_return_continue_on_amazon_contract_url():
         "https://www.amazon.com/spr/returns/confirmation/d2304f78-2fdb-43d0-b8d5-8a531ff1"
     )
 
+    # Final commit is form submit + Continue (785a3207). Bare span Continue on
+    # contract is mid-wizard (13e735c9) and must stay unlocked for drop-off.
     assert is_return_button("submit\nContinue", contract)
-    assert is_return_button("Continue", contract)
-    assert is_return_button("Continue", confirm)
+    assert is_return_button("submit\nContinue", confirm)
+    assert not is_return_button("Continue", contract)
+    assert not is_return_button("Continue", confirm)
     assert not is_return_button("Continue", cart)
     assert not is_return_button("submit\nContinue", cart)
     assert not is_return_button("Continue")  # no URL → phrase-only path
     assert not is_return_button("Refund to your Visa ending in 9616", contract)
     assert not is_return_button("View return/refund status", contract)
     assert is_return_button("Confirm your return", confirm)
+    assert is_return_button("Confirm", contract)
 
     # Mid-wizard resolution Continue on contract URL must stay unlocked so the
-    # agent can reach drop-off selection (c1b33ca5).
+    # agent can reach drop-off selection (c1b33ca5 / 13e735c9).
     resolutions = "submit\nContinue\nresolutions-section-continue-button"
     assert not is_return_button(resolutions, contract)
     assert not is_return_button(
