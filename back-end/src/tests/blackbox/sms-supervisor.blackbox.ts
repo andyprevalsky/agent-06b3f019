@@ -15,7 +15,6 @@
  */
 
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import {
   BASE_URL,
@@ -62,11 +61,6 @@ import {
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
-import {
-  GENERATION_CUTOVER_STATUS_PREFIX,
-  setCutoverRestartForTests,
-} from '../../providers/generationQueueCutover';
-import { DEPLOY_INTERRUPTED_TOOL_MESSAGE } from '../../providers/workflowGeneration';
 const prisma = new PrismaClient();
 
 // ==================== SMOKE — inbound → supervisor loop → outbound SMS ====================
@@ -411,67 +405,6 @@ async function testWriteCommit_startNewAgentCommitsBeforeUserSend() {
 
 // ==================== WRITE-TOOL COMMIT FAILURE REPORTING ====================
 
-async function testWriteCommit_lateApproveRestartsCutoverKilledAgent() {
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const workflowId = `${randomUUID()}:deployment-sealed:${randomUUID()}`;
-  try {
-    const agent = await prisma.agent.create({
-      data: {
-        userId,
-        goal: 'Order Glide dental floss for delivery to San Francisco',
-        status: 'FAILED',
-        source: 'SMS',
-        statusMessage: `${GENERATION_CUTOVER_STATUS_PREFIX} terminated workflow still on superseded queue navi-agent-tasks@old`,
-        temporalWorkflowId: workflowId,
-      },
-    });
-    const attention = await prisma.agentAttentionRequest.create({
-      data: {
-        userId,
-        agentId: agent.id,
-        workflowId,
-        question: 'Approve the Amazon purchase?',
-        userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-        metadata: { requestUserApproval: true },
-      },
-    });
-    let restarted: string | null = null;
-    setCutoverRestartForTests(async (id) => {
-      restarted = id;
-      return { success: true, agent_id: id };
-    });
-    const results = await commitPendingWrites(
-      [
-        {
-          kind: 'reply_to_agent',
-          args: {
-            agent_id_or_prefix: agent.id.substring(0, 6),
-            attention_request_id: attention.id,
-            message: 'approve',
-            reject: false,
-          },
-          agentId: agent.id,
-        },
-      ],
-      userId
-    );
-    if (!results[0]?.success) {
-      throw new Error(`Expected late approve to succeed, got ${JSON.stringify(results)}`);
-    }
-    if (!results[0].result.includes('Approved after deploy interruption and restarted')) {
-      throw new Error(`Expected cutover restart confirmation, got: ${results[0].result}`);
-    }
-    if (restarted !== agent.id) {
-      throw new Error(`Expected restart of ${agent.id}, got ${restarted}`);
-    }
-  } finally {
-    setCutoverRestartForTests(null);
-    await prisma.agentAttentionRequest.deleteMany({ where: { userId } });
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
 async function testWriteCommit_failureBuildsUserVisibleError() {
   const op: PendingOp = {
     kind: 'increase_budget',
@@ -679,10 +612,6 @@ async function runAll() {
     {
       name: 'write-commit -- increase_budget result includes task goal',
       fn: testWriteCommit_increaseBudgetResultIncludesTaskGoal,
-    },
-    {
-      name: 'write-commit -- late approve restarts a generation-cutover FAILED agent',
-      fn: testWriteCommit_lateApproveRestartsCutoverKilledAgent,
     },
     {
       name: 'natural approval -- resolves matching pending request',

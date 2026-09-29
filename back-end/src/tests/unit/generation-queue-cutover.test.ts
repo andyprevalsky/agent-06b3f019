@@ -243,7 +243,7 @@ async function main(): Promise<void> {
 
 main()
   .catch((error) => {
-    console.error(error);
+    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : error}\n`);
     process.exitCode = 1;
   })
   .finally(async () => {
