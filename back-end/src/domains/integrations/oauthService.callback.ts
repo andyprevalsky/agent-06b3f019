@@ -14,9 +14,10 @@ import {
 import { createLogger } from '../../providers/logger';
 import { fetchGmailEmails, parseGmailOAuthEmails } from '../../services/integrations/gmailParser';
 import { EMAIL_PROVIDER_CONFIG } from './config';
+import { storedOAuthGrant } from './googleOAuthCredential';
 import * as repo from './repo';
 import { exchangeProviderCode, buildRedirectUri, sendOAuthResult } from './oauthService';
-import { resolvePendingGateByKey } from '../../providers/gateResolution';
+import { resolveSourceConnectGate } from './sourceConnectGate';
 
 const log = createLogger('Integrations');
 
@@ -58,21 +59,6 @@ async function syncGmailEmails(
   });
 }
 
-async function resolveSourceConnectGate(
-  userId: string,
-  providerKey: EmailProviderSlug
-): Promise<void> {
-  try {
-    await resolvePendingGateByKey(userId, `source_connect:${providerKey}`, 'SOURCE_CONNECTED');
-  } catch (error: unknown) {
-    log.warn('Failed to resolve source-connect gate after OAuth', {
-      userId,
-      providerKey,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
 function maybeSyncGmailAfterOAuth(params: {
   providerKey: EmailProviderSlug;
   accessToken: string;
@@ -94,13 +80,11 @@ function maybeSyncGmailAfterOAuth(params: {
     params.userEmail,
     params.userId,
     params.integrationId
-  ).catch((error: unknown) => {
-    log.error('Error syncing Gmail emails', {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  ).catch(() => {
+    log.error('Error syncing Gmail emails', { integrationId: params.integrationId });
     void repo.updateIntegrationStatus(params.integrationId, IntegrationStatus.SYNC_FAILED, {
       lastFailedSyncAt: new Date(),
-      failureReason: error instanceof Error ? error.message : 'Unknown error',
+      failureReason: 'Gmail sync failed',
     });
   });
 }
@@ -121,19 +105,20 @@ async function handleExistingEmail(
   returnUrl: string | null,
   errorUrl: string | null
 ): Promise<void> {
-  log.info('Gmail already connected, refreshing tokens', { email });
+  log.info('Gmail already connected, refreshing tokens', { credentialId: existingCredentialId });
   await repo.deleteEmailCredential(pendingCredentialId);
+  const grant = storedOAuthGrant(providerKey, tokenResult, existingRefreshToken);
 
   await repo.updateEmailCredential(existingCredentialId, {
-    accessToken: tokenResult.accessToken,
-    refreshToken: tokenResult.refreshToken ?? existingRefreshToken,
+    accessToken: grant.accessToken,
+    refreshToken: grant.refreshToken,
     expiresAt,
     scopes: tokenResult.scopes,
     metadata: mergeJson(existingMetadata ?? null, tokenResult.metadata),
     // This is the reconnect path: re-consent is exactly what clears a
     // needs_reconnect account, so the health state must reset with the tokens.
-    state: 'connected',
-    lastErrorReason: null,
+    state: grant.state,
+    lastErrorReason: grant.lastErrorReason,
   });
 
   await repo.updateIntegrationStatus(existingIntegrationId, IntegrationStatus.CONNECTED, {
@@ -143,12 +128,14 @@ async function handleExistingEmail(
   });
 
   sendOAuthResult(res, {
-    success: true,
-    message: `${email} was already connected. Tokens refreshed.`,
+    success: grant.complete,
+    message: grant.complete
+      ? `${email} was already connected. Tokens refreshed.`
+      : 'Google did not grant all requested permissions. Reconnect Google.',
     returnUrl,
     errorUrl,
   });
-  await resolveSourceConnectGate(userId, providerKey);
+  if (grant.complete) await resolveSourceConnectGate(userId, providerKey);
 }
 
 /** Finalize a new credential: save tokens, update integration, and start email sync. */
@@ -168,17 +155,18 @@ async function finalizeNewCredential(
   returnUrl: string | null,
   errorUrl: string | null
 ): Promise<void> {
+  const grant = storedOAuthGrant(providerKey, tokenResult, credential.refreshToken);
   await repo.updateEmailCredential(credential.id, {
     email: tokenResult.userEmail,
-    accessToken: tokenResult.accessToken,
-    refreshToken: tokenResult.refreshToken ?? credential.refreshToken,
+    accessToken: grant.accessToken,
+    refreshToken: grant.refreshToken,
     expiresAt,
     scopes: tokenResult.scopes,
     metadata: mergeJson(credential.metadata ?? null, tokenResult.metadata),
     pkceVerifier: null,
     stateToken: null,
-    state: 'connected',
-    lastErrorReason: null,
+    state: grant.state,
+    lastErrorReason: grant.lastErrorReason,
   });
 
   const allCredentials = await repo.findConnectedEmailCredentials(credential.userId, provider);
@@ -207,22 +195,26 @@ async function finalizeNewCredential(
     tokenResult.userEmail !== ''
       ? ` (${tokenResult.userEmail})`
       : '';
-  log.info('Gmail OAuth complete', { email: tokenResult.userEmail, status: 'CONNECTED' });
+  log.info('Gmail OAuth complete', { credentialId: credential.id, status: 'CONNECTED' });
   sendOAuthResult(res, {
-    success: true,
-    message: `Successfully connected ${providerKey.toUpperCase()}${displayEmail}.`,
+    success: grant.complete,
+    message: grant.complete
+      ? `Successfully connected ${providerKey.toUpperCase()}${displayEmail}.`
+      : 'Google did not grant all requested permissions. Reconnect Google.',
     returnUrl,
     errorUrl,
   });
-  await resolveSourceConnectGate(credential.userId, providerKey);
+  if (grant.complete) await resolveSourceConnectGate(credential.userId, providerKey);
 
-  maybeSyncGmailAfterOAuth({
-    providerKey,
-    accessToken: tokenResult.accessToken,
-    userEmail: tokenResult.userEmail,
-    userId: credential.userId,
-    integrationId: credential.integrationId,
-  });
+  if (grant.complete) {
+    maybeSyncGmailAfterOAuth({
+      providerKey,
+      accessToken: tokenResult.accessToken,
+      userEmail: tokenResult.userEmail,
+      userId: credential.userId,
+      integrationId: credential.integrationId,
+    });
+  }
 }
 
 /** Validate credential and extract metadata URLs. Returns null + sends error if invalid. */

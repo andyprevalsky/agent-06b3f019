@@ -556,6 +556,7 @@ model MessageRecord {
   timestamp  DateTime
   message    String
   externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  googleAccountEmail String? // Source Gmail account for account-scoped deletion
   createdAt  DateTime       @default(now())
   person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
@@ -564,6 +565,20 @@ model MessageRecord {
   @@index([timestamp])
   @@index([personId, timestamp])
   @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
+  @@index([googleAccountEmail, createdAt])
+}
+
+model GoogleDataPurge {
+  id          String    @id @default(uuid())
+  userId      String
+  email       String
+  requestedAt DateTime  @default(now())
+  claimedUntil DateTime?
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([processedAt, claimedUntil, requestedAt])
+  @@index([userId, email])
 }
 
 model Person {

@@ -101,6 +101,9 @@ export default function GmailRow({
           <div className="flex min-w-0 items-center">
             <span className="truncate text-sm">Gmail</span>
           </div>
+          <span className="text-xs text-muted-foreground">
+            Google consent also requests Calendar and Drive access
+          </span>
           <GmailEmails
             connectedIntegrations={connectedIntegrations}
             disconnectingEmail={disconnectingEmail}
@@ -112,6 +115,8 @@ export default function GmailRow({
       </div>
       <button
         onClick={onGmailConnect}
+        aria-label={connectingProvider === 'gmail' ? 'Connecting Google' : 'Connect Google'}
+        title="Connect Google"
         disabled={connectingProvider === 'gmail'}
         className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground disabled:opacity-60"
       >

@@ -46,8 +46,20 @@ export function buildOpenRouterCerebrasBody(
     // org rate cap. Same model, just not stuck on the capped provider —
     // never a generic waterfall model.
     provider: opts.allowProviderFallback
-      ? { order: ['cerebras', 'groq'], allow_fallbacks: true, require_parameters: true }
-      : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
+      ? {
+          order: ['cerebras', 'groq'],
+          allow_fallbacks: true,
+          require_parameters: true,
+          zdr: true,
+          data_collection: 'deny',
+        }
+      : {
+          only: ['cerebras'],
+          allow_fallbacks: false,
+          require_parameters: true,
+          zdr: true,
+          data_collection: 'deny',
+        },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),

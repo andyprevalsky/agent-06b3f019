@@ -6,6 +6,9 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { http, HttpResponse } from 'msw';
 import Index from '@/pages/Index';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 describe('Index (landing) page', () => {
   beforeEach(() => {
@@ -83,6 +86,15 @@ describe('Index (landing) page', () => {
       expect(screen.getByText('Privacy Policy')).toBeInTheDocument();
       expect(screen.getByText('Terms of Service')).toBeInTheDocument();
       expect(screen.getByText('Cookie Policy')).toBeInTheDocument();
+      expect(screen.getByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
+    });
+
+    it('ships the reviewer description in visible static HTML', () => {
+      const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
+      expect(html).toContain(ROSE_APP_DESCRIPTION);
+      expect(html).toMatch(/<footer class="rose-static-description">/);
+      expect(html).toContain('<a href="/about">About</a>');
+      expect(html).not.toMatch(/rose-static-description[^}]*display:\s*none/);
     });
 
     it('renders the Powered By ticker with provider logos', () => {

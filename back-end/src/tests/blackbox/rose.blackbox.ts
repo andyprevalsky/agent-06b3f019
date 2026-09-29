@@ -2218,6 +2218,15 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     model: 'openai/gpt-5.6-sol',
     messages,
   });
+  for (const body of [
+    openrouter,
+    buildOpenRouterCerebrasBody({ messages }),
+    buildOpenRouterFastChatBody({ messages }),
+  ]) {
+    const provider = body.provider as Record<string, unknown>;
+    assertEqual(provider.zdr, true, 'OpenRouter ZDR enforced');
+    assertEqual(provider.data_collection, 'deny', 'OpenRouter data collection denied');
+  }
   assertEqual(
     (openrouter.reasoning as Record<string, unknown>).effort,
     'xhigh',

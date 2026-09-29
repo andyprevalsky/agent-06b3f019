@@ -5,6 +5,9 @@
 
 import { type Prisma, EmailProvider, IntegrationStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
+import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
+import { revokeGoogleGrant } from '../../providers/googleRevoke';
 
 export async function createEmailCredential(params: {
   userId: string;
@@ -57,8 +60,20 @@ export async function findExistingCredential(params: {
 }
 
 export async function deleteEmailCredential(credentialId: string) {
-  return prisma.emailIntegrationCredential.delete({
+  const credential = await prisma.emailIntegrationCredential.findUnique({
     where: { id: credentialId },
+    select: { provider: true, userId: true, email: true, accessToken: true, refreshToken: true },
+  });
+  if (credential?.provider === EmailProvider.GMAIL) {
+    await revokeGoogleGrant(credential.refreshToken, credential.accessToken);
+  }
+  return prisma.$transaction(async (tx) => {
+    if (credential?.provider === EmailProvider.GMAIL && credential.email !== null) {
+      await tx.googleDataPurge.create({
+        data: { userId: credential.userId, email: credential.email.toLowerCase() },
+      });
+    }
+    return tx.emailIntegrationCredential.delete({ where: { id: credentialId } });
   });
 }
 
@@ -100,17 +115,27 @@ export async function findGmailIntegrationsWithCredentials(userId: string) {
 }
 
 export async function findGmailCredentialForSend(userId: string, fromEmail: string) {
-  return prisma.emailIntegrationCredential.findFirst({
+  const credential = await prisma.emailIntegrationCredential.findFirst({
     where: {
       userId,
       provider: EmailProvider.GMAIL,
       accessToken: { not: null },
+      scopes: { hasEvery: [...GOOGLE_OAUTH_SCOPES] },
       email: fromEmail,
     },
     include: {
       integration: true,
     },
   });
+  return credential === null
+    ? null
+    : {
+        ...credential,
+        accessToken:
+          credential.accessToken === null ? null : readGoogleToken(credential.accessToken),
+        refreshToken:
+          credential.refreshToken === null ? null : readGoogleToken(credential.refreshToken),
+      };
 }
 
 export async function findGmailCredentialForDisconnect(userId: string, email: string) {
@@ -156,10 +181,10 @@ export async function updateEmailCredentialToken(
   return prisma.emailIntegrationCredential.update({
     where: { id: credentialId },
     data: {
-      accessToken: data.accessToken,
+      accessToken: encryptGoogleToken(data.accessToken),
       expiresAt: data.expiresAt,
       ...(data.refreshToken !== undefined &&
-        data.refreshToken !== '' && { refreshToken: data.refreshToken }),
+        data.refreshToken !== '' && { refreshToken: encryptGoogleToken(data.refreshToken) }),
     },
   });
 }

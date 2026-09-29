@@ -1,5 +1,4 @@
 import fetch, { RequestInit, Response } from 'node-fetch';
-import { logTruncate } from '../../utils/log';
 import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords } from './personMessageManager';
 import {
@@ -100,10 +99,8 @@ export async function getGmailProfile(accessToken: string): Promise<GmailProfile
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     log.error('Failed to get profile', {
       status: response.status,
-      body: logTruncate(errorText),
     });
     throw new Error(`Gmail API error: ${response.status}`);
   }
@@ -123,7 +120,7 @@ export async function fetchGmailHistory(
   let pageToken: string | undefined;
   let newHistoryId = startHistoryId;
 
-  log.info('Fetching history', { start_history_id: startHistoryId });
+  log.info('Fetching history');
 
   do {
     const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/history');
@@ -138,7 +135,6 @@ export async function fetchGmailHistory(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
       // 404 means historyId is too old or invalid - need full sync
       if (response.status === 404) {
         log.info('History expired, full sync required');
@@ -146,7 +142,6 @@ export async function fetchGmailHistory(
       }
       log.error('Failed to fetch history', {
         status: response.status,
-        body: logTruncate(errorText),
       });
       throw new Error(`Gmail API error: ${response.status}`);
     }
@@ -169,7 +164,6 @@ export async function fetchGmailHistory(
 
   log.info('History fetch complete', {
     new_messages: addedMessageIds.length,
-    new_history_id: newHistoryId,
   });
   return { addedMessageIds, newHistoryId };
 }
@@ -223,7 +217,7 @@ export async function fetchGmailMessagesSince(
   const unixSeconds = Math.floor(since.getTime() / 1000);
   const query = `after:${unixSeconds}`;
 
-  log.info('Fetching messages since', { since: since.toISOString(), query });
+  log.info('Fetching messages since', { since: since.toISOString() });
 
   const messageIds: string[] = [];
   let pageToken: string | undefined;
@@ -240,10 +234,8 @@ export async function fetchGmailMessagesSince(
     const listResponse = await fetchWithRetry(listUrl.toString(), accessToken);
 
     if (!listResponse.ok) {
-      const errorText = await listResponse.text();
       log.error('Failed to list messages', {
         status: listResponse.status,
-        body: logTruncate(errorText),
       });
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
@@ -301,10 +293,8 @@ async function fetchMessagesBatch(
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
     log.error('Batch request failed', {
       status: response.status,
-      body: logTruncate(errorText),
     });
     throw new Error(`Gmail batch API error: ${response.status}`);
   }
@@ -406,10 +396,8 @@ export async function fetchGmailEmails(
     const listResponse = await fetchWithRetry(listUrl.toString(), accessToken);
 
     if (!listResponse.ok) {
-      const errorText = await listResponse.text();
       log.error('Failed to list messages', {
         status: listResponse.status,
-        body: logTruncate(errorText),
       });
       throw new Error(`Gmail API error: ${listResponse.status}`);
     }
@@ -599,7 +587,7 @@ export async function parseGmailOAuthEmails(
     contact_count: contactsToUpsert.length,
   });
 
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId);
+  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, userEmail);
 
   log.info('Gmail sync complete', {
     job_id: jobId,
@@ -637,6 +625,6 @@ export async function searchAndFetchEmails(
 
   if (messageIds.length === 0) return [];
 
-  log.info('Fetching messages for query', { count: messageIds.length, query });
+  log.info('Fetching messages for query', { count: messageIds.length });
   return fetchMessagesByIds(accessToken, messageIds.slice(0, maxResults));
 }

@@ -13,7 +13,7 @@ describe('Privacy page', () => {
 
   it('renders the last updated date', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/last updated: may 12, 2026/i)).toBeInTheDocument();
+    expect(screen.getByText(/last updated: september 29, 2026/i)).toBeInTheDocument();
   });
 
   it('renders all 11 section headings', () => {
@@ -39,6 +39,25 @@ describe('Privacy page', () => {
     expect(screen.getByRole('heading', { name: /9\. international users/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /10\. policy updates/i })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: /11\. contact/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /^google user data$/i })).toBeInTheDocument();
+  });
+
+  it('discloses Google permissions, limited use, revocation and retention', () => {
+    renderWithProviders(<Privacy />);
+    expect(
+      screen.getByText(/gmail \(to search, read, summarize, draft, send, label, and archive/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /we do not use google user data to develop, improve, or train generalized ai/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/we revoke our oauth token immediately and delete cached google user data/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: /google api services user data policy/i }),
+    ).toHaveAttribute('href', 'https://developers.google.com/terms/api-services-user-data-policy');
   });
 
   it('renders the intro disclosure that we collect and store data', () => {

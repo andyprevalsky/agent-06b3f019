@@ -1,6 +1,5 @@
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
-import { logTruncate } from '../../utils/log';
 import { IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
 import {
   fetchGmailEmails,
@@ -16,6 +15,9 @@ import {
   markCredentialHealthy,
   type EmailAuthFailure,
 } from './emailCredentialHealth';
+import { missingGoogleScopes } from '../../domains/integrations/googleScopes';
+import { googleClientId, googleClientSecret } from '../../domains/integrations/config';
+import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
 
 const log = createLogger('GmailSync');
 
@@ -43,11 +45,11 @@ async function refreshGoogleAccessToken(
 ): Promise<
   { ok: true; accessToken: string; expiresAt: Date } | { ok: false; failure: EmailAuthFailure }
 > {
-  const clientId = process.env.GMAIL_WEB_CLIENT_ID;
-  const clientSecret = process.env.GMAIL_WEB_CLIENT_SECRET;
+  const clientId = googleClientId();
+  const clientSecret = googleClientSecret();
 
   if (!clientId) {
-    log.error('Missing GMAIL_WEB_CLIENT_ID');
+    log.error('Missing GOOGLE_CLIENT_ID');
     // Our misconfiguration, not the user's. Never ask them to reconnect for this.
     return {
       ok: false,
@@ -73,7 +75,6 @@ async function refreshGoogleAccessToken(
       const errorText = await response.text();
       log.error('Token refresh failed', {
         status: response.status,
-        body: logTruncate(errorText),
       });
       return {
         ok: false,
@@ -91,8 +92,8 @@ async function refreshGoogleAccessToken(
       accessToken: json.access_token,
       expiresAt: new Date(Date.now() + json.expires_in * 1000),
     };
-  } catch (error) {
-    log.error('Error refreshing token', { error: error instanceof Error ? error.message : error });
+  } catch {
+    log.error('Error refreshing token');
     // Network/DNS failure: transient by construction.
     return {
       ok: false,
@@ -109,14 +110,22 @@ export async function getValidAccessToken(credential: {
   accessToken: string | null;
   refreshToken: string | null;
   expiresAt: Date | null;
+  scopes?: string[];
 }): Promise<string | null> {
+  if (credential.scopes !== undefined && missingGoogleScopes(credential.scopes).length > 0) {
+    await markCredentialFailure(credential.id, {
+      state: 'needs_reconnect',
+      reason: 'Reconnect Google to grant the current permissions.',
+    });
+    return null;
+  }
   // Check if current token is still valid (with 5 min buffer)
   if (
     credential.accessToken &&
     credential.expiresAt &&
     credential.expiresAt > new Date(Date.now() + 5 * 60 * 1000)
   ) {
-    return credential.accessToken;
+    return readGoogleToken(credential.accessToken);
   }
 
   // Need to refresh
@@ -130,7 +139,7 @@ export async function getValidAccessToken(credential: {
   }
 
   log.info('Refreshing expired access token...');
-  const refreshed = await refreshGoogleAccessToken(credential.refreshToken);
+  const refreshed = await refreshGoogleAccessToken(readGoogleToken(credential.refreshToken));
 
   if (!refreshed.ok) {
     await markCredentialFailure(credential.id, refreshed.failure);
@@ -142,7 +151,7 @@ export async function getValidAccessToken(credential: {
   await prisma.emailIntegrationCredential.update({
     where: { id: credential.id },
     data: {
-      accessToken: refreshed.accessToken,
+      accessToken: encryptGoogleToken(refreshed.accessToken),
       expiresAt: refreshed.expiresAt,
       state: 'connected',
       lastErrorReason: null,
@@ -211,7 +220,6 @@ async function transformAndFilterEmails(
         userEmailSet.add(topAddr);
         foundNew = true;
         log.info('Detected imported account', {
-          address: topAddr,
           from: topCount,
           to: toCounts.get(topAddr) || 0,
           next: secondCount,
@@ -219,7 +227,7 @@ async function transformAndFilterEmails(
       }
     }
   }
-  log.info('userEmailSet computed', { emails: [...userEmailSet] });
+  log.info('userEmailSet computed', { count: userEmailSet.size });
 
   // Group emails by contact
   const contactMap = new Map<
@@ -377,12 +385,12 @@ async function syncGmailForUser(
   integrationId: string
 ): Promise<{ success: boolean; contacts: number; messages: number }> {
   const credentialEmail = credential.email || '';
-  log.info('Starting sync for user', { userId, credentialEmail });
+  log.info('Starting sync for user', { userId, credentialId: credential.id });
 
   // Get valid access token
   const accessToken = await getValidAccessToken(credential);
   if (!accessToken) {
-    log.error('Failed to get valid access token', { credentialEmail });
+    log.error('Failed to get valid access token', { credentialId: credential.id });
     return { success: false, contacts: 0, messages: 0 };
   }
 
@@ -413,10 +421,8 @@ async function syncGmailForUser(
     try {
       const profile = await getGmailProfile(accessToken);
       userEmail = profile.emailAddress;
-    } catch (error) {
-      log.error('Failed to get user email', {
-        error: error instanceof Error ? error.message : error,
-      });
+    } catch {
+      log.error('Failed to get user email', { credentialId: credential.id });
       return { success: false, contacts: 0, messages: 0 };
     }
   }
@@ -426,24 +432,24 @@ async function syncGmailForUser(
 
   if (historyId) {
     // Incremental sync using History API
-    log.info('Performing incremental sync', { credentialEmail, historyId });
+    log.info('Performing incremental sync', { credentialId: credential.id });
 
     const historyResult = await fetchGmailHistory(accessToken, historyId);
 
     if (historyResult.newHistoryId === '') {
       // History expired, need full sync
-      log.info('History expired, falling back to full sync', { credentialEmail });
+      log.info('History expired, falling back to full sync', { credentialId: credential.id });
       emails = await fetchGmailEmails(accessToken, userEmail);
       const profile = await getGmailProfile(accessToken);
       newHistoryId = profile.historyId;
     } else if (historyResult.addedMessageIds.length === 0) {
       // No new messages
-      log.info('No new messages', { credentialEmail });
+      log.info('No new messages', { credentialId: credential.id });
       newHistoryId = historyResult.newHistoryId;
     } else {
       // Fetch the new messages
       log.info('New messages found', {
-        credentialEmail,
+        credentialId: credential.id,
         count: historyResult.addedMessageIds.length,
       });
       emails = await fetchMessagesByIds(accessToken, historyResult.addedMessageIds);
@@ -451,7 +457,7 @@ async function syncGmailForUser(
     }
   } else {
     // Full sync (first time for this credential)
-    log.info('Performing full sync (no historyId)', { credentialEmail });
+    log.info('Performing full sync (no historyId)', { credentialId: credential.id });
     emails = await fetchGmailEmails(accessToken, userEmail);
     const profile = await getGmailProfile(accessToken);
     newHistoryId = profile.historyId;
@@ -469,7 +475,8 @@ async function syncGmailForUser(
       const result = await upsertPersonAndMessageRecords(
         userId,
         contactsToUpsert,
-        `gmail-sync-${credentialEmail}-${Date.now()}`
+        `gmail-sync-${credential.id}-${Date.now()}`,
+        credentialEmail
       );
       contactCount = result.contacts;
       messageCount = result.messages;
@@ -506,7 +513,7 @@ async function syncGmailForUser(
   await markCredentialHealthy(credential.id);
 
   log.info('Sync complete', {
-    credentialEmail,
+    credentialId: credential.id,
     newContacts: contactCount,
     newMessages: messageCount,
   });
@@ -580,22 +587,22 @@ export async function runGmailSyncJob(): Promise<void> {
     for (const credential of validCredentials) {
       try {
         log.info('Syncing credential', {
-          credentialEmail: credential.email,
+          credentialId: credential.id,
           integrationId: integration.id,
         });
         const result = await syncGmailForUser(integration.userId, credential, integration.id);
 
         if (!result.success) {
           allSucceeded = false;
-          lastError = `Sync failed for ${credential.email}`;
+          lastError = 'Gmail sync failed';
         }
       } catch (error) {
         log.error('Error syncing credential', {
-          credentialEmail: credential.email,
-          error: error instanceof Error ? error.message : error,
+          credentialId: credential.id,
+          errorType: error instanceof Error ? error.name : 'UnknownError',
         });
         allSucceeded = false;
-        lastError = error instanceof Error ? error.message : 'Unknown error';
+        lastError = 'Gmail sync failed';
       }
     }
 

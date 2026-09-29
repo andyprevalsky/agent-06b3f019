@@ -3122,6 +3122,7 @@ def test_build_openrouter_body_includes_optionals():
     assert body["model"] == "google/gemini-3-flash-preview"
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
+    assert body["provider"] == {"zdr": True, "data_collection": "deny"}
     assert body["tool_choice"] == "auto"
     assert body["temperature"] == 0.4
     assert body["max_tokens"] == 42

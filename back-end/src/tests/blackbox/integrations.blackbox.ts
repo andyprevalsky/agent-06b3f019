@@ -2699,6 +2699,10 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     where: { userId, email: 'primary@gmail.com' },
   });
   assert(deleted === null, 'deleted Gmail credential should be removed');
+  const purge = await prisma.googleDataPurge.findFirst({
+    where: { userId, email: 'primary@gmail.com', processedAt: null },
+  });
+  assert(purge !== null, 'disconnect should queue cached Google data for deletion');
 
   const updated = await prisma.integration.findUnique({ where: { id: integration.id } });
   const config = updated?.config as { connectedEmail?: unknown; connectedEmails?: unknown };
@@ -2746,6 +2750,13 @@ async function testListIntegrations_exposesPerAccountHealth() {
         email: 'healthy@gmail.com',
         accessToken: 'access-healthy',
         refreshToken: 'refresh-healthy',
+        scopes: [
+          'openid',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/gmail.modify',
+          'https://www.googleapis.com/auth/calendar.events',
+          'https://www.googleapis.com/auth/drive',
+        ],
       },
       {
         userId,
@@ -2754,6 +2765,11 @@ async function testListIntegrations_exposesPerAccountHealth() {
         email: 'broken@gmail.com',
         accessToken: 'access-broken',
         refreshToken: 'refresh-broken',
+        scopes: [
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/gmail.readonly',
+          'https://www.googleapis.com/auth/gmail.send',
+        ],
         state: 'needs_reconnect',
         lastErrorReason: 'Access was revoked or expired.',
       },
@@ -4064,6 +4080,29 @@ async function testEmailStart_gmailPkceFields() {
     // Verify Gmail-specific OAuth params
     assert(body.authUrl.includes('access_type=offline'), 'Expected access_type=offline for Gmail');
     assert(body.authUrl.includes('prompt=consent'), 'Expected prompt=consent for Gmail');
+    const googleAuth = new URL(body.authUrl);
+    assert(
+      googleAuth.searchParams.get('include_granted_scopes') === 'true',
+      'Expected incremental Google consent'
+    );
+    const expectedGoogleScopes = [
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/gmail.modify',
+      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/drive',
+    ];
+    assert(
+      JSON.stringify((googleAuth.searchParams.get('scope') ?? '').split(' ')) ===
+        JSON.stringify(expectedGoogleScopes),
+      'Google consent must request the exact approved scopes'
+    );
+    assert(
+      googleAuth.searchParams
+        .get('redirect_uri')
+        ?.endsWith('/api/integrations/email/gmail/callback'),
+      'Expected the approved Gmail callback path'
+    );
   } else if (res.status !== 500) {
     throw new Error(`Expected 200 or 500, got ${res.status}`);
   }

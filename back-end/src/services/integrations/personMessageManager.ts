@@ -98,7 +98,8 @@ function calculateCommunicationFrequency(messages: Array<{ timestamp: Date }>): 
 export async function upsertPersonAndMessageRecords(
   userId: string,
   contacts: ContactToUpsert[],
-  jobId: string
+  jobId: string,
+  googleAccountEmail?: string
 ): Promise<{ contacts: number; messages: number }> {
   const totalMessages = contacts.reduce((sum, c) => sum + c.messages.length, 0);
   log.info('Processing messages', {
@@ -178,7 +179,6 @@ export async function upsertPersonAndMessageRecords(
         if (!personId) {
           log.warn('Person not found for contact, skipping messages', {
             jobId,
-            identifier: contact.identifier,
           });
           continue;
         }
@@ -186,7 +186,6 @@ export async function upsertPersonAndMessageRecords(
         if (!contact.messages?.length) {
           log.warn('No messages for contact, skipping', {
             jobId,
-            identifier: contact.identifier,
           });
           continue;
         }
@@ -208,6 +207,7 @@ export async function upsertPersonAndMessageRecords(
               timestamp: msg.timestamp,
               message: msg.message,
               externalId: msg.externalId,
+              googleAccountEmail: googleAccountEmail?.toLowerCase() ?? null,
             })),
             skipDuplicates: true,
           });
@@ -229,16 +229,13 @@ export async function upsertPersonAndMessageRecords(
 
         log.info('Processed contact', {
           jobId,
-          identifier: contact.identifier,
           messagesInContact: contact.messages.length,
           messagesProcessed,
           totalMessages,
         });
-      } catch (error) {
+      } catch {
         log.error('Error processing contact', {
           jobId,
-          identifier: contact.identifier,
-          error: error instanceof Error ? error.message : String(error),
         });
       }
     }
