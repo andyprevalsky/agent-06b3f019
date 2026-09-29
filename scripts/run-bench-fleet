@@ -5407,7 +5407,7 @@ reap_orphaned_fleet_proxies() {
 }
 
 stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry>
-    local registry="$1" record clone_name id vol details status volume receipt count=0 claims
+    local registry="$1" record clone_name id vol details status state actual_name mounted_vol volume count=0 claims
     [ "$(registry_meta_value "$registry/meta" version)" = "2" ] || return 1
     [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
         && [ ! -e "$registry/runtime-evidence-unconfirmed" ] || return 1
@@ -5447,7 +5447,16 @@ PY
         [ -n "$id" ] && [ -n "$vol" ] || return 1
         details="$(registry_machine_details "$id")"
         status=$?
-        [ "$status" -eq 1 ] || return 1  # exact Machine absent
+        if [ "$status" -eq 0 ]; then
+            state="$(printf '%s' "$details" | awk '{print $1}')"
+            actual_name="$(printf '%s' "$details" | awk '{print $2}')"
+            [ "$state" = destroyed ] && [ "$actual_name" = "$clone_name" ] || return 1
+            mounted_vol="$(fleet_registry_reconcile_mounted_volume \
+                "$registry" "$clone_name" "$id")" || return 1
+            [ "$mounted_vol" = "$vol" ] || return 1
+        else
+            [ "$status" -eq 1 ] || return 1  # exact Machine absent
+        fi
         [ "$vol" != "${WARM_VOLUME_ID:-}" ] \
             && [ "$vol" != "${SHARED_WARM_VOLUME_ID:-}" ] || return 1
         # A fresh accepted destroy request and a second exact read prove that

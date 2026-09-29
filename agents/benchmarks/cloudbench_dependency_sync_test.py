@@ -8822,17 +8822,18 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
 
 
 @pytest.mark.parametrize(
-    ("state", "attached", "machine_present", "has_claim", "expected"),
+    ("state", "attached", "machine_state", "has_claim", "expected"),
     [
-        ("waiting_for_detach", "null", False, False, True),
-        ("created", "null", False, False, False),
-        ("waiting_for_detach", '"deadbeef"', False, False, False),
-        ("waiting_for_detach", "null", True, False, False),
-        ("waiting_for_detach", "null", False, True, False),
+        ("waiting_for_detach", "null", "absent", False, True),
+        ("waiting_for_detach", "null", "destroyed", False, True),
+        ("created", "null", "destroyed", False, False),
+        ("waiting_for_detach", '"deadbeef"', "destroyed", False, False),
+        ("waiting_for_detach", "null", "started", False, False),
+        ("waiting_for_detach", "null", "destroyed", True, False),
     ],
 )
 def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
-    tmp_path: Path, state: str, attached: str, machine_present: bool, has_claim: bool, expected: bool,
+    tmp_path: Path, state: str, attached: str, machine_state: str, has_claim: bool, expected: bool,
 ) -> None:
     registry = tmp_path / "ownership" / ("ab" * 16)
     clone = registry / "clones" / "cloudbench-one"
@@ -8841,9 +8842,14 @@ def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
     clone.write_text("name=cloudbench-one\nid=deadbeef\nvolume_id=vol_owned\n")
     original = clone.read_bytes()
     fleet = FLEET_SCRIPT.read_text()
+    assert fleet.index('if stale_registry_only_waits_for_provider_detach "$registry"; then') < fleet.index(
+        'if ! reap_registry_clones "$registry" stale; then'
+    )
     helper = _extract_fleet_function(fleet, "stale_registry_only_waits_for_provider_detach() {")
     claim_result = "printf 'deadbeef\\n'" if has_claim else ":"
-    machine_result = "printf 'started cloudbench-one\\n'" if machine_present else "return 1"
+    machine_result = (
+        "return 1" if machine_state == "absent" else f"printf '{machine_state} cloudbench-one\\n'"
+    )
     script = f'''set -u
 APP=bench-app
 WARM_VOLUME_ID=vol_warm
@@ -8851,6 +8857,7 @@ SHARED_WARM_VOLUME_ID=vol_shared
 registry_meta_value() {{ [ "$2" = version ] && printf '2\\n'; }}
 exact_owner_pool_claim_ids() {{ {claim_result}; }}
 registry_machine_details() {{ {machine_result}; }}
+fleet_registry_reconcile_mounted_volume() {{ printf 'vol_owned\\n'; }}
 FLY() {{
   case "$1 $2" in
     'volumes destroy') return 0 ;;

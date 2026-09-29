@@ -27,7 +27,7 @@ status: open
 ## Problem
 
 An unnecessary 40 GB replacement clone was canceled before startup. Its exact
-Machine was destroyed, but Fly continued to expose the attached volume as
+Machine entered Fly's `destroyed` state, but Fly continued to expose the volume as
 `waiting_for_detach` with no attached Machine, after accepting volume deletion.
 The exact owner registry correctly retained the volume. The next proof slice
 exited before any bench started because generic stale-owner reconciliation
@@ -51,16 +51,17 @@ volume detach`. The September 9 default-list omission case is related, but
 its strict exact-ID terminal-state rule remains intact. This incident is a
 separate admission coupling, not a recurrence of false ownership release.
 
-The local owning-boundary test on the prior script failed five cases with
+The local owning-boundary test on the prior script failed six cases with
 `ValueError: substring not found` because no deferred-detach boundary existed.
-The unchanged test passes all five cases on the fix. Its negative controls
+The unchanged test passes all six cases on the fix. Its negative controls
 reject a created volume, foreign attachment, live Machine, and outstanding
 pool claim; the positive case leaves the exact registry record byte-identical.
 
 ## Solution
 
 Before generic stale-owner reaping, admit a subsequent independent fleet only
-when every remaining clone record is canonical, every exact Machine is absent,
+when every remaining clone record is canonical, every exact Machine is absent
+or `destroyed` with matching name and current mounted-volume identity,
 there are no unconfirmed guest/runtime latches or pool claims, Fly accepts a
 fresh destroy request for each exact volume, and an exact volume read reports
 `waiting_for_detach` with no attachment. Keep the dead-owner registry and its
