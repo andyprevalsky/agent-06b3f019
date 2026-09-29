@@ -7467,7 +7467,14 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
 
     RUN_ID="$(registry_meta_value "$meta" run_id)"
     CLOUDBENCH_BARRIER_TOKEN="$barrier_token"
-    CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN=1
+    # Once an earlier recovery has sealed all guest acknowledgements, reconnect
+    # the same proxies for missing runtime bytes without reissuing shutdown.
+    if [ -e "$registry/guest-cleanup-unconfirmed" ] \
+        || [ -L "$registry/guest-cleanup-unconfirmed" ]; then
+        CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN=1
+    else
+        CLOUDBENCH_REVERIFY_GUEST_SHUTDOWN=0
+    fi
     if cloudbench_confirm_guest_shutdowns; then
         shutdown_status=0
     else
@@ -8206,6 +8213,19 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             return 1
             ;;
     esac
+    # Guest cleanup and runtime capture are separate durable latches. A prior
+    # recovery can clear the former while retaining the latter; reconnect only
+    # post-start exact guests that still own an unfinished local transfer.
+    if [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        || [ -L "$registry/runtime-evidence-unconfirmed" ]; then
+        for _evidence_output in "$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)"/*; do
+            if [ -f "$_evidence_output/post-config-start.accepted" ] \
+                && [ -f "$_evidence_output/runtime-evidence.pending" ]; then
+                needs_guest_recovery=1
+                break
+            fi
+        done
+    fi
     registry_owner_alive "$meta"
     owner_status=$?
     [ "$owner_status" -eq 1 ] || {
