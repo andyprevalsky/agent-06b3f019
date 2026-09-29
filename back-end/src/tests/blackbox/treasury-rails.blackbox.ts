@@ -29,6 +29,10 @@ import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { extractAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
+import {
+  unusedMintSettleOutcome,
+  type MintTransferObservation,
+} from '../../providers/agentcard/unused-mint-settle';
 import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
@@ -44,37 +48,6 @@ function isTransientOrgMcpPollError(error: unknown): boolean {
   return /temporarily unavailable|service unavailable|aborted due to timeout|operation was aborted|timed out/i.test(
     message
   );
-}
-
-/**
- * Poll a card's funding transfer until it reaches a terminal release state.
- *
- * `consumed` is transient after a close — it flips to `reclaimed`/`released` once the release
- * settles (same terminal set as `AgentCardCompanyWalletFundingProvider.reclaimUserWalletFunding`).
- * Asserting immediately after `close_card` reads the transient value and looks like value loss.
- */
-async function waitForTransferReclaimed(
-  cardId: string,
-  minReleasedCents: number,
-  timeoutMs = 120_000
-): Promise<{ status: string; releasedCents: number }> {
-  const deadline = Date.now() + timeoutMs;
-  let last = { status: 'not_found', releasedCents: 0 };
-  for (;;) {
-    try {
-      const mine = await readCardTransfer(cardId);
-      if (mine !== undefined) {
-        last = mine;
-        if (isFullyReclaimedTransfer(mine, minReleasedCents)) {
-          return last;
-        }
-      }
-    } catch (error) {
-      if (!isTransientOrgMcpPollError(error)) throw error;
-    }
-    if (Date.now() >= deadline) return last;
-    await sleep(8_000);
-  }
 }
 
 /**
@@ -115,9 +88,7 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
  * AgentCard may reclaim the mint transfer directly on close without ever exposing cardholder
  * residual for `recover_funds`.
  */
-async function readCardTransfer(
-  cardId: string
-): Promise<{ status: string; releasedCents: number } | undefined> {
+async function readCardTransfer(cardId: string): Promise<MintTransferObservation | undefined> {
   const transfers =
     (
       (await callOrgTool('list_transfers', { limit: 100 })) as {
@@ -132,55 +103,52 @@ async function readCardTransfer(
   };
 }
 
-function isFullyReclaimedTransfer(
-  transfer: { status: string; releasedCents: number } | undefined,
-  minReleasedCents: number
-): transfer is { status: string; releasedCents: number } {
-  return (
-    transfer !== undefined &&
-    transfer.releasedCents >= minReleasedCents &&
-    (transfer.status === 'reclaimed' || transfer.status === 'released')
-  );
-}
-
 /**
- * Wait until unused mint value is observably back (recover_funds residual OR transfer reclaim).
+ * Wait until THIS card's unused mint transfer reaches a terminal release state.
  *
- * Closing a card does NOT always free recoverable cardholder headroom first — the release can
- * settle by flipping the mint transfer straight to `reclaimed`/`released`. In that path
- * `recover_funds` keeps answering `insufficient_headroom` even though the pool already has the
- * money back. Requiring a recover_funds yield alone false-fails that real provider behavior
- * (observed: transfer `reclaimed` + `released_cents` full while sweep stayed at 0 for 240s).
+ * `recover_funds` is called each poll as an accelerator (AgentCard often flips the mint transfer
+ * to `reclaimed` only after residual is pulled). A foreign cardholder's recover_funds yield is
+ * NEVER treated as success — that false-passed the old wait while THIS transfer stayed
+ * `consumed`, then the follow-up poll stopped calling recover_funds and timed out.
+ *
+ * Auto-reclaim without residual (transfer flips while recover answers insufficient_headroom) is
+ * still accepted via the transfer observation alone.
  */
-async function waitForRecoverable(
+async function waitForUnusedMintSettled(
   cardId: string,
   minReleasedCents: number,
   timeoutMs = 240_000
-): Promise<{ settledCents: number; pendingCents: number; via: 'recover_funds' | 'transfer' }> {
+): Promise<{ status: string; releasedCents: number }> {
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
+  let last: MintTransferObservation = { status: 'not_found', releasedCents: 0 };
   for (;;) {
     attempt += 1;
     try {
       const sweep = await recoverAllCardholderResiduals(callOrgTool);
-      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-        console.log(`  (recovery yielded on attempt ${attempt})`);
-        return { ...sweep, via: 'recover_funds' };
-      }
       const transfer = await readCardTransfer(cardId);
-      if (isFullyReclaimedTransfer(transfer, minReleasedCents)) {
-        console.log(
-          `  (transfer already ${transfer.status} with ${usd(transfer.releasedCents)} on attempt ${attempt}; ` +
-            `recover_funds not needed)`
-        );
-        return { settledCents: transfer.releasedCents, pendingCents: 0, via: 'transfer' };
+      if (transfer !== undefined) last = transfer;
+      const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
+      if (outcome.done) {
+        if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
+          console.log(
+            `  (transfer ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
+              `recover_funds also yielded settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)})`
+          );
+        } else {
+          console.log(
+            `  (transfer already ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
+              `recover_funds not needed)`
+          );
+        }
+        return { status: outcome.status, releasedCents: outcome.settledCents };
       }
       if (Date.now() >= deadline) {
         console.error(
-          `  recovery never yielded after ${attempt} attempts; transfer for ${cardId}: ` +
-            (transfer === undefined ? '(not found)' : JSON.stringify(transfer))
+          `  unused mint never reclaimed after ${attempt} attempts; transfer for ${cardId}: ` +
+            JSON.stringify(last)
         );
-        return { ...sweep, via: 'recover_funds' };
+        return last;
       }
     } catch (error) {
       if (!isTransientOrgMcpPollError(error)) throw error;
@@ -366,24 +334,14 @@ async function main(): Promise<void> {
   assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
   record('closed the card unused');
 
-  const sweep = await waitForRecoverable(cardId, mintCents);
-  assert.ok(
-    sweep.settledCents > 0 || sweep.pendingCents > 0,
-    'recovery reported nothing within the settle window after closing a funded card — the ' +
-      'unused value never became recoverable headroom or a reclaimed mint transfer'
-  );
-  record(
-    sweep.via === 'transfer'
-      ? `recovery: mint transfer already settled (${usd(sweep.settledCents)}) without residual headroom`
-      : `recovery: settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
-  );
-
-  // Assert on OUR transfer, not the pool balance. The sandbox org is shared with running
-  // benchmarks that mint and consume cards continuously, so the absolute pool balance moves
-  // underneath us — an earlier version of this test asserted `pool >= poolBefore` and failed
-  // because concurrent benchmark traffic had drawn $30.96 during our settle wait. The race-free
-  // invariant is that THIS card's funding transfer reached a terminal release and released in full.
-  const settled = await waitForTransferReclaimed(cardId, mintCents);
+  // Assert on OUR transfer, not the pool balance / any recover_funds yield. The sandbox org is
+  // shared with running benchmarks that mint and consume cards continuously, so absolute pool
+  // balance and foreign residual sweeps move underneath us. An earlier wait accepted ANY
+  // recover_funds yield then polled transfers without further recover — foreign residual made
+  // that wait return early while THIS transfer stayed `consumed` (deploy failure:
+  // `ended in "consumed"`). The race-free invariant is THIS card's funding transfer reaching a
+  // terminal release with the full unused amount; recover_funds runs each poll only as accelerator.
+  const settled = await waitForUnusedMintSettled(cardId, mintCents);
   assert.ok(
     settled.status === 'reclaimed' || settled.status === 'released',
     `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +

@@ -154,7 +154,7 @@ ${NO_TOOLS_TRAILER}`;
     messages: [{ role: 'user', content: prompt }],
     temperature: 0.3,
     max_tokens: 8_000,
-    provider_route: 'openrouter-waterfall',
+    // rose-fast pool path (same as chat router/generator) — no provider_route override
     dump_context: {
       call_site: 'chat_compaction',
       agent_id: agentId,

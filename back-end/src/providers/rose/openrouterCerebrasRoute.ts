@@ -6,10 +6,10 @@
  * fallbacks are both disabled on the exclusive path; any pre-content failure
  * is surfaced to the caller.
  *
- * Model note (2026-09): Align with direct Cerebras chat (`gpt-oss-120b`).
- * OpenRouter serves `openai/gpt-oss-120b` on Cerebras (~3k t/s) and Groq
- * (~500 t/s). Prefer Cerebras; on org rate-cap fallover, prefer Cerebras then
- * Groq before any other host of the same model.
+ * Model note (2026-09-29): Align with direct Cerebras chat (`qwen-3.8-27b` /
+ * rose-fast). OpenRouter id `qwen/qwen3.8-27b` matches the rose-1-flash
+ * waterfall first hop. Prefer Cerebras; on org rate-cap fallover, prefer
+ * Cerebras then Groq before any other host of the same model.
  */
 
 import {
@@ -22,10 +22,11 @@ import {
 } from './errors';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
-import { normalizeOpenAiToolCalls } from './transforms';
+import { coerceLeadingOnlySystemMessages, normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_CEREBRAS_MODEL = 'openai/gpt-oss-120b';
+/** Must match rose-1-flash waterfall[0] / direct Cerebras chat inventory. */
+export const OPENROUTER_CEREBRAS_MODEL = 'qwen/qwen3.8-27b';
 export const OPENROUTER_CEREBRAS_POOL = 'openrouter-cerebras';
 
 export function buildOpenRouterCerebrasBody(
@@ -34,10 +35,10 @@ export function buildOpenRouterCerebrasBody(
 ): Record<string, unknown> {
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
-    messages: normalizeOpenAiToolCalls(options.messages),
+    messages: coerceLeadingOnlySystemMessages(normalizeOpenAiToolCalls(options.messages)),
     stream: true,
     stream_options: { include_usage: true },
-    // gpt-oss-120b rejects reasoning effort `none` (only low/medium/high).
+    // Keep effort low so OpenRouter spill matches the direct-chat stall budget.
     reasoning: { effort: 'low', exclude: true },
     // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
     // serve the chat model from another host. Fallback mode
