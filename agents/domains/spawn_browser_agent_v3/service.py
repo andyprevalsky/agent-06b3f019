@@ -392,12 +392,15 @@ async def build_browser_verifier_context(
     action_entries = all_action_entries[-30:]
     # The card request can predate many form-fill actions. Keep its actual
     # recorded result in the verifier's bounded history when it ages out.
-    if payment_card_evidence and not any(
-        entry.get("action") == "request_payment_card" for entry in action_entries
+    if not any(
+        entry.get("action") == "request_payment_card"
+        and (entry.get("result") or {}).get("status") == "approved"
+        for entry in action_entries
     ):
         card_request = next(
             (entry for entry in reversed(all_action_entries[:-30])
-             if entry.get("action") == "request_payment_card"),
+             if entry.get("action") == "request_payment_card"
+             and (entry.get("result") or {}).get("status") == "approved"),
             None,
         )
         if card_request is not None:

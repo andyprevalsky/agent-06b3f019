@@ -9790,7 +9790,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
-                    payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                     browser_checkpoints=verifier_checkpoints,
                 )
                 final_verifier_prompt = build_verifier_prompt(

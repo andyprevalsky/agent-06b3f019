@@ -19782,7 +19782,6 @@ def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
 
 async def test_recorded_payment_request_survives_verifier_action_window():
     from browser_tools.dom_service import ActionHistory
-    from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
     from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
 
     action_history = ActionHistory()
@@ -19804,7 +19803,6 @@ async def test_recorded_payment_request_survives_verifier_action_window():
             action_history=action_history,
             config=SimpleNamespace(),
             session_id="session-1",
-            payment_card_evidence=_build_payment_card_verifier_evidence("4242"),
         )
     action_evidence = next(
         entry for entry in context if entry.get("metadata", {}).get("toolName") == "action_history"
