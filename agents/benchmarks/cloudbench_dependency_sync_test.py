@@ -10308,16 +10308,24 @@ def test_runner_cleanup_lifecycle_classifier_preserves_negative_states(
             assert result.returncode != 0
 
 
-def test_failed_runner_receipt_enters_exact_cleanup_without_authorizing_ack(
-    tmp_path: Path,
+def _exercise_runner_receipt_recovery(
+    tmp_path: Path, runner_state: str, guest_status: int = 500,
+    preexisting_runner_receipt: bool = False,
 ) -> None:
-    """A valid failed subtype must reach cleanup, not become an acknowledgement."""
+    """A runner receipt only short-circuits recovery with a guest stack ACK."""
     fleet = FLEET_SCRIPT.read_text()
     recover = _extract_fleet_function(
         fleet, "cloudbench_recover_guest_cleanup_receipts() {"
     )
+    shutdown_status = _extract_fleet_function(
+        fleet, "cloudbench_guest_shutdown_status() {"
+    )
     output = tmp_path / "bench-output"
     output.mkdir()
+    if preexisting_runner_receipt:
+        (output / "guest-cleanup.recovery-receipt.json").write_text(
+            json.dumps({"kind": "runner-cleanup"}) + "\n"
+        )
     exact_helper = tmp_path / "exact-helper"
     exact_helper.write_text(
         """#!/usr/bin/env python3
@@ -10329,10 +10337,13 @@ command = sys.argv[1]
 with open(os.environ["CALLS"], "a", encoding="utf-8") as handle:
     handle.write(command + "\\n")
 if command == "classify-runner-receipt":
-    print("failed")
+    print(os.environ["RUNNER_STATE"])
 elif command == "recover-runner-receipt":
-    Path(os.environ["UNEXPECTED_ACK"]).touch()
-    raise SystemExit(91)
+    if os.environ["GUEST_STATUS"] != "204":
+        Path(os.environ["UNEXPECTED_ACK"]).touch()
+        raise SystemExit(91)
+    arguments = sys.argv[2:]
+    Path(arguments[arguments.index("--receipt") + 1]).write_text("{}\\n", encoding="utf-8")
 elif command == "cleanup-provider-sessions":
     arguments = sys.argv[2:]
     receipt = Path(arguments[arguments.index("--receipt") + 1])
@@ -10368,7 +10379,9 @@ EXACT_SESSION_CLEANUP_HELPER={shlex.quote(str(exact_helper))}
 GUEST_RECOVERY_HELPER={shlex.quote(str(guest_helper))}
 CALLS={shlex.quote(str(calls))}
 UNEXPECTED_ACK={shlex.quote(str(unexpected_ack))}
-export CALLS UNEXPECTED_ACK
+RUNNER_STATE={shlex.quote(runner_state)}
+GUEST_STATUS={guest_status}
+export CALLS UNEXPECTED_ACK RUNNER_STATE GUEST_STATUS
 recovery_benches=(fixture-bench)
 recovery_clone_names=(cloudbench-fixture)
 recovery_machine_ids=({machine_id})
@@ -10380,7 +10393,7 @@ cloudbench_fetch_guest_evidence() {{
   local result_variable="$1" remote_path="$4" local_path="$5"
   case "$remote_path" in
     /cloudbench-interrupt-cleanup-*.status)
-      printf 'version=1\\ntoken={runner_token}\\nstate=failed\\n' > "$local_path"
+      printf 'version=1\\ntoken={runner_token}\\nstate={runner_state}\\n' > "$local_path"
       ;;
     /cloudbench-guest-state-*.json)
       printf '{{}}\\n' > "$local_path"
@@ -10401,12 +10414,17 @@ cloudbench_fetch_guest_evidence() {{
 FLY() {{
   printf 'fly %s\\n' "$*" >> "$CALLS"
 }}
+curl() {{
+  printf 'shutdown-health %s\\n' "$GUEST_STATUS" >> "$CALLS"
+  printf '%s' "$GUEST_STATUS"
+}}
 cloudbench_publish_guest_shutdown_confirmation() {{
   [ ! -e "$1/guest-shutdown.confirmed" ] || return 1
   printf '%s\\n' "$2" > "$1/guest-shutdown.confirmed"
   printf 'publish-confirmation\\n' >> "$CALLS"
 }}
-{recover}
+    {shutdown_status}
+    {recover}
 cloudbench_recover_guest_cleanup_receipts \
   {shlex.quote(str(tmp_path / "ownership" / owner))}
 """
@@ -10420,12 +10438,51 @@ cloudbench_recover_guest_cleanup_receipts \
 
     assert result.returncode == 0, result.stderr + result.stdout
     call_lines = calls.read_text().splitlines()
-    assert call_lines[:2] == ["classify-runner-receipt", "fly ssh console -a bench-app --machine deadbeef000001 -C rm -f '/data/cloudbench-guest-recovery.py'"]
-    assert "recover-runner-receipt" not in call_lines
-    assert "cleanup-provider-sessions" in call_lines
+    assert call_lines[0] == (
+        "validate-recovery-receipt" if preexisting_runner_receipt
+        else "classify-runner-receipt"
+    )
+    if guest_status == 204 and runner_state == "clean":
+        assert "recover-runner-receipt" in call_lines
+        assert "cleanup-provider-sessions" not in call_lines
+        assert not any(line.startswith("fly ") for line in call_lines)
+    else:
+        assert any(line.startswith("fly ssh console -a bench-app --machine deadbeef000001") for line in call_lines)
+        assert "recover-runner-receipt" not in call_lines
+        assert "cleanup-provider-sessions" in call_lines
     assert call_lines[-1] == "publish-confirmation"
     assert not unexpected_ack.exists()
     assert (output / "guest-shutdown.confirmed").read_text() == "fixture-run\n"
+    if preexisting_runner_receipt:
+        assert json.loads(
+            (output / "guest-cleanup.runner-receipt.json").read_text()
+        )["kind"] == "runner-cleanup"
+
+
+def test_failed_runner_receipt_enters_exact_cleanup_without_authorizing_ack(
+    tmp_path: Path,
+) -> None:
+    _exercise_runner_receipt_recovery(tmp_path, "failed")
+
+
+def test_clean_runner_receipt_cannot_ack_failed_guest_stack(
+    tmp_path: Path,
+) -> None:
+    _exercise_runner_receipt_recovery(tmp_path, "clean")
+
+
+def test_clean_runner_receipt_uses_verified_guest_stack_ack(
+    tmp_path: Path,
+) -> None:
+    _exercise_runner_receipt_recovery(tmp_path, "clean", guest_status=204)
+
+
+def test_preexisting_runner_receipt_cannot_ack_failed_guest_stack(
+    tmp_path: Path,
+) -> None:
+    _exercise_runner_receipt_recovery(
+        tmp_path, "clean", preexisting_runner_receipt=True
+    )
 
 
 def test_exact_provider_cleanup_uses_only_manifest_sessions_and_is_idempotent(

@@ -243,11 +243,12 @@ trace evidence; input dumps, attempts, and aggregate counters alone do not prove
 success. Do not add calls or alter tasks to reach the minimum. Infrastructure
 failures during execution, evaluation, artifact collection, or teardown prevent
 credit even when a task verdict exists. Verify each slice's exact resource
-cleanup and ten durable FE/LLM evidence bundles before advancing. Keep the normal
-7,200-second execution backstop for counted slices; the temporary 300-second
-diagnostic on 2026-09-29 was not credited because it interrupted several agents
-before their third LLM response. Set both the environment and CLI backstop to
-7,200 seconds for the counted proof. These are proof acceptance requirements, not
+cleanup and ten durable FE/LLM evidence bundles before advancing. The normal
+execution backstop is 7,200 seconds. The user's temporary 300-second validation
+backstop can count only when every bench still has at least three completed LLM
+responses, a real evaluator result, and full cleanup/evidence; an interrupted
+diagnostic that misses those requirements earns no credit. Restore the normal
+backstop after this validation. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
 For the current accelerated validation, the user explicitly requested a
 temporary 300-second benchmark execution limit and a separate 30-minute hard
@@ -272,6 +273,17 @@ change that can reduce the slice's end-to-end wall clock by more than 5% without
 changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
 streak on a clean commit; forensic recovery never retroactively grants credit.
+The 2026-09-29 smoke-inclusive candidate `20260929-161610-10375` earned no
+credit: the planner benchmark root reported clean interrupt handling but its
+stack cleanup failed, leaving a worker alive and no guest ACK. The recovery
+path formerly mistook that narrower runner receipt for whole-guest cleanup and
+waited 600 seconds for runtime evidence after the guest reported terminal HTTP
+500. See `docs/rca/cases/2026-09-29-runner-receipt-accepted-before-stack-cleanup.md`.
+Never release its exact pool claims or start another slice until stale-owner
+recovery verifies the guest and provider state. The planner pool VM also showed
+roughly 40–50% CPU pressure during its slow boot versus about 0–1% on comparable
+active VMs; inspect or replace that host-bound pool member before counting a
+fresh streak.
 
 Fly's legacy `cloudbench-warm` donor has a 40 GB volume, although current
 `run-bench-cloud --setup` defaults to 20 GB. Snapshot clones inherit the donor

@@ -6737,6 +6737,12 @@ finally:
 PY
 }
 
+cloudbench_guest_shutdown_status() {  # <status-proxy-port>
+    curl --noproxy '*' -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+        -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+        "http://127.0.0.1:$1/shutdown-health" 2>/dev/null || true
+}
+
 start_data_plane_proxy() {
     cloudbench_start_data_plane_proxy "$@"
 }
@@ -6902,7 +6908,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
     local state_driver state_descendants state_reason fetch_spec remote_path
     local local_path maximum status_code machine_status_evidence stopped_proof
     local machine_status_temporary stopped_verified remote_zero zero_evidence
-    local runner_lifecycle debug_manifest_status
+    local runner_lifecycle debug_manifest_status receipt_kind archived_runner_receipt
     local -a identity_args validation_args
     owner="${owner##*/}"
     [ -s "$EXACT_SESSION_CLEANUP_HELPER" ] || {
@@ -6972,15 +6978,51 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         fi
 
         if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-            if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                validate-recovery-receipt "${validation_args[@]}" \
-                && cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
-                recovered=$((recovered + 1))
+            if ! python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                    validate-recovery-receipt "${validation_args[@]}"; then
+                echo "❌ [$bench] existing guest cleanup recovery receipt is invalid" >&2
+                failed=1
                 continue
             fi
-            echo "❌ [$bench] existing guest cleanup recovery receipt is invalid" >&2
-            failed=1
-            continue
+            receipt_kind="$(python3 - "$receipt" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["kind"])
+PY
+)" || {
+                echo "❌ [$bench] existing guest cleanup recovery kind is unreadable" >&2
+                failed=1
+                continue
+            }
+            if [ "$receipt_kind" = runner-cleanup ] \
+                && { [ "$machine_state" != started ] \
+                    || [ "$(cloudbench_guest_shutdown_status "$proxy_port")" != 204 ]; }; then
+                # A clean benchmark root receipt does not prove that run.sh
+                # stopped its workers or sealed browser recordings. Retain the
+                # runner evidence, then continue through exact guest recovery.
+                archived_runner_receipt="$output/guest-cleanup.runner-receipt.json"
+                if [ -e "$archived_runner_receipt" ] || [ -L "$archived_runner_receipt" ]; then
+                    if [ -L "$archived_runner_receipt" ] \
+                        || ! cmp -s "$receipt" "$archived_runner_receipt" \
+                        || ! rm -f "$receipt"; then
+                        echo "❌ [$bench] prior runner receipt cannot be archived safely" >&2
+                        failed=1
+                        continue
+                    fi
+                elif ! mv "$receipt" "$archived_runner_receipt"; then
+                    echo "❌ [$bench] runner receipt cannot be archived safely" >&2
+                    failed=1
+                    continue
+                fi
+                echo "🧭 [$bench] clean runner receipt lacks guest stack acknowledgement; performing exact cleanup"
+            else
+                if cloudbench_publish_guest_shutdown_confirmation "$output" "$RUN_ID"; then
+                    recovered=$((recovered + 1))
+                    continue
+                fi
+                echo "❌ [$bench] existing guest cleanup recovery receipt cannot be published" >&2
+                failed=1
+                continue
+            fi
         fi
 
         runner_status_code=404
@@ -7001,19 +7043,23 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
                 }
                 case "$runner_lifecycle" in
                     clean)
-                        if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                                recover-runner-receipt "${identity_args[@]}" \
-                                --source "$runner_evidence" --receipt "$receipt" \
-                            && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
-                                validate-recovery-receipt "${validation_args[@]}" \
-                            && cloudbench_publish_guest_shutdown_confirmation \
-                                "$output" "$RUN_ID"; then
-                            recovered=$((recovered + 1))
+                        if [ "$machine_state" = started ] \
+                            && [ "$(cloudbench_guest_shutdown_status "$proxy_port")" = 204 ]; then
+                            if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                                    recover-runner-receipt "${identity_args[@]}" \
+                                    --source "$runner_evidence" --receipt "$receipt" \
+                                && python3 "$EXACT_SESSION_CLEANUP_HELPER" \
+                                    validate-recovery-receipt "${validation_args[@]}" \
+                                && cloudbench_publish_guest_shutdown_confirmation \
+                                    "$output" "$RUN_ID"; then
+                                recovered=$((recovered + 1))
+                                continue
+                            fi
+                            echo "❌ [$bench] positive runner cleanup receipt is invalid" >&2
+                            failed=1
                             continue
                         fi
-                        echo "❌ [$bench] positive runner cleanup receipt is invalid" >&2
-                        failed=1
-                        continue
+                        echo "🧭 [$bench] runner cleanup is clean but guest stack acknowledgement is absent; performing exact cleanup"
                         ;;
                     pending|failed)
                         echo "🧭 [$bench] runner cleanup state is $runner_lifecycle; performing exact cleanup"

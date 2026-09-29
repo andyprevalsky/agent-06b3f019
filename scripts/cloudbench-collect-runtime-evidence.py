@@ -36,6 +36,7 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect
 headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
            "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
 url = f"http://127.0.0.1:{port}/runtime-evidence"
+shutdown_url = f"http://127.0.0.1:{port}/shutdown-health"
 def request(suffix=""):
     return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=6)
 def manifest():
@@ -54,6 +55,18 @@ while True:
     except urllib.error.HTTPError as error:
         if error.code != 409:
             raise
+        # A 409 is normal while the guest drains, but the same authenticated
+        # guest can already know that its driver exited without a cleanup ACK.
+        # That terminal state can never publish runtime evidence, so fail closed
+        # now instead of consuming the full recovery deadline.
+        try:
+            with opener.open(urllib.request.Request(shutdown_url, headers=headers), timeout=6) as response:
+                assert response.status in (202, 204)
+        except urllib.error.HTTPError as shutdown_error:
+            if shutdown_error.code == 500:
+                raise RuntimeError("driver exited without cleanup acknowledgement") from shutdown_error
+            if shutdown_error.code not in (409, 503):
+                raise
         time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]

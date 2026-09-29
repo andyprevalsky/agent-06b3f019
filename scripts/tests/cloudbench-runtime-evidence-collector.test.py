@@ -22,7 +22,8 @@ assert MATCH, "production collector function was not found"
 COLLECTOR = MATCH.group()
 
 
-def exercise(*, seal_after: int, deadline: int, file_delay: float, recovery: bool = False):
+def exercise(*, seal_after: int, deadline: int, file_delay: float,
+             recovery: bool = False, terminal_cleanup_failure: bool = False):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
         "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}).encode(),
@@ -52,6 +53,11 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float, recovery: boo
             assert self.headers.get("X-Cloudbench-Run-Token") == token
             assert self.headers.get("X-Cloudbench-Machine-Id") == machine
             parts = urlsplit(self.path)
+            if parts.path == "/shutdown-health":
+                self.send_error(500 if terminal_cleanup_failure else 202,
+                                "driver exited without cleanup acknowledgement"
+                                if terminal_cleanup_failure else "cleanup pending")
+                return
             assert parts.path == "/runtime-evidence"
             if not parts.query:
                 manifest_calls += 1
@@ -87,11 +93,19 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float, recovery: boo
                 ["bash", "-c", command, "collector-test", str(destination),
                  str(server.server_port), token, machine, str(deadline)]
             )
+            started = time.monotonic()
             result = subprocess.run(
                 argv,
                 env={**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "test-secret"},
                 capture_output=True, text=True, timeout=deadline + 5,
             )
+            elapsed = time.monotonic() - started
+            if terminal_cleanup_failure:
+                assert result.returncode != 0
+                assert "driver exited without cleanup acknowledgement" in result.stderr
+                assert elapsed < 1.5, elapsed
+                assert not (destination / "runtime-evidence").exists()
+                return
             if seal_after < 100:
                 assert result.returncode == 0, result.stderr[-600:]
                 capture = destination / "runtime-evidence"
@@ -126,9 +140,15 @@ def test_recovery_collector_keeps_pending_on_timeout():
     exercise(seal_after=1000, deadline=1, file_delay=0, recovery=True)
 
 
+def test_recovery_collector_stops_on_terminal_cleanup_failure():
+    exercise(seal_after=1000, deadline=3, file_delay=0, recovery=True,
+             terminal_cleanup_failure=True)
+
+
 if __name__ == "__main__":
     test_delayed_seal_then_complete_transfer()
     test_unsealed_guest_fails_closed_at_deadline()
     test_recovery_collector_after_delayed_seal()
     test_recovery_collector_keeps_pending_on_timeout()
+    test_recovery_collector_stops_on_terminal_cleanup_failure()
     print("PASS: terminal collector waits for exact seal, transfers, and fails closed on timeout")
