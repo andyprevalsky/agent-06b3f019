@@ -621,7 +621,10 @@ def verify_interrupted_pool_evidence(
                         verify_prestart_provider_archive(
                             out, row, provider,
                             archived[prefix + "repo/.context/cloudbench/logs/backend.log"])
-                    elif provider["kind"] in {"provider-exact-manifest", "provider-zero-manifest"}:
+                    elif provider["kind"] in {
+                        "provider-exact-manifest", "provider-zero-manifest",
+                        "provider-rootless-sms-zero-manifest",
+                    }:
                         assert services["status"] == "stopped"
                         assert "original/repo/.context/cloudbench/run.json" in row["files"]
                         verify_quiesced_provider_archive(
