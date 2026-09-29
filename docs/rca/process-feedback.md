@@ -75,6 +75,14 @@ to the persistent memory store; case ids refer to `docs/rca/cases/`.
    default for ALL injected state." Point fixes leave the siblings broken.
    Source: `memory:feedback_descend_no_contract_relaxation` (H-04).
 
+8a. **If the first-bad write killed the agent, stop killing — do not add a
+recover-after-death path as the product fix.** Showing cutover-FAILED
+agents in SMS context so a late `approve` can restart them was rejected:
+the question is why force-clear marked the parent FAILED.
+Why: a recovery fallback leaves the next deploy still able to randomly
+kill parked approval-waits. Replace onto the live generation instead.
+Source: `2026-09-29-force-clear-kills-approval-blocked-cutover-stragglers`.
+
 9. **Never disable a linter or type-checker to clear a gate.** No
    `eslint-disable`, `@ts-ignore`, `@ts-expect-error`, `# noqa`, `# type: ignore`,
    `ruff: noqa`. Remove existing disables in files you touch.
@@ -97,15 +105,15 @@ to the persistent memory store; case ids refer to `docs/rca/cases/`.
     Source: `memory:feedback_never_truncate_prompts`, CLAUDE.md rule 13.
 
 11a. **Before a prompt edit, climb one level of abstraction deeper.** Name the
-    problem class, then try a more general solution that would eliminate that
-    class — or the class of class, or the class of class of class. Only stop
-    when the more general solution **fails to be coherent**. Record the
-    next-deeper class you tried and the one-sentence reason it failed.
-    Why: prompt tokens that name the incident, the benchmark, or one captured
-    miss overfit the instance and leave the class intact. The failed deeper
-    attempt is the anti-overfit proof; without it the Problem is too specific
-    to edit a prompt against.
-    Source: `/RCA` Step 5b, user instruction 2026-09-09.
+problem class, then try a more general solution that would eliminate that
+class — or the class of class, or the class of class of class. Only stop
+when the more general solution **fails to be coherent**. Record the
+next-deeper class you tried and the one-sentence reason it failed.
+Why: prompt tokens that name the incident, the benchmark, or one captured
+miss overfit the instance and leave the class intact. The failed deeper
+attempt is the anti-overfit proof; without it the Problem is too specific
+to edit a prompt against.
+Source: `/RCA` Step 5b, user instruction 2026-09-09.
 
 ## C. How to prove it
 
