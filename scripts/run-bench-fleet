@@ -7749,6 +7749,39 @@ if source_manifest is not None and not expected and not parents and not index:
     # has no clone topology. Its byte-bound source proof still names the sole
     # external root; no resource ownership is inferred from that source.
     roots = {source_manifest.get("machine_id")}
+if source_manifest is None and roots:
+    # Autoscaler workers can be fresh clones of several already-claimed pool
+    # primaries. Those primaries are each protected by their exact pool claim;
+    # there is no single warm donor to resolve for recovery. Admit this shape
+    # only when every topology root is an exact claimed pool record of this
+    # owner. Fresh children are still reaped by their own clone ledger below.
+    pool = audit / "pool"
+    if not plain_directory(pool):
+        raise ValueError("unsafe exact recovery pool source directory")
+    if (registry / "source-manifest.json").exists() or (audit / "source-manifest.json").exists():
+        raise ValueError("unbound exact recovery source manifest")
+    if (registry / "source-manifest.json").is_symlink() or (audit / "source-manifest.json").is_symlink():
+        raise ValueError("unsafe exact recovery source manifest")
+    pool_bound = True
+    for machine_id in roots:
+        record = pool / machine_id
+        if not regular_file(record):
+            pool_bound = False
+            break
+        value = fields(record)
+        if (value.get("version") != "1"
+                or value.get("fleet_owner_token") != owner
+                or value.get("run_id") != meta["run_id"]
+                or value.get("app") != expected_app
+                or value.get("source") != "borrowed-pool"
+                or value.get("machine_id") != machine_id
+                or value.get("disposition") != "claimed"
+                or re.fullmatch(r"vol_[A-Za-z0-9]+", value.get("volume_id", "")) is None):
+            pool_bound = False
+            break
+    if pool_bound:
+        print("__POOL_BOUND__")
+        raise SystemExit(0)
 if len(roots) != 1:
     raise ValueError("exact owner does not identify one external source root")
 root = next(iter(roots))
@@ -7767,6 +7800,11 @@ for machine_id in parents:
 print(root)
 PY
 )" || return 1
+    if [ "$source_id" = "__POOL_BOUND__" ]; then
+        # The exact owned pool ledger protects every external source; there is
+        # no separate warm Machine/Volume pair for this recovery invocation.
+        return 0
+    fi
     case "$source_id" in ''|*[!0-9a-f]*) return 1 ;; esac
     volume_id="$(machine_volume_id "$source_id")" || return 1
     case "$volume_id" in ''|*[!a-zA-Z0-9_-]*) return 1 ;; esac
@@ -9205,6 +9243,8 @@ if [ "$RECOVER_STALE_ONLY" = "1" ]; then
         [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
     fi
     warm_pair=""
+    WARM_ID=""
+    WARM_VOLUME_ID=""
     if exact_recovery_is_pool_only "$recovery_registry" 2>/dev/null; then
         # Pool claims bind their own Machine and Volume identities. No donor
         # topology was allocated by this owner, so no warm source exists to
