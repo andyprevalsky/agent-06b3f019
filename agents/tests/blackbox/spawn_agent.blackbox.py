@@ -3948,7 +3948,7 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
 
 async def test_handler_for_each_drain_handoff_reraises_instead_of_failing_children():
     """Cutover during for_each drain must not mark parked children failed."""
-    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from helpers.generation_handoff import GenerationHandoffRequested
     from tools.base import MessageStatus
     import domains.spawn_agent.handler as h
 

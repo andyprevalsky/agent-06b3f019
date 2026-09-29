@@ -318,18 +318,30 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from tools.base import MessageStatus
 
+    wf = _FakeWorkflow(has_new_messages=False)
+    activity_names: list[str] = []
+
     class _WaitFake(_FakeWorkflowModule):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._now = datetime(2026, 9, 29, tzinfo=timezone.utc)
+            self._waits = 0
 
         def now(self):
             return self._now
 
+        async def execute_activity(self, fn, args=None, **kwargs):
+            activity_names.append(getattr(fn, "__name__", "?"))
+            return await super().execute_activity(fn, args=args, **kwargs)
+
         async def wait_condition(self, predicate, timeout=None):
-            # Advance past the 15m SMS fallback so the helper re-raises TimeoutError.
-            self._now = self._now + timedelta(minutes=16)
-            raise TimeoutError("no response")
+            self._waits += 1
+            if self._waits == 1:
+                # Advance past the 15m SMS fallback so the helper re-raises.
+                self._now = self._now + timedelta(minutes=16)
+                raise TimeoutError("no response")
+            wf._has_new_messages = True
+            return
 
     fake = _WaitFake(
         activity_results={
@@ -339,28 +351,18 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
     )
     restore = _patch_handler_workflow(fake)
     try:
-        wf = _FakeWorkflow(has_new_messages=False)
-
-        # Simulate that after first wait (timeout) we "have" a message so the
-        # second wait in step 5 short-circuits via `if not _has_new_messages`.
-        async def _run():
-            gen = SendMessageToUserManager().execute_tool(
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
                 workflow_instance=wf,
                 tool_call={"message": "Ready?", "is_question": True},
                 tool_call_id="tc-non-sms",
             )
-            events = []
-            async for e in gen:
-                # Set new_messages to True before step 5 runs
-                wf._has_new_messages = True
-                events.append(e)
-            return events
-
-        events = await _run()
+        )
     finally:
         restore()
 
     assert events[-1].status == MessageStatus.FINISHED
+    assert "notify_sms_event_activity" in activity_names
 
 
 async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
@@ -372,21 +374,33 @@ async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
     from temporalio.exceptions import TimeoutType
     from tools.base import MessageStatus
 
+    wf = _FakeWorkflow(has_new_messages=False)
+    activity_names: list[str] = []
+
     class _WaitFake(_FakeWorkflowModule):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._now = datetime(2026, 9, 29, tzinfo=timezone.utc)
+            self._waits = 0
 
         def now(self):
             return self._now
 
+        async def execute_activity(self, fn, args=None, **kwargs):
+            activity_names.append(getattr(fn, "__name__", "?"))
+            return await super().execute_activity(fn, args=args, **kwargs)
+
         async def wait_condition(self, predicate, timeout=None):
-            self._now = self._now + timedelta(minutes=16)
-            raise TemporalTimeoutError(
-                "timed out",
-                type=TimeoutType.START_TO_CLOSE,
-                last_heartbeat_details=(),
-            )
+            self._waits += 1
+            if self._waits == 1:
+                self._now = self._now + timedelta(minutes=16)
+                raise TemporalTimeoutError(
+                    "timed out",
+                    type=TimeoutType.START_TO_CLOSE,
+                    last_heartbeat_details=(),
+                )
+            wf._has_new_messages = True
+            return
 
     fake = _WaitFake(
         activity_results={
@@ -396,25 +410,18 @@ async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
     )
     restore = _patch_handler_workflow(fake)
     try:
-        wf = _FakeWorkflow(has_new_messages=False)
-
-        async def _run():
-            gen = SendMessageToUserManager().execute_tool(
+        events = await _collect_events(
+            SendMessageToUserManager().execute_tool(
                 workflow_instance=wf,
                 tool_call={"message": "Ready?", "is_question": True},
                 tool_call_id="tc-temporal-timeout",
             )
-            events = []
-            async for e in gen:
-                wf._has_new_messages = True
-                events.append(e)
-            return events
-
-        events = await _run()
+        )
     finally:
         restore()
 
     assert events[-1].status == MessageStatus.FINISHED
+    assert "notify_sms_event_activity" in activity_names
 
 
 async def test_handler_non_sms_fallback_handoff_closes_finished_and_reraises():
