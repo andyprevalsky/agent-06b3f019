@@ -1257,7 +1257,7 @@ async def test_handler_condition_leftover_child_without_root_goal_honors_sleep()
         restore()
 
     assert evals["n"] == 2
-    assert 600 in fake.sleep_records, (
+    assert sum(fake.sleep_records) == 600, (
         f"leftover child skipped inter-check sleep; sleep_records={fake.sleep_records!r}"
     )
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
