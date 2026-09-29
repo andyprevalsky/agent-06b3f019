@@ -339,8 +339,11 @@ def verify_started_pool_evidence(
             assert receipt["machine_id"] == row["machine_id"]
             assert receipt["fleet_owner_token"] == owner
             assert receipt["fleet_run_id"] == meta["run_id"]
+            assert stopped["machine_status_sha256"] == hashlib.sha256(
+                regular_bytes(out / "guest-cleanup.machine-status.txt", 1048576)
+            ).hexdigest()
             assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
-                regular_bytes(out / "guest-cleanup.machine-stopped.json", 1048576)
+                json.dumps(stopped, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
             assert native_machines[row["machine_id"]]["state"] == "stopped"
         results = archived_runs[name].get("tasks")
