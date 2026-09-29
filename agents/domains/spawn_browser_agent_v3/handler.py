@@ -8735,7 +8735,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             score=score,
                         )
                         verifier_soft_accepted = True
-                        score = 1.0
+                        score = 1.0  # branch gate only; display uses original score
                         v_reasoning = (
                             "Identical verifier reject circuit: completing "
                             "unverified with already-populated structured "
@@ -8746,9 +8746,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         identical_verifier_reject_fingerprint = ""
                         identical_verifier_reject_streak = 0
 
+                    display_score = (
+                        soft_accept_original_score
+                        if verifier_soft_accepted
+                        else float(score or 0.0)
+                    )
+                    progress_title = f"\u2696\ufe0f Progress: {display_score * 100:.0f}%"
+                    if verifier_soft_accepted:
+                        progress_title += " (unverified)"
+
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        title=f"\u2696\ufe0f Progress: {score * 100:.0f}%",
+                        title=progress_title,
                         task_id=task_id,
                         message=v_reasoning,
                         status=MessageStatus.FINISHED,
@@ -8758,7 +8767,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     if browser_recorder:
                         await browser_recorder.mark(
-                            f"Verifier progress: {score * 100:.0f}%",
+                            f"Verifier progress: {display_score * 100:.0f}%"
+                            + (" (unverified)" if verifier_soft_accepted else ""),
                             action="verify",
                         )
 

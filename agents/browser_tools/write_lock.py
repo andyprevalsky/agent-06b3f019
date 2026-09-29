@@ -766,7 +766,29 @@ def extract_amazon_return_approval_fields(page_text: str) -> dict[str, str]:
             )
             option_end = min(next_start, match.end() + 40)
             window = text[match.start() : option_end].lower()
-            if "checked" in window or "selected" in window or "pressed" in window:
+            # Reject negated markers (unchecked / aria-checked=false / not selected).
+            has_selection = False
+            for marker in re.finditer(
+                r"\b(checked|selected|pressed)\b",
+                window,
+            ):
+                token = marker.group(1)
+                start = marker.start()
+                prefix = window[max(0, start - 12) : start]
+                if token == "checked" and (
+                    prefix.endswith("un")
+                    or "checked=false" in window[start : start + 14]
+                    or "checked=\"false\"" in window[start : start + 16]
+                    or "checked='false'" in window[start : start + 16]
+                ):
+                    continue
+                if token == "selected" and (
+                    prefix.endswith("un") or prefix.rstrip().endswith("not")
+                ):
+                    continue
+                has_selection = True
+                break
+            if has_selection:
                 fields["drop_off"] = re.sub(r"\s+", " ", match.group(1)).strip(" -:")
                 break
         # Do not guess the first listed drop-off from "no box" alone — multiple

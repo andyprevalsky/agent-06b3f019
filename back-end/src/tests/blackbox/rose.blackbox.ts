@@ -2343,10 +2343,7 @@ async function testClaudeAuth_omitsEffortForHaiku() {
     miniOc === undefined || miniOc.effort === undefined,
     'haiku must not receive output_config.effort'
   );
-  assert(
-    mini.thinking === undefined,
-    'haiku must not receive thinking.type=adaptive'
-  );
+  assert(mini.thinking === undefined, 'haiku must not receive thinking.type=adaptive');
 
   const flash = buildAnthropicBody({
     poolSpec: getPool('rose-1-flash'),
