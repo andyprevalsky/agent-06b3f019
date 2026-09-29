@@ -112,6 +112,14 @@ can release any claim. A live recovery and
 ten consecutive complete slices are still required before this case can be
 marked fixed.
 
+The interrupted run's original archive passed exact-owner/native verification
+with zero proof credit and returned all ten stopped pool claims. The planner's
+boot held the synchronized slice barrier roughly eight minutes longer than
+its peers while its shared CPU showed sustained pressure. It now receives the
+existing 8GB/shared-CPU-4x primary shape for real execution, reusing a 20GB
+pool volume through the already verified dynamic resize path. The next slice
+will measure whether that removes at least five percent of full E2E time.
+
 At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or
 providers. In the observed terminal state, the collector's futile wait falls

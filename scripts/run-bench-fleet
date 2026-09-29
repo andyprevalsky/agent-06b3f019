@@ -825,7 +825,11 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
         [ "$browser_task" = "$1" ] && return 0
     done
     case "$1" in
-        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
+        # On the first smoke-inclusive 10-wide slice this planner VM spent
+        # roughly eight extra minutes booting under sustained CPU pressure,
+        # holding the synchronized barrier for every other benchmark. The
+        # large primary only changes VM resources, not the task or evaluator.
+        planner-memory-blue-bottle-on|agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
             return 0
             ;;
     esac

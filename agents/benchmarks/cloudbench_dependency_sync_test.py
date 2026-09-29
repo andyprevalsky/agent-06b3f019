@@ -8612,9 +8612,9 @@ def test_large_primary_provisioning_uses_only_a_matching_pool_shape() -> None:
     wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
     phase1 = fleet[prov:wait_all]
     assert 'bench_uses_default_pool_shape "$bench"' in phase1
-    assert 'pcid="$(claim_pool_machine)"' in phase1
+    assert 'pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"' in phase1
     assert 'clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory"' in phase1
-    assert phase1.index('bench_uses_default_pool_shape "$bench"') < phase1.index('pcid="$(claim_pool_machine)"')
+    assert phase1.index('bench_uses_default_pool_shape "$bench"') < phase1.index('pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"')
 
     shape_helpers = _fleet_primary_shape_helpers(fleet)
     result = subprocess.run(
@@ -8634,6 +8634,30 @@ bench_uses_default_pool_shape agent-payment-setup-resume || exit 4
         text=True, capture_output=True, check=False, timeout=5,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_planner_primary_resizes_only_for_real_benchmark() -> None:
+    """CPU-bound planner boot can reuse a pool volume with a larger guest VM."""
+    helpers = _fleet_primary_shape_helpers(FLEET_SCRIPT.read_text())
+    script = f"""set -eu
+CATALOG_BROWSER_REQUIRED_TASKS=()
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+FLEET_PRIMARY_VM_MEMORY=4096
+FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
+FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+{helpers}
+[ "$(primary_vm_size_for_bench planner-memory-blue-bottle-on)" = shared-cpu-4x ]
+[ "$(primary_vm_memory_for_bench planner-memory-blue-bottle-on)" = 8192 ]
+bench_uses_default_pool_shape planner-memory-blue-bottle-on
+INFRA_PROBE=1
+[ "$(primary_vm_size_for_bench planner-memory-blue-bottle-on)" = shared-cpu-2x ]
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
