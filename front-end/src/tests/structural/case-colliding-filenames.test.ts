@@ -25,7 +25,10 @@ describe('front-end source filenames are unique under case-insensitive FS', () =
   it('has no two files in the same directory that differ only by case', () => {
     const collisions: string[] = [];
     for (const dir of walkDirs(SRC_DIR)) {
-      const names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name);
+      const names = fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => e.name);
       const byLower = new Map<string, string[]>();
       for (const name of names) {
         const key = name.toLowerCase();
