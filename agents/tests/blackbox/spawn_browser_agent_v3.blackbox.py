@@ -20627,6 +20627,55 @@ def test_compact_browser_turn_messages_drops_leading_orphan_tool():
     assert state["browser_turn_messages"][0].get("role") != "tool"
 
 
+def test_browser_resume_keeps_auth_attempts_and_task_summary():
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_resume_continuity_state,
+        _copy_browser_resume_continuity_fields,
+        _restore_browser_auth_attempts,
+    )
+    from domains.spawn_browser_agent_v3.service import AuthRuntimeState
+
+    class _History:
+        def get_entries(self):
+            return [{"step": 3, "action": "request_payment_card", "result": {"success": True}}]
+
+    before = AuthRuntimeState.from_auth_options(
+        {
+            "passwords": [{"id": "password-1"}, {"id": "password-2"}],
+            "email_otp": {"available": True, "attemptable": True},
+        }
+    )
+    before.mark_credential_ref({"kind": "password", "id": "password-1"})
+    before.mark_credential_ref({"kind": "email_otp"})
+    before.observe_clicked_element_text("Continue as guest")
+    saved = _browser_resume_continuity_state(
+        action_history=_History(),
+        visited_urls=["https://shop.example/checkout"],
+        verifier_checkpoints=[],
+        browser_turn_messages=[{"role": "assistant", "content": "I requested the card."}],
+        reasoning_messages=["I saw the approved order."],
+        action_summary=["requested the one-time payment card"],
+        auth_runtime_state=before,
+    )
+    resumed = {"approval_type": "payment"}
+    _copy_browser_resume_continuity_fields(saved, resumed)
+    assert resumed["reasoning_messages"] == ["I saw the approved order."]
+    assert resumed["action_summary"] == ["requested the one-time payment card"]
+    assert resumed["auth_attempts"]["password"]["attempted_ids"] == ["password-1"]
+    after = AuthRuntimeState.from_auth_options(
+        {
+            "passwords": [{"id": "password-1"}, {"id": "password-3"}],
+            "email_otp": {"available": True, "attemptable": True},
+        }
+    )
+    _restore_browser_auth_attempts(after, resumed["auth_attempts"])
+    assert after.passwords_attempted == {"password-1"}
+    assert after.email_otp_attempted is True
+    assert after.guest_option_seen is True
+    assert after.guest_attempted is True
+    assert after.user_assistance_guard()[0] is False  # password-3 remains untried
+
+
 def test_compact_browser_turn_messages_strips_embedded_screenshots():
     """Resume compaction must strip base64 screenshot media from turn payloads."""
     from domains.spawn_browser_agent_v3.handler import (
@@ -20809,6 +20858,10 @@ async def run_all_tests():
     r.record(
         "payment_card_verifier_evidence_links_approved_request",
         test_payment_card_verifier_evidence_links_approved_request_without_secrets,
+    )
+    r.record(
+        "browser_resume_keeps_auth_attempts_and_task_summary",
+        test_browser_resume_keeps_auth_attempts_and_task_summary,
     )
     await r.record_async(
         "approved_payment_request_reaches_verifier",

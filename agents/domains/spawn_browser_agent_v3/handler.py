@@ -825,6 +825,9 @@ def _browser_resume_continuity_state(
     visited_urls: List[str],
     verifier_checkpoints: List[Dict[str, Any]],
     browser_turn_messages: Optional[List[Dict[str, Any]]] = None,
+    reasoning_messages: Optional[List[str]] = None,
+    action_summary: Optional[List[str]] = None,
+    auth_runtime_state: Optional[AuthRuntimeState] = None,
 ) -> Dict[str, Any]:
     """Serialize compact, browser-sourced continuity for a resumed activity."""
     from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
@@ -837,7 +840,35 @@ def _browser_resume_continuity_state(
         "visited_urls": list(visited_urls[-30:]),
         "verifier_checkpoints": list(verifier_checkpoints[-VERIFIER_CHECKPOINT_MAX:]),
         "browser_turn_messages": compact_turns,
+        "reasoning_messages": list((reasoning_messages or [])[-20:]),
+        "action_summary": list((action_summary or [])[-20:]),
+        "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
     }
+
+
+def _restore_browser_auth_attempts(state: AuthRuntimeState, snapshot: Any) -> None:
+    """Restore attempted paths only; current realm credentials remain authoritative."""
+    if not isinstance(snapshot, dict):
+        return
+    password = snapshot.get("password")
+    password = password if isinstance(password, dict) else {}
+    attempted_ids = password.get("attempted_ids") or []
+    if isinstance(attempted_ids, list):
+        state.passwords_attempted.update(
+            credential_id
+            for credential_id in attempted_ids
+            if isinstance(credential_id, str) and credential_id in state.password_ids
+        )
+    email_otp = snapshot.get("email_otp")
+    minted = snapshot.get("minted")
+    guest = snapshot.get("guest")
+    email_otp = email_otp if isinstance(email_otp, dict) else {}
+    minted = minted if isinstance(minted, dict) else {}
+    guest = guest if isinstance(guest, dict) else {}
+    state.email_otp_attempted = bool(email_otp.get("attempted"))
+    state.minted_attempted = bool(minted.get("attempted"))
+    state.guest_option_seen = bool(guest.get("option_seen"))
+    state.guest_attempted = bool(guest.get("attempted"))
 
 
 def _resume_context_from_session_info(
@@ -4669,6 +4700,9 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "visited_urls",
     "verifier_checkpoints",
     "browser_turn_messages",
+    "reasoning_messages",
+    "action_summary",
+    "auth_attempts",
 )
 
 
@@ -5646,8 +5680,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # onto the pool constant.
     usage_by_model: Dict[str, Dict[str, int]] = {}
     visited_urls: List[str] = []
-    reasoning_messages: List[str] = []
-    action_summary: List[str] = []
+    reasoning_messages: List[str] = [
+        message
+        for message in ((write_lock_resume_state or {}).get("reasoning_messages") or [])
+        if isinstance(message, str)
+    ][-20:]
+    action_summary: List[str] = [
+        summary
+        for summary in ((write_lock_resume_state or {}).get("action_summary") or [])
+        if isinstance(summary, str)
+    ][-20:]
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
@@ -6534,6 +6576,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # on every later realm transition.
         auth_options = initial_realm_credential_state.auth_options
         auth_runtime_state = initial_realm_credential_state.auth_runtime_state
+        if (
+            write_lock_resume_state
+            and write_lock_resume_state.get("auth_realm") == auth_realm
+            and write_lock_resume_state.get("approval_type") != "auth_assistance"
+        ):
+            _restore_browser_auth_attempts(
+                auth_runtime_state, write_lock_resume_state.get("auth_attempts")
+            )
         passkey_ref_by_credential_id.update(initial_realm_credential_state.passkey_ref_by_credential_id)
         if initial_realm_credential_state.decrypted_passkeys:
             await sync_passkeys_onto_target(
@@ -8146,6 +8196,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
                         browser_turn_messages=browser_turn_messages,
+                        reasoning_messages=reasoning_messages,
+                        action_summary=action_summary,
+                        auth_runtime_state=auth_runtime_state,
                     ),
                 }
 
@@ -9454,6 +9507,9 @@ Based on this feedback, I need to continue working on the task and address the i
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
                         browser_turn_messages=browser_turn_messages,
+                        reasoning_messages=reasoning_messages,
+                        action_summary=action_summary,
+                        auth_runtime_state=auth_runtime_state,
                     ),
                 }
 
@@ -9579,6 +9635,9 @@ Based on this feedback, I need to continue working on the task and address the i
                         visited_urls=visited_urls,
                         verifier_checkpoints=verifier_checkpoints,
                         browser_turn_messages=browser_turn_messages,
+                        reasoning_messages=reasoning_messages,
+                        action_summary=action_summary,
+                        auth_runtime_state=auth_runtime_state,
                     ),
                 }
 

@@ -96,10 +96,35 @@ merchant, currency, total, and line items. The verifier's trusted
 last four. Card number, CVV, user ID, and purchase fingerprint are excluded.
 The same evidence is passed to both normal completion and final synthesis.
 
+The follow-up resume audit found additional worker-local continuity gaps. All
+three real-browser pause paths (payment, write approval, and auth assistance)
+now carry the last 20 reasoning and action-summary entries through their
+existing continuity copy. Payment and write approval also restore the auth
+ladder's attempt markers for the same realm. Auth assistance deliberately
+starts fresh after the user may have changed credentials. Current auth options
+are still reloaded from the
+browser session, so a removed credential is not restored as attemptable. The
+same owning blackbox domain passed after this addition: 1 passed, 0 failed in
+40.2s on the final tree. The exact payment benchmark remains pending.
+
+This is semantic continuity, not a full memory dump. The pause payload already
+limits browser turns to 40, action history and URLs to 30, and verifier
+checkpoints to the configured cap; it replaces embedded screenshots with text
+placeholders. Browser handles and the live page are reconnected and reread.
+OTP plaintext and media are not newly copied into Temporal history. A future
+need for full archival history would require references to external storage,
+not an unbounded activity result.
+Retry and recovery counters still reset with a new activity: carrying failed
+provider/session attempts through a user sign-in or replacement browser session
+could incorrectly block a fresh attempt. This is an intentional session boundary,
+not missing task evidence.
+
 ## Human feedback
 
-No new feedback recorded. The standing deploy instruction forbids timeout,
-prompt, and evaluator changes for this failure.
+The user asked what else the browser drops on resume and stated that task
+context should be preserved. The follow-up audit and bounded continuity change
+above address that feedback. The standing deploy instruction forbids timeout,
+prompt, and evaluator changes for the benchmark failure.
 
 ## Reusable lesson
 
