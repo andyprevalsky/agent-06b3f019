@@ -277,6 +277,10 @@ deletion but has not confirmed a terminal state. If a fleet is canceled before
 its boot-config barrier releases, only the exact stopped-Machine, unreleased
 barrier and preallocated runtime-owner proof can discharge guest cleanup; the
 `guest-never-started.confirmed` receipt is not a benchmark result.
+For a cancellation after guest start, exact-owner recovery must obtain guest
+shutdown acknowledgements and recapture the sealed runtime bundle over each
+machine-pinned status proxy before returning pool members; an interrupted local
+collector must never be mistaken for absent guest work.
 For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
 `CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
 nondefault machine uses its own git-common dependency/snapshot proof file, so

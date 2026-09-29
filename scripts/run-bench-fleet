@@ -657,6 +657,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-run.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker.sh" \
        "$ROOT_DIR/scripts/cloudbench-worker-evidence.py" \
+       "$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py" \
        "$ROOT_DIR/scripts/cloudbench-codex-auth.py" \
        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" \
        "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" \
@@ -736,6 +737,12 @@ EXACT_SESSION_CLEANUP_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-exact-sessi
 GUEST_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-guest-recovery.py"
 VOLUME_MIGRATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py"
 FORENSIC_RETIREMENT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-forensic-retirement.py"
+RUNTIME_EVIDENCE_RECOVERY_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-collect-runtime-evidence.py"
+# An exact owner created before this collector was snapshotted can still be
+# recovered with the committed controller helper. Its admission/run identity
+# and the guest's immutable manifest are verified again below.
+[ -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
+    || RUNTIME_EVIDENCE_RECOVERY_HELPER="$ROOT_DIR/scripts/cloudbench-collect-runtime-evidence.py"
 STALE_OWNER_RECOVERY_PROXY_PIDS=()
 STALE_OWNER_RECOVERY_PORT_LEASE_TOKEN=""
 STALE_OWNER_RECOVERY_PLAN_FILE=""
@@ -7485,6 +7492,31 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
             shutdown_status=$?
         fi
     fi
+    # A cancelled child may lose its local data-plane collector after the guest
+    # sealed shutdown. Reuse the exact recovered proxy while it is still owned
+    # here; later verification must never treat a missing local copy as proof
+    # that the original guest runtime was absent.
+    if [ "$shutdown_status" -eq 0 ]; then
+        for recovery_index in "${!recovery_outputs[@]}"; do
+            output="${recovery_outputs[$recovery_index]}"
+            [ -f "$output/runtime-evidence.pending" ] || continue
+            [ ! -e "$output/remote-logs/runtime-evidence" ] || continue
+            proxy_port="${recovery_proxy_ports[$recovery_index]}"
+            if [ -z "$proxy_port" ] \
+                || [ ! -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
+                || ! mkdir -p "$output/remote-logs" \
+                || ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
+                    "$output/remote-logs" "$proxy_port" \
+                    "${recovery_guest_tokens[$recovery_index]}" \
+                    "${recovery_machine_ids[$recovery_index]}" \
+                    "${CLOUDBENCH_RUNTIME_EVIDENCE_SECONDS:-600}"; then
+                echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
+                shutdown_status=1
+            else
+                echo "✅ [${recovery_benches[$recovery_index]}] sealed runtime evidence recaptured"
+            fi
+        done
+    fi
     if cleanup_stale_owner_recovery_proxies; then
         proxy_cleanup_status=0
     else
@@ -8089,8 +8121,21 @@ import json, os, sys
 from pathlib import Path
 out = Path(sys.argv[1])
 canonical = out / 'cloudbench-run.json'
+captured = out / 'remote-logs/runtime-evidence/run.json'
+if not canonical.exists():
+    # Cancellation can interrupt the child before it publishes its local run
+    # copy. The sealed guest result was already validated for this exact task,
+    # mode and execution provenance immediately above.
+    assert not canonical.is_symlink()
+    temporary = canonical.with_name(canonical.name + '.recovery.tmp')
+    assert not temporary.exists() and not temporary.is_symlink()
+    with temporary.open('xb') as handle:
+        handle.write(captured.read_bytes())
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, canonical)
 assert canonical.is_file() and not canonical.is_symlink()
-assert json.loads(canonical.read_bytes()) == json.loads((out / 'remote-logs/runtime-evidence/run.json').read_bytes())
+assert json.loads(canonical.read_bytes()) == json.loads(captured.read_bytes())
 pending = out / 'runtime-evidence.pending'
 if pending.exists() or pending.is_symlink():
     assert pending.is_file() and not pending.is_symlink()

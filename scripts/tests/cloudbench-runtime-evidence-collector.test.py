@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,7 +22,7 @@ assert MATCH, "production collector function was not found"
 COLLECTOR = MATCH.group()
 
 
-def exercise(*, seal_after: int, deadline: int, file_delay: float):
+def exercise(*, seal_after: int, deadline: int, file_delay: float, recovery: bool = False):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
         "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}).encode(),
@@ -79,9 +80,15 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float):
             for name in ("runtime-evidence.pending", "runtime-evidence.owner.json"):
                 (output / name).write_text(json.dumps(owner))
             command = COLLECTOR + "\ncloudbench_collect_runtime_evidence \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n"
-            result = subprocess.run(
+            argv = (
+                [sys.executable, str(ROOT / "scripts/cloudbench-collect-runtime-evidence.py"),
+                 str(destination), str(server.server_port), token, machine, str(deadline)]
+                if recovery else
                 ["bash", "-c", command, "collector-test", str(destination),
-                 str(server.server_port), token, machine, str(deadline)],
+                 str(server.server_port), token, machine, str(deadline)]
+            )
+            result = subprocess.run(
+                argv,
                 env={**os.environ, "CLOUDBENCH_BARRIER_TOKEN": "test-secret"},
                 capture_output=True, text=True, timeout=deadline + 5,
             )
@@ -111,7 +118,17 @@ def test_unsealed_guest_fails_closed_at_deadline():
     exercise(seal_after=1000, deadline=1, file_delay=0)
 
 
+def test_recovery_collector_after_delayed_seal():
+    exercise(seal_after=2, deadline=5, file_delay=0.14, recovery=True)
+
+
+def test_recovery_collector_keeps_pending_on_timeout():
+    exercise(seal_after=1000, deadline=1, file_delay=0, recovery=True)
+
+
 if __name__ == "__main__":
     test_delayed_seal_then_complete_transfer()
     test_unsealed_guest_fails_closed_at_deadline()
+    test_recovery_collector_after_delayed_seal()
+    test_recovery_collector_keeps_pending_on_timeout()
     print("PASS: terminal collector waits for exact seal, transfers, and fails closed on timeout")
