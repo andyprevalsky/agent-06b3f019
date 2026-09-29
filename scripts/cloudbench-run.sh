@@ -919,6 +919,10 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # One isolated guest runs one benchmark. A single worker still supports many
+    # workflow/activity slots; eight workers per guest at fleet width exhaust
+    # the shared Temporal namespace poll budget and delay stack health by minutes.
+    "BENCHMARK_AGENT_WORKERS=${BENCHMARK_AGENT_WORKERS:-1}"
     # The isolated stack is launched through `env` with this allow-list. Keep the
     # controller's provider exclusion inside that environment so the WMH Rose
     # provider cannot lease/use Claude after the outer runner explicitly disabled

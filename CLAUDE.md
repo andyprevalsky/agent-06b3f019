@@ -239,8 +239,10 @@ success. Do not add calls or alter tasks to reach the minimum. Infrastructure
 failures during execution, evaluation, artifact collection, or teardown prevent
 credit even when a task verdict exists. Verify each slice's exact resource
 cleanup and ten durable FE/LLM evidence bundles before advancing. Keep the normal
-7,200-second execution backstop; this explicitly bounded proof uses **300 seconds
-in both the environment and CLI**. These are proof acceptance requirements, not
+7,200-second execution backstop for counted slices; the temporary 300-second
+diagnostic on 2026-09-29 was not credited because it interrupted several agents
+before their third LLM response. Set both the environment and CLI backstop to
+7,200 seconds for the counted proof. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
 After each valid slice, report the whole slice's wall-clock time and every
 bench's individual wall-clock time (including startup, evidence collection and
@@ -259,7 +261,12 @@ This is provisioned capacity, not a 40 GB upload by the controller. The stopped
 Task-free infra probes use the default 4 GB primary shape so they can borrow
 that pool even when sampled names are browser/payment tasks; they also skip
 the payment-only bundled frontend build and launch one worker, since no sampled
-task executes. Real browser and payment benches retain their 8 GB shape and
+task executes. Each real isolated cloudbench guest also defaults to one Temporal
+worker process: a single worker has ample workflow slots for one benchmark,
+whereas eight workers per guest at width ten exhausted the shared namespace's
+poll budget and delayed stack health by several minutes in the 2026-09-29
+diagnostic. This guest-only default does not change the eight-worker deploy
+stress test. Real browser and payment benches retain their 8 GB shape and
 frontend contract. A fresh large-primary clone still inherits the legacy
 donor's 40 GB volume until a verified 20 GB donor replaces it. Keep
 `waiting_for_detach` volumes in the exact-owner ledger: Fly has accepted
