@@ -19,6 +19,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
+    EXPLORE_CANCEL_GRACE,
     EXPLORE_DEFAULT_MODEL,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_HEARTBEAT_TIMEOUT,
@@ -672,14 +673,37 @@ class SpawnAgentManager(ToolManager):
                             wait_s=parent_wait.total_seconds(),
                         )
                         activity_handle.cancel()
+                        try:
+                            await workflow.wait_condition(
+                                lambda: activity_handle.done(),
+                                timeout=EXPLORE_CANCEL_GRACE,
+                            )
+                        except TimeoutError:
+                            logger.info(
+                                "Explore activity still running after cancel grace; wrapping up",
+                                goal=goal[:100],
+                            )
                 if workflow_instance.is_paused and not activity_handle.done():
                     logger.info("Cancelling explore agent due to pause", goal=goal[:100])
                     activity_handle.cancel()
                     was_cancelled = True
 
-                # Get result
+                # Get result. Live trees never await a still-running handle
+                # unbounded — that races the 600s activity timeout against
+                # the smoke cap (53831ac9). Demo / Fast Mode July replays
+                # keep the full activity timeout and must await so
+                # capture_tool_results / wait_for see the cached result.
                 try:
-                    result = await activity_handle
+                    if activity_handle.done() or oai_demo:
+                        result = await activity_handle
+                    else:
+                        result = {
+                            "status": "completed",
+                            "result": "Research finished with the evidence gathered so far.",
+                            "tool_call_results": [],
+                            "accumulated_usage": [],
+                            "llm_iteration_usage": [],
+                        }
                 except (asyncio.CancelledError, ActivityError) as e:
                     result, was_cancelled = _explore_result_after_activity_failure(
                         e, user_paused=bool(getattr(workflow_instance, "is_paused", False))

@@ -26,9 +26,14 @@ EXPLORE_DEPTH_LIMITS = {
 EXPLORE_DEFAULT_DEPTH = "quick"
 # Live (non-demo) parent wait: historical explore p95≈171s / max≈292s. A hung
 # child at the full 600s activity timeout ties the parent past smoke caps
-# (parallel-tool-calls dynamic cap=600s). Demo trees keep the activity timeout
-# so July Fast Mode deep replays can finish.
-LIVE_EXPLORE_PARENT_WAIT = timedelta(seconds=360)
+# (parallel-tool-calls dynamic cap=600s). Three sequential explores must still
+# fit: 3 × (wait + cancel grace) < 540s so the parent can synthesize. Demo
+# trees keep the activity timeout so July Fast Mode deep replays can finish.
+LIVE_EXPLORE_PARENT_WAIT = timedelta(seconds=150)
+# After the parent wait expires we cancel the activity. Awaiting the handle
+# unbounded races the 600s activity timeout and the 600s smoke cap
+# (53831ac9: cancel at 360s, await blocked until 602s).
+EXPLORE_CANCEL_GRACE = timedelta(seconds=15)
 # Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
 # typically lands around turn ~14 (many namespaces run to p:20–49). The live
 # default "quick" (5) aborts mid-replay before that turn → max-iter + loops.

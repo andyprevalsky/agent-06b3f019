@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from domains.spawn_agent.config import (
+    EXPLORE_CANCEL_GRACE,
     LIVE_EXPLORE_PARENT_WAIT,
     OAI_DEMO_CHILD_GOAL_PREFIX,
     OAI_DEMO_CHILD_WINDOW,
@@ -50,6 +51,14 @@ def test_explore_parent_wait_timeout_caps_live_not_demo():
     assert explore_parent_wait_timeout(hour, oai_demo=True) == hour
     assert explore_parent_wait_timeout(hour, oai_demo=False) == LIVE_EXPLORE_PARENT_WAIT
     assert explore_parent_wait_timeout(timedelta(seconds=120), oai_demo=False) == timedelta(seconds=120)
+
+
+def test_live_explore_parent_wait_fits_three_sequential_under_smoke_cap():
+    """parallel-tool-calls cap is 600s; 3 hung explores must leave synthesis room."""
+    worst = 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE)
+    assert worst <= timedelta(seconds=540)
+    assert LIVE_EXPLORE_PARENT_WAIT == timedelta(seconds=150)
+    assert EXPLORE_CANCEL_GRACE == timedelta(seconds=15)
 
 
 def test_is_oai_demo_goal_matches_all_three_prefixes():

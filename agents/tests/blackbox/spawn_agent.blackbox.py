@@ -411,19 +411,30 @@ def test_build_for_each_goal_dict_item():
 class _Activity:
     """Fake activity handle supporting done/cancel/await."""
 
-    def __init__(self, result=None, *, cancel_on_await=False, exception=None, done=True):
+    def __init__(
+        self,
+        result=None,
+        *,
+        cancel_on_await=False,
+        exception=None,
+        done=True,
+        done_on_cancel=False,
+    ):
         self._result = result if result is not None else {}
         self._done = done
         self._awaited = False
         self._cancel_on_await = cancel_on_await
         self._exception = exception
         self._cancelled = False
+        self._done_on_cancel = done_on_cancel
 
     def done(self):
         return self._done
 
     def cancel(self):
         self._cancelled = True
+        if self._done_on_cancel:
+            self._done = True
 
     def __await__(self):
         self._awaited = True
@@ -444,7 +455,12 @@ class _Activity:
 class _FakeSpawnWF:
     """Workflow module stub."""
 
-    def __init__(self, activity_results=None, start_activity_result=None):
+    def __init__(
+        self,
+        activity_results=None,
+        start_activity_result=None,
+        wait_condition_raises=None,
+    ):
         self._activity_results = activity_results or {}
         self.activity_calls = []
         self.start_activity_calls = []
@@ -459,6 +475,7 @@ class _FakeSpawnWF:
         )
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
         self.wait_condition_timeouts = []
+        self._wait_condition_raises = list(wait_condition_raises or [])
         import temporalio.workflow as real
 
         self.unsafe = real.unsafe
@@ -504,6 +521,10 @@ class _FakeSpawnWF:
     async def wait_condition(self, predicate, timeout=None):
         # Evaluate once; if not satisfied, return anyway (no real waiting)
         self.wait_condition_timeouts.append(timeout)
+        if self._wait_condition_raises:
+            should_raise = self._wait_condition_raises.pop(0)
+            if should_raise:
+                raise TimeoutError("parent wait")
         predicate()
         return
 
@@ -1146,6 +1167,85 @@ async def test_handler_explore_timeout_without_heartbeat_still_finishes():
 
     finished = next(event for event in events if event.status == MessageStatus.FINISHED)
     assert "evidence gathered" in finished.message.lower()
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
+    """Hung explore after parent wait + cancel grace FINISHES without unbounded await.
+
+    53831ac9 cancelled at the parent-wait budget then `await activity_handle`
+    blocked until the 600s activity timeout, tying the 600s smoke cap.
+    """
+    from datetime import timedelta
+
+    from domains.spawn_agent.config import EXPLORE_CANCEL_GRACE, LIVE_EXPLORE_PARENT_WAIT
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    handle = _Activity(done=False, result={"result": "must not await this handle"})
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=handle,
+        wait_condition_raises=[True, True],
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver weather"},
+                tool_call_id="tc-cancel-grace",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "evidence gathered" in finished.message.lower()
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+    assert handle._cancelled
+    assert not handle._awaited
+    assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
+    assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
+
+
+async def test_handler_explore_cancel_grace_awaits_when_handle_completes():
+    """If cancel finishes the activity inside the grace window, use that result."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    handle = _Activity(
+        done=False,
+        done_on_cancel=True,
+        result={
+            "status": "completed",
+            "result": "Denver median rent $1,800 from cancelled wrap-up",
+            "tool_call_results": [],
+            "accumulated_usage": [],
+            "llm_iteration_usage": [],
+        },
+    )
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=handle,
+        wait_condition_raises=[True, False],
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver weather"},
+                tool_call_id="tc-cancel-grace-done",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "median rent" in finished.message
+    assert handle._cancelled
+    assert handle._awaited
     assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
@@ -4006,6 +4106,14 @@ async def run_all_tests():
     await r.record_async(
         "handler_explore_timeout_without_heartbeat_still_finishes",
         test_handler_explore_timeout_without_heartbeat_still_finishes,
+    )
+    await r.record_async(
+        "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
+        test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle,
+    )
+    await r.record_async(
+        "handler_explore_cancel_grace_awaits_when_handle_completes",
+        test_handler_explore_cancel_grace_awaits_when_handle_completes,
     )
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
