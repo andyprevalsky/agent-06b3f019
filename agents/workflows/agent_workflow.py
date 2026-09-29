@@ -339,6 +339,39 @@ def last_real_completion_text(
     return ""
 
 
+_FAST_MODE_CARD_MARKERS = (
+    "fast mode",
+    "cached trajectory",
+    "based on prior tool evidence",
+    "verified results are included below",
+)
+
+
+def completion_card_has_fast_mode_markers(text: str) -> bool:
+    """True when Task Complete text still carries Fast Mode ablation copy."""
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _FAST_MODE_CARD_MARKERS)
+
+
+def strip_fast_mode_card_narration(text: str) -> str:
+    """Drop Fast Mode lead-in sentences; keep extracted report text.
+
+    July Fast Mode sometimes prefixes a valid Extracted Output block with
+    ``Fast Mode cache trajectory ended...``. T7 forbids that substring even
+    when the rest of the card is a real 200+ character summary.
+    """
+    raw = str(text or "").strip()
+    if not raw or not completion_card_has_fast_mode_markers(raw):
+        return raw
+    parts = re.split(r"(?<=[.!?])\s+", raw)
+    kept = [
+        part.strip()
+        for part in parts
+        if part.strip() and not completion_card_has_fast_mode_markers(part)
+    ]
+    return " ".join(kept).strip()
+
+
 def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800) -> str:
     """Collapse a long replayed report into a Task Complete card body."""
     kept: List[str] = []
@@ -347,6 +380,8 @@ def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800)
         if not line or line.startswith("#"):
             continue
         if is_ablated_completion_summary(line) or _is_plumbing_tool_text(line):
+            continue
+        if completion_card_has_fast_mode_markers(line) and len(line) < 200:
             continue
         kept.append(line)
     blob = " ".join(kept).strip()
@@ -402,7 +437,7 @@ def card_summary_from_evidence(
 ) -> str:
     """1-2 sentence Task Complete summary from replayed evidence, never Fast Mode copy."""
     candidate = last_real_completion_text(context, structured_response)
-    brief = brief_card_summary(candidate, min_chars=min_chars)
+    brief = strip_fast_mode_card_narration(brief_card_summary(candidate, min_chars=min_chars))
     if brief and not is_ablated_completion_summary(brief) and len(brief) >= min_chars:
         return brief
     if isinstance(structured_response, dict):
@@ -411,7 +446,9 @@ def card_summary_from_evidence(
             for value in structured_response.values()
             if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
         ]
-        brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
+        brief = strip_fast_mode_card_narration(
+            brief_card_summary(" ".join(parts), min_chars=min_chars)
+        )
         if brief and len(brief) >= min_chars:
             return brief
     return ""
@@ -5056,7 +5093,7 @@ class AgentWorkflow:
                 summary_result = {}
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
-            summary = summary_result.get("summary", "")
+            summary = strip_fast_mode_card_narration(summary_result.get("summary", ""))
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             summary_is_invalid = is_ablated_completion_summary(summary)
@@ -5064,7 +5101,9 @@ class AgentWorkflow:
                 str(summary or "").strip()
             ) < 200
             if summary_is_invalid or needs_demo_detail:
-                recovered = card_summary_from_evidence(transcript, structured_response)
+                recovered = strip_fast_mode_card_narration(
+                    card_summary_from_evidence(transcript, structured_response)
+                )
                 if (
                     recovered
                     and not is_ablated_completion_summary(recovered)
@@ -5074,6 +5113,7 @@ class AgentWorkflow:
             # This is the final, general publication boundary.  Never persist
             # tool I/O or a cache sentinel as the Task Complete narration, even
             # when no suitable report exists in the transcript.
+            summary = strip_fast_mode_card_narration(summary)
             if is_ablated_completion_summary(summary):
                 summary = f"Completed: {self.goal}" if self.goal else "Completed."
             if (

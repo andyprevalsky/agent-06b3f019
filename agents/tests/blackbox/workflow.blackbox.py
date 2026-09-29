@@ -5675,6 +5675,28 @@ async def test_workflow_mark_complete_survives_summary_generation_failure():
         _restore_workflow(original)
 
 
+def test_strip_fast_mode_card_narration_keeps_extracted_output():
+    """T7 3452c32c: Fast Mode prefix + extracted report must publish the report only."""
+    from workflows.agent_workflow import (
+        completion_card_has_fast_mode_markers,
+        strip_fast_mode_card_narration,
+    )
+
+    published = (
+        "Fast Mode cache trajectory ended; prior tool evidence is sufficient to "
+        "treat the goal as complete. **Extracted Output:** - **Audience Persona:** "
+        "Ambitious self-improvement audience: entrepreneurs, operators, creators "
+        "and professionals seeking high-agency life/career advice, health "
+        "optimization, business lessons, and mainstream celebrity interviews."
+    )
+    assert completion_card_has_fast_mode_markers(published)
+    stripped = strip_fast_mode_card_narration(published)
+    assert "Fast Mode" not in stripped
+    assert "cached trajectory" not in stripped.lower()
+    assert "Audience Persona" in stripped
+    assert len(stripped) >= 200
+
+
 async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary():
     """Fast Mode traj-end completion_summary must not land on the Task Complete card."""
     wf = _bare_workflow_instance()
@@ -5752,6 +5774,94 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         assert outputs, "Task Complete must show schema outputs"
         keys = {item.get("key") for item in outputs}
         assert "creator_name" in keys
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_strips_fast_mode_prefix_from_long_extracted_output():
+    """A 200+ char Fast Mode-prefixed Extracted Output must not fail T7."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-steven-bartlett-summary"
+    wf.user_id = "u-mc"
+    wf.goal = (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
+        "building a brand at the intersection of health, longevity, technology, "
+        "and founder journey. Last 90 days are 2026-04-04 through 2026-07-03."
+    )
+    wf.root_goal = (
+        "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
+    )
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = "root-demo"
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "audience_persona", "type": "str"},
+        ]
+    }
+
+    extracted = (
+        "**Extracted Output:** - **Audience Persona:** Ambitious self-improvement "
+        "audience: entrepreneurs, operators, creators and professionals seeking "
+        "high-agency life/career advice, health optimization, business lessons, "
+        "and mainstream celebrity/political/business interviews. Official "
+        "positioning emphasizes diary-style interviews with operators."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Fast Mode cache trajectory ended; prior tool evidence is sufficient "
+            f"to treat the goal as complete. {extracted}"
+        ),
+        "tool_counts": {"web_search": 4},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+            "actual_model": "fast-mode-soft-complete",
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[
+                {"role": "USER", "text": "analyze Steven Bartlett"},
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Fast Mode cache trajectory ended; prior tool evidence is "
+                        f"sufficient to treat the goal as complete.\n\n{extracted}"
+                    ),
+                    "metadata": {
+                        "toolName": "attempt_completion",
+                        "toolStatus": "FINISHED",
+                    },
+                },
+            ],
+            structured_response={"creator_name": "Steven Bartlett", "audience_persona": extracted},
+        )
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "cached trajectory" not in summary.lower()
+        assert "based on prior tool evidence" not in summary.lower()
+        assert "Audience Persona" in summary or "Steven Bartlett" in summary
+        assert len(summary) >= 200
+        outputs = card.get("outputs") or []
+        assert outputs, "Task Complete must keep schema outputs after Fast Mode strip"
     finally:
         _restore_workflow(original)
 
@@ -7752,9 +7862,17 @@ async def run_all_tests():
         "wf_mark_complete_survives_summary_failure",
         test_workflow_mark_complete_survives_summary_generation_failure,
     )
+    r.record(
+        "wf_strip_fast_mode_card_narration_keeps_extracted_output",
+        test_strip_fast_mode_card_narration_keeps_extracted_output,
+    )
     await r.record_async(
         "wf_mark_complete_replaces_fast_mode_ablation",
         test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_strips_fast_mode_prefix_from_long_extracted_output",
+        test_workflow_mark_complete_strips_fast_mode_prefix_from_long_extracted_output,
     )
     await r.record_async(
         "wf_mark_complete_rejects_raw_tool_envelope_globally",
