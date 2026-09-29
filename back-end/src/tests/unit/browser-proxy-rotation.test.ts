@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert';
 import { rotateProxySchema } from '../../domains/browser-session/types';
-import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
+import { kernelProxyCandidates, reusableKernelProxyId } from '../../providers/browser/kernelProxy';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import {
   isSteelProvisioningOutage,
@@ -44,6 +44,35 @@ function testResidentialUnchanged(): void {
   assert.strictEqual(candidates[0].proxyKey, 'residential:US:CA:san_francisco');
   assert.strictEqual(candidates[0].type, 'residential');
   assert.strictEqual(candidates[0].source, 'kernel_residential_city');
+}
+
+function testBenchmarkProxyReuseRequiresSameLocationAndTier(): void {
+  const candidate = kernelProxyCandidates({ country: 'US', state: 'CA', city: 'PALO ALTO' })[0];
+  assert.strictEqual(
+    reusableKernelProxyId(candidate, [
+      { id: 'wrong-tier', name: candidate.name, type: 'mobile', config: candidate.config },
+      {
+        id: 'wrong-city',
+        name: candidate.name,
+        type: 'residential',
+        config: { country: 'US', state: 'CA', city: 'san_francisco' },
+      },
+      {
+        id: 'same-proxy',
+        name: candidate.name,
+        type: 'residential',
+        config: { country: 'us', state: 'ca', city: 'palo_alto' },
+      },
+    ]),
+    'same-proxy'
+  );
+  assert.strictEqual(
+    reusableKernelProxyId(candidate, [
+      { id: 'different-name', name: 'another-proxy', type: 'residential', config: candidate.config },
+      { id: 'extra-setting', name: candidate.name, type: 'residential', config: { ...candidate.config, zip: '94301' } },
+    ]),
+    null
+  );
 }
 
 function testRotationTierLadder(): void {
@@ -188,6 +217,7 @@ function testSteelOutageDetector(): void {
 function main(): void {
   testMobileCandidates();
   testResidentialUnchanged();
+  testBenchmarkProxyReuseRequiresSameLocationAndTier();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();

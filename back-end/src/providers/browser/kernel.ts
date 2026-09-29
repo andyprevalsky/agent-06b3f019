@@ -347,7 +347,9 @@ async function createRemoteSession(
     let resolved: ResolvedKernelProxy | undefined;
     try {
       const proxyStartedAt = Date.now();
-      resolved = await getOrCreateKernelProxy(client, candidate);
+      resolved = await getOrCreateKernelProxy(client, candidate, {
+        reuseExisting: benchmarkIsolatedBrowserProfilesEnabled(),
+      });
       log.info('Kernel browser proxy resolved', {
         agentId,
         proxySource: resolved.source,
