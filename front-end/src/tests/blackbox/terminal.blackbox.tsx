@@ -6,7 +6,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Terminal from '@/pages/Terminal';
-import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
+import { ROSE_HOMEPAGE_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -199,7 +199,7 @@ describe('Terminal page', () => {
     it('renders the public app description with About, Privacy, and Terms links', async () => {
       renderWithProviders(<Terminal />);
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(legalLinks).toHaveTextContent(ROSE_APP_DESCRIPTION);
+      expect(legalLinks).toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
       expect(within(legalLinks).getByRole('link', { name: 'About' })).toHaveAttribute(
         'href',
         '/about',
@@ -220,7 +220,7 @@ describe('Terminal page', () => {
       renderWithProviders(<Terminal />);
 
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(legalLinks).toHaveTextContent(ROSE_APP_DESCRIPTION);
+      expect(legalLinks).toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
       expect(legalLinks).not.toHaveClass('absolute');
       expect(legalLinks).toHaveClass('shrink-0');
     });
@@ -326,6 +326,7 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
+      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 

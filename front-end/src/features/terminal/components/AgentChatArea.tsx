@@ -15,15 +15,15 @@
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
  *
- * MOBILE CHROME:
- *   The public app description and legal links remain in the visible layout,
- *   with safe-area padding below them on mobile.
+ * PUBLIC LANDING:
+ *   The compact app description and legal links appear only before an agent is
+ *   selected, so an active conversation keeps its full scroll area.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
 import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
-import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
+import { ROSE_HOMEPAGE_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -127,24 +127,30 @@ export function AgentChatArea({
         tickerRef={tickerRef}
       />
 
-      <footer
-        data-testid="terminal-legal-links"
-        className="relative z-10 w-full shrink-0 px-3 pb-[calc(0.5rem+var(--safe-area-inset-bottom))] text-center text-[12px] leading-[1.4] text-foreground/75 md:pb-2 md:pl-20"
-      >
-        <span>{ROSE_APP_DESCRIPTION}</span>{' '}
-        <Link to="/about" className="underline-offset-2 hover:underline hover:text-foreground">
-          About
-        </Link>{' '}
-        &middot;{' '}
-        <Link to="/privacy" className="underline-offset-2 hover:underline hover:text-foreground">
-          Privacy
-        </Link>{' '}
-        &middot;{' '}
-        <Link to="/terms" className="underline-offset-2 hover:underline hover:text-foreground">
-          Terms
-        </Link>
-      </footer>
+      {!a.selectedAgentId && <PublicLandingFooter />}
     </>
+  );
+}
+
+function PublicLandingFooter() {
+  return (
+    <footer
+      data-testid="terminal-legal-links"
+      className="relative z-10 w-full shrink-0 px-3 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] text-center text-[11px] leading-[1.25] text-foreground/65 md:pb-1 md:pl-20"
+    >
+      <span>{ROSE_HOMEPAGE_DESCRIPTION}</span>{' '}
+      <Link to="/about" className="underline-offset-2 hover:underline hover:text-foreground">
+        About
+      </Link>{' '}
+      &middot;{' '}
+      <Link to="/privacy" className="underline-offset-2 hover:underline hover:text-foreground">
+        Privacy
+      </Link>{' '}
+      &middot;{' '}
+      <Link to="/terms" className="underline-offset-2 hover:underline hover:text-foreground">
+        Terms
+      </Link>
+    </footer>
   );
 }
 
