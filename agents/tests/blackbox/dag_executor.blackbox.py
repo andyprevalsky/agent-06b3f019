@@ -415,6 +415,7 @@ async def _run_execute_dag(
     param_usage=None,
     execute_activity_calls=None,
     pending_context_seen=None,
+    context=None,
     **execute_dag_kwargs,
 ):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
@@ -481,7 +482,7 @@ async def _run_execute_dag(
             agent_id="agent-1",
             user_id="user-1",
             model="rose-flash",
-            context=[],
+            context=list(context or []),
             execute_activity=execute_activity,
             post_message=post_message,
             execute_tool=execute_tool_impl,
@@ -1217,6 +1218,68 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
     assert not any(e["status"] == "ERROR" for e in leftover_events)
 
 
+async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
+    """Catalog demo leftover GPs after for_each must not spawn — they desync assemble-final cache."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+    leftover_goal = "Create a 90-day content calendar for Andy Prevalsky"
+    plan_data = {
+        "tasks": [
+            {"goal": "Analyze 50 creators", "tool_name": "spawn_general_purpose_agent_for_each"},
+            {"goal": leftover_goal, "tool_name": "spawn_general_purpose_agent"},
+            {"goal": "Final assembly and quality assurance", "tool_name": "reasoning"},
+        ],
+        "dependencies": {"1": [0], "2": [1]},
+    }
+    executed: list[str] = []
+
+    schema = {"fields": [{"name": "creator_name", "type": "str", "required": True, "properties": []}]}
+
+    def param_tool_calls(args):
+        extra = args[10] if args and len(args) > 10 else ""
+        if leftover_goal in extra:
+            return [
+                {
+                    "tool": "spawn_agent",
+                    "type": "general_purpose",
+                    "start_phase": "EXECUTE",
+                    "goal": leftover_goal,
+                    "output_schema": schema,
+                }
+            ]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "for_each",
+                "start_phase": "EXECUTE",
+                "goal": "Analyze 50 creators",
+                "items": [{"name": "Huberman"}],
+                "output_schema": schema,
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        executed.append(params.get("type") or name)
+        return {"message": f"{name} done"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        context=[{"role": "USER", "message": OAI_DEMO_ROOT_GOAL_PREFIX}],
+        reasoning_result={"content": "# positioning_statement\n\nAndy as the founder-operator.", "usage": {}},
+    )
+
+    assert result["status"] == "completed"
+    assert executed == ["for_each"]
+    leftover_events = [e for e in events if e["type"] == "tool_event" and e["metadata"].get("dagTaskIndex") == 1]
+    assert leftover_events, f"leftover chip missing: {events}"
+    terminal = [e for e in leftover_events if e["status"] not in (None, "IN_PROGRESS")]
+    assert terminal and terminal[0]["status"] == "FINISHED"
+    assert terminal[0]["metadata"].get("fastModeCacheSkip") is True
+    assert not any(e["status"] == "ERROR" for e in leftover_events)
+
+
 async def test_execute_dag_transport_lookup_error_still_fails():
     """A FastCacheLookupError that is not a clean read-only miss stays a failure."""
     from providers.fast_cache.rose_cache import FastCacheLookupError
@@ -1266,6 +1329,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_strict_readonly_populate_miss_skips_without_error",
         test_execute_dag_strict_readonly_populate_miss_skips_without_error,
+    )
+    await r.record_async(
+        "execute_dag_skips_oai_demo_leftover_gp_after_for_each",
+        test_execute_dag_skips_oai_demo_leftover_gp_after_for_each,
     )
     await r.record_async(
         "execute_dag_transport_lookup_error_still_fails",

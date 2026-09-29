@@ -1772,6 +1772,40 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     assert outputs[0]["value"] == "Aman as the founder-operator."
 
 
+def test_workflow_coalesce_for_each_items_fills_top_creators_analysis():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "top_creators_analysis"},
+            {"name": "positioning_statement"},
+        ]
+    }
+    context = [
+        {
+            "role": "TOOL",
+            "text": "Completed for_each delegation for 50 items.",
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent_for_each",
+                "structured_response": {
+                    "items": [
+                        {
+                            "status": "completed",
+                            "structured_response": {
+                                "creator_name": "Andrew Huberman",
+                                "hook_formulas": ["mechanism first"],
+                            },
+                        }
+                    ]
+                },
+            },
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    by_key = {row["key"]: row["value"] for row in outputs}
+    assert by_key["top_creators_analysis"][0]["creator_name"] == "Andrew Huberman"
+
+
 def test_workflow_coalesce_structured_response_from_metadata_payload():
     wf = _bare_workflow_instance()
     wf.output_schema = {
@@ -7433,6 +7467,10 @@ async def run_all_tests():
     r.record(
         "wf_coalesce_structured_response_from_headings",
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
+    )
+    r.record(
+        "wf_coalesce_for_each_items_fills_top_creators_analysis",
+        test_workflow_coalesce_for_each_items_fills_top_creators_analysis,
     )
     r.record(
         "wf_coalesce_structured_response_from_metadata_payload",

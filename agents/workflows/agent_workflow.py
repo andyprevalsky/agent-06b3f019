@@ -485,6 +485,21 @@ def _fill_from_row_and_sections(
             for name in names:
                 if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
                     merged[name] = obj[name]
+            items = obj.get("items")
+            if (
+                isinstance(items, list)
+                and "top_creators_analysis" in names
+                and merged.get("top_creators_analysis") in empty + (None,)
+            ):
+                analyses = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    nested = item.get("structured_response") or item.get("structuredResponse") or item
+                    if isinstance(nested, dict) and nested:
+                        analyses.append(nested)
+                if analyses:
+                    merged["top_creators_analysis"] = analyses
         if not missing():
             return merged
 
@@ -596,7 +611,23 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
     nested = obj.get("structured_response") or obj.get("structuredResponse") or obj
     if not isinstance(nested, dict):
         return {}
-    return {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
+    found = {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
+    items = nested.get("items") if "items" in nested else obj.get("items")
+    if (
+        "top_creators_analysis" in names
+        and "top_creators_analysis" not in found
+        and isinstance(items, list)
+    ):
+        analyses = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            row = item.get("structured_response") or item.get("structuredResponse") or item
+            if isinstance(row, dict) and row:
+                analyses.append(row)
+        if analyses:
+            found["top_creators_analysis"] = analyses
+    return found
 
 
 @workflow.defn

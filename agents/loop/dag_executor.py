@@ -246,6 +246,57 @@ def _is_strict_readonly_cache_miss(exc: BaseException) -> bool:
     return "Strict read-only benchmark cache miss" in extract_error_message(exc)
 
 
+def _context_is_oai_demo(context: Optional[List[Dict]]) -> bool:
+    """True when the DAG conversation is the catalog mass-agent demo tree."""
+    from domains.spawn_agent.config import is_oai_demo_goal
+
+    for message in context or []:
+        if not isinstance(message, dict):
+            continue
+        if is_oai_demo_goal(str(message.get("text") or message.get("message") or "")):
+            return True
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if is_oai_demo_goal(str(metadata.get("fullGoal") or metadata.get("goal") or "")):
+            return True
+    return False
+
+
+def _dag_has_completed_for_each(dag: "TaskDAG") -> bool:
+    return any(
+        task.tool_name == "spawn_general_purpose_agent_for_each" and task.state == TaskState.COMPLETED
+        for task in dag.tasks
+    )
+
+
+def _should_skip_oai_demo_leftover_gp(task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]) -> bool:
+    """Skip leftover post-for_each GPs on the catalog demo so assemble-final stays cached.
+
+    July Fast Mode records explore + for_each, then assemble-final. Extra leftover
+    GPs after for_each change the parent transcript and miss the assemble cache
+    slot, leaving Task Complete with no schema outputs (T7).
+    """
+    if task.tool_name != "spawn_general_purpose_agent":
+        return False
+    if not _dag_has_completed_for_each(dag):
+        return False
+    return _context_is_oai_demo(context)
+
+
+def _fast_mode_skip_event(task: "DAGTask", *, message: str) -> ToolEvent:
+    skip_title = DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
+    return ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title=skip_title,
+        message=message,
+        status=MessageStatus.FINISHED,
+        metadata={
+            "dagTaskIndex": task.index,
+            "plannedToolName": task.tool_name,
+            "fastModeCacheSkip": True,
+        },
+    )
+
+
 def extract_error_message(e: Exception) -> str:
     """
     Extract the actual error message from an exception, unwrapping Temporal wrappers.
@@ -880,6 +931,20 @@ async def _execute_single_task(
             await handle_tool_event_fn(early_event, tool_call_id, early_tool_name)
             early_tool_event_name = early_tool_name
 
+            if _should_skip_oai_demo_leftover_gp(task, dag, context):
+                workflow.logger.info(
+                    f"[DAG] Task {task.index} skipped: leftover post-for_each GP on OAI demo tree"
+                )
+                await handle_tool_event_fn(
+                    _fast_mode_skip_event(
+                        task,
+                        message="Fast Mode leftover post-for_each GP skipped so assemble-final can replay.",
+                    ),
+                    tool_call_id,
+                    early_tool_event_name or task.tool_name,
+                )
+                return True
+
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.
             # Same system prompt + tools + conversation = cache prefix hit.
@@ -1158,18 +1223,10 @@ async def _execute_single_task(
             skip_tool_name = early_tool_event_name or (
                 DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
             )
-            skip_title = DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
             await handle_tool_event_fn(
-                ToolEvent(
-                    type=EventType.POST_MESSAGE,
-                    title=skip_title,
+                _fast_mode_skip_event(
+                    task,
                     message="Fast Mode cache has no populate for this DAG node; skipping.",
-                    status=MessageStatus.FINISHED,
-                    metadata={
-                        "dagTaskIndex": task.index,
-                        "plannedToolName": task.tool_name,
-                        "fastModeCacheSkip": True,
-                    },
                 ),
                 tool_call_id,
                 skip_tool_name,
