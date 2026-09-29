@@ -6506,7 +6506,17 @@ async def set_response_schema_activity(
         )
         _fc_key = _fc_lookup_keys[0]
         if fast_mode_cache_enabled:
-            _fc_cached, _ = await _fc_client.cache_get_first(_fc_lookup_keys)
+            try:
+                _fc_cached, _ = await _fc_client.cache_get_first(_fc_lookup_keys)
+            except Exception as exc:
+                # Transport / get-first failure with no usable hit must fall
+                # through to live schema generation (not abort the activity).
+                logger.warning(
+                    "Fast-cache response_schema lookup failed; generating live",
+                    agent_id=agent_id,
+                    error=str(exc),
+                )
+                _fc_cached = None
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:

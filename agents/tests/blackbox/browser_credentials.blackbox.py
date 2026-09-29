@@ -833,8 +833,12 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
     from browser_tools.dom_service import DOMService
 
     state, send = _webauthn_browser_double()
+    # Host must match held passkey rpId (amazon.com.mx), not a foreign login page.
     href = {
-        "value": "https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2F"
+        "value": (
+            "https://www.amazon.com.mx/ap/signin?"
+            "openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F"
+        )
     }
 
     async def send_with_reload(method: str, params: dict, target_id: str):
@@ -854,6 +858,75 @@ async def test_passkey_rebuild_reloads_amazon_signin_page() -> None:
     assert any(method == "Page.reload" for method, _ in state.calls), (
         "VA rebuild on Amazon sign-in must reload so Conditional UI re-probes"
     )
+
+
+async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
+    """Reload at most once per href and only when host matches a held rpId."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    href = {"value": "https://accounts.google.com/signin"}
+
+    async def send_with_reload(method: str, params: dict, target_id: str):
+        if method == "Runtime.evaluate":
+            return {"result": {"value": href["value"]}}
+        if method == "Page.reload":
+            state.calls.append((method, target_id))
+            return {}
+        return await send(method, params, target_id)
+
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send_with_reload)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert not any(method == "Page.reload" for method, _ in state.calls), (
+        "Amazon passkey must not reload an unrelated Google sign-in page"
+    )
+
+    href["value"] = (
+        "https://www.amazon.com.mx/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com.mx%2F"
+    )
+    state.reset_environment("target-a")
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    first_reloads = sum(1 for method, _ in state.calls if method == "Page.reload")
+    assert first_reloads == 1
+
+    # Same href after another rebuild must not reload again (preserve typed fields).
+    state.reset_environment("target-a")
+    # Expire cooldown so only the href gate applies.
+    dom._passkey_auth_reload_at_by_target.clear()
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert sum(1 for method, _ in state.calls if method == "Page.reload") == first_reloads
+
+
+async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
+    """Invalidate must not erase an assertion that advanced signCount before remove."""
+    from browser_tools.dom_service import DOMService
+
+    state, send = _webauthn_browser_double()
+    dom = DOMService(cdp_url="")
+    dom._session = _fake_webauthn_session(send)
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Simulate relying-party assertion advancing the counter on the live VA.
+    for _owner, creds in state.authenticators.values():
+        if "credential-amazon" in creds:
+            creds["credential-amazon"]["signCount"] = 12
+
+    await dom.invalidate_passkey_state_for_live_target()
+    assert dom._passkey_observed_max_counts.get("credential-amazon") == 12
+
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    # Re-seed must use max(base, observed) so RP never sees a rolled-back counter.
+    seeded_counts = [
+        creds["credential-amazon"]["signCount"]
+        for _owner, creds in state.authenticators.values()
+        if "credential-amazon" in creds
+    ]
+    assert seeded_counts and max(seeded_counts) == 12
+    assert "credential-amazon" in await dom.get_used_passkey_credential_ids()
 
 
 async def test_passkey_and_native_ui_suppression_follow_the_agent_to_a_new_target() -> None:

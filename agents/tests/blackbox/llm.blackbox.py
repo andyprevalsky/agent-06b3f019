@@ -2086,6 +2086,71 @@ async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
 
 
+async def test_set_response_schema_activity_cache_lookup_error_falls_through_to_live():
+    """cache_get_first transport failure must not abort schema generation."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-cache-fail:generation-1",
+        workflow_run_id="run-cache-fail",
+        activity_id="set-response-schema-cache-fail",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    rose_calls = []
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            rose_calls.append(kwargs)
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "reasoning": "Need a concise summary.",
+                        "fields": [{"name": "summary", "type": "str"}],
+                    }
+                ),
+                tool_calls=[],
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            )
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(True, "goal", False, "agent-cache-fail", "goal", True)),
+        ),
+        patch(
+            "providers.fast_cache.client.cache_get_first",
+            AsyncMock(side_effect=RuntimeError("fast-cache get-first failed: backend down")),
+        ),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-cache-fail",
+            ["goal"],
+            fast_mode_cache_enabled=True,
+            include_title=False,
+        )
+
+    assert result is not None
+    assert rose_calls, "lookup failure must fall through to live Rose generation"
+    assert result["schema"]["fields"][0]["name"] == "summary"
+
+
 async def test_set_response_schema_activity_mass_agent_title_when_generation_fails():
     """Mass-agent root still PATCHes Creator Brand Strategy if schema generation throws."""
     from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX, OAI_DEMO_ROOT_TITLE

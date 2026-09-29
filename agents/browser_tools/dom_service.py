@@ -550,12 +550,20 @@ class DOMService:
         self._passkey_seeded_by_target: Dict[str, set] = {}
         self._held_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
         self._passkey_seed_counts: Dict[str, int] = {}
+        # Highest signCount seen per credential before an invalidate/rebuild.
+        # Invalidate removes the Chrome authenticator; without this map the
+        # re-seed restores the original base and usage detection misses the
+        # assertion that advanced the counter on the dying authenticator.
+        self._passkey_observed_max_counts: Dict[str, int] = {}
         # Monotonic timestamp of the last successful seed/readback per target.
         # Used to grace mid-ceremony getCredentials flaps without rebuilding
         # (rebuild = WebAuthn.enable gap → Amazon "No passkeys available").
         self._passkey_seeded_at_by_target: Dict[str, float] = {}
         # Cooldown so auth-page reload after environment-loss rebuild cannot loop.
         self._passkey_auth_reload_at_by_target: Dict[str, float] = {}
+        # href last reloaded after VA rebuild, per target — at most once per
+        # navigation (same href must not wipe typed credentials every step).
+        self._passkey_auth_reload_url_by_target: Dict[str, str] = {}
         # Targets that must reload an auth document after the next successful
         # VA rebuild (environment loss / CDP session swap).
         self._passkey_pending_auth_reload_targets: set = set()
@@ -768,9 +776,11 @@ class DOMService:
                 self._passkey_seeded_by_target.clear()
                 self._held_passkeys_by_credential_id.clear()
                 self._passkey_seed_counts.clear()
+                self._passkey_observed_max_counts.clear()
                 self._passkey_seeded_at_by_target.clear()
                 self._passkey_armed_session_by_target.clear()
                 self._passkey_auth_reload_at_by_target.clear()
+                self._passkey_auth_reload_url_by_target.clear()
                 self._passkey_pending_auth_reload_targets.clear()
                 logger.info("🔌 Disconnected from browser")
 
@@ -1204,6 +1214,16 @@ class DOMService:
                 )
                 cdp_session = None
             if cdp_session is not None and authenticator_id:
+                # Snapshot signCounts before remove so a mid-nav assertion is not
+                # lost when re-seed restores the original block-reserved base.
+                pre_remove_counts = await self._read_signcounts_for_target(
+                    target_id, cdp_session
+                )
+                if pre_remove_counts:
+                    for cid, value in pre_remove_counts.items():
+                        prev = self._passkey_observed_max_counts.get(cid, -1)
+                        if value > prev:
+                            self._passkey_observed_max_counts[cid] = value
                 try:
                     await self._send_cdp_command(
                         cdp_session,
@@ -1497,6 +1517,9 @@ class DOMService:
             if credential_id in seeded_ids:
                 continue
             sign_count = int(pk.get("signCount") or 0)
+            observed = self._passkey_observed_max_counts.get(credential_id)
+            if observed is not None:
+                sign_count = max(sign_count, observed)
             credential: Dict[str, Any] = {
                 "credentialId": credential_id,
                 "privateKey": pk.get("privateKey"),
@@ -1561,7 +1584,12 @@ class DOMService:
     async def _reload_auth_page_after_passkey_rebuild(
         self, target_id: str, cdp_session: Any
     ) -> None:
-        """Reload sign-in documents after VA environment rebuild (cooldown-gated)."""
+        """Reload sign-in documents after VA environment rebuild (cooldown-gated).
+
+        At most once per target href (so a long LLM step past the 8s cooldown
+        cannot wipe typed credentials). Host must match a held passkey rpId so
+        an Amazon credential cannot reload an unrelated merchant login page.
+        """
         last = self._passkey_auth_reload_at_by_target.get(target_id)
         if last is not None and (time.monotonic() - last) < 8.0:
             return
@@ -1581,6 +1609,8 @@ class DOMService:
             )
             if not isinstance(href, str) or not href:
                 return
+            if self._passkey_auth_reload_url_by_target.get(target_id) == href:
+                return
             lower = href.lower()
             auth_markers = (
                 "/ap/signin",
@@ -1593,8 +1623,16 @@ class DOMService:
             )
             if not any(marker in lower for marker in auth_markers):
                 return
+            host = (urlparse(href).hostname or "").lower()
+            held_rp_ids = {
+                str(pk.get("rpId") or "").lower()
+                for pk in self._held_passkeys_by_credential_id.values()
+            }
+            if not any(rp and (host == rp or host.endswith("." + rp)) for rp in held_rp_ids):
+                return
             await self._send_cdp_command(cdp_session, "Page.reload", {"ignoreCache": True})
             self._passkey_auth_reload_at_by_target[target_id] = time.monotonic()
+            self._passkey_auth_reload_url_by_target[target_id] = href
             logger.info(
                 "🔑 [passkey] reloaded auth page after VA environment rebuild "
                 f"so relying party can re-probe passkeys url={href[:120]}"
@@ -1650,6 +1688,9 @@ class DOMService:
             for cid, value in target_counts.items():
                 if value > counts.get(cid, -1):
                     counts[cid] = value
+        for cid, value in self._passkey_observed_max_counts.items():
+            if value > counts.get(cid, -1):
+                counts[cid] = value
         return counts
 
     async def get_used_passkey_credential_ids(self) -> List[str]:
