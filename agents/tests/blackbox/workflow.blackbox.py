@@ -534,12 +534,23 @@ async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: i
 # Captures the Fast Mode cache args the workflow threads into LLM activities,
 # keyed by agent_id. Tests clear their agent's entry before starting.
 FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
+FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
+RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
+LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
+LEFTOVER_CHILD_GOAL = (
+    "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
+)
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
 async def mock_resolve_fast_cache_goal_activity(
     agent_id: str,
 ) -> Optional[dict[str, Optional[str]]]:
+    RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
+    if agent_id == LEFTOVER_CHILD_AGENT_ID:
+        from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+        return {"goal": LEFTOVER_CHILD_GOAL, "root_goal": OAI_DEMO_ROOT_GOAL_PREFIX}
     # DEMO-tagged mass-agent root prompt (stable cache namespace).
     persisted = (
         "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
@@ -590,6 +601,7 @@ async def mock_call_llm_activity(
     _record_workflow_env_activity(activity_agent_id, "call_llm_activity")
     if agent_id:
         FAST_MODE_GOAL_CAPTURE.setdefault(agent_id, []).append(fast_mode_goal)
+        FAST_MODE_ENABLED_CAPTURE.setdefault(agent_id, []).append(fast_mode_cache_enabled)
     if extra_user_message and required_tool:
         return {
             "response": "",
@@ -1165,6 +1177,61 @@ async def _run_all_workflow_tests() -> List[tuple]:
                     f"Fast Mode cache goal must be the persisted agent-row goal, got {captured_goals[0]!r}"
                 )
 
+                await _cancel_workflow(handle)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+
+            # Leftover GP children keep a non-DEMO input goal. If the Fast Mode
+            # button is off, root-goal resolution must still run so they inherit
+            # DEMO wait_for / cache from the tree root.
+            name = "wf_leftover_child_resolves_root_goal_when_fast_mode_off"
+            try:
+                leftover_id = LEFTOVER_CHILD_AGENT_ID
+                FAST_MODE_GOAL_CAPTURE.pop(leftover_id, None)
+                FAST_MODE_ENABLED_CAPTURE.pop(leftover_id, None)
+                while leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                    RESOLVE_FAST_CACHE_GOAL_CALLS.remove(leftover_id)
+                handle = await env.client.start_workflow(
+                    AgentWorkflow.run,
+                    args=[
+                        leftover_id,
+                        "user-test-1",
+                        LEFTOVER_CHILD_GOAL,
+                        "rose-labs/rose-1-flash",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        None,  # context
+                        "parent-wf-leftover",  # parent_workflow_id
+                        "parent-agent-leftover",  # parent_agent_id
+                        1,  # depth
+                        None,  # bus_id
+                        "execute",  # start_phase
+                        None,  # max_iterations
+                        100,  # price_limit_cents
+                        None,  # context_gates
+                        False,  # fast_mode_cache_enabled (button off)
+                    ],
+                    id=_next_wf_id("leftover-child-root-goal"),
+                    task_queue=TASK_QUEUE,
+                )
+                for _ in range(60):
+                    if leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                        break
+                    await asyncio.sleep(0.5)
+                assert leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS, (
+                    "leftover child must resolve tree root_goal even when Fast Mode is off"
+                )
+                for _ in range(60):
+                    if FAST_MODE_ENABLED_CAPTURE.get(leftover_id):
+                        break
+                    await asyncio.sleep(0.5)
+                enabled = FAST_MODE_ENABLED_CAPTURE.get(leftover_id)
+                assert enabled, "leftover child never reached an LLM call"
+                assert enabled[0] is True, (
+                    "leftover child must inherit DEMO cache from root_goal, "
+                    f"got fast_mode_cache_enabled={enabled[0]!r}"
+                )
                 await _cancel_workflow(handle)
                 results.append((name, None))
             except Exception as e:

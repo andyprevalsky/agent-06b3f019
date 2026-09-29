@@ -131,3 +131,8 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal():
         restore_idx,
     )
     assert recompute_idx > restore_idx
+    resolve_idx = workflow_src.index("unpack_fast_cache_goal_resolution(")
+    guard_block = workflow_src[workflow_src.rfind("if (", 0, resolve_idx) : resolve_idx]
+    assert "self.parent_workflow_id" in guard_block, (
+        "leftover children must resolve root_goal even when Fast Mode is off"
+    )

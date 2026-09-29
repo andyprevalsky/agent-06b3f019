@@ -1664,6 +1664,7 @@ class AgentWorkflow:
         if (
             self.provider_fast_mode
             or self.fast_mode_cache_enabled
+            or self.parent_workflow_id
             or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
         ):
             try:
