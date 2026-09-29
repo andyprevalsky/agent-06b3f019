@@ -24,6 +24,16 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
+# Live (non-demo) parent wait: historical explore p95≈171s / max≈292s. A hung
+# child at the full 600s activity timeout ties the parent past smoke caps
+# (parallel-tool-calls dynamic cap=600s). Three sequential explores must still
+# fit: 3 × (wait + cancel grace) < 540s so the parent can synthesize. Demo
+# trees keep the activity timeout so July Fast Mode deep replays can finish.
+LIVE_EXPLORE_PARENT_WAIT = timedelta(seconds=150)
+# After the parent wait expires we cancel the activity. Awaiting the handle
+# unbounded races the 600s activity timeout and the 600s smoke cap
+# (53831ac9: cancel at 360s, await blocked until 602s).
+EXPLORE_CANCEL_GRACE = timedelta(seconds=15)
 # Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
 # typically lands around turn ~14 (many namespaces run to p:20–49). The live
 # default "quick" (5) aborts mid-replay before that turn → max-iter + loops.
@@ -39,6 +49,20 @@ def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     may batch multiple parallel searches.
     """
     return EXPLORE_DEPTH_LIMITS.get(depth or EXPLORE_DEFAULT_DEPTH, EXPLORE_DEPTH_LIMITS[EXPLORE_DEFAULT_DEPTH])
+
+
+def explore_parent_wait_timeout(activity_timeout: timedelta, *, oai_demo: bool) -> timedelta:
+    """How long the parent workflow waits for one explore activity.
+
+    Demo / Fast Mode mass-agent trees keep the full activity timeout. Live
+    trees cap the wait so a stuck child returns gathered evidence in time
+    for the parent to finish.
+    """
+    if oai_demo:
+        return activity_timeout
+    if activity_timeout <= LIVE_EXPLORE_PARENT_WAIT:
+        return activity_timeout
+    return LIVE_EXPLORE_PARENT_WAIT
 
 
 def resolve_explore_depth(
@@ -127,10 +151,17 @@ def is_oai_demo_goal(text: str | None) -> bool:
 
 
 def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
-    """True only for the mass-agent-0 root or its per-creator for_each children."""
+    """True for the mass-agent-0 root or any descendant of that tree.
+
+    Child workflows keep their own spawn goal for cache keys. Demo wait_for /
+    spawn gates must still see the tree root — otherwise a leftover GP whose
+    goal is not the catalog prefix sleeps real ``wait_for`` intervals and
+    blows the 900s smoke cap.
+    """
     chunks = (
         getattr(workflow_instance, "fast_cache_goal", None) or "",
         getattr(workflow_instance, "goal", None) or "",
+        getattr(workflow_instance, "root_goal", None) or "",
     )
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
@@ -183,15 +214,17 @@ def is_demo_cache_task(workflow_instance) -> bool:
     if is_oai_demo_mass_agent_task(workflow_instance):
         return True
     goal = str(getattr(workflow_instance, "goal", None) or "")
-    root = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
-    if DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in goal or DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in root:
+    cached = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
+    root_goal = str(getattr(workflow_instance, "root_goal", None) or "")
+    if any(
+        DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)
+    ):
         return True
     if _demo_cache_goal_hash is None or not _DEMO_CACHE_GOAL_HASHES:
         return False
-    if goal and _demo_cache_goal_hash(goal) in _DEMO_CACHE_GOAL_HASHES:
-        return True
-    if root and _demo_cache_goal_hash(root) in _DEMO_CACHE_GOAL_HASHES:
-        return True
+    for blob in (goal, cached, root_goal):
+        if blob and _demo_cache_goal_hash(blob) in _DEMO_CACHE_GOAL_HASHES:
+            return True
     return False
 
 

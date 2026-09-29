@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from domains.spawn_agent.config import (
+    EXPLORE_CANCEL_GRACE,
+    LIVE_EXPLORE_PARENT_WAIT,
     OAI_DEMO_CHILD_GOAL_PREFIX,
     OAI_DEMO_CHILD_WINDOW,
     OAI_DEMO_ROOT_GOAL_PREFIX,
+    explore_parent_wait_timeout,
     is_oai_demo_goal,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
@@ -42,6 +46,21 @@ from helpers.fetch_queue_pointer import fetch_agent_queue_pointer
 from utils.source_connect_gates import raise_source_connect_gates
 
 
+def test_explore_parent_wait_timeout_caps_live_not_demo():
+    hour = timedelta(seconds=3600)
+    assert explore_parent_wait_timeout(hour, oai_demo=True) == hour
+    assert explore_parent_wait_timeout(hour, oai_demo=False) == LIVE_EXPLORE_PARENT_WAIT
+    assert explore_parent_wait_timeout(timedelta(seconds=120), oai_demo=False) == timedelta(seconds=120)
+
+
+def test_live_explore_parent_wait_fits_three_sequential_under_smoke_cap():
+    """parallel-tool-calls cap is 600s; 3 hung explores must leave synthesis room."""
+    worst = 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE)
+    assert worst <= timedelta(seconds=540)
+    assert LIVE_EXPLORE_PARENT_WAIT == timedelta(seconds=150)
+    assert EXPLORE_CANCEL_GRACE == timedelta(seconds=15)
+
+
 def test_is_oai_demo_goal_matches_all_three_prefixes():
     assert is_oai_demo_goal(OAI_DEMO_ROOT_GOAL_PREFIX + " extra")
     assert is_oai_demo_goal(f"window {OAI_DEMO_CHILD_WINDOW} here")
@@ -56,6 +75,24 @@ def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX, fast_cache_goal=""))
     assert is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=f"{OAI_DEMO_CHILD_GOAL_PREFIX} for Andy Prevalsky"))
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
+
+
+def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
+    leftover = (
+        "Produce fresh tool-grounded evidence for the remaining strategic "
+        "deliverables for Andy Prevalsky's [REDACTED] brand task."
+    )
+    assert not is_oai_demo_goal(leftover)
+    assert not is_oai_demo_mass_agent_task(
+        SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None)
+    )
+    assert is_oai_demo_mass_agent_task(
+        SimpleNamespace(
+            goal=leftover,
+            fast_cache_goal=leftover,
+            root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+        )
+    )
 
 
 def test_browser_timeout_and_recording_are_demo_only():
@@ -590,16 +627,11 @@ def test_realtime_message_helpers_cover_coalesce_and_order_keys():
 def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     from domains.spawn_agent.handler import (
         _activity_handle_done,
-        _explore_agent_capacity,
-        _explore_limit_error,
-        _explore_slot_reservations,
         _fm_explore_handles,
-        _has_failed_completion_feedback,
         _is_for_each_finalize_timeout,
         _is_oai_demo_for_each_tool,
         _oai_demo_child_result_failed,
         _oai_demo_first_level_gp_count,
-        _prior_explore_agent_count,
         _prior_oai_demo_for_each_count,
         _recover_oai_demo_for_each_timeout,
         prune_fast_mode_explores,
@@ -727,73 +759,6 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
         )
         == 2
     )
-
-    assert _prior_explore_agent_count(SimpleNamespace(context="x")) == 0
-    assert (
-        _prior_explore_agent_count(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "IN_PROGRESS",
-                            "toolCallId": "e0",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {
-                        "role": "TOOL",
-                        "metadata": {
-                            "toolName": "spawn_agent",
-                            "agentType": "explore",
-                            "toolStatus": "FINISHED",
-                            "toolCallId": "e1",
-                        },
-                    },
-                    {"role": "TOOL", "metadata": {"toolName": "web_search"}},
-                ]
-            )
-        )
-        == 1
-    )
-
-    slots = _explore_slot_reservations(SimpleNamespace())
-    assert "x" not in slots
-    slots.add("x")
-    assert "x" in _explore_slot_reservations(SimpleNamespace(_explore_slot_reservations=slots))
-    assert "one explore" in _explore_limit_error(3)
-
-    assert _has_failed_completion_feedback(SimpleNamespace(context="nope")) is False
-    assert (
-        _has_failed_completion_feedback(
-            SimpleNamespace(
-                context=[
-                    {
-                        "role": "TOOL",
-                        "text": "verifier rejected the answer",
-                        "metadata": {
-                            "toolName": "attempt_completion",
-                            "toolStatus": "FINISHED",
-                            "verifierMessage": "no",
-                            "title": "Verifier rejected",
-                        },
-                    }
-                ]
-            )
-        )
-        is True
-    )
-    assert _explore_agent_capacity(SimpleNamespace(context=[]), 2) == 2
 
     demo_wf = SimpleNamespace(
         goal=OAI_DEMO_ROOT_GOAL_PREFIX,

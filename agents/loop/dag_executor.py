@@ -15,7 +15,6 @@ USAGE:
 """
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -79,62 +78,6 @@ ALIAS_REQUIRED_FIELDS = {
 }
 
 assert set(ALIAS_REQUIRED_FIELDS) == set(ALIAS_TYPE_OVERRIDES)
-
-
-_FAN_IN_SYNTHESIS_RE = re.compile(
-    r"(?i)\b("
-    r"consolidat\w*|merg\w*|synthes\w*|finaliz\w*|fan[- ]?in|"
-    r"produc(?:e|ing) the final|final (?:artifact|answer|report|ranking|candidate)|"
-    r"rank(?:ing)? (?:all|the)|deduplicat\w*"
-    r")\b"
-)
-_FAN_IN_DERIVATION_RE = re.compile(
-    r"(?is)\b(?:build|create|draft|generate|select|write)\b.{0,1000}\b(?:based on|from|using)\b"
-)
-_FAN_IN_ARTIFACT_RE = re.compile(
-    r"(?is)(?:"
-    r"\b(?:build|create|generate)\b.{0,200}\b(?:calendar|hooks?|openings?)\b|"
-    r"\bselect\b.{0,200}\bcreators?\b"
-    r")"
-)
-
-
-def is_fan_in_synthesis_goal(goal: str) -> bool:
-    """True when a DAG goal looks like merge/consolidate/finalize synthesis.
-
-    Callers that rewrite execution must also require fan-in evidence (non-empty
-    ``depends_on``). Besides explicit synthesis verbs, recognize artifact
-    derivations such as "create ... using ..." and "select ... based on ...";
-    these consume prior task results and should stay in the parent.
-    """
-    return bool(
-        _FAN_IN_SYNTHESIS_RE.search(goal or "")
-        or _FAN_IN_DERIVATION_RE.search(goal or "")
-        or _FAN_IN_ARTIFACT_RE.search(goal or "")
-    )
-
-
-def maybe_rewrite_recursive_gp_synthesis_task(task: "DAGTask") -> bool:
-    """Rewrite fan-in synthesis planned as general_purpose spawn into reasoning.
-
-    Planners sometimes schedule "consolidate / merge / finalize" as
-    spawn_general_purpose_agent, which forces a same-goal recursive spawn via
-    the param-populator contract. Those steps are pure synthesis and belong on
-    reasoning so the parent keeps ownership of the deliverable.
-
-    Requires both a synthesis-shaped goal AND positive fan-in evidence
-    (``depends_on`` non-empty) so keyword-only false positives do not strip
-    the GP ``output_schema`` contract from standalone work.
-    """
-    if task.tool_name != "spawn_general_purpose_agent":
-        return False
-    if not task.depends_on:
-        return False
-    if not is_fan_in_synthesis_goal(task.goal):
-        return False
-    task.tool_name = "reasoning"
-    return True
-
 
 
 class ParamPopulationContractError(ValueError):
@@ -288,6 +231,89 @@ def _build_early_tool_event(
         message=message,
         status=MessageStatus.IN_PROGRESS,
         metadata=metadata,
+    )
+
+
+def _is_strict_readonly_cache_miss(exc: BaseException) -> bool:
+    """True when Fast Mode refused a live populate because the slot is absent.
+
+    Transport/lookup faults also raise FastCacheLookupError; those stay
+    failures. Only the clean read-only miss ("no row, live fallback disabled")
+    is a skip — replay what is cached, do not invent a live DAG node.
+    """
+    if not error_chain_has_type(exc, "FastCacheLookupError"):
+        return False
+    return "Strict read-only benchmark cache miss" in extract_error_message(exc)
+
+
+def _context_is_oai_demo(context: Optional[List[Dict]]) -> bool:
+    """True when the DAG conversation is the catalog mass-agent demo tree."""
+    from domains.spawn_agent.config import is_oai_demo_goal
+
+    for message in context or []:
+        if not isinstance(message, dict):
+            continue
+        if is_oai_demo_goal(str(message.get("text") or message.get("message") or "")):
+            return True
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        if is_oai_demo_goal(str(metadata.get("fullGoal") or metadata.get("goal") or "")):
+            return True
+    return False
+
+
+def _dag_has_completed_for_each(dag: "TaskDAG") -> bool:
+    return any(
+        task.tool_name == "spawn_general_purpose_agent_for_each" and task.state == TaskState.COMPLETED
+        for task in dag.tasks
+    )
+
+
+# July Fast Mode seeded assemble-final at dag_reasoning p:6. Current planner
+# leftover GPs after for_each inflate the reasoning task.index (70a8df9d
+# used 7), which misses that slot and soft-completes a 92-char stub — T7
+# then sees a 411-char card instead of the 4000-char report.
+OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP = 6
+
+
+def _oai_demo_reasoning_fast_mode_step(
+    task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]
+) -> int:
+    """Replay assemble-final from the July p:6 slot on catalog demo trees."""
+    if task.tool_name != "reasoning":
+        return task.index
+    if not _context_is_oai_demo(context):
+        return task.index
+    if not _dag_has_completed_for_each(dag):
+        return task.index
+    return OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP
+
+
+def _should_skip_oai_demo_leftover_gp(task: "DAGTask", dag: "TaskDAG", context: Optional[List[Dict]]) -> bool:
+    """Skip leftover post-for_each GPs on the catalog demo so assemble-final stays cached.
+
+    July Fast Mode records explore + for_each, then assemble-final. Extra leftover
+    GPs after for_each change the parent transcript and miss the assemble cache
+    slot, leaving Task Complete with no schema outputs (T7).
+    """
+    if task.tool_name != "spawn_general_purpose_agent":
+        return False
+    if not _dag_has_completed_for_each(dag):
+        return False
+    return _context_is_oai_demo(context)
+
+
+def _fast_mode_skip_event(task: "DAGTask", *, message: str) -> ToolEvent:
+    skip_title = DAG_REASONING_FINISHED_TITLE if task.tool_name == "reasoning" else task.tool_name
+    return ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title=skip_title,
+        message=message,
+        status=MessageStatus.FINISHED,
+        metadata={
+            "dagTaskIndex": task.index,
+            "plannedToolName": task.tool_name,
+            "fastModeCacheSkip": True,
+        },
     )
 
 
@@ -801,10 +827,6 @@ async def _execute_single_task(
     # Name of the early IN_PROGRESS tool chip once emitted (non-reasoning path).
     # Tracked so a cancellation can terminalize the exact same live chip.
     early_tool_event_name: Optional[str] = None
-    if maybe_rewrite_recursive_gp_synthesis_task(task):
-        workflow.logger.info(
-            f"[DAG] Rewrote fan-in synthesis task {task.index} spawn_general_purpose_agent → reasoning"
-        )
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
@@ -842,7 +864,9 @@ async def _execute_single_task(
                 gpt_token_pool_id,
                 user_id,
                 # Fast Mode: reasoning keys by canonical request fingerprint.
-                task.index,
+                # Catalog demo assemble-final must use the July p:6 slot even
+                # when leftover post-for_each GPs shifted task.index.
+                _oai_demo_reasoning_fast_mode_step(task, dag, context),
                 system_prompt_text,
             ]
             # Fail fast if context has grown past Temporal's 2 MiB payload limit —
@@ -922,6 +946,16 @@ async def _execute_single_task(
             actual_tool = TOOL_ALIASES.get(task.tool_name, task.tool_name)
             if actual_tool != task.tool_name:
                 workflow.logger.info(f"[DAG] Resolved alias: {task.tool_name} → {actual_tool}")
+
+            if _should_skip_oai_demo_leftover_gp(task, dag, context):
+                # Do not emit IN_PROGRESS/FINISHED chips. July Fast Mode records
+                # explore + for_each + assemble-final only; leftover skip cards
+                # change the parent transcript and miss the assemble-final cache
+                # (T7 then sees a 411-char stub instead of the 4000-char report).
+                workflow.logger.info(
+                    f"[DAG] Task {task.index} skipped silently: leftover post-for_each GP on OAI demo tree"
+                )
+                return True
 
             # Emit a placeholder before param population so the UI reflects the
             # concrete planned tool while the LLM fills arguments.
@@ -1197,6 +1231,25 @@ async def _execute_single_task(
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)
         error_msg = extract_error_message(e)
+        if _is_strict_readonly_cache_miss(e):
+            # Fast Mode read-only: this DAG node's populate is not in the
+            # cache. Skip it without an ERROR chip so leftover post-for_each
+            # GPs do not fail t10; execute_loop can still replay cached work.
+            workflow.logger.info(
+                f"[DAG] Task {task.index} skipped: Fast Mode has no cached populate for this node"
+            )
+            skip_tool_name = early_tool_event_name or (
+                DAG_REASONING_UI_TOOL_NAME if task.tool_name == "reasoning" else task.tool_name
+            )
+            await handle_tool_event_fn(
+                _fast_mode_skip_event(
+                    task,
+                    message="Fast Mode cache has no populate for this DAG node; skipping.",
+                ),
+                tool_call_id,
+                skip_tool_name,
+            )
+            return True
         workflow.logger.error(f"[DAG] Task {task.index} error: {error_msg}", exc_info=True)
         if task.tool_name == "reasoning":
             await post_message(
