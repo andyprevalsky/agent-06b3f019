@@ -3275,6 +3275,7 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect
 headers = {"Authorization": "Bearer " + os.environ["CLOUDBENCH_BARRIER_TOKEN"],
            "X-Cloudbench-Run-Token": run_token, "X-Cloudbench-Machine-Id": machine}
 url = f"http://127.0.0.1:{port}/runtime-evidence"
+shutdown_url = f"http://127.0.0.1:{port}/shutdown-health"
 def request(suffix=""):
     return opener.open(urllib.request.Request(url + suffix, headers=headers), timeout=6)
 def manifest():
@@ -3293,6 +3294,16 @@ while True:
     except urllib.error.HTTPError as error:
         if error.code != 409:
             raise
+        try:
+            with opener.open(urllib.request.Request(shutdown_url, headers=headers), timeout=6) as response:
+                if response.status == 204:
+                    raise RuntimeError("guest shutdown without sealed runtime evidence")
+                assert response.status == 202
+        except urllib.error.HTTPError as shutdown_error:
+            if shutdown_error.code == 500:
+                raise RuntimeError("driver exited without cleanup acknowledgement") from shutdown_error
+            if shutdown_error.code not in (409, 503):
+                raise
         time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]

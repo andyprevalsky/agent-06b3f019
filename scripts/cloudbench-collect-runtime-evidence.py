@@ -61,7 +61,12 @@ while True:
         # now instead of consuming the full recovery deadline.
         try:
             with opener.open(urllib.request.Request(shutdown_url, headers=headers), timeout=6) as response:
-                assert response.status in (202, 204)
+                if response.status == 204:
+                    # The exact driver and its exit trap have finished. A 409
+                    # now cannot become a sealed run result; preserve the
+                    # pending latch for zero-credit forensic retirement.
+                    raise RuntimeError("guest shutdown without sealed runtime evidence")
+                assert response.status == 202
         except urllib.error.HTTPError as shutdown_error:
             if shutdown_error.code == 500:
                 raise RuntimeError("driver exited without cleanup acknowledgement") from shutdown_error

@@ -124,6 +124,13 @@ reaching 84.59%. That attempt was canceled before task execution, with no
 acceptance credit. `image-handling` now receives the same resource-only large
 primary; its startup and cleanup still need live verification.
 
+That cancellation also exposed a terminal collector wait: a guest can
+acknowledge clean shutdown before any benchmark run record exists. The runtime
+endpoint correctly returns 409 forever in that state, while authenticated
+`/shutdown-health` returns 204. Both normal and recovery collectors now fail
+closed immediately on that combination, leaving the runtime-evidence latch
+for zero-credit forensic capture instead of waiting 600 seconds per guest.
+
 At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or
 providers. In the observed terminal state, the collector's futile wait falls

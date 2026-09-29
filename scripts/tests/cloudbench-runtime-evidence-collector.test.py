@@ -23,7 +23,8 @@ COLLECTOR = MATCH.group()
 
 
 def exercise(*, seal_after: int, deadline: int, file_delay: float,
-             recovery: bool = False, terminal_cleanup_failure: bool = False):
+             recovery: bool = False, terminal_cleanup_failure: bool = False,
+             terminal_clean_without_seal: bool = False):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
         "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}).encode(),
@@ -54,7 +55,8 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
             assert self.headers.get("X-Cloudbench-Machine-Id") == machine
             parts = urlsplit(self.path)
             if parts.path == "/shutdown-health":
-                self.send_error(500 if terminal_cleanup_failure else 202,
+                self.send_error(500 if terminal_cleanup_failure else
+                                204 if terminal_clean_without_seal else 202,
                                 "driver exited without cleanup acknowledgement"
                                 if terminal_cleanup_failure else "cleanup pending")
                 return
@@ -100,9 +102,14 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
                 capture_output=True, text=True, timeout=deadline + 5,
             )
             elapsed = time.monotonic() - started
-            if terminal_cleanup_failure:
+            if terminal_cleanup_failure or terminal_clean_without_seal:
                 assert result.returncode != 0
-                assert "driver exited without cleanup acknowledgement" in result.stderr
+                expected_error = (
+                    "driver exited without cleanup acknowledgement"
+                    if terminal_cleanup_failure else
+                    "guest shutdown without sealed runtime evidence"
+                )
+                assert expected_error in result.stderr
                 assert elapsed < 1.5, elapsed
                 assert not (destination / "runtime-evidence").exists()
                 return
@@ -145,10 +152,17 @@ def test_recovery_collector_stops_on_terminal_cleanup_failure():
              terminal_cleanup_failure=True)
 
 
+def test_collectors_stop_on_clean_shutdown_without_run_result():
+    for recovery in (False, True):
+        exercise(seal_after=1000, deadline=3, file_delay=0, recovery=recovery,
+                 terminal_clean_without_seal=True)
+
+
 if __name__ == "__main__":
     test_delayed_seal_then_complete_transfer()
     test_unsealed_guest_fails_closed_at_deadline()
     test_recovery_collector_after_delayed_seal()
     test_recovery_collector_keeps_pending_on_timeout()
     test_recovery_collector_stops_on_terminal_cleanup_failure()
+    test_collectors_stop_on_clean_shutdown_without_run_result()
     print("PASS: terminal collector waits for exact seal, transfers, and fails closed on timeout")
