@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from domains.spawn_agent.config import (
+    LIVE_EXPLORE_PARENT_WAIT,
     OAI_DEMO_CHILD_GOAL_PREFIX,
     OAI_DEMO_CHILD_WINDOW,
     OAI_DEMO_ROOT_GOAL_PREFIX,
+    explore_parent_wait_timeout,
     is_oai_demo_goal,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
@@ -40,6 +43,13 @@ from domains.spawn_browser_agent_v3.config import (
 )
 from helpers.fetch_queue_pointer import fetch_agent_queue_pointer
 from utils.source_connect_gates import raise_source_connect_gates
+
+
+def test_explore_parent_wait_timeout_caps_live_not_demo():
+    hour = timedelta(seconds=3600)
+    assert explore_parent_wait_timeout(hour, oai_demo=True) == hour
+    assert explore_parent_wait_timeout(hour, oai_demo=False) == LIVE_EXPLORE_PARENT_WAIT
+    assert explore_parent_wait_timeout(timedelta(seconds=120), oai_demo=False) == timedelta(seconds=120)
 
 
 def test_is_oai_demo_goal_matches_all_three_prefixes():

@@ -27,6 +27,7 @@ from domains.spawn_agent.config import (
     SUB_ACTIVITY_MAX_ATTEMPTS,
     SUB_ACTIVITY_TIMEOUT,
     explore_limits_for_depth,
+    explore_parent_wait_timeout,
     is_oai_demo_mass_agent_task,
     resolve_explore_depth,
     should_skip_oai_demo_browser_spawn,
@@ -95,6 +96,45 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
             result.get("tool_call_results") or [],
         )
     )
+
+
+def _explore_result_after_activity_failure(
+    exc: BaseException, *, user_paused: bool
+) -> tuple[Dict[str, Any], bool]:
+    """Map an explore activity failure to (result, was_cancelled).
+
+    Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
+    parent can synthesize. A user pause still ERROR-cancels. Unexpected
+    ActivityError without wrap-up is re-raised for the outer ERROR path.
+    """
+    recovered = wrap_up_payload_from_failure(exc)
+    cancel_cause = not isinstance(exc, ActivityError) or isinstance(
+        exc.cause, (asyncio.CancelledError, TemporalCancelledError)
+    )
+    if user_paused and cancel_cause:
+        return {}, True
+    if recovered:
+        return {
+            "status": "completed",
+            "result": recovered.get("result")
+            or recovered.get("final_response")
+            or recovered.get("summary")
+            or "",
+            "tool_call_results": recovered.get("tool_call_results") or [],
+            "accumulated_usage": recovered.get("accumulated_usage") or [],
+            "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
+        }, False
+    if isinstance(exc, ActivityError) and not cancel_cause:
+        raise exc
+    if cancel_cause and not user_paused:
+        return {
+            "status": "completed",
+            "result": "Research finished with the evidence gathered so far.",
+            "tool_call_results": [],
+            "accumulated_usage": [],
+            "llm_iteration_usage": [],
+        }, False
+    return {}, True
 
 logger = structlog.get_logger()
 
@@ -606,6 +646,7 @@ class SpawnAgentManager(ToolManager):
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
+            parent_wait = explore_parent_wait_timeout(explore_activity_timeout, oai_demo=oai_demo)
 
             async with span(
                 "explore_activity_wait",
@@ -618,7 +659,19 @@ class SpawnAgentManager(ToolManager):
             ):
                 # Wait for activity completion or pause signal
                 was_cancelled = False
-                await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
+                try:
+                    await workflow.wait_condition(
+                        lambda: activity_handle.done() or workflow_instance.is_paused,
+                        timeout=parent_wait,
+                    )
+                except TimeoutError:
+                    if not activity_handle.done():
+                        logger.info(
+                            "Cancelling explore agent after parent wait budget",
+                            goal=goal[:100],
+                            wait_s=parent_wait.total_seconds(),
+                        )
+                        activity_handle.cancel()
                 if workflow_instance.is_paused and not activity_handle.done():
                     logger.info("Cancelling explore agent due to pause", goal=goal[:100])
                     activity_handle.cancel()
@@ -628,12 +681,9 @@ class SpawnAgentManager(ToolManager):
                 try:
                     result = await activity_handle
                 except (asyncio.CancelledError, ActivityError) as e:
-                    if isinstance(e, ActivityError) and not isinstance(
-                        e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                    ):
-                        raise  # Re-raise non-cancellation errors
-                    was_cancelled = True
-                    result = {}
+                    result, was_cancelled = _explore_result_after_activity_failure(
+                        e, user_paused=bool(getattr(workflow_instance, "is_paused", False))
+                    )
 
             if was_cancelled:
                 logger.info("Explore agent cancelled", goal=goal[:100])

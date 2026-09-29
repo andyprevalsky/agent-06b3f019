@@ -458,6 +458,7 @@ class _FakeSpawnWF:
             }
         )
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
+        self.wait_condition_timeouts = []
         import temporalio.workflow as real
 
         self.unsafe = real.unsafe
@@ -502,6 +503,7 @@ class _FakeSpawnWF:
 
     async def wait_condition(self, predicate, timeout=None):
         # Evaluate once; if not satisfied, return anyway (no real waiting)
+        self.wait_condition_timeouts.append(timeout)
         predicate()
         return
 
@@ -1067,6 +1069,84 @@ async def test_handler_explore_cancelled_yields_error():
         restore()
     # Either ERROR (cancel path) is expected
     assert any(e.status == MessageStatus.ERROR for e in events)
+
+
+def _explore_timeout_activity_error(heartbeat=None):
+    from temporalio.exceptions import ActivityError
+
+    exc = ActivityError(
+        message="activity StartToClose timeout",
+        scheduled_event_id=1,
+        started_event_id=1,
+        identity="worker",
+        activity_type="spawn_explore_agent_activity",
+        activity_id="1",
+        retry_state=None,
+    )
+    exc.__cause__ = TimeoutError("StartToClose")
+    if heartbeat is not None:
+        exc.last_heartbeat_details = (heartbeat,)
+    return exc
+
+
+async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
+    """A timed-out explore must FINISH with heartbeat research, not ERROR."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    evidence = {
+        "result": "Denver median rent $1,800; Capitol Hill; 60F winters",
+        "tool_call_results": ["**Result:** NOAA normals unavailable"],
+        "accumulated_usage": [],
+        "llm_iteration_usage": [],
+    }
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(exception=_explore_timeout_activity_error(evidence)),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver weather"},
+                tool_call_id="tc-timeout-wrap",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "median rent" in finished.message
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+    assert fake.wait_condition_timeouts
+    assert fake.wait_condition_timeouts[0] is not None
+
+
+async def test_handler_explore_timeout_without_heartbeat_still_finishes():
+    """Wait-budget cancel without heartbeat still FINISHES so the parent can continue."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(cancel_on_await=True),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver weather"},
+                tool_call_id="tc-timeout-empty",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "evidence gathered" in finished.message.lower()
+    assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
 async def test_handler_explore_exception_yields_error():
@@ -3919,6 +3999,14 @@ async def run_all_tests():
         test_handler_explore_unavailable_sources_still_finished,
     )
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
+    await r.record_async(
+        "handler_explore_timeout_finishes_with_heartbeat_wrap_up",
+        test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
+    )
+    await r.record_async(
+        "handler_explore_timeout_without_heartbeat_still_finishes",
+        test_handler_explore_timeout_without_heartbeat_still_finishes,
+    )
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
     await r.record_async("handler_code_delegates", test_handler_code_delegates)

@@ -24,6 +24,11 @@ EXPLORE_DEPTH_LIMITS = {
     "deep": (50, timedelta(seconds=1800)),
 }
 EXPLORE_DEFAULT_DEPTH = "quick"
+# Live (non-demo) parent wait: historical explore p95≈171s / max≈292s. A hung
+# child at the full 600s activity timeout ties the parent past smoke caps
+# (parallel-tool-calls dynamic cap=600s). Demo trees keep the activity timeout
+# so July Fast Mode deep replays can finish.
+LIVE_EXPLORE_PARENT_WAIT = timedelta(seconds=360)
 # Fast Mode replays July OAi-demo explore trajectories whose attempt_completion
 # typically lands around turn ~14 (many namespaces run to p:20–49). The live
 # default "quick" (5) aborts mid-replay before that turn → max-iter + loops.
@@ -39,6 +44,20 @@ def explore_limits_for_depth(depth: str | None) -> tuple[int, timedelta]:
     may batch multiple parallel searches.
     """
     return EXPLORE_DEPTH_LIMITS.get(depth or EXPLORE_DEFAULT_DEPTH, EXPLORE_DEPTH_LIMITS[EXPLORE_DEFAULT_DEPTH])
+
+
+def explore_parent_wait_timeout(activity_timeout: timedelta, *, oai_demo: bool) -> timedelta:
+    """How long the parent workflow waits for one explore activity.
+
+    Demo / Fast Mode mass-agent trees keep the full activity timeout. Live
+    trees cap the wait so a stuck child returns gathered evidence in time
+    for the parent to finish.
+    """
+    if oai_demo:
+        return activity_timeout
+    if activity_timeout <= LIVE_EXPLORE_PARENT_WAIT:
+        return activity_timeout
+    return LIVE_EXPLORE_PARENT_WAIT
 
 
 def resolve_explore_depth(
