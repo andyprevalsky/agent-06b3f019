@@ -5406,6 +5406,67 @@ reap_orphaned_fleet_proxies() {
     echo "🧹 reaped $n orphaned data-plane proxy tunnel(s) leaked by a dead controller"
 }
 
+stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry>
+    local registry="$1" record clone_name id vol details status volume receipt count=0 claims
+    [ "$(registry_meta_value "$registry/meta" version)" = "2" ] || return 1
+    [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
+        && [ ! -e "$registry/runtime-evidence-unconfirmed" ] || return 1
+    claims="$(exact_owner_pool_claim_ids "$registry/meta")" || return 1
+    [ -z "$claims" ] || return 1
+    [ -d "$registry/clones" ] && [ ! -L "$registry/clones" ] || return 1
+    for record in "$registry"/clones/*; do
+        [ -e "$record" ] || continue
+        [ -f "$record" ] && [ ! -L "$record" ] || return 1
+        clone_name="${record##*/}"
+        # The audit-first repair above has already bound this record to the
+        # dead owner. Require the remaining exact ID tuple to be canonical.
+        read -r id vol < <(python3 - "$record" "$clone_name" <<'PY'
+import re, stat, sys
+from pathlib import Path
+p, name = Path(sys.argv[1]), sys.argv[2]
+if not re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", name):
+    raise SystemExit(1)
+if not stat.S_ISREG(p.lstat().st_mode):
+    raise SystemExit(1)
+raw = p.read_bytes()
+if len(raw) > 65536:
+    raise SystemExit(1)
+fields = {}
+for line in raw.decode().splitlines():
+    key, sep, value = line.partition("=")
+    if not sep or key in fields:
+        raise SystemExit(1)
+    fields[key] = value
+if set(fields) != {"name", "id", "volume_id"} or fields["name"] != name:
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]+", fields["id"]) or not re.fullmatch(r"[A-Za-z0-9_-]+", fields["volume_id"]):
+    raise SystemExit(1)
+print(fields["id"], fields["volume_id"])
+PY
+) || return 1
+        [ -n "$id" ] && [ -n "$vol" ] || return 1
+        details="$(registry_machine_details "$id")"
+        status=$?
+        [ "$status" -eq 1 ] || return 1  # exact Machine absent
+        [ "$vol" != "${WARM_VOLUME_ID:-}" ] \
+            && [ "$vol" != "${SHARED_WARM_VOLUME_ID:-}" ] || return 1
+        # A fresh accepted destroy request and a second exact read prove that
+        # only Fly's unattached, transitional Volume is left. Keep its record;
+        # a later startup or exact-owner recovery will retry until terminal.
+        FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || return 1
+        volume="$(FLY volumes show "$vol" -a "$APP" --json)" || return 1
+        printf '%s' "$volume" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or data.get("attached_machine_id", "missing") is not None:
+    raise SystemExit(1)
+' "$vol" || return 1
+        count=$((count + 1))
+    done
+    [ "$count" -gt 0 ] || return 1
+    echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach; retained dead-owner registry $registry" >&2
+}
+
 reconcile_stale_fleet_registries() {
     local registry meta version app policy cleanup_state host owner_status recovery_lock_status unresolved=0
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
@@ -5465,12 +5526,28 @@ reconcile_stale_fleet_registries() {
             continue
         fi
         echo "🧭 recovering stale fleet registry $(basename "$registry") (same-host controller identity is dead)"
-        if ! recover_registry_audit_only_fresh "$registry" \
-            || ! reap_registry_clones "$registry" stale; then
+        if ! recover_registry_audit_only_fresh "$registry"; then
             rm -rf "$registry/recovery-lock"
             # Registries are independent ownership scopes. Preserve this one
             # and keep the overall startup fail-closed, but continue cleaning
             # later registries whose exact IDs and dead owners can be proven.
+            unresolved=1
+            continue
+        fi
+        # A provider-accepted destroy can linger in waiting_for_detach for
+        # hours. Verify that this exact orphan is the only unfinished resource
+        # before spending six more destroy/read attempts or blocking a healthy
+        # unrelated fleet. The registry remains owned and retryable.
+        if stale_registry_only_waits_for_provider_detach "$registry"; then
+            rm -rf "$registry/recovery-lock"
+            continue
+        fi
+        if ! reap_registry_clones "$registry" stale; then
+            if stale_registry_only_waits_for_provider_detach "$registry"; then
+                rm -rf "$registry/recovery-lock"
+                continue
+            fi
+            rm -rf "$registry/recovery-lock"
             unresolved=1
             continue
         fi

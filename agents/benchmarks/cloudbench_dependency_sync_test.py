@@ -8821,6 +8821,51 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
     assert "volumes destroy vol_warm" not in log
 
 
+@pytest.mark.parametrize(
+    ("state", "attached", "machine_present", "has_claim", "expected"),
+    [
+        ("waiting_for_detach", "null", False, False, True),
+        ("created", "null", False, False, False),
+        ("waiting_for_detach", '"deadbeef"', False, False, False),
+        ("waiting_for_detach", "null", True, False, False),
+        ("waiting_for_detach", "null", False, True, False),
+    ],
+)
+def test_stale_provider_detach_does_not_block_unrelated_fleet_but_retains_owner(
+    tmp_path: Path, state: str, attached: str, machine_present: bool, has_claim: bool, expected: bool,
+) -> None:
+    registry = tmp_path / "ownership" / ("ab" * 16)
+    clone = registry / "clones" / "cloudbench-one"
+    clone.parent.mkdir(parents=True)
+    (registry / "meta").write_text("version=2\n")
+    clone.write_text("name=cloudbench-one\nid=deadbeef\nvolume_id=vol_owned\n")
+    original = clone.read_bytes()
+    fleet = FLEET_SCRIPT.read_text()
+    helper = _extract_fleet_function(fleet, "stale_registry_only_waits_for_provider_detach() {")
+    claim_result = "printf 'deadbeef\\n'" if has_claim else ":"
+    machine_result = "printf 'started cloudbench-one\\n'" if machine_present else "return 1"
+    script = f'''set -u
+APP=bench-app
+WARM_VOLUME_ID=vol_warm
+SHARED_WARM_VOLUME_ID=vol_shared
+registry_meta_value() {{ [ "$2" = version ] && printf '2\\n'; }}
+exact_owner_pool_claim_ids() {{ {claim_result}; }}
+registry_machine_details() {{ {machine_result}; }}
+FLY() {{
+  case "$1 $2" in
+    'volumes destroy') return 0 ;;
+    'volumes show') printf '%s\\n' '{{"id":"vol_owned","state":"{state}","attached_machine_id":{attached}}}' ;;
+    *) return 99 ;;
+  esac
+}}
+{helper}
+stale_registry_only_waits_for_provider_detach {shlex.quote(str(registry))}
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+    assert (result.returncode == 0) is expected, result.stderr
+    assert clone.read_bytes() == original, "transitional volume must remain exactly owned"
+
+
 def test_reap_volume_requires_exact_absence_and_distinguishes_accepted_pending(
     tmp_path: Path,
 ) -> None:
