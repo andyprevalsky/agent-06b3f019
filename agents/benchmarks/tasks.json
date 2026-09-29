@@ -5403,7 +5403,7 @@
     "name": "grep-agent-trajectories-cross-surface",
     "title": "Recall browser and code agent history",
     "description": "Retrieve grounded facts from two archived prior agent traces.",
-    "prompt": "From my earlier agent runs, what document title did the browser find at example.com, and how many steps did the Collatz program starting at 27 take? Cite the earlier agent trace paths and message roles. Use my local agent history only.",
+    "prompt": "From my earlier agent runs, what document title did the browser find at example.com, and how many steps did the Collatz program starting at 27 take? Use my local agent history only. In your final answer, give two bullets; after each fact, include the exact agent_trajectories message path from grep and its message role.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "start_phase": "execute",
