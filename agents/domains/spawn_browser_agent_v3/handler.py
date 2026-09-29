@@ -6773,7 +6773,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
-        if (write_lock_resume_state or {}).get("approval_type") == "payment":
+        if (
+            (write_lock_resume_state or {}).get("approval_type") == "payment"
+            and (write_lock_resume_state or {}).get("pending_action") is None
+            and (write_lock_resume_state or {}).get("payment_card_refs")
+        ):
             if not _complete_pending_payment_card_result(
                 browser_turn_messages, action_history, last4=payment_card_last4, card_refs=card_refs
             ):

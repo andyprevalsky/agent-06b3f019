@@ -120,6 +120,7 @@ export function selectReusableKernelProxy(
   return proxies.find((proxy) => {
     if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) return false;
     if (proxy.status !== 'available') return false;
+    if (proxy.bypass_hosts?.length) return false;
     const config = proxy.config as Record<string, unknown> | undefined;
     if (!config || Object.keys(config).length !== Object.keys(candidate.config).length)
       return false;

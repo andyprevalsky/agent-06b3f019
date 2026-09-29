@@ -63,6 +63,11 @@ function testRestoredProxyReuse(): void {
   };
   assert.strictEqual(selectReusableKernelProxy([matching], candidate), 'ready-proxy');
   assert.strictEqual(
+    selectReusableKernelProxy([{ ...matching, bypass_hosts: ['example.com'] }], candidate),
+    undefined,
+    'a proxy that bypasses hosts cannot satisfy a geographic proxy candidate'
+  );
+  assert.strictEqual(
     selectReusableKernelProxy([{ ...matching, status: 'unavailable' }], candidate),
     undefined
   );
