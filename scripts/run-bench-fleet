@@ -5447,7 +5447,7 @@ reconcile_stale_fleet_registries() {
 # inode below .locks/.  The lock file is deliberately never unlinked: removing
 # and recreating a lock pathname would reproduce the same ABA split-brain that
 # this transaction closes.  Different machine IDs never contend on one lock.
-pool_claim_fs_transaction() {  # <publish-ordinary|publish-transfer|release|mark-unconfirmed> ...
+pool_claim_fs_transaction() {  # <publish-ordinary|publish-transfer|release|mark-unconfirmed|confirm> ...
     python3 - "$@" <<'PY'
 import fcntl
 import hashlib
@@ -5632,12 +5632,17 @@ try:
                 os.fsync(parent_fd)
             except FileNotFoundError:
                 pass
-    elif operation in ("release", "mark-unconfirmed"):
+    elif operation in ("release", "mark-unconfirmed", "confirm"):
         if len(sys.argv) != 9:
             raise SystemExit(1)
         digest, host, pid, pid_start, owner = sys.argv[4:]
         payload, opened = read_claim_locked()
         parse_exact_owner(payload, digest, host, pid, pid_start, owner)
+        if operation == "confirm":
+            assert payload == (
+                f"host={host}\npid={pid}\npid_start={pid_start}\n"
+                f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+            ).encode()
         # Re-stat after validation and immediately before mutation. Writers and
         # removers of this machine share this lock, so the pathname cannot cross
         # an old-inode -> absent -> successor-inode ABA boundary here.
@@ -5648,11 +5653,12 @@ try:
             os.unlink(machine_id, dir_fd=parent_fd)
             os.fsync(parent_fd)
         else:
+            state = "owned" if operation == "confirm" else "unconfirmed"
             replacement = (
                 f"host={host}\npid={pid}\npid_start={pid_start}\n"
-                f"fleet_owner_token={owner}\ncleanup_state=unconfirmed\n"
+                f"fleet_owner_token={owner}\ncleanup_state={state}\n"
             ).encode()
-            temporary = f".{machine_id}.unconfirmed.{secrets.token_hex(16)}"
+            temporary = f".{machine_id}.{state}.{secrets.token_hex(16)}"
             temporary_fd = -1
             try:
                 temporary_fd = os.open(
@@ -6293,7 +6299,9 @@ if pool_dir is not None and pool_dir.exists():
             or claim.get("host") != meta.get("host")
             or claim.get("pid") != meta.get("pid")
             or claim.get("pid_start") != meta.get("pid_start")
-            or claim.get("cleanup_state") != "unconfirmed"
+            or claim.get("cleanup_state") not in {"unconfirmed", "owned"}
+            or (claim.get("cleanup_state") == "owned"
+                and (registry / "guest-cleanup-unconfirmed").exists())
         ):
             raise ValueError("unbound stale-owner pool claim")
         machine_records[machine_id] = (f"cloudbench-pool-{machine_id}", volume_id)
@@ -7426,6 +7434,47 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     CLOUDBENCH_BARRIER_TOKEN="$save_barrier"
 }
 
+fleet_recovery_confirm_pool_claims() {  # <exact recovered owner registry>
+    local registry="$1" meta="$1/meta" plan kind bench clone_name id volume_id out port
+    local claim state digest host pid pid_start owner run_id exact_ids
+    exact_ids="$(exact_owner_pool_claim_ids "$meta")" || return 1
+    [ -n "$exact_ids" ] || return 0
+    [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
+        && [ ! -e "$registry/runtime-evidence-unconfirmed" ] \
+        && [ "$(registry_meta_value "$meta" cleanup_policy)" = "reap" ] || return 1
+    owner="$(registry_meta_value "$meta" fleet_owner_token)"
+    run_id="$(registry_meta_value "$meta" run_id)"
+    host="$(registry_meta_value "$meta" host)"
+    pid="$(registry_meta_value "$meta" pid)"
+    pid_start="$(registry_meta_value "$meta" pid_start)"
+    plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-confirm-pool.XXXXXX")" || return 1
+    if ! fleet_registry_build_guest_recovery_plan "$registry" "$plan"; then
+        rm -f "$plan"
+        return 1
+    fi
+    while IFS=$'\t' read -r kind bench clone_name id volume_id out port; do
+        [ "$kind" = "pool-guest" ] || continue
+        [ -f "$out/guest-shutdown.confirmed" ] \
+            && [ ! -L "$out/guest-shutdown.confirmed" ] \
+            && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ] || {
+            rm -f "$plan"
+            return 1
+        }
+        claim="$POOL_CLAIMS_DIR/$id"
+        state="$(registry_meta_value "$claim" cleanup_state)"
+        case "$state" in
+            unconfirmed)
+                digest="$(cloudbench_env_sha256 "$claim")" || { rm -f "$plan"; return 1; }
+                pool_claim_fs_transaction confirm "$claim" "$id" "$digest" \
+                    "$host" "$pid" "$pid_start" "$owner" || { rm -f "$plan"; return 1; }
+                ;;
+            owned) ;;
+            *) rm -f "$plan"; return 1 ;;
+        esac
+    done < "$plan"
+    rm -f "$plan"
+}
+
 resolve_exact_recovery_warm_identity() {  # <v2-registry>; exact source Machine and mounted Volume
     local registry="${1%/}" source_id volume_id
     source_id="$(python3 - "$registry" "$FLEET_AUDIT_ROOT" "$APP" <<'PY'
@@ -7831,6 +7880,11 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
         && ! fleet_recovery_confirm_runtime_evidence "$registry"; then
         echo "❌ exact stale-owner runtime evidence is incomplete; original volumes remain retained" >&2
+        rm -rf "$registry/recovery-lock"
+        return 1
+    fi
+    if ! fleet_recovery_confirm_pool_claims "$registry"; then
+        echo "❌ exact stale-owner pool claims lack complete guest receipts" >&2
         rm -rf "$registry/recovery-lock"
         return 1
     fi
