@@ -84,8 +84,12 @@ uses only the structured start/receipt state and a bounded failed-start log;
 an unrelated provider start failure remains mapped for exact cleanup and
 still cannot release a guest latch without independent proof.
 
-The 8 GB Machine remained unstartable on that host; pool replacement is being
-performed once from the existing snapshot. The replacement and ten consecutive
+The 8 GB Machine remained unstartable on that host. The pool already has seven
+other 8 GB Machines and three 4 GB Machines, so its existing shape-aware claim
+selection can put the two large tasks on healthy 8 GB hosts without copying a
+volume. An attempted replacement was canceled before startup when provisioning
+selected an obsolete 40 GB snapshot; its exact volume remains under retained
+provider-cleanup ownership until Fly confirms destruction. Ten consecutive
 complete slices are still needed before this case can be marked fixed. No task,
 model, prompt, evaluator, scoring rule, or benchmark timeout changed.
 
