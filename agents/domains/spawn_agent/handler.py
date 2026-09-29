@@ -1207,6 +1207,8 @@ class SpawnAgentManager(ToolManager):
                                 "structured_response": event_metadata.get("structured_response"),
                             }
                         )
+            except GenerationHandoffRequested:
+                raise
             except Exception as exc:
                 recovered = await _recover_oai_demo_for_each_timeout(
                     workflow_instance, child_info.get("agent_id"), exc

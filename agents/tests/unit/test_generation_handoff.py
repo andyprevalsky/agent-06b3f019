@@ -110,6 +110,39 @@ def test_sleep_raises_on_handoff_before_first_slice():
         assert fake.sleep_calls == []
 
 
+def test_wait_condition_overall_timeout_normalizes_temporal_timeout():
+    """A Temporal TimeoutError after the caller timeout becomes asyncio.TimeoutError."""
+    from datetime import timedelta
+
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
+
+    class _TemporalTimeoutMod(_FakeWorkflowMod):
+        async def wait_condition(self, predicate, timeout=None):
+            self.now_value = datetime(2026, 9, 29, 0, 20, tzinfo=timezone.utc)
+            raise TemporalTimeoutError(
+                "timed out",
+                type=TimeoutType.START_TO_CLOSE,
+                last_heartbeat_details=(),
+            )
+
+    async def _run():
+        await wait_condition_or_generation_handoff(
+            lambda: False,
+            SimpleNamespace(),
+            timeout=timedelta(minutes=15),
+            workflow_mod=_TemporalTimeoutMod(),
+        )
+
+    try:
+        asyncio.run(_run())
+        raise AssertionError("expected asyncio.TimeoutError")
+    except asyncio.TimeoutError:
+        pass
+    except GenerationHandoffRequested:
+        raise AssertionError("overall timeout must not become a handoff")
+
+
 def test_sleep_slices_long_wait_into_handoff_polls():
     fake = _FakeWorkflowMod()
 

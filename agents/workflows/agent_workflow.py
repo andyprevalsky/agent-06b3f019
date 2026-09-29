@@ -3326,7 +3326,7 @@ class AgentWorkflow:
                     return {"error": True, "message": result_text or f"{tool_name} failed"}
                 return {"success": True, "message": result_text or f"{tool_name} completed"}
 
-        except GenerationHandoffRequested:
+        except GenerationHandoffRequested as exc:
             # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
             # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
             workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
@@ -3334,6 +3334,7 @@ class AgentWorkflow:
                 "success": True,
                 "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
                 "generation_handoff": True,
+                "handoff_task_queue": exc.task_queue,
             }
 
         except asyncio.CancelledError:

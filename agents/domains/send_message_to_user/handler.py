@@ -20,6 +20,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.send_message_to_user.config import SMS_FALLBACK_TIMEOUT_MINUTES, SUB_AGENT_AUTO_RESPONSE
 from domains.send_message_to_user.service import is_sub_agent, validate_tool_call
@@ -156,7 +157,16 @@ class SendMessageToUserManager(ToolManager):
                     "User responded within timeout, no SMS needed",
                     agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
                 )
-            except TimeoutError:
+            except GenerationHandoffRequested:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Waiting for reply",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata=build_attention_metadata(message, is_question, is_waiting=True),
+                )
+                raise
+            except (TimeoutError, TemporalTimeoutError):
                 logger.info(
                     "No response within timeout, sending SMS",
                     agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]

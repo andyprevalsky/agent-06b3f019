@@ -686,6 +686,57 @@ async def test_execute_tool_exception_path_yields_error():
     assert "activity boom" in events[0].message
 
 
+async def test_execute_tool_generation_handoff_closes_finished_and_reraises():
+    """Cutover while waiting on a child must FINISH, not swallow into ERROR."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(
+        activity_results={
+            "spawn_sub_agent_activity": {
+                "agents": [
+                    {
+                        "agent_id": "child-handoff",
+                        "goal": "Wait for approval",
+                        "temporal_workflow_id": "wf-child-handoff",
+                    }
+                ]
+            },
+            "fetch_child_terminal_result_activity": None,
+        }
+    )
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow()
+
+        async def _check_generation_handoff():
+            return "navi-agent-tasks@new"
+
+        parent._check_generation_handoff = _check_generation_handoff
+        manager = SpawnSubAgentManager()
+        events = []
+        raised = None
+        try:
+            async for event in manager.execute_tool(
+                parent,
+                {"sub_agent": {"goal": "Wait for approval"}},
+                "tc-handoff",
+            ):
+                events.append(event)
+        except GenerationHandoffRequested as exc:
+            raised = exc
+    finally:
+        restore()
+
+    assert raised is not None
+    assert raised.task_queue == "navi-agent-tasks@new"
+    assert all(getattr(e, "status", None) != MessageStatus.ERROR for e in events)
+    finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def test_execute_tool_happy_path_completes_and_tracks_child():
     """Full happy path: parent tracks child, waits, yields FINISHED with summary."""
     from domains.spawn_sub_agents.handler import SpawnSubAgentManager
@@ -1292,6 +1343,10 @@ async def run_all_tests():
     await r.record_async("exec_empty_agents", test_execute_tool_empty_agents_list_yields_error)
     await r.record_async("exec_child_error_key", test_execute_tool_child_info_has_error_key)
     await r.record_async("exec_exception_path", test_execute_tool_exception_path_yields_error)
+    await r.record_async(
+        "exec_generation_handoff_finished",
+        test_execute_tool_generation_handoff_closes_finished_and_reraises,
+    )
     await r.record_async("exec_happy_path", test_execute_tool_happy_path_completes_and_tracks_child)
     await r.record_async("exec_recovers_terminal_child", test_execute_tool_recovers_terminal_child_from_persisted_state)
     await r.record_async("exec_no_bus_id", test_execute_tool_happy_path_no_parent_bus_id_sets_it)

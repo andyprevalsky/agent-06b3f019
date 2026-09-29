@@ -3946,6 +3946,103 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
     assert any(e.status == MessageStatus.ERROR and "2/2" in e.message for e in events)
 
 
+async def test_handler_for_each_drain_handoff_reraises_instead_of_failing_children():
+    """Cutover during for_each drain must not mark parked children failed."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    class _HandoffDrainMgr:
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id, *, for_each_child: bool = False):
+            async def _gen():
+                raise GenerationHandoffRequested("navi-agent-tasks@new")
+                yield  # generator marker
+
+            return _gen()
+
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: _HandoffDrainMgr()
+    events = []
+    raised = None
+    try:
+        try:
+            events = await _collect(
+                h.SpawnAgentManager().execute_tool(
+                    workflow_instance=_FakeWFInstance(),
+                    tool_call={
+                        "type": "for_each",
+                        "goal": "process",
+                        "output_schema": {"fields": []},
+                        "items": ["a", "b"],
+                    },
+                    tool_call_id="tc",
+                )
+            )
+        except GenerationHandoffRequested as exc:
+            raised = exc
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    assert raised is not None
+    assert raised.task_queue == "navi-agent-tasks@new"
+    assert all(getattr(e, "status", None) != MessageStatus.ERROR for e in events)
+
+
+async def test_spawn_agent_wrapper_handoff_closes_finished_chip():
+    """spawn_agent() must close the parent chip FINISHED when drain re-raises handoff."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    class _HandoffDrainMgr:
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id, *, for_each_child: bool = False):
+            async def _gen():
+                raise GenerationHandoffRequested("navi-agent-tasks@new")
+                yield  # generator marker
+
+            return _gen()
+
+    fake = _FakeSpawnWF()
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    h.get_sub_agent_manager = lambda: _HandoffDrainMgr()
+    wf = _FakeWFInstance()
+    raised = None
+    try:
+        try:
+            await h.spawn_agent(
+                wf,
+                {
+                    "type": "for_each",
+                    "goal": "process",
+                    "output_schema": {"fields": []},
+                    "items": ["a"],
+                },
+                "tc-wrap",
+            )
+        except GenerationHandoffRequested as exc:
+            raised = exc
+    finally:
+        h.get_sub_agent_manager = original_sub
+        restore_wf()
+
+    assert raised is not None
+    assert raised.task_queue == "navi-agent-tasks@new"
+    finished = [
+        event
+        for event, _tcid, _name in wf.handled_events
+        if getattr(event, "status", None) == MessageStatus.FINISHED
+    ]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    assert all(
+        getattr(event, "status", None) != MessageStatus.ERROR for event, _tcid, _name in wf.handled_events
+    )
+
+
 # ── service: explore tool dispatch wraps call_temporal_activity_from_activity ──
 
 
@@ -4258,6 +4355,14 @@ async def run_all_tests():
     await r.record_async("handler_explore_unknown_attachment", test_handler_explore_unknown_attachment_warns)
     await r.record_async("handler_for_each_drain_exception", test_handler_for_each_drain_exception_counts_as_failure)
     await r.record_async("handler_for_each_spawn_exception", test_handler_for_each_spawn_exception_counts_as_failure)
+    await r.record_async(
+        "handler_for_each_drain_handoff_reraises",
+        test_handler_for_each_drain_handoff_reraises_instead_of_failing_children,
+    )
+    await r.record_async(
+        "spawn_agent_wrapper_handoff_closes_finished",
+        test_spawn_agent_wrapper_handoff_closes_finished_chip,
+    )
     await r.record_async(
         "tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message
     )

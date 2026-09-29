@@ -79,7 +79,7 @@ async def wait_condition_or_generation_handoff(
             await wf.wait_condition(predicate, timeout=slice_timeout)
         except (asyncio.TimeoutError, TemporalTimeoutError):
             if timeout is not None and started is not None and (wf.now() - started) >= timeout:
-                raise
+                raise asyncio.TimeoutError()
             continue
 
 

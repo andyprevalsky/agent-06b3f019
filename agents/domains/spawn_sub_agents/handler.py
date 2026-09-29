@@ -22,7 +22,10 @@ from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
 )
 from helpers.child_results import fetch_child_terminal_result_activity
-from helpers.generation_handoff import GenerationHandoffRequested
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
@@ -234,6 +237,15 @@ class SpawnSubAgentManager(ToolManager):
             ):
                 yield event
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Spawning sub-agent",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata={"toolName": USER_FACING_TOOL_NAME},
+            )
+            raise
         except Exception as e:
             error_msg = extract_error_message(e)
             logger.error("Failed to spawn sub-agent", error=error_msg)

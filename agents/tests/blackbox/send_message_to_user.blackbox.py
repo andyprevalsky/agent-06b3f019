@@ -313,19 +313,23 @@ async def test_handler_sms_source_sends_sms_and_waits():
 
 async def test_handler_non_sms_timeout_triggers_sms_fallback():
     """Non-SMS agent waits; TimeoutError triggers SMS fallback notify."""
+    from datetime import datetime, timedelta, timezone
+
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from tools.base import MessageStatus
 
-    wait_calls = {"count": 0}
-
     class _WaitFake(_FakeWorkflowModule):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._now = datetime(2026, 9, 29, tzinfo=timezone.utc)
+
+        def now(self):
+            return self._now
+
         async def wait_condition(self, predicate, timeout=None):
-            wait_calls["count"] += 1
-            # First wait: simulate timeout; second wait: satisfy
-            if wait_calls["count"] == 1:
-                raise TimeoutError("no response")
-            # second call: set flag and return
-            return
+            # Advance past the 15m SMS fallback so the helper re-raises TimeoutError.
+            self._now = self._now + timedelta(minutes=16)
+            raise TimeoutError("no response")
 
     fake = _WaitFake(
         activity_results={
@@ -359,6 +363,101 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
     assert events[-1].status == MessageStatus.FINISHED
 
 
+async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
+    """Temporal TimeoutError from wait_condition must still trigger SMS fallback."""
+    from datetime import datetime, timedelta, timezone
+
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
+    from tools.base import MessageStatus
+
+    class _WaitFake(_FakeWorkflowModule):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._now = datetime(2026, 9, 29, tzinfo=timezone.utc)
+
+        def now(self):
+            return self._now
+
+        async def wait_condition(self, predicate, timeout=None):
+            self._now = self._now + timedelta(minutes=16)
+            raise TemporalTimeoutError(
+                "timed out",
+                type=TimeoutType.START_TO_CLOSE,
+                last_heartbeat_details=(),
+            )
+
+    fake = _WaitFake(
+        activity_results={
+            "get_agent_source": "WEB",
+            "notify_sms_event_activity": None,
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        wf = _FakeWorkflow(has_new_messages=False)
+
+        async def _run():
+            gen = SendMessageToUserManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"message": "Ready?", "is_question": True},
+                tool_call_id="tc-temporal-timeout",
+            )
+            events = []
+            async for e in gen:
+                wf._has_new_messages = True
+                events.append(e)
+            return events
+
+        events = await _run()
+    finally:
+        restore()
+
+    assert events[-1].status == MessageStatus.FINISHED
+
+
+async def test_handler_non_sms_fallback_handoff_closes_finished_and_reraises():
+    """Cutover during the 15m SMS-fallback park must FINISH, not leave the chip open."""
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(
+        activity_results={
+            "get_agent_source": "WEB",
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        wf = _FakeWorkflow(has_new_messages=False)
+
+        async def _check_generation_handoff():
+            return "navi-agent-tasks@new"
+
+        wf._check_generation_handoff = _check_generation_handoff
+        events = []
+        raised = None
+        try:
+            async for event in SendMessageToUserManager().execute_tool(
+                workflow_instance=wf,
+                tool_call={"message": "Ready?", "is_question": True},
+                tool_call_id="tc-handoff-fallback",
+            ):
+                events.append(event)
+        except GenerationHandoffRequested as exc:
+            raised = exc
+    finally:
+        restore()
+
+    assert raised is not None
+    assert raised.task_queue == "navi-agent-tasks@new"
+    assert all(e.status != MessageStatus.ERROR for e in events)
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert finished[-1].message == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+
 async def run_all_tests():
     print("send-message-to-user blackbox tests:")
     r = BlackboxResult()
@@ -378,6 +477,14 @@ async def run_all_tests():
     await r.record_async("handler_sub_agent", test_handler_sub_agent_auto_responds)
     await r.record_async("handler_sms_source", test_handler_sms_source_sends_sms_and_waits)
     await r.record_async("handler_non_sms_timeout", test_handler_non_sms_timeout_triggers_sms_fallback)
+    await r.record_async(
+        "handler_non_sms_temporal_timeout",
+        test_handler_non_sms_temporal_timeout_triggers_sms_fallback,
+    )
+    await r.record_async(
+        "handler_non_sms_fallback_handoff",
+        test_handler_non_sms_fallback_handoff_closes_finished_and_reraises,
+    )
     teardown_mock()
     return r.all_passed
 

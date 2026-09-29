@@ -6504,6 +6504,40 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
         _restore_workflow(original)
 
 
+async def test_workflow_execute_tool_handoff_includes_task_queue():
+    """_execute_tool must pass the live queue through so run_agent can CAN now."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a-handoff"
+    wf.user_id = "u1"
+    wf.current_phase = "EXECUTE"
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_spawn_agent(workflow_instance, tool_call, tool_call_id):
+        raise GenerationHandoffRequested("navi-agent-tasks@new")
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["spawn_agent"]
+    workflow_module.TOOL_EXECUTORS["spawn_agent"] = fake_spawn_agent
+    try:
+        result = await wf._execute_tool(
+            "spawn_agent",
+            {"type": "explore", "goal": "parked child"},
+            "tc-handoff",
+        )
+        assert result.get("success") is True
+        assert result.get("generation_handoff") is True
+        assert result.get("handoff_task_queue") == "navi-agent-tasks@new"
+        assert result.get("message") == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+        assert result.get("error") is not True
+    finally:
+        workflow_module.TOOL_EXECUTORS["spawn_agent"] = original_executor
+        _restore_workflow(original)
+
+
 async def test_workflow_execute_tool_web_fetch_preserves_fast_mode_kwargs():
     """web_fetch auth kwargs must merge with, not replace, Fast Mode cache kwargs."""
     wf = _bare_workflow_instance()
@@ -7692,6 +7726,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_legacy_spawn_agent_phase",
         test_workflow_execute_tool_legacy_spawn_agent_receives_phase,
+    )
+    await r.record_async(
+        "wf_execute_tool_handoff_includes_task_queue",
+        test_workflow_execute_tool_handoff_includes_task_queue,
     )
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
