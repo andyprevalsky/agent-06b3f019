@@ -674,6 +674,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/cloudbench-machine-readiness.py" \
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
+       "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
@@ -728,6 +729,7 @@ INFRA_CANARY_PREFLIGHT_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-infra-cana
 AUTOSCALER_PORT_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-port-lease.py"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readiness.py"
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
+WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
@@ -1911,6 +1913,20 @@ if len(volumes) != 1 or not volumes[0]:
     raise SystemExit(1)
 print(volumes[0])
 ' <<< "$config"
+}
+
+machine_volume_size_gb() {  # machine_volume_size_gb <machine-id> → exact mounted volume size
+    machine_config_exact_read "$1" | python3 -c '
+import json, sys
+try:
+    mounts = json.load(sys.stdin).get("mounts") or []
+    size = mounts[0].get("size_gb") if len(mounts) == 1 else None
+    size = int(size)
+    if size <= 0: raise ValueError
+except (TypeError, ValueError, KeyError, IndexError):
+    raise SystemExit(1)
+print(size)
+' 2>/dev/null
 }
 
 volume_inventory_contains_id() {  # <volume-id>; stdout=exact state; 0=present, 1=exactly absent, 2=unknown
@@ -8707,9 +8723,10 @@ worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
     WORKER_LEDGER_LOCK_TOKEN=""
 }
 
-clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb]
+clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb] [snapshot-id]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
+    local clone_snapshot="${5:-$SNAP_ID}"
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
     local storage_deadline preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
@@ -8743,7 +8760,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
-            --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" \
+            --from-snapshot "$clone_snapshot" --region "$REGION" --name "$target_name" \
             --vm-size "$vm_size" --vm-memory "$vm_memory" --detach 2>&1)"
         clone_status=$?
         {
@@ -11956,6 +11973,18 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
     local runtime_run_token="$7"
     local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
+    local primary_volume_size worker_snapshot
+    primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
+    if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
+        worker_snapshot="$SNAP_ID"
+    elif [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
+        && [ "$primary_volume_size" = "$WORKER_POOL_SNAPSHOT_SIZE_GB" ]; then
+        worker_snapshot="$WORKER_POOL_SNAPSHOT_ID"
+    else
+        printf '%s\n' "primary volume size has no proven matching worker snapshot" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: no exact-size worker snapshot for primary" >&2
+        return 1
+    fi
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -11963,7 +11992,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         return 1
     fi
     if ! wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
-        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY")"; then
+        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY" "$worker_snapshot")"; then
         # Keep the reservation until controller teardown: an ambiguous clone
         # failure can still become provider-visible after the lookup deadline.
         printf '%s\n' "could not allocate worker clone" > "$out/autoscaler.failed"
@@ -12728,6 +12757,33 @@ mkdir -p "$FLEET_DIR"
 start_machines_snapshot_loop || exit 1
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
+# A pooled primary can have a smaller volume than the legacy warm donor. Worker
+# clones inherit their primary's volume size, so the warm donor's 40 GB snapshot
+# is not admissible for a 20 GB pool primary. Cut one exact pool-volume snapshot
+# on first use and cache its immutable ID across slices. This happens before
+# any task starts, never once per autoscaled worker or benchmark.
+WARM_SOURCE_SIZE_GB="$(machine_volume_size_gb "$WARM_ID")" || WARM_SOURCE_SIZE_GB=""
+case "$WARM_SOURCE_SIZE_GB" in ''|0|*[!0-9]*)
+    echo "❌ could not verify warm source volume size for worker clones" >&2; exit 1 ;;
+esac
+WORKER_POOL_SNAPSHOT_SIZE_GB=""
+WORKER_POOL_SNAPSHOT_ID=""
+if [ -s "$POOL_IDS_FILE" ]; then
+    worker_snapshot_binding="$(python3 "$WORKER_SNAPSHOT_HELPER" \
+        --pool-ids "$POOL_IDS_FILE" \
+        --cache "$POOL_IDS_FILE.worker-snapshot.json" \
+        --app "$APP" --warm-volume-id "$VOL_ID" \
+        --warm-snapshot-id "$SNAP_ID")" || exit 1
+    read -r WORKER_POOL_SNAPSHOT_SIZE_GB WORKER_POOL_SNAPSHOT_ID <<< "$worker_snapshot_binding"
+    case "$WORKER_POOL_SNAPSHOT_SIZE_GB:$WORKER_POOL_SNAPSHOT_ID" in
+        *[!a-zA-Z0-9_:.-]*|:)
+            echo "❌ worker pool snapshot binding malformed" >&2; exit 1 ;;
+    esac
+    [ -n "$WORKER_POOL_SNAPSHOT_SIZE_GB" ] && [ -n "$WORKER_POOL_SNAPSHOT_ID" ] || {
+        echo "❌ worker pool snapshot binding missing" >&2; exit 1;
+    }
+    echo "🧊 worker clone source: ${WORKER_POOL_SNAPSHOT_SIZE_GB} GB pool snapshot $WORKER_POOL_SNAPSHOT_ID"
+fi
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
 if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
     && [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != "1" ]; then

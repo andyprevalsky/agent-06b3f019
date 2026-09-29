@@ -60,9 +60,21 @@ def verify_quiesced_provider_archive(
     )
     provider = object_file(out / "guest-cleanup.provider-manifest.json")
     receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
-    assert provider["kind"] == "provider-exact-manifest"
-    assert provider == helper["provider_manifest"](args)
-    assert helper["validate_provider_receipt"](receipt, provider, None)
+    if provider["kind"] == "provider-exact-manifest":
+        assert provider == helper["provider_manifest"](args)
+        assert helper["validate_provider_receipt"](receipt, provider, None)
+    elif provider["kind"] == "provider-zero-manifest":
+        # A task can complete real LLM work without allocating a browser
+        # session. The recovery path then proves zero allocation with the
+        # guest's exact database/query receipt, not a provider DELETE list.
+        # Recompute that proof against the captured run, backend, quiescence,
+        # and zero-query files before the interrupted archive can release its
+        # resource latch. This remains zero benchmark-proof credit.
+        args.zero_query_proof = str(out / "guest-cleanup.zero-allocation.json")
+        assert provider == helper["zero_provider_manifest"](args)
+        assert helper["validate_zero_receipt"](receipt, provider)
+    else:
+        raise AssertionError("unrecognized exact provider cleanup manifest")
     originals = row["files"]
     assert originals["original/repo/.context/cloudbench/run.json"]["sha256"] == (
         provider["evidence"]["run_json_sha256"])
@@ -609,7 +621,7 @@ def verify_interrupted_pool_evidence(
                         verify_prestart_provider_archive(
                             out, row, provider,
                             archived[prefix + "repo/.context/cloudbench/logs/backend.log"])
-                    elif provider["kind"] == "provider-exact-manifest":
+                    elif provider["kind"] in {"provider-exact-manifest", "provider-zero-manifest"}:
                         assert services["status"] == "stopped"
                         assert "original/repo/.context/cloudbench/run.json" in row["files"]
                         verify_quiesced_provider_archive(

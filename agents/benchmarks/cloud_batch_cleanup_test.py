@@ -384,12 +384,15 @@ async def test_minted_dispatch_preserves_live_root_observer_for_interrupt_cleanu
         on_agent_created("post-stage", CHILD)
         return result(f"{ROOT},{CHILD}")
 
-    with patch.object(bench, "run_minted_agent_account_task", composite):
-        await bench.run_single_task(
+    with patch.object(bench, "run_minted_agent_account_task", composite), patch.dict(
+        os.environ, {"BENCHMARK_WORLD_MODEL_MODE": "real"}
+    ):
+        outcome = await bench.run_single_task(
             "http://localhost:1", task,
             on_agent_created=lambda name, aid: observed.append((name, aid)),
         )
     assert observed == [("gate-stage", ROOT), ("post-stage", CHILD)]
+    assert outcome.world_model_mode == "real"
 
 
 def test_provider_cleanup_rejects_drift_and_requires_sealed_descendants():

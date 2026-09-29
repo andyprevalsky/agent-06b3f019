@@ -12439,10 +12439,15 @@ async def run_single_task(
         await _preflight_close_purchase_reuse_gate(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
-        return await run_minted_agent_account_task(
+        result = await run_minted_agent_account_task(
             base_url, task, keep_failed_agents,
             on_agent_created=on_agent_created,
         )
+        # Composite tasks return a single evaluator record for multiple exact
+        # roots. Bind that record to the same execution mode as ordinary task
+        # records so cloud artifact identity checks can accept its real result.
+        result.world_model_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real")
+        return result
 
     if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode() and _is_local_base_url(base_url):
         auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"

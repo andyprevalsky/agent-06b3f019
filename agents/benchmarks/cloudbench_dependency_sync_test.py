@@ -3096,6 +3096,10 @@ BOX_BACKEND_PORT=3001
 BOX_WMH_PORT=3007
 FLEET_WORKER_VM_SIZE=shared-cpu-1x
 FLEET_WORKER_VM_MEMORY=1024
+WARM_SOURCE_SIZE_GB=40
+WORKER_POOL_SNAPSHOT_SIZE_GB=20
+WORKER_POOL_SNAPSHOT_ID=vs_pool20
+SNAP_ID=vs_warm40
 FLEET_WORKER_HEALTH_PORT=3103
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
@@ -3110,11 +3114,13 @@ REAPED={shlex.quote(str(reaped))}
 CALLS={shlex.quote(str(calls))}
 : > "$CALLS"
 clone_machine_target() {{
+  test "$5" = vs_pool20
   mkdir -p "$(dirname "$1")"
   printf '%s\n' abc123 >> "$1"
   printf '%s' abc123
 }}
 reserve_worker_machine_slot() {{ return 0; }}
+machine_volume_size_gb() {{ printf 20; }}
 capacity_release_reservation() {{ return 0; }}
 controller_github_token_b64() {{ printf token; }}
 machine_storage_ready() {{ [ "$MODE" != storage-not-ready ] && [ "$MODE" != storage-failed ]; }}
@@ -5959,7 +5965,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     # the app-environment lock at all.
     verify_call = 'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets'
     assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
-    assert fleet.index(verify_call) < fleet.index('cid="$(claim_pool_machine)"')
+    assert fleet.index(verify_call) < fleet.index('pcid="$(claim_pool_machine "$bench_vm_size" "$bench_vm_memory")"')
     assert "run-bench-cloud --refresh-secrets;" not in fleet
     assert "APP_ENV_LOCK" not in fleet
     assert "acquire_app_environment_lock" not in fleet
@@ -6107,6 +6113,7 @@ POOL_IDS_FILE="$POOL_FILE"
 POOL_META_FILE="$POOL_META_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
+FLEET_DIR="$POOL_FILE"
 POOL_INVENTORY_JSON='[]'
 UNAVAILABLE_POOL_IDS=(abc123)
 FLEET_OWNER_HOST=test-host
@@ -9970,7 +9977,7 @@ recover_exact_stale_fleet_owner {owner}
     assert "cleanup_policy=reap\n" in (registry / "meta").read_text()
 
 
-def test_pre_fix_guest_runner_receipt_authorizes_exact_reaper(
+def test_pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper(
     tmp_path: Path,
 ) -> None:
     """A pre-fix driver can omit its top-level ack after the runner sealed clean.
@@ -10054,7 +10061,7 @@ machine_guest_recovery_configuration() {{
 claim_recovery_status_proxy_ports() {{ printf '62009\\n' > "$1"; }}
 release_recovery_status_proxy_ports() {{ :; }}
 start_data_plane_proxy() {{
-  sleep 60 &
+  sleep 60 >/dev/null 2>&1 &
   printf -v "$5" '%s' "$!"
 }}
 cloudbench_terminate_and_wait() {{
@@ -10113,17 +10120,11 @@ recover_exact_stale_fleet_owner {owner}
         timeout=10,
     )
 
-    assert result.returncode == 0, result.stderr + result.stdout
-    receipt = json.loads((output / "guest-cleanup.recovery-receipt.json").read_text())
-    assert receipt["kind"] == "runner-cleanup"
-    assert receipt["fleet_owner_token"] == owner
-    assert receipt["fleet_run_id"] == run_id
-    assert receipt["bench"] == bench
-    assert receipt["machine_id"] == machine_id
-    assert receipt["guest_run_token"] == guest_token
-    assert receipt["runner_receipt"]["state"] == "clean"
-    assert (output / "guest-shutdown.confirmed").read_text() == f"{run_id}\n"
-    assert calls.read_text().splitlines()[:2] == ["audit-recovery", "provider-reap"]
+    assert result.returncode != 0, result.stderr + result.stdout
+    assert (registry / "guest-cleanup-unconfirmed").exists()
+    assert not (output / "guest-shutdown.confirmed").exists()
+    assert not (output / "guest-cleanup.recovery-receipt.json").exists()
+    assert not calls.exists() or "provider-reap" not in calls.read_text()
 
 
 def test_exact_recovery_seals_actual_retained_owner_remote_evidence_paths(
@@ -11366,6 +11367,39 @@ case "$*" in *'UPDATE "Agent"'*) touch {shlex.quote(str(tmp_path / "deleted"))} 
     assert receipt_value["allocation_event_count"] == 0
     assert receipt_value["browser_session_mutation_count"] == 0
     assert re.fullmatch(r"[0-9a-f]{64}", receipt_value["zero_query_proof_sha256"])
+    # An interrupted fleet must be able to retire its exact owner after a
+    # real evaluated no-browser task. The forensic verifier recomputes the
+    # same zero-allocation proof against original run/backend bytes and still
+    # grants no benchmark credit for the interruption.
+    for source, target in (
+        (run_json, output / "guest-cleanup.run.json"),
+        (backend_log, output / "guest-cleanup.backend.log"),
+        (quiescence, output / "guest-cleanup.quiescence.json"),
+        (query_proof, output / "guest-cleanup.zero-allocation.json"),
+        (manifest, output / "guest-cleanup.provider-manifest.json"),
+        (receipt, output / "guest-cleanup.recovery-receipt.json"),
+    ):
+        target.write_bytes(source.read_bytes())
+    verifier_spec = importlib.util.spec_from_file_location(
+        "cloudbench_forensic_retirement", FORENSIC_RETIREMENT_SCRIPT
+    )
+    assert verifier_spec is not None and verifier_spec.loader is not None
+    verifier = importlib.util.module_from_spec(verifier_spec)
+    verifier_spec.loader.exec_module(verifier)
+    row = {
+        "task": bench, "machine_id": machine_id, "run_token": guest_token,
+        "files": {
+            "original/repo/.context/cloudbench/run.json": {
+                "sha256": hashlib.sha256(run_json.read_bytes()).hexdigest()},
+            "original/repo/.context/cloudbench/logs/backend.log": {
+                "sha256": hashlib.sha256(backend_log.read_bytes()).hexdigest()},
+        },
+    }
+    assert verifier.verify_quiesced_provider_archive(output, row, owner, "fixture-run")[
+        "kind"] == "provider-zero-manifest"
+    (output / "guest-cleanup.zero-allocation.json").write_text("{}\n")
+    with pytest.raises((AssertionError, ValueError, RuntimeError)):
+        verifier.verify_quiesced_provider_archive(output, row, owner, "fixture-run")
     psql_lines = psql_calls.read_text().splitlines()
     assert any("pg_database" in line and database_name in line for line in psql_lines)
     assert any(root_agent in line and '"BrowserSession"' in line for line in psql_lines)
@@ -11699,6 +11733,7 @@ def test_exited_guest_quiescence_requires_stopped_services_and_seals_run_evidenc
     assert not receipt.exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="guest recovery reads Linux /proc")
 def test_running_guest_is_diagnosed_active_and_never_sealed_quiescent(
     tmp_path: Path,
 ) -> None:
@@ -15986,6 +16021,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
         "cloudbench-port-lease.py",
         "cloudbench-machine-readiness.py",
         "cloudbench-select-snapshot.py",
+        "cloudbench-worker-snapshot.py",
         "cloudbench-aggregate-runs.py",
         "cloudbench-env.sh",
         "cloudbench-seed-budget.sh",
@@ -22521,6 +22557,7 @@ PRIVATE_SOURCE_VOLUME_ID=vol_private
 SHARED_WARM_ID=683e47df5094d8
 SHARED_WARM_VOLUME_ID=vol_shared
 POOL_IDS_FILE="$FIXTURE/pool.ids"
+FLEET_DIR="$FIXTURE"
 POOL_CLAIMS_DIR="$FIXTURE/claims"
 CLAIMED_POOL_FILE="$FIXTURE/claimed"
 POOL_INVENTORY_JSON='[]'
@@ -22550,7 +22587,7 @@ claim_pool_machine
             continue
         assert result.stdout == "", "protected source escaped pool claim: " + result.stdout
         assert not (root / "claimed").exists()
-        assert not list((root / "claims").iterdir())
+        assert not (root / "claims").exists() or not list((root / "claims").iterdir())
 
 
 def test_private_fleet_source_native_identity_uses_existing_inventory(tmp_path: Path) -> None:
@@ -22726,7 +22763,7 @@ def test_private_fleet_source_recovery_requires_bound_manifest_without_env(tmp_p
     guard = _extract_fleet_function(fleet, "private_source_allows_provider_call() {")
     meta = _extract_fleet_function(fleet, "registry_meta_value() {")
     start = fleet.index('    recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"')
-    end = fleet.index('    warm_pair="$(resolve_exact_recovery_warm_identity', start)
+    end = fleet.index('    if exact_recovery_is_pool_only', start)
     script = f"""set -uo pipefail
 APP=navi-whisper-lux-bench
 FLEET_OWNERSHIP_ROOT="$FIXTURE/registries"
