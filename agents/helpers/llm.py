@@ -6445,23 +6445,27 @@ async def set_response_schema_activity(
         from providers.fast_cache import client as _fc_client
         from providers.fast_cache import normalize as _fc_norm
 
-        _fc_key = _fc_norm.content_key(
-            goal,
-            "response_schema",
-            {
-                "pool": "rose-1-flash",
-                "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
-                + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
-                "user": f"Goal: {goal}",
-                "response_model": (
-                    "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
-                ),
-                "temperature": 0.3,
-                "max_tokens": [2000, 4000],
-            },
+        # Content key includes the pool name. Dual-read rose-1-flash + legacy
+        # rose-1-lite so the warm July/Aug response_schema row still hits after
+        # the 2026-09-27 pool rename (otherwise generated_title never PATCHes and
+        # mass-agent T7 fails with "Root task title is missing").
+        _fc_material = {
+            "pool": "rose-1-flash",
+            "system": _RESPONSE_SCHEMA_SYSTEM_PROMPT
+            + (_RESPONSE_SCHEMA_TITLE_INSTRUCTION if include_title else ""),
+            "user": f"Goal: {goal}",
+            "response_model": (
+                "_GeneratedResponseSchemaWithTitle" if include_title else "_GeneratedResponseSchema"
+            ),
+            "temperature": 0.3,
+            "max_tokens": [2000, 4000],
+        }
+        _fc_lookup_keys = _fc_norm.content_lookup_keys_with_pool_aliases(
+            goal, "response_schema", _fc_material
         )
+        _fc_key = _fc_lookup_keys[0]
         if fast_mode_cache_enabled:
-            _fc_cached = await _fc_client.cache_get(_fc_key)
+            _fc_cached, _ = await _fc_client.cache_get_first(_fc_lookup_keys)
 
     try:
         async with httpx.AsyncClient(timeout=90.0) as client:

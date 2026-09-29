@@ -1983,8 +1983,13 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
             AsyncMock(return_value=(True, "goal", False, "agent-cached-title", "goal", True)),
         ),
         patch(
-            "providers.fast_cache.client.cache_get",
-            AsyncMock(return_value={"schema": schema, "title": "Task Output", "usage": {}}),
+            "providers.fast_cache.client.cache_get_first",
+            AsyncMock(
+                return_value=(
+                    {"schema": schema, "title": "Task Output", "usage": {}},
+                    "fastmode:v42:llm:hit:response_schema",
+                )
+            ),
         ),
         patch("helpers.llm.RoseClient") as rose_client,
     ):
@@ -2004,6 +2009,73 @@ async def test_set_response_schema_activity_replaces_cached_task_output_title():
         request
         for request in get_captured_requests()
         if "/api/agents/agent-cached-title" in request["url"]
+    )
+    assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
+
+
+async def test_set_response_schema_activity_dual_reads_lite_pool_alias():
+    """After rose-1-lite→flash rename, warm schema rows under the lite key still apply title."""
+    setup_mock(
+        {
+            "/api/agents/": {
+                "status": 200,
+                "json": {"ok": True},
+            },
+        }
+    )
+    schema = {
+        "fields": [
+            {"name": "top_creators_analysis", "type": "list[object]", "required": True},
+            {"name": "positioning_statement", "type": "str", "required": True},
+        ]
+    }
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id="agent-lite-alias:generation-1",
+        workflow_run_id="run-lite-alias",
+        activity_id="set-response-schema-lite-alias",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    lookup_keys_seen: list[list[str]] = []
+
+    async def _cache_get_first(keys):
+        lookup_keys_seen.append(list(keys))
+        # Simulate flash miss + lite hit (exact failure mode from FLOOR smoke).
+        assert len(keys) >= 2
+        return {"schema": schema, "title": "Task Output", "usage": {}}, keys[1]
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            AsyncMock(return_value=(True, "goal", False, "agent-lite-alias", "goal", True)),
+        ),
+        patch("providers.fast_cache.client.cache_get_first", AsyncMock(side_effect=_cache_get_first)),
+        patch("helpers.llm.RoseClient") as rose_client,
+    ):
+        from helpers.llm import set_response_schema_activity
+
+        result = await set_response_schema_activity(
+            "agent-lite-alias",
+            ["goal"],
+            fast_mode_cache_enabled=True,
+            include_title=True,
+        )
+
+    rose_client.assert_not_called()
+    assert result is not None
+    assert result["title"] == "Creator Brand Strategy"
+    assert lookup_keys_seen and len(lookup_keys_seen[0]) >= 2
+    schema_save = next(
+        request
+        for request in get_captured_requests()
+        if "/api/agents/agent-lite-alias" in request["url"]
     )
     assert json.loads(schema_save["requestBody"])["generated_title"] == "Creator Brand Strategy"
 
@@ -8075,6 +8147,10 @@ async def run_all_tests():
     await r.record_async(
         "set_response_schema_activity_replaces_cached_task_output_title",
         test_set_response_schema_activity_replaces_cached_task_output_title,
+    )
+    await r.record_async(
+        "set_response_schema_activity_dual_reads_lite_pool_alias",
+        test_set_response_schema_activity_dual_reads_lite_pool_alias,
     )
     await r.record_async(
         "set_response_schema_activity_uses_internal_auth_only",
