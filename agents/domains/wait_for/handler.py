@@ -27,7 +27,12 @@ from domains.wait_for.config import (
     MIN_CHECK_INTERVAL_SECONDS,
     MIN_CHECKS,
 )
-from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
+from domains.wait_for.service import (
+    cap_evidence,
+    evaluate_condition_activity,
+    format_duration,
+    sibling_agent_completion_already_met,
+)
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.source_connect_gates import raise_source_connect_gates
 
@@ -247,6 +252,33 @@ class WaitForManager(ToolManager):
                 "maxChecks": max_checks_param,
             },
         )
+
+        sibling_evidence = sibling_agent_completion_already_met(
+            getattr(workflow_instance, "context", None),
+            condition,
+        )
+        if sibling_evidence:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Condition met (sibling already finished)",
+                message=f"Condition: {condition}\n\n{sibling_evidence}",
+                status=MessageStatus.FINISHED,
+                metadata={
+                    "waitForMode": "condition",
+                    "description": description,
+                    "condition": condition,
+                    "checkNum": 1,
+                    "maxChecks": max_checks_param,
+                    "conditionMet": True,
+                    "siblingCompletion": True,
+                },
+                data={
+                    "condition_met": True,
+                    "checks_completed": 0,
+                    "evidence": sibling_evidence,
+                },
+            )
+            return
 
         # Contact + message-thread context is now fetched on-demand by the
         # explore agent via the grep tool's network / agent_network_* /

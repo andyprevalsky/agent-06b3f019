@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         poll_new_messages,
         post_agent_message,
         resolve_fast_cache_goal_activity,
+        unpack_fast_cache_goal_resolution,
         update_agent_status,
     )
     from helpers.completion_summary_contract import (
@@ -616,6 +617,10 @@ class AgentWorkflow:
         # differ from the workflow-input goal (chat escalation passes an LLM-refined
         # goal that varies run to run). All cache keying threads this, never self.goal.
         self.fast_cache_goal: Optional[str] = None
+        # Tree-root goal for DEMO inheritance. Child cache keys stay on
+        # fast_cache_goal; wait_for / spawn gates read this when the child's
+        # own spawn goal is not the catalog prefix.
+        self.root_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
@@ -941,6 +946,7 @@ class AgentWorkflow:
             "agent_source",
             "user_context_section",
             "fast_cache_goal",
+            "root_goal",
         ):
             value = runtime.get(field_name)
             if isinstance(value, str):
@@ -1107,6 +1113,7 @@ class AgentWorkflow:
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
                 "fast_cache_goal": self.fast_cache_goal,
+                "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
             },
@@ -1660,23 +1667,31 @@ class AgentWorkflow:
             or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
         ):
             try:
-                persisted_goal = await workflow.execute_activity(
-                    resolve_fast_cache_goal_activity,
-                    args=[agent_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                persisted_goal, resolved_root_goal = unpack_fast_cache_goal_resolution(
+                    await workflow.execute_activity(
+                        resolve_fast_cache_goal_activity,
+                        args=[agent_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
                 )
+                if resolved_root_goal:
+                    self.root_goal = resolved_root_goal
                 if persisted_goal and persisted_goal != self.fast_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
                     self.fast_cache_goal = persisted_goal
-                    # Recompute DEMO cache gate after the durable goal is known.
+                if persisted_goal or resolved_root_goal:
+                    # Recompute DEMO cache gate after durable child + root goals
+                    # are known. Leftover GPs inherit demo wait_for from root_goal.
                     self.fast_mode_cache_enabled = is_demo_cache_task(self)
-                    # Compute-token cache affinity pins by goal too — keep it on
-                    # the same stable namespace.
+                    # Compute-token cache affinity pins by the child's goal —
+                    # keep it on the same stable namespace, not the root's.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
+                        _fast_cache_compute_affinity_key(
+                            user_id, self.fast_cache_goal or persisted_goal or self.goal
+                        )
                         if self.fast_mode_cache_enabled
                         else None
                     )

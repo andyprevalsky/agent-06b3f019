@@ -127,10 +127,17 @@ def is_oai_demo_goal(text: str | None) -> bool:
 
 
 def is_oai_demo_mass_agent_task(workflow_instance) -> bool:
-    """True only for the mass-agent-0 root or its per-creator for_each children."""
+    """True for the mass-agent-0 root or any descendant of that tree.
+
+    Child workflows keep their own spawn goal for cache keys. Demo wait_for /
+    spawn gates must still see the tree root — otherwise a leftover GP whose
+    goal is not the catalog prefix sleeps real ``wait_for`` intervals and
+    blows the 900s smoke cap.
+    """
     chunks = (
         getattr(workflow_instance, "fast_cache_goal", None) or "",
         getattr(workflow_instance, "goal", None) or "",
+        getattr(workflow_instance, "root_goal", None) or "",
     )
     return is_oai_demo_goal("\n".join(str(chunk) for chunk in chunks))
 
@@ -183,15 +190,17 @@ def is_demo_cache_task(workflow_instance) -> bool:
     if is_oai_demo_mass_agent_task(workflow_instance):
         return True
     goal = str(getattr(workflow_instance, "goal", None) or "")
-    root = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
-    if DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in goal or DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in root:
+    cached = str(getattr(workflow_instance, "fast_cache_goal", None) or "")
+    root_goal = str(getattr(workflow_instance, "root_goal", None) or "")
+    if any(
+        DEMO_FLEET_CONCURRENCY_GOAL_PREFIX in blob for blob in (goal, cached, root_goal)
+    ):
         return True
     if _demo_cache_goal_hash is None or not _DEMO_CACHE_GOAL_HASHES:
         return False
-    if goal and _demo_cache_goal_hash(goal) in _DEMO_CACHE_GOAL_HASHES:
-        return True
-    if root and _demo_cache_goal_hash(root) in _DEMO_CACHE_GOAL_HASHES:
-        return True
+    for blob in (goal, cached, root_goal):
+        if blob and _demo_cache_goal_hash(blob) in _DEMO_CACHE_GOAL_HASHES:
+            return True
     return False
 
 

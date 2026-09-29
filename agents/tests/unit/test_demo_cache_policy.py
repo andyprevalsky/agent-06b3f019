@@ -100,6 +100,13 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     assert is_oai_demo_mass_agent_task(fleet) is False
     assert is_demo_cache_task(mass) is True
     assert is_oai_demo_mass_agent_task(mass) is True
+    leftover = SimpleNamespace(
+        goal="Produce fresh tool-grounded evidence for Andy Prevalsky's brand task.",
+        fast_cache_goal="",
+        root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+    )
+    assert is_demo_cache_task(leftover) is True
+    assert is_oai_demo_mass_agent_task(leftover) is True
     assert is_demo_cache_task(live) is False
 
 

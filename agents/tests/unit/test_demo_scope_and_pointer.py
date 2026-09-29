@@ -58,6 +58,24 @@ def test_is_oai_demo_mass_agent_task_reads_goal_or_fast_cache_goal():
     assert not is_oai_demo_mass_agent_task(SimpleNamespace(goal="Buy socks", fast_cache_goal=None))
 
 
+def test_is_oai_demo_mass_agent_task_inherits_tree_root_goal():
+    leftover = (
+        "Produce fresh tool-grounded evidence for the remaining strategic "
+        "deliverables for Andy Prevalsky's [REDACTED] brand task."
+    )
+    assert not is_oai_demo_goal(leftover)
+    assert not is_oai_demo_mass_agent_task(
+        SimpleNamespace(goal=leftover, fast_cache_goal=leftover, root_goal=None)
+    )
+    assert is_oai_demo_mass_agent_task(
+        SimpleNamespace(
+            goal=leftover,
+            fast_cache_goal=leftover,
+            root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+        )
+    )
+
+
 def test_browser_timeout_and_recording_are_demo_only():
     demo_wf = SimpleNamespace(goal=OAI_DEMO_ROOT_GOAL_PREFIX)
     live_wf = SimpleNamespace(goal="Buy socks")
