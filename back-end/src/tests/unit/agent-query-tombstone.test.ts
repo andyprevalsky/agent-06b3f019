@@ -2,7 +2,10 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import { getAgentDetail } from '../../domains/agents/agentQueryService';
+import {
+  getAgentDetail,
+  tombstoneSkipsBenchmarkHub,
+} from '../../domains/agents/agentQueryService';
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   await fn();
@@ -35,6 +38,18 @@ async function main(): Promise<void> {
         null,
         'soft-deleted local agents must 404 instead of hitting Benchmark Hub'
       );
+
+      assert.strictEqual(
+        tombstoneSkipsBenchmarkHub({ isBenchmark: false }),
+        true,
+        'non-bench tombstones must skip hub'
+      );
+      assert.strictEqual(
+        tombstoneSkipsBenchmarkHub({ isBenchmark: true }),
+        false,
+        'benchmark tombstones must still consult hub'
+      );
+      assert.strictEqual(tombstoneSkipsBenchmarkHub(null), false);
     } finally {
       await prisma.agent.deleteMany({ where: { id: agentId } });
       await prisma.user.deleteMany({ where: { userId } });
