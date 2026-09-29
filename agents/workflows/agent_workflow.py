@@ -5155,12 +5155,18 @@ class AgentWorkflow:
                 update_tree=False,
             )
 
-            # Mark finished (includes structured_response for persistence)
+            # Mark finished (includes structured_response for persistence).
+            # mark_finished only reads the first USER text as the goal
+            # (extract_goal_from_context). Forwarding the full conversation
+            # put a 638092-byte payload on the activity command (TMPRL1103
+            # warn 512KB) and left ed9a3b6e ACTIVE until the 900s smoke cap.
+            # message_count still records the real transcript length.
+            finished_steps = [{"role": "USER", "text": self.goal or "No goal specified"}]
             await workflow.execute_activity(
                 mark_finished,
                 args=[
                     self.agent_id,
-                    context,
+                    finished_steps,
                     self.token_count,
                     self.context_size,
                     len(context),

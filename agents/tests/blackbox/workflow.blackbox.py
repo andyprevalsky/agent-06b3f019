@@ -5490,6 +5490,55 @@ async def test_workflow_mark_complete_happy_path():
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_does_not_forward_full_context():
+    """Huge Fast Mode context must not ride the mark_finished Temporal payload.
+
+    ed9a3b6e scheduled mark_finished with a 638092-byte payload (TMPRL1103
+    limit 524288). The activity sat 17 minutes, timed out, and the verified
+    root stayed ACTIVE until the 900s smoke cap. mark_finished only reads the
+    first USER text as the goal; message_count still records the real length.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-slim-finished"
+    wf.user_id = "u-slim"
+    wf.goal = "Analyze the top 50 creators"
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.root_agent_id = "root-slim-finished"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 100
+    wf.tokens_in = 70
+    wf.tokens_out = 30
+    wf.context_size = 500
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+
+    huge_context = [{"role": "USER", "text": wf.goal}] + [{"role": "ASSISTANT", "text": "x" * 2000} for _ in range(400)]
+    assert len(json.dumps(huge_context)) > 512 * 1024
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "All done",
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=huge_context, structured_response={"ok": True})
+        mark_finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        steps = mark_finished_args[1]
+        payload = json.dumps(steps)
+        assert steps == [{"role": "USER", "text": wf.goal}]
+        assert len(payload) < 4096, (
+            f"mark_finished steps_taken is {len(payload)} bytes; "
+            "full conversation must not be forwarded (ed9a3b6e leftover-ACTIVE)"
+        )
+        assert mark_finished_args[4] == len(huge_context)
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_no_parent_no_signal():
     """A WEB-source root sends one completion SMS with verified outputs."""
     wf = _bare_workflow_instance()
@@ -7711,6 +7760,10 @@ async def run_all_tests():
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
+    await r.record_async(
+        "wf_mark_complete_does_not_forward_full_context",
+        test_workflow_mark_complete_does_not_forward_full_context,
+    )
     await r.record_async(
         "wf_mark_complete_materializes_oai_demo_report_files",
         test_workflow_mark_complete_materializes_oai_demo_root_report_files,
