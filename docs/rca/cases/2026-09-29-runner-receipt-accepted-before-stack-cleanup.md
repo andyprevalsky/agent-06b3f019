@@ -106,7 +106,9 @@ cleanup now releases only its own latch before attempting runtime recapture;
 the runtime-evidence latch and pool claims remain retained until the original
 bytes are archived and verified. The zero-credit interrupted archive accepts
 an absent original driver PID only with original `exited` state, `failed`
-services, and exact stopped-Machine/provider receipts. A live recovery and
+services, and exact stopped-Machine/provider receipts. Its recovery path also
+stops the other acknowledged pool Machines before the native archive verifier
+can release any claim. A live recovery and
 ten consecutive complete slices are still required before this case can be
 marked fixed.
 

@@ -8296,7 +8296,7 @@ PY
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
-    local needs_guest_recovery=0
+    local needs_guest_recovery=0 forensic_schema=""
     case "$token" in ''|*[!0-9a-f]*) return 1 ;; esac
     [ "${#token}" -eq 32 ] || return 1
     if [ ! -d "$registry" ]; then
@@ -8349,11 +8349,23 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     # recovery can clear the former while retaining the latter; reconnect only
     # post-start exact guests that still own an unfinished local transfer.
     # A failed run with a forensic archive can discharge the evidence latch
-    # without reconnecting stopped guests whose driver never sealed. The
-    # verifier below still checks the archive, exact owner, native stopped
-    # Machines, and the independently discharged guest-cleanup latch.
+    # without recapturing a guest whose driver never sealed. An interrupted
+    # pool archive still needs this exact-owner recovery path to stop its
+    # other, already-acknowledged pool Machines before native verification.
     local forensic_manifest
     forensic_manifest="$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)/_forensic/manifest.json"
+    if [ -e "$registry/runtime-evidence-unconfirmed" ] \
+        && [ -f "$forensic_manifest" ] && [ ! -L "$forensic_manifest" ]; then
+        forensic_schema="$(python3 - "$forensic_manifest" <<'PY'
+import json, sys
+from pathlib import Path
+print(json.loads(Path(sys.argv[1]).read_text())["schema"])
+PY
+)" || return 1
+        if [ "$forensic_schema" = cloudbench-interrupted-pool-evidence-v1 ]; then
+            needs_guest_recovery=1
+        fi
+    fi
     if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
         && { [ ! -f "$forensic_manifest" ] || [ -L "$forensic_manifest" ] \

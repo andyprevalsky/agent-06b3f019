@@ -9449,6 +9449,52 @@ recover_exact_stale_fleet_owner {owner} || recovery_status=$?
     assert sum("volume_id=" in record.read_text() for record in records) == 10
 
 
+def test_interrupted_archive_routes_exact_pool_stop_before_evidence_release(
+    tmp_path: Path,
+) -> None:
+    """A zero-credit archive cannot release started pool Machines by itself."""
+    owner = "8d" * 16
+    registry = tmp_path / "ownership" / owner
+    (registry / "clones").mkdir(parents=True)
+    run = tmp_path / "runs" / "failed-run"
+    forensic = run / "_forensic"
+    forensic.mkdir(parents=True)
+    (forensic / "manifest.json").write_text(
+        json.dumps({"schema": "cloudbench-interrupted-pool-evidence-v1"})
+    )
+    (registry / "meta").write_text(
+        "version=2\napp=bench-app\n"
+        f"fleet_owner_token={owner}\nhost=test-host\n"
+        f"runs_root={run.parent}\nrun_id={run.name}\ncleanup_policy=reap\n"
+    )
+    (registry / "runtime-evidence-unconfirmed").touch()
+    reconnect_called = tmp_path / "reconnect-called"
+    fleet = FLEET_SCRIPT.read_text()
+    recover = _extract_fleet_function(fleet, "recover_exact_stale_fleet_owner() {")
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNER_HOST=test-host
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
+FLEET_AUDIT_ROOT={shlex.quote(str(tmp_path / 'audits'))}
+RECONNECT_CALLED={shlex.quote(str(reconnect_called))}
+registry_meta_value() {{ sed -n "s/^$2=//p" "$1" | head -1; }}
+fleet_registry_cleanup_state() {{ printf 'quarantined\\n'; }}
+registry_owner_alive() {{ return 1; }}
+release_cleanup_disk_reserve() {{ return 0; }}
+acquire_registry_recovery_lock() {{ return 0; }}
+fleet_recovery_reconnect_guest_shutdowns() {{ touch "$RECONNECT_CALLED"; return 1; }}
+{recover}
+if recover_exact_stale_fleet_owner {owner}; then exit 90; fi
+[ -e "$RECONNECT_CALLED" ] || exit 91
+[ -e "$FLEET_OWNERSHIP_ROOT/{owner}/runtime-evidence-unconfirmed" ] || exit 92
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
 def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap(
     tmp_path: Path,
 ) -> None:
