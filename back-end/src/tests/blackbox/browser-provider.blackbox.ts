@@ -8,9 +8,11 @@ import { prisma } from '../../providers/database';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
   isKernelProxyAvailabilityError,
+  KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
+import { APIConnectionTimeoutError } from '@onkernel/sdk';
 import { retryWithBackoff } from '../../providers/retry';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
@@ -159,6 +161,24 @@ const tests: Array<[string, () => void]> = [
         "400 proxy configuration validation failed: city 'sanfrancisco' is not available for subdivision 'us-ca'"
       );
       assert(isKernelProxyAvailabilityError(error), 'expected proxy availability error');
+    },
+  ],
+  [
+    'Kernel SDK request timeouts trigger location fallback',
+    () => {
+      assert(
+        isKernelProxyAvailabilityError(new APIConnectionTimeoutError()),
+        'APIConnectionTimeoutError must relax city→state→country'
+      );
+      assert(
+        isKernelProxyAvailabilityError(new Error('Request timed out.')),
+        'string timeout must also relax location specificity'
+      );
+      assert(
+        KERNEL_CREATE_REQUEST_OPTIONS.maxRetries === 0 &&
+          KERNEL_CREATE_REQUEST_OPTIONS.timeout === 45_000,
+        'create calls must fail fast (no SDK retry multiplication into ~180s)'
+      );
     },
   ],
   [

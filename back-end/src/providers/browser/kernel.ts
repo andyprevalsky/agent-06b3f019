@@ -13,8 +13,10 @@ import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import {
+  forgetKernelProxy,
   getOrCreateKernelProxy,
   isKernelProxyAvailabilityError,
+  KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
   resolveKernelProxyMode,
   type KernelProxyType,
@@ -240,23 +242,26 @@ async function createRemoteSession(
   const createValidatedSession = async (proxy: KernelProxySelection) =>
     retryWithBackoff(
       async () => {
-        const session = await client.browsers.create({
-          headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
-          stealth,
-          telemetry: kernelCaptchaTelemetryConfig(),
-          gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
-          // Do not let Chromium reopen the profile's previous window. The new-tab
-          // page created by this policy is replaced below along with any unexpected
-          // restored pages, leaving one clean bootstrap tab.
-          chrome_policy: { RestoreOnStartup: 5 },
-          timeout_seconds: kernelTimeoutSeconds(),
-          viewport: { width: 1280, height: 800, refresh_rate: 60 },
-          ...(profile.profileId !== null
-            ? { profile: { id: profile.profileId, save_changes: true } }
-            : {}),
-          ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
-          tags: { rose_agent_id: agentId, rose_session_request: randomUUID() },
-        });
+        const session = await client.browsers.create(
+          {
+            headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
+            stealth,
+            telemetry: kernelCaptchaTelemetryConfig(),
+            gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+            // Do not let Chromium reopen the profile's previous window. The new-tab
+            // page created by this policy is replaced below along with any unexpected
+            // restored pages, leaving one clean bootstrap tab.
+            chrome_policy: { RestoreOnStartup: 5 },
+            timeout_seconds: kernelTimeoutSeconds(),
+            viewport: { width: 1280, height: 800, refresh_rate: 60 },
+            ...(profile.profileId !== null
+              ? { profile: { id: profile.profileId, save_changes: true } }
+              : {}),
+            ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
+            tags: { rose_agent_id: agentId, rose_session_request: randomUUID() },
+          },
+          KERNEL_CREATE_REQUEST_OPTIONS
+        );
         const actualProfileId = session.profile?.id ?? null;
         // Only a required authenticated profile (Steel SessionAuth, H-07) fails
         // closed on mismatch. Kernel manages its own profiles and its create
@@ -342,6 +347,23 @@ async function createRemoteSession(
       });
     } catch (error) {
       if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
+
+      // Only drop a cache row when the error proves this proxy_id is bad.
+      // A browsers.create transport timeout does not mean the remote proxy is
+      // gone — forgetting it would recreate orphans for the same geo key.
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const stickyBadProxy =
+        resolved?.proxyKey !== undefined &&
+        (message.includes('proxy not found') ||
+          message.includes('invalid proxy') ||
+          message.includes('proxy unavailable') ||
+          message.includes('proxy is unavailable') ||
+          message.includes('no_peer') ||
+          message.includes('no peer'));
+      if (stickyBadProxy) {
+        await forgetKernelProxy(resolved.proxyKey).catch(() => {});
+      }
 
       log.warn('Kernel proxy location unavailable; relaxing location specificity', {
         proxyKey: candidate.proxyKey,

@@ -1149,7 +1149,16 @@ class DOMService:
 
         target_id, cdp_session = await self._live_cdp_session()
         if not target_id or cdp_session is None:
-            raise RuntimeError("No focused browser target is available for passkey injection")
+            # Match ensure_browser_overlays_suppressed: focus can be briefly
+            # missing after navigation/CDP reconnect. Held keys stay in
+            # `_held_passkeys_by_credential_id` and re-arm when focus returns.
+            # Hard-raising here killed prod browser a890a362 mid-goto via
+            # record_passkey_usage_once → sync_passkeys_onto_target.
+            logger.warning(
+                "⚠️ [passkey] No focused target; retaining held passkeys for re-arm "
+                f"(held={len(self._held_passkeys_by_credential_id)})"
+            )
+            return 0
         return await self._arm_target(target_id, cdp_session)
 
     async def _sync_passkeys_onto_live_target(self, target_id: str, cdp_session: Any) -> int:
