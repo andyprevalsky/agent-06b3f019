@@ -246,7 +246,10 @@ no Temporal agent root to anchor an archive or correlate the required three
 LLM completions. An explicit pool containing one fails before provisioning.
 The SMS runner still verifies its own seeded-session cleanup for ordinary
 benchmark runs; a missing root from any other runner remains an ownership
-error.
+error. If a legacy rootless SMS guest fails before publishing its guest ACK,
+exact-owner recovery requires the original run, complete backend log, and
+quiescence receipt to prove zero root/browser/payment allocation. It grants
+zero benchmark proof credit and refuses any observed external ownership.
 
 **If a run goes wrong:** Start with its `summary.json`, `_batch/run.json`,
 `_batch/lifecycle.json`, per-task `cloudbench-run.json`, `fleet-child.log`,

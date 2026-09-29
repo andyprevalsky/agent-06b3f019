@@ -29,6 +29,7 @@ RUNNER_FIELDS = {"version", "token", "state"}
 RUNNER_STATES = {"pending", "clean", "failed"}
 SCHEMA = "cloudbench-guest-cleanup-recovery-v1"
 ZERO_QUERY_SCHEMA = "cloudbench-guest-zero-allocation-v1"
+LEGACY_SMS_CLEANUP_SHA = "3b91d36b9b884feedaa34c0d2c16ae3341fcaec7"
 
 
 class CleanupEvidenceError(RuntimeError):
@@ -555,6 +556,17 @@ def payment_mutation_count(text: str) -> int:
 
 def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
     exact_identity = identity(args)
+    run_candidate = read_json_object(Path(args.run_json))
+    candidate_tasks = run_candidate.get("tasks")
+    if (
+        isinstance(candidate_tasks, list)
+        and len(candidate_tasks) == 1
+        and isinstance(candidate_tasks[0], dict)
+        and candidate_tasks[0].get("agent_id") == ""
+        and isinstance(candidate_tasks[0].get("stop_metadata"), dict)
+        and candidate_tasks[0]["stop_metadata"].get("runner") == "sms"
+    ):
+        return rootless_sms_provider_manifest(args)
     root_agent_id, run_sha = parse_run_identity(Path(args.run_json), args.bench)
     text, backend_sha = read_backend_evidence(Path(args.backend_log), root_agent_id)
     logged_sessions, _, _ = collect_session_evidence(text)
@@ -595,6 +607,79 @@ def provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "run_json_sha256": run_sha,
             "backend_log_sha256": backend_sha,
             "quiescence_receipt_sha256": quiescence_sha,
+        },
+    }
+
+
+def rootless_sms_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    """Retire a quiesced SMS loop only when no external root was created.
+
+    The legacy source SHA returned a result only after its ``finally`` cleanup
+    completed, but did not emit an explicit receipt. Later source versions
+    carry ``owned_cleanup_verified``. Both require the complete guest/backend
+    bytes and zero root, browser, and payment allocation evidence.
+    """
+    run_path = Path(args.run_json)
+    run_payload = read_bytes(run_path)
+    run = parse_json_object(run_payload, run_path)
+    tasks = run.get("tasks")
+    if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
+        raise CleanupEvidenceError("rootless SMS run is not exactly one task")
+    task = tasks[0]
+    metadata = task.get("stop_metadata")
+    provenance = run.get("execution_provenance")
+    legacy = (
+        isinstance(provenance, dict)
+        and provenance.get("base_sha") == LEGACY_SMS_CLEANUP_SHA
+        and provenance.get("workspace_patch_sha256") == "none"
+    )
+    if (
+        task.get("name") != args.bench
+        or task.get("agent_id") != ""
+        or task.get("status") not in {"PASSED", "FAILED", "COMPLETED"}
+        or not isinstance(metadata, dict)
+        or metadata.get("runner") != "sms"
+        or not (metadata.get("owned_cleanup_verified") is True or legacy)
+    ):
+        raise CleanupEvidenceError("rootless SMS result has no completed cleanup proof")
+    backend_path = Path(args.backend_log)
+    backend_payload = read_bytes(backend_path)
+    try:
+        backend = ANSI.sub("", backend_payload.decode("utf-8"))
+    except UnicodeDecodeError as error:
+        raise CleanupEvidenceError("backend log is not UTF-8") from error
+    validate_complete_backend_lifecycle(backend)
+    sessions, allocations, browser_mutations = collect_session_evidence(backend)
+    if (
+        "[HTTP] POST /api/agents" in backend
+        or "path=/api/agents/" in backend
+        or any(sessions.values())
+        or allocations != 0
+        or browser_mutations != 0
+        or payment_mutation_count(backend) != 0
+    ):
+        raise CleanupEvidenceError("rootless SMS guest has unretired external ownership")
+    run_sha = sha256_bytes(run_payload)
+    backend_sha = sha256_bytes(backend_payload)
+    quiescence_sha = validate_quiescence(
+        Path(args.quiescence_receipt), args.machine_id,
+        args.guest_run_token, run_sha, backend_sha,
+    )
+    return {
+        "schema_version": SCHEMA,
+        "version": 1,
+        "kind": "provider-rootless-sms-zero-manifest",
+        **identity(args),
+        "root_agent_id": None,
+        "sessions": {"kernel": [], "steel": []},
+        "evidence": {
+            "run_json_sha256": run_sha,
+            "backend_log_sha256": backend_sha,
+            "quiescence_receipt_sha256": quiescence_sha,
+            "allocation_event_count": 0,
+            "browser_session_mutation_count": 0,
+            "payment_mutation_count": 0,
+            "root_creation_count": 0,
         },
     }
 
@@ -1358,7 +1443,7 @@ def validate_recovery_receipt(args: argparse.Namespace) -> int:
         )
     manifest = read_json_object(Path(args.manifest))
     stopped_proof_sha256: str | None = None
-    if manifest.get("kind") == "provider-exact-manifest":
+    if manifest.get("kind") in {"provider-exact-manifest", "provider-rootless-sms-zero-manifest"}:
         if not all(
             (
                 args.run_json,

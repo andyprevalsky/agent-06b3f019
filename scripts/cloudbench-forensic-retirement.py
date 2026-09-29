@@ -60,7 +60,7 @@ def verify_quiesced_provider_archive(
     )
     provider = object_file(out / "guest-cleanup.provider-manifest.json")
     receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
-    if provider["kind"] == "provider-exact-manifest":
+    if provider["kind"] in {"provider-exact-manifest", "provider-rootless-sms-zero-manifest"}:
         assert provider == helper["provider_manifest"](args)
         assert helper["validate_provider_receipt"](receipt, provider, None)
     elif provider["kind"] == "provider-zero-manifest":

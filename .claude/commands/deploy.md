@@ -598,6 +598,7 @@ bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/verify-successful-llm-queries.test.py
 python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
+python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py
 python3 scripts/tests/cloudbench-forensic-quiesced.test.py
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/cloudbench-github-token.test.sh
