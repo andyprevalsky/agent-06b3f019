@@ -113,7 +113,7 @@ async def execute_reasoning(
 
     def on_model_detected(actual_model: str) -> None:
         is_claude[0] = actual_model.endswith("-claude")
-        is_gpt[0] = actual_model.endswith(("-gpt", "-foundry"))
+        is_gpt[0] = actual_model.endswith(("-gpt", "-openai", "-foundry"))
 
     async def on_chunk(text_so_far: str, tokens: int) -> None:
         """Stream chunks to frontend via Supabase Realtime."""

@@ -134,6 +134,38 @@ async def test_execute_reasoning_happy_path():
     assert streamed_chunks[-1]["done"] is True
 
 
+async def test_execute_reasoning_marks_gpt_streams():
+    """All GPT routes keep their streaming UI classification."""
+    from activities.reasoning import ReasoningResponse
+    from domains.reasoning import service as rservice
+
+    for actual_model in ("gpt-6-sol-gpt", "gpt-6-sol-openai", "gpt-6-sol-foundry"):
+        streamed_chunks = []
+
+        async def fake_llm(messages, **kwargs):
+            kwargs["on_model_detected"](actual_model)
+            await kwargs["on_chunk"]("GPT stream", 2)
+            return ReasoningResponse(response="GPT stream"), {}, []
+
+        async def fake_stream_chunk(**kwargs):
+            streamed_chunks.append(kwargs)
+
+        with (
+            patch.object(rservice, "call_llm_structured_streaming", fake_llm),
+            patch.object(rservice, "stream_assistant_chunk", fake_stream_chunk),
+        ):
+            await rservice.execute_reasoning(
+                goal="Investigate",
+                context=[],
+                model="gpt-6-sol",
+                agent_id="agent-1",
+                stream_id="stream-1",
+            )
+
+        text_chunks = [chunk for chunk in streamed_chunks if chunk["delta"]]
+        assert text_chunks and all(chunk["is_gpt"] for chunk in text_chunks), actual_model
+
+
 async def test_execute_reasoning_uses_streamed_text_when_structured_json_missing():
     """Reasoning is raw assistant text; streamed text should survive JSON wrapper misses."""
     from domains.reasoning import service as rservice
@@ -298,6 +330,7 @@ async def run_all_tests():
     await r.record_async("build_reasoning_messages_trims", test_build_reasoning_messages_trims_to_max)
     await r.record_async("build_reasoning_messages_small", test_build_reasoning_messages_small_context)
     await r.record_async("execute_reasoning_happy_path", test_execute_reasoning_happy_path)
+    await r.record_async("execute_reasoning_marks_gpt_streams", test_execute_reasoning_marks_gpt_streams)
     await r.record_async(
         "execute_reasoning_streamed_text_json_missing",
         test_execute_reasoning_uses_streamed_text_when_structured_json_missing,
