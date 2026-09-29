@@ -96,39 +96,43 @@ merchant, currency, total, and line items. The verifier's trusted
 last four. Card number, CVV, user ID, and purchase fingerprint are excluded.
 The same evidence is passed to both normal completion and final synthesis.
 
-The follow-up resume audit found additional worker-local continuity gaps. All
-three real-browser pause paths (payment, write approval, and auth assistance)
-now carry the last 20 reasoning and action-summary entries through their
-existing continuity copy. Payment and write approval also restore the auth
-ladder's attempt markers for the same realm. Auth assistance deliberately
-starts fresh after the user may have changed credentials. Current auth options
-are still reloaded from the
-browser session, so a removed credential is not restored as attemptable. The
-same owning blackbox domain passed after this addition: 1 passed, 0 failed in
-40.2s on the final tree. The exact payment benchmark remains pending.
+The follow-up resume audit found a more serious context gap. The three real
+browser pause paths had truncated provider-visible turns to the last 40,
+replaced screenshots with placeholders, and shortened action history and URLs
+to 30. Payment resume also inserted card instructions into the dynamic system
+message. A dump of the failed payment run showed the system message changing
+from 1,877 to 2,314 characters at resume, breaking the cached prefix.
 
-This is semantic continuity, not a full memory dump. The pause payload already
-limits browser turns to 40, action history and URLs to 30, and verifier
-checkpoints to the configured cap; it replaces embedded screenshots with text
-placeholders. Browser handles and the live page are reconnected and reread.
-OTP plaintext and media are not newly copied into Temporal history. A future
-need for full archival history would require references to external storage,
-not an unbounded activity result.
-Retry and recovery counters still reset with a new activity: carrying failed
-provider/session attempts through a user sign-in or replacement browser session
-could incorrectly block a fresh attempt. This is an intentional session boundary,
-not missing task evidence.
+Real browser pauses now preserve the exact prior provider transcript, including
+screenshots, and the full action history and URLs. The original dynamic system
+context is frozen across resume; current runtime context changes and the
+approved-card tool result are appended after the prior turns. The latter
+contains only card refs, last four, and the approved request summary, never PAN
+or CVV. Small snapshots travel inline in the Temporal activity result. Above
+one million serialized bytes, the worker synchronously writes chunked AES-GCM
+encrypted snapshots to the trace archive and verifies each read before
+returning a pointer. Resume checks the full SHA-256 before continuing and fails
+closed if any part is missing or changed. This avoids Temporal's 2 MiB payload
+limit without silently discarding prompt context.
+
+Browser handles and the live page are reconnected and reread. Current auth
+options are reloaded from the session, while prior attempts for the same realm
+are restored. Retry and recovery counters still reset at the activity boundary;
+those are session-scoped control state rather than prior model messages. The
+browser's in-run action-summary and verifier-checkpoint caps remain separate
+from the pause serialization. The exact payment benchmark remains pending.
 
 ## Human feedback
 
-The user asked what else the browser drops on resume and stated that task
-context should be preserved. The follow-up audit and bounded continuity change
-above address that feedback. The standing deploy instruction forbids timeout,
-prompt, and evaluator changes for the benchmark failure.
+The user asked what else the browser drops on resume and identified the prompt
+cache loss. The follow-up change preserves the model-visible prefix and uses
+verified external storage when it cannot fit in a workflow payload. The
+standing deploy instruction forbids timeout, prompt, and evaluator changes for
+the benchmark failure.
 
 ## Reusable lesson
 
-When an activity resumes after a user approval, carry the small trusted facts
-that later verification requires across the activity boundary. A verifier
-cannot reliably reconstruct an approved request from a card's last four digits
-or from a bounded browser action history.
+When an activity resumes after a user approval, preserve the model-visible
+prefix byte for byte and append the approval result as a new turn. A verifier
+also needs the exact approved request; a card's last four digits and page
+history cannot reconstruct it.

@@ -3140,7 +3140,10 @@ def test_browser_activity_finally_skips_terminal_on_pause_for_resume():
             idx = real.find(f'"status": "{status}"', idx)
             if idx < 0:
                 break
-            window = real[max(0, idx - 200) : idx]
+            return_idx = real.find("return resume_result", idx)
+            assert return_idx > idx, status
+            window = real[idx:return_idx]
+            assert "persist_resume_context(" in window, status
             assert "browser_task_paused_for_resume = True" in window, status
             found = True
             idx += 1
@@ -20576,11 +20579,11 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
-def test_compact_browser_turn_messages_drops_leading_orphan_tool():
-    """Resume compaction must not start on a tool row (OpenAI pairing)."""
+def test_browser_resume_preserves_full_provider_transcript():
+    """Pause state keeps all paired turns, including those before step 40."""
     from domains.spawn_browser_agent_v3.handler import (
         _browser_resume_continuity_state,
-        _compact_browser_turn_messages_for_resume,
+        _browser_turn_messages_for_resume,
     )
 
     class _History:
@@ -20613,18 +20616,18 @@ def test_compact_browser_turn_messages_drops_leading_orphan_tool():
         if i % 5 == 0:
             long_turns.append({"role": "user", "content": f"nudge-{i}"})
 
-    compact = _compact_browser_turn_messages_for_resume(long_turns, limit=40)
-    assert compact, "expected non-empty compact transcript"
-    assert compact[0].get("role") != "tool"
-    assert len(compact) <= 40
+    assert _browser_turn_messages_for_resume(long_turns) == long_turns
 
     state = _browser_resume_continuity_state(
         action_history=_History(),
-        visited_urls=[],
+        visited_urls=[f"https://shop.example/page/{i}" for i in range(45)],
         verifier_checkpoints=[],
         browser_turn_messages=long_turns,
+        dynamic_system_context="Stable original browser context",
     )
-    assert state["browser_turn_messages"][0].get("role") != "tool"
+    assert state["browser_turn_messages"] == long_turns
+    assert len(state["visited_urls"]) == 45
+    assert state["dynamic_system_context"] == "Stable original browser context"
 
 
 def test_browser_resume_keeps_auth_attempts_and_task_summary():
@@ -20676,10 +20679,10 @@ def test_browser_resume_keeps_auth_attempts_and_task_summary():
     assert after.user_assistance_guard()[0] is False  # password-3 remains untried
 
 
-def test_compact_browser_turn_messages_strips_embedded_screenshots():
-    """Resume compaction must strip base64 screenshot media from turn payloads."""
+def test_browser_resume_keeps_embedded_screenshots():
+    """Resume must keep every provider-visible screenshot byte in position."""
     from domains.spawn_browser_agent_v3.handler import (
-        _compact_browser_turn_messages_for_resume,
+        _browser_turn_messages_for_resume,
     )
 
     turns = [
@@ -20713,13 +20716,88 @@ def test_compact_browser_turn_messages_strips_embedded_screenshots():
             ],
         },
     ]
-    compact = _compact_browser_turn_messages_for_resume(turns, limit=40)
-    blob = str(compact)
-    assert "data:image/png;base64," not in blob
-    assert "AAAA" not in blob
-    assert '"type": "image_url"' not in blob and "'type': 'image_url'" not in blob
-    assert any(message.get("role") == "user" for message in compact)
-    assert "[image omitted from Temporal resume]" in blob
+    resumed = _browser_turn_messages_for_resume(turns)
+    assert resumed == turns
+    assert resumed[2]["content"][1]["image_url"]["url"] == "data:image/png;base64," + ("A" * 1200)
+
+
+def test_browser_payment_resume_keeps_cached_prompt_prefix():
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import build_browser_use_messages
+
+    goal = "Complete the approved checkout"
+    dynamic_context = "Original browser context"
+    prior_turns = [
+        {"role": "assistant", "content": "I found the checkout."},
+        {"role": "user", "content": "Continue with the approved purchase."},
+    ]
+    original = build_browser_use_messages(
+        task=goal,
+        browser_state={},
+        action_history=[],
+        available_actions=["request_payment_card"],
+        dynamic_system_context=dynamic_context,
+        turn_messages=prior_turns,
+    )
+    resumed_turns = list(prior_turns)
+    _append_browser_turn_messages(
+        resumed_turns,
+        unified_action={"action": "request_payment_card", "thinking": "Get the approved card.", "params": {}},
+        result={"success": True, "status": "approved", "last4": "1234", "message": "Card refs are ready."},
+        tool_call_id="call-payment",
+    )
+    resumed = build_browser_use_messages(
+        task=goal,
+        browser_state={},
+        action_history=[],
+        available_actions=["request_payment_card"],
+        dynamic_system_context=dynamic_context,
+        turn_messages=resumed_turns,
+    )
+    assert resumed[: len(original)] == original
+    assert resumed[-2]["tool_calls"][0]["id"] == resumed[-1]["tool_call_id"]
+    assert "Card refs are ready." in resumed[-1]["content"]
+
+
+async def test_browser_resume_store_preserves_inline_and_external_snapshots():
+    from tempfile import TemporaryDirectory
+
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    inline = {"browser_turn_messages": [{"role": "user", "content": "Hello"}]}
+    assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=inline) == inline
+
+    parts = {}
+
+    def store_part(agent_id, path, body):
+        parts[(agent_id, path)] = body
+
+    def load_part(agent_id, path):
+        return parts[(agent_id, path)]
+
+    large = {"browser_turn_messages": [{"role": "user", "content": "x" * 1_500_000}]}
+    with patch.object(resume_store, "_store_part", side_effect=store_part), patch.object(
+        resume_store, "_load_part", side_effect=load_part
+    ):
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=large)
+        assert "browser_turn_messages" not in pointer
+        assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
+        first_path = pointer["browser_resume_context_ref"]["paths"][0]
+        parts[("agent", first_path)] += b"!"
+        with pytest.raises(resume_store.BrowserResumeStoreError, match="checksum mismatch"):
+            await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer)
+
+    # Exercise the actual local archive encryption and read-after-write path.
+    with TemporaryDirectory() as archive_root, patch.dict(
+        os.environ,
+        {
+            "TRACE_ARCHIVE_LOCAL_ROOT": archive_root,
+            "TRACE_ARCHIVE_BACKEND": "local",
+            "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(b"0" * 32).decode(),
+        },
+    ):
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=large)
+        assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
 
 
 def test_final_screenshot_fetch_isolated_from_verifier_errors():
@@ -22794,12 +22872,20 @@ async def run_all_tests():
         test_goto_action_returns_current_url_for_recovery_fallback,
     )
     r.record(
-        "compact_browser_turn_messages_drops_leading_orphan_tool",
-        test_compact_browser_turn_messages_drops_leading_orphan_tool,
+        "browser_resume_preserves_full_provider_transcript",
+        test_browser_resume_preserves_full_provider_transcript,
     )
     r.record(
-        "compact_browser_turn_messages_strips_embedded_screenshots",
-        test_compact_browser_turn_messages_strips_embedded_screenshots,
+        "browser_resume_keeps_embedded_screenshots",
+        test_browser_resume_keeps_embedded_screenshots,
+    )
+    r.record(
+        "browser_payment_resume_keeps_cached_prompt_prefix",
+        test_browser_payment_resume_keeps_cached_prompt_prefix,
+    )
+    await r.record_async(
+        "browser_resume_store_preserves_inline_and_external_snapshots",
+        test_browser_resume_store_preserves_inline_and_external_snapshots,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",

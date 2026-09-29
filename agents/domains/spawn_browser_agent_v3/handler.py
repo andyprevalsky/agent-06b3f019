@@ -150,6 +150,7 @@ from .visible_result_completion import (
     forced_visible_result_completion_action,
     should_force_visible_result_completion,
 )
+from .resume_store import hydrate_resume_context, persist_resume_context
 from .verifier_reject_circuit import (
     next_identical_reject_streak,
     should_soft_accept_identical_verifier_reject,
@@ -778,45 +779,11 @@ async def _capture_preserved_evidence_after_evaluate(
 
 
 
-def _replace_resume_image_blocks(value: Any) -> Any:
-    """Replace multimodal image blocks with a text placeholder for resume.
-
-    ``_compact_simulated_resume_value`` strips nested ``image_url`` keys and can
-    leave ``{"type": "image_url"}`` shells that fail provider schema validation
-    on the next resumed LLM call. Replace the whole block first.
-    """
-    if isinstance(value, dict):
-        if value.get("type") == "image_url" or "image_url" in value:
-            return {
-                "type": "text",
-                "text": "[image omitted from Temporal resume]",
-            }
-        return {key: _replace_resume_image_blocks(nested) for key, nested in value.items()}
-    if isinstance(value, list):
-        return [_replace_resume_image_blocks(item) for item in value]
-    return value
-
-
-def _compact_browser_turn_messages_for_resume(
+def _browser_turn_messages_for_resume(
     browser_turn_messages: Optional[List[Dict[str, Any]]],
-    *,
-    limit: int = 40,
 ) -> List[Dict[str, Any]]:
-    """Bound resume transcript size without leaving a leading orphan tool row.
-
-    Standalone user nudges between assistant/tool pairs mean a naive ``[-N:]``
-    slice can start on a ``tool`` message. OpenAI-compatible providers reject
-    that orphan because it has no preceding assistant ``tool_calls`` entry.
-    Also strip embedded screenshot/media payloads so Temporal activity results
-    stay under the payload limit across write-lock / payment resumes.
-    """
-    compact_turns = [
-        _compact_simulated_resume_value(_replace_resume_image_blocks(message))
-        for message in list(browser_turn_messages or [])[-limit:]
-    ]
-    while compact_turns and compact_turns[0].get("role") == "tool":
-        compact_turns.pop(0)
-    return compact_turns
+    """Keep the provider-visible transcript exactly as it was before the pause."""
+    return list(browser_turn_messages or [])
 
 
 def _browser_resume_continuity_state(
@@ -828,22 +795,20 @@ def _browser_resume_continuity_state(
     reasoning_messages: Optional[List[str]] = None,
     action_summary: Optional[List[str]] = None,
     auth_runtime_state: Optional[AuthRuntimeState] = None,
+    dynamic_system_context: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Serialize compact, browser-sourced continuity for a resumed activity."""
-    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
-
-    # Bound the transcript so Temporal resume payloads stay small; keep enough
-    # recent tool results (incl. read_browser_state) for the next LLM turn.
-    compact_turns = _compact_browser_turn_messages_for_resume(browser_turn_messages)
-    return {
-        "action_history": action_history.get_entries()[-30:],
-        "visited_urls": list(visited_urls[-30:]),
-        "verifier_checkpoints": list(verifier_checkpoints[-VERIFIER_CHECKPOINT_MAX:]),
-        "browser_turn_messages": compact_turns,
-        "reasoning_messages": list((reasoning_messages or [])[-20:]),
-        "action_summary": list((action_summary or [])[-20:]),
+    """Serialize exact task continuity for inline or encrypted storage."""
+    state = {
+        "action_history": action_history.get_entries(),
+        "visited_urls": list(visited_urls),
+        "verifier_checkpoints": list(verifier_checkpoints),
+        "browser_turn_messages": _browser_turn_messages_for_resume(browser_turn_messages),
+        "reasoning_messages": list(reasoning_messages or []),
+        "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
+        "dynamic_system_context": dynamic_system_context,
     }
+    return state
 
 
 def _restore_browser_auth_attempts(state: AuthRuntimeState, snapshot: Any) -> None:
@@ -4703,6 +4668,8 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
+    "dynamic_system_context",
+    "browser_resume_context_ref",
 )
 
 
@@ -5629,6 +5596,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             "output_files": [],
         }
 
+    if write_lock_resume_state:
+        write_lock_resume_state = await hydrate_resume_context(
+            agent_id=agent_id, resume_state=write_lock_resume_state
+        )
+
     from browser_tools.dom_service import ActionHistory, DOMService
     from browser_tools.humanizer import BrowserHumanizer
     from helpers.llm import check_progress
@@ -5684,12 +5656,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         message
         for message in ((write_lock_resume_state or {}).get("reasoning_messages") or [])
         if isinstance(message, str)
-    ][-20:]
+    ]
     action_summary: List[str] = [
         summary
         for summary in ((write_lock_resume_state or {}).get("action_summary") or [])
         if isinstance(summary, str)
-    ][-20:]
+    ]
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
@@ -5734,14 +5706,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
-        ][-30:]
-        from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+        ]
 
         verifier_checkpoints = [
             checkpoint
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
-        ][-VERIFIER_CHECKPOINT_MAX:]
+        ]
         # H-06 heal: payment-card resume must unlock the merchant domain. Older
         # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
         # re-resolve from start_url / visited merchant URLs when needed.
@@ -6362,9 +6333,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 value = payment_card_refs.get(ref)
                 if value:
                     _secret_refs[ref] = value
-            _payment_card_resume_section = build_payment_card_resume_prompt_section(payment_card_refs)
-            if _payment_card_resume_section:
-                _user_context_sections.append(_payment_card_resume_section.strip())
             _secret_refs.update(_realm_credential_state.password_secret_refs)
 
             logger.info(
@@ -6812,6 +6780,34 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+        prior_dynamic_context = (write_lock_resume_state or {}).get("dynamic_system_context")
+        if isinstance(prior_dynamic_context, str) and prior_dynamic_context:
+            if dynamic_system_context != prior_dynamic_context:
+                browser_turn_messages.append(
+                    {"role": "user", "content": "Trusted browser runtime context update:\n" + dynamic_system_context}
+                )
+            dynamic_system_context = prior_dynamic_context
+        if (write_lock_resume_state or {}).get("approval_type") == "payment":
+            card_guidance = build_payment_card_resume_prompt_section(card_refs)
+            if card_guidance:
+                payment_action = write_lock_resume_state.get("payment_action")
+                payment_action_call_id = write_lock_resume_state.get("payment_action_call_id")
+                if isinstance(payment_action, dict) and isinstance(payment_action_call_id, str):
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        unified_action=payment_action,
+                        result={
+                            "success": True,
+                            "status": "approved",
+                            "last4": payment_card_last4,
+                            "approved_request": payment_card_request,
+                            "message": card_guidance.strip(),
+                        },
+                        tool_call_id=payment_action_call_id,
+                    )
+                else:
+                    # Older in-flight tasks have no pending tool-call snapshot.
+                    browser_turn_messages.append({"role": "user", "content": card_guidance.strip()})
         failed_credential_prep_realms: Dict[str, str] = {}
 
         async def _prepare_credentials_for_url_unquarantined(
@@ -8175,8 +8171,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
-                browser_task_paused_for_resume = True
-                return {
+                resume_result = {
                     "status": "awaiting_auth_assistance",
                     "request_id": request_id,
                     "auth_assistance_request": request_info,
@@ -8191,16 +8186,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     "execution_time_ms": execution_time_ms,
                     "usage_items": usage_items,
-                    **_browser_resume_continuity_state(
-                        action_history=action_history,
-                        visited_urls=visited_urls,
-                        verifier_checkpoints=verifier_checkpoints,
-                        browser_turn_messages=browser_turn_messages,
-                        reasoning_messages=reasoning_messages,
-                        action_summary=action_summary,
-                        auth_runtime_state=auth_runtime_state,
-                    ),
+                    **(await persist_resume_context(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        state=_browser_resume_continuity_state(
+                            action_history=action_history,
+                            visited_urls=visited_urls,
+                            verifier_checkpoints=verifier_checkpoints,
+                            browser_turn_messages=browser_turn_messages,
+                            reasoning_messages=reasoning_messages,
+                            action_summary=action_summary,
+                            auth_runtime_state=auth_runtime_state,
+                            dynamic_system_context=dynamic_system_context,
+                        ),
+                    )),
                 }
+                browser_task_paused_for_resume = True
+                return resume_result
 
             if action_name == "recover_from_challenge":
                 recovery_params = unified_action.get("params", {}) or {}
@@ -9485,8 +9487,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     cdp_url=cdp_url[:50] if cdp_url else None,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
-                browser_task_paused_for_resume = True
-                return {
+                resume_result = {
                     "status": "awaiting_write_approval",
                     "approval_type": approval_type,
                     "question": question,
@@ -9502,16 +9503,23 @@ Based on this feedback, I need to continue working on the task and address the i
                     "task_id": task_id,
                     "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                    **_browser_resume_continuity_state(
-                        action_history=action_history,
-                        visited_urls=visited_urls,
-                        verifier_checkpoints=verifier_checkpoints,
-                        browser_turn_messages=browser_turn_messages,
-                        reasoning_messages=reasoning_messages,
-                        action_summary=action_summary,
-                        auth_runtime_state=auth_runtime_state,
-                    ),
+                    **(await persist_resume_context(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        state=_browser_resume_continuity_state(
+                            action_history=action_history,
+                            visited_urls=visited_urls,
+                            verifier_checkpoints=verifier_checkpoints,
+                            browser_turn_messages=browser_turn_messages,
+                            reasoning_messages=reasoning_messages,
+                            action_summary=action_summary,
+                            auth_runtime_state=auth_runtime_state,
+                            dynamic_system_context=dynamic_system_context,
+                        ),
+                    )),
                 }
+                browser_task_paused_for_resume = True
+                return resume_result
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
                 payment_request = result.get("payment_request", {})
@@ -9616,10 +9624,11 @@ Based on this feedback, I need to continue working on the task and address the i
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
 
                 await browser_stream.finish_tools(status="FINISHED")
-                browser_task_paused_for_resume = True
-                return {
+                resume_result = {
                     "status": "awaiting_payment_card_approval",
                     "payment_request": payment_request,
+                    "payment_action": unified_action,
+                    "payment_action_call_id": tool_call_id_action,
                     "current_url": current_url,
                     "write_lock_notification": payment_write_lock_notification,
                     "write_lock_notification_usage": payment_write_lock_notification_usage,
@@ -9630,16 +9639,23 @@ Based on this feedback, I need to continue working on the task and address the i
                     "task_id": task_id,
                     "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                    **_browser_resume_continuity_state(
-                        action_history=action_history,
-                        visited_urls=visited_urls,
-                        verifier_checkpoints=verifier_checkpoints,
-                        browser_turn_messages=browser_turn_messages,
-                        reasoning_messages=reasoning_messages,
-                        action_summary=action_summary,
-                        auth_runtime_state=auth_runtime_state,
-                    ),
+                    **(await persist_resume_context(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        state=_browser_resume_continuity_state(
+                            action_history=action_history,
+                            visited_urls=visited_urls,
+                            verifier_checkpoints=verifier_checkpoints,
+                            browser_turn_messages=browser_turn_messages,
+                            reasoning_messages=reasoning_messages,
+                            action_summary=action_summary,
+                            auth_runtime_state=auth_runtime_state,
+                            dynamic_system_context=dynamic_system_context,
+                        ),
+                    )),
                 }
+                browser_task_paused_for_resume = True
+                return resume_result
 
             if result.get("success", True):
                 logger.info(
@@ -10950,6 +10966,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "payment_card_request": _payment_card_request_evidence(payment_payload),
+                        "payment_action": result.get("payment_action"),
+                        "payment_action_call_id": result.get("payment_action_call_id"),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
