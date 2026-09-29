@@ -326,7 +326,16 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
-      expect(screen.queryByTestId('terminal-legal-links')).not.toBeInTheDocument();
+      const legalLinks = screen.getByTestId('terminal-legal-links');
+      expect(legalLinks).not.toHaveTextContent(ROSE_HOMEPAGE_DESCRIPTION);
+      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
+        'href',
+        '/privacy',
+      );
+      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
+        'href',
+        '/terms',
+      );
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 

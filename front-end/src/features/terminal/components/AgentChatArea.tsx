@@ -16,8 +16,8 @@
  *   transition without changing interaction or visual behavior.
  *
  * PUBLIC LANDING:
- *   The compact app description and legal links appear only before an agent is
- *   selected, so an active conversation keeps its full scroll area.
+ *   The compact app description appears before an agent is selected. Legal
+ *   links remain available while chatting.
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
@@ -127,27 +127,36 @@ export function AgentChatArea({
         tickerRef={tickerRef}
       />
 
-      {!a.selectedAgentId && <PublicLandingFooter />}
+      <TerminalLegalFooter showDescription={!a.selectedAgentId} />
     </>
   );
 }
 
-function PublicLandingFooter() {
+function TerminalLegalFooter({ showDescription }: { showDescription: boolean }) {
   return (
     <footer
       data-testid="terminal-legal-links"
-      className="relative z-10 w-full shrink-0 px-3 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] text-center text-[11px] leading-[1.25] text-foreground/65 md:pb-1 md:pl-20"
+      className="relative z-10 w-full shrink-0 px-2 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] text-center text-[11px] leading-[1.25] text-foreground/60 md:pb-1 md:pl-20"
     >
-      <span>{ROSE_HOMEPAGE_DESCRIPTION}</span>{' '}
-      <Link to="/about" className="underline-offset-2 hover:underline hover:text-foreground">
+      {showDescription && <>{ROSE_HOMEPAGE_DESCRIPTION} &middot; </>}
+      <Link
+        to="/about"
+        className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
+      >
         About
       </Link>{' '}
       &middot;{' '}
-      <Link to="/privacy" className="underline-offset-2 hover:underline hover:text-foreground">
+      <Link
+        to="/privacy"
+        className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
+      >
         Privacy
       </Link>{' '}
       &middot;{' '}
-      <Link to="/terms" className="underline-offset-2 hover:underline hover:text-foreground">
+      <Link
+        to="/terms"
+        className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
+      >
         Terms
       </Link>
     </footer>

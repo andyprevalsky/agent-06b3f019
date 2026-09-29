@@ -91,7 +91,7 @@ describe('Index (landing) page', () => {
 
     it('ships the reviewer description in visible static HTML', () => {
       const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
-      expect(html).toContain(ROSE_HOMEPAGE_DESCRIPTION);
+      expect(html).toContain(ROSE_HOMEPAGE_DESCRIPTION.replace('&', '&amp;'));
       expect(html).toMatch(/<footer class="rose-static-description">/);
       expect(html).toContain('<a href="/about">About</a>');
       expect(html).not.toMatch(/rose-static-description[^}]*display:\s*none/);
