@@ -2,10 +2,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
-import {
-  getAgentDetail,
-  tombstoneSkipsBenchmarkHub,
-} from '../../domains/agents/agentQueryService';
+import { getAgentDetail, tombstoneSkipsBenchmarkHub } from '../../domains/agents/agentQueryService';
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   await fn();

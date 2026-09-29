@@ -176,9 +176,7 @@ async function getInspectionContext(agentUserId: string, viewerUserId?: string) 
   };
 }
 
-export function tombstoneSkipsBenchmarkHub(
-  tombstone: { isBenchmark: boolean } | null
-): boolean {
+export function tombstoneSkipsBenchmarkHub(tombstone: { isBenchmark: boolean } | null): boolean {
   return tombstone !== null && tombstone.isBenchmark !== true;
 }
 

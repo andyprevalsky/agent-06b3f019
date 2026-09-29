@@ -48,24 +48,20 @@ test('force-clear replaces an approval-blocked agent instead of marking it FAILE
   });
 
   let restartedAgentId: string | null = null;
-  const outcome = await clearSupersededGenerationWorkflow(
-    'navi-agent-tasks@old',
-    workflowId,
-    {
-      restartAgent: async (id) => {
-        restartedAgentId = id;
-        await prepareAgentWorkflowReplacement(id, session.user.id);
-        return {
-          success: true,
-          agent_id: id,
-          workflow_id: `${id}:replacement:${randomUUID()}`,
-        };
-      },
-      terminateOrphan: async () => {
-        throw new Error('owned approval-blocked agent must not be treated as an orphan');
-      },
-    }
-  );
+  const outcome = await clearSupersededGenerationWorkflow('navi-agent-tasks@old', workflowId, {
+    restartAgent: async (id) => {
+      restartedAgentId = id;
+      await prepareAgentWorkflowReplacement(id, session.user.id);
+      return {
+        success: true,
+        agent_id: id,
+        workflow_id: `${id}:replacement:${randomUUID()}`,
+      };
+    },
+    terminateOrphan: async () => {
+      throw new Error('owned approval-blocked agent must not be treated as an orphan');
+    },
+  });
 
   assert(outcome === 'cleared', `force-clear must replace, got ${outcome}`);
   assert(restartedAgentId === agentId, 'force-clear must restart the parked agent');
@@ -91,23 +87,19 @@ test('force-clear replaces HTTP-created agents in every AgentStatus', async () =
     });
 
     let restartedAgentId: string | null = null;
-    const outcome = await clearSupersededGenerationWorkflow(
-      'navi-agent-tasks@old',
-      workflowId,
-      {
-        restartAgent: async (id) => {
-          restartedAgentId = id;
-          return {
-            success: true,
-            agent_id: id,
-            workflow_id: `${id}:replacement:${randomUUID()}`,
-          };
-        },
-        terminateOrphan: async () => {
-          throw new Error(`${status} agent must not be treated as an orphan`);
-        },
-      }
-    );
+    const outcome = await clearSupersededGenerationWorkflow('navi-agent-tasks@old', workflowId, {
+      restartAgent: async (id) => {
+        restartedAgentId = id;
+        return {
+          success: true,
+          agent_id: id,
+          workflow_id: `${id}:replacement:${randomUUID()}`,
+        };
+      },
+      terminateOrphan: async () => {
+        throw new Error(`${status} agent must not be treated as an orphan`);
+      },
+    });
 
     assert(outcome === 'cleared', `${status} must be replaced, got ${outcome}`);
     assert(restartedAgentId === agentId, `${status} must restart`);
