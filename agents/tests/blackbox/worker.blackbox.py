@@ -84,6 +84,28 @@ run_worker_event_loop(main())
     assert "Worker shutdown left unrelated tasks pending: unrelated-work" in result.stderr
 
 
+def test_worker_event_loop_stops_browser_event_buses_before_pending_check():
+    """An idle browser-use bus is owned cleanup work, not an orphaned task."""
+    script = r'''
+from bubus import BaseEvent, EventBus
+from helpers.worker_event_loop import run_worker_event_loop
+
+async def main():
+    bus = EventBus(name="worker_shutdown_bus")
+    await bus.dispatch(BaseEvent())
+    assert bus._is_running
+
+run_worker_event_loop(main())
+print("process-exited", flush=True)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
+        capture_output=True, text=True, timeout=6,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert result.stdout.rstrip().endswith("process-exited")
+
+
 def _worker_tree() -> ast.Module:
     return ast.parse(WORKER_PATH.read_text())
 
@@ -1030,6 +1052,7 @@ async def run_all_tests():
     r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
     r.record("worker_terminal_browser_io_cannot_strand_cleanup", test_worker_event_loop_closes_after_terminal_browser_io_times_out)
     r.record("worker_loop_rejects_unrelated_pending_work", test_worker_event_loop_rejects_unrelated_pending_work)
+    r.record("worker_loop_stops_browser_event_buses", test_worker_event_loop_stops_browser_event_buses_before_pending_check)
     r.record("worker_cancellation_heartbeat_cadence", test_worker_cancellation_uses_application_heartbeat_cadence)
     await r.record_async(
         "worker_metrics_stop_prevents_later_fleet_requests",
