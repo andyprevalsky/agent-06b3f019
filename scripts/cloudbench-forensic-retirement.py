@@ -205,12 +205,12 @@ def verify_started_pool_evidence(
         assert directory.is_dir() and not directory.is_symlink()
     names = {path.name for path in fresh.iterdir()}
     assert names == {path.name for path in expected_fresh.iterdir()}
-    assert names == {path.name for path in clones.iterdir()}
+    clone_names = {path.name for path in clones.iterdir()}
+    assert clone_names <= names
     fresh_records = {}
     for name in names:
         original = fields(fresh / name)
         expected = fields(expected_fresh / name)
-        clone = fields(clones / name)
         machine = original["machine_id"]
         volume = original["volume_id"]
         assert re.fullmatch(r"cloudbench-[A-Za-z0-9_-]+", name)
@@ -219,10 +219,16 @@ def verify_started_pool_evidence(
         assert original["version"] == "1" and original["fleet_owner_token"] == owner
         assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
         assert original["clone_name"] == name and original["source"] == "fresh-clone"
-        assert original["disposition"] == "owned"
+        assert original["disposition"] in (
+            "owned", "destroyed-verified-absent", "destroyed-provider-retained")
         assert expected == {"clone_name": name,
                             "source_machine_id": original["source_machine_id"]}
-        assert clone == {"name": name, "id": machine, "volume_id": volume}
+        if original["disposition"] == "owned":
+            assert name in clone_names
+            assert fields(clones / name) == {
+                "name": name, "id": machine, "volume_id": volume}
+        else:
+            assert name not in clone_names
         assert regular_bytes(by_machine / machine, 256).decode().strip() == name
         fresh_records[machine] = original
     assert {path.name for path in by_machine.iterdir()} == set(fresh_records)
@@ -235,7 +241,11 @@ def verify_started_pool_evidence(
     assert len(native_volumes) == len(volumes)
     for machine, original in fresh_records.items():
         assert original["source_machine_id"] in {row["machine_id"] for row in rows}
-        assert original["volume_id"] in native_volumes
+        if original["disposition"] == "owned":
+            assert original["volume_id"] in native_volumes
+        else:
+            assert original["volume_id"] not in native_volumes
+            assert machine not in native_machines
         if machine in native_machines:
             assert native_machines[machine]["name"] == original["clone_name"]
         ordinal = next(i for i, row in enumerate(rows)
