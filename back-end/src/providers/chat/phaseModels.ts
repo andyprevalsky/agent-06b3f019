@@ -1,13 +1,15 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> rose-fast (rose-1-flash pool: Cerebras Qwen → waterfall)
- *                   ├─ generator ──> rose-fast (same pool path; no provider_route override)
+ * requested model ──┬─ router ──> rose-fast via direct-cerebras (Qwen + 1.2s stall hedge)
+ *                   ├─ generator ──> rose-fast via direct-cerebras (same)
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
- * Both synchronous chat phases are latency-sensitive and use the rose-fast pool
- * as-is. Do NOT pin `provider_route: 'direct-cerebras'` here — that exclusive
- * chat route hardcodes gpt-oss-120b and bypasses the pool's cerebrasModel.
+ * `direct-cerebras` selects the exclusive chat hedge path in Rose client; the
+ * model on that path is rose-fast Qwen (`CEREBRAS_CHAT_MODEL` = pool
+ * cerebrasModel), not the legacy gpt-oss-120b pin. Omitting the route falls
+ * through to the 90s/high-effort pool hop and breaches the 5s FE lifecycle
+ * ratchet (web_search samples).
  */
 
 import type { CompletionOptions } from '../rose';
@@ -15,25 +17,25 @@ import type { CompletionOptions } from '../rose';
 /** Display alias rose-fast; pool id rose-1-flash. */
 export const ROSE_FAST_MODEL = 'rose-labs/rose-1-flash';
 
+/** Chat-only: arms stall hedge; model remains rose-fast Qwen. */
+export const ROSE_FAST_CHAT_PROVIDER_ROUTE = 'direct-cerebras' as const;
+
 export type ChatProviderRoute = NonNullable<CompletionOptions['provider_route']>;
 
 export interface ChatPhaseModels {
   readonly requested: string;
   readonly router: string;
-  /**
-   * Omitted on purpose: chat rides the rose-fast pool path (Cerebras Qwen →
-   * OpenRouter waterfall). A concrete route here would re-introduce the
-   * gpt-oss exclusive chat hop.
-   */
-  readonly routerProviderRoute?: ChatProviderRoute;
+  readonly routerProviderRoute: ChatProviderRoute;
   readonly generator: string;
-  readonly generatorProviderRoute?: ChatProviderRoute;
+  readonly generatorProviderRoute: ChatProviderRoute;
 }
 
 export function selectChatPhaseModels(requestedModel: string): ChatPhaseModels {
   return {
     requested: requestedModel,
     router: ROSE_FAST_MODEL,
+    routerProviderRoute: ROSE_FAST_CHAT_PROVIDER_ROUTE,
     generator: ROSE_FAST_MODEL,
+    generatorProviderRoute: ROSE_FAST_CHAT_PROVIDER_ROUTE,
   };
 }

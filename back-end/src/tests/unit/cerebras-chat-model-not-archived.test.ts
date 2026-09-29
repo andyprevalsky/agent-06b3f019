@@ -16,23 +16,28 @@ import {
   CEREBRAS_CHAT_MODEL,
   CEREBRAS_CHAT_REASONING_EFFORT,
   CHAT_DEAD_CEREBRAS_MODEL,
+  LEGACY_EXCLUSIVE_CEREBRAS_CHAT_MODEL,
 } from '../../providers/rose/cerebrasRoute';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
+import { getPool } from '../../providers/rose/pools';
 
 describe('cerebras chat model inventory', () => {
-  it('does not pin synchronous chat to the archived Cerebras GLM id', () => {
+  it('pins synchronous chat to rose-fast Qwen (not archived GLM / gpt-oss / dead gemma)', () => {
     assert.equal(ARCHIVED_CEREBRAS_CHAT_MODEL, 'zai-glm-4.7');
     assert.notEqual(
       CEREBRAS_CHAT_MODEL,
       ARCHIVED_CEREBRAS_CHAT_MODEL,
       'CEREBRAS_CHAT_MODEL must leave the archived zai-glm-4.7 id'
     );
-    assert.equal(CEREBRAS_CHAT_MODEL, 'gpt-oss-120b');
+    assert.equal(CEREBRAS_CHAT_MODEL, 'qwen-3.8-27b');
+    assert.equal(CEREBRAS_CHAT_MODEL, getPool('rose-1-flash').cerebrasModel);
     assert.notEqual(CEREBRAS_CHAT_MODEL, CHAT_DEAD_CEREBRAS_MODEL);
-    assert.equal(OPENROUTER_CEREBRAS_MODEL, 'openai/gpt-oss-120b');
+    assert.notEqual(CEREBRAS_CHAT_MODEL, LEGACY_EXCLUSIVE_CEREBRAS_CHAT_MODEL);
+    assert.equal(OPENROUTER_CEREBRAS_MODEL, 'qwen/qwen3.8-27b');
+    assert.equal(OPENROUTER_CEREBRAS_MODEL, getPool('rose-1-flash').waterfall[0]);
   });
 
-  it('builds a Cerebras body gpt-oss-120b accepts (no clear_thinking, effort low)', () => {
+  it('builds a Cerebras body Qwen accepts (no clear_thinking, effort low)', () => {
     const body = buildCerebrasChatBody({
       messages: [{ role: 'user', content: 'Include CHATWEBSEARCH marker verbatim.' }],
       temperature: 0.7,
@@ -50,7 +55,7 @@ describe('cerebras chat model inventory', () => {
         },
       },
     });
-    assert.equal(body.model, 'gpt-oss-120b');
+    assert.equal(body.model, 'qwen-3.8-27b');
     assert.equal(body.clear_thinking, undefined);
     assert.equal(body.reasoning_effort, CEREBRAS_CHAT_REASONING_EFFORT);
     assert.equal(body.reasoning_effort, 'low');

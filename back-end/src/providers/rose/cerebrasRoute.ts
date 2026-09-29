@@ -1,18 +1,17 @@
 /**
  * Exclusive Cerebras boundary for latency-sensitive synchronous Chat.
  *
- *   explicit route -> direct Cerebras Gemma-4-31B stream -> normalized Rose chunks
+ *   explicit route -> direct Cerebras rose-fast Qwen stream -> normalized Rose chunks
  *
  * A short first-content deadline protects the synchronous chat budget. This
  * route is exclusive and surfaces every failure to its caller.
  *
- * Model note (2026-09-09): Cerebras still lists `gemma-4-31b` on /models
- * but chat/completions returns `model_not_found` 404. Same class as the
- * 2026-08-20 `zai-glm-4.7` archive — every direct-cerebras call would
- * fall to the OpenRouter waterfall and miss the 5s lifecycle ratchet.
- * `gpt-oss-120b` is the inventory that still answers chat (structured
- * outputs included) inside the budget. It rejects `reasoning_effort=none`
- * (only low/medium/high); `low` is the minimum.
+ * Model note (2026-09-29): Chat must stay on rose-fast inventory
+ * (`qwen-3.8-27b`, same as `POOL_REGISTRY['rose-1-flash'].cerebrasModel`).
+ * Older pins (`gemma-4-31b` 404, archived `zai-glm-4.7`, exclusive
+ * `gpt-oss-120b`) either miss structured chat or bypass the rose-fast pool.
+ * Effort `low` keeps first visible content inside the 5s FE lifecycle ratchet;
+ * pool hop elsewhere may use `high`.
  */
 
 import { createLogger } from '../logger';
@@ -32,7 +31,8 @@ import type { CompletionOptions, RoseStreamChunk } from './types';
 
 const log = createLogger('CerebrasRoute');
 
-export const CEREBRAS_CHAT_MODEL = 'gpt-oss-120b';
+/** Must match `POOL_REGISTRY['rose-1-flash'].cerebrasModel`. */
+export const CEREBRAS_CHAT_MODEL = 'qwen-3.8-27b';
 export const CEREBRAS_DIRECT_POOL = 'cerebras-direct';
 export const DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS = 1_200;
 /** Pool hop (rose-fast Qwen high; Cerebras max) — not the 1.2s chat stall. */
@@ -41,6 +41,8 @@ export const POOL_CEREBRAS_IDLE_TIMEOUT_MS = 90_000;
 export const ARCHIVED_CEREBRAS_CHAT_MODEL = 'zai-glm-4.7';
 /** Listed on /models but chat/completions 404s (2026-09-09). */
 export const CHAT_DEAD_CEREBRAS_MODEL = 'gemma-4-31b';
+/** Former exclusive chat pin — bypassed rose-fast; do not restore. */
+export const LEGACY_EXCLUSIVE_CEREBRAS_CHAT_MODEL = 'gpt-oss-120b';
 export const CEREBRAS_CHAT_REASONING_EFFORT = 'low';
 
 function chatIdleTimeoutMs(): number {
@@ -52,8 +54,8 @@ function chatIdleTimeoutMs(): number {
 
 /**
  * Only user-visible output satisfies the chat first-content deadline. This
- * route requests the lowest effort `gpt-oss-120b` accepts (`low`). A
- * reasoning trickle is still not progress — counting it kept a silent
+ * route requests effort `low` so Qwen emits content inside the stall budget.
+ * A reasoning trickle is still not progress — counting it kept a silent
  * chat open past the stall guard while the user saw nothing (web_search
  * lifecycle ratchet breach, 2026-07-19).
  */

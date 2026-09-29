@@ -76,12 +76,12 @@ function directGeneratorOptions() {
   });
 }
 
-async function testPhaseUsesRoseFastPoolCerebras(): Promise<void> {
+async function testPhaseUsesDirectCerebras(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   process.env.OPENROUTER_API_KEY = 'openrouter-must-not-run';
-  process.env.CEREBRAS_API_KEY = 'rose-fast-pool-cerebras';
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
   const calls: string[] = [];
   let capturedBody: Record<string, unknown> = {};
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -93,14 +93,13 @@ async function testPhaseUsesRoseFastPoolCerebras(): Promise<void> {
   }) as typeof fetch;
   try {
     const options = phaseGeneratorOptions();
-    assert.equal(options.provider_route, undefined);
-    assert.equal(Object.hasOwn(options, 'provider_route'), false);
+    assert.equal(options.provider_route, 'direct-cerebras');
     const chunks = await collect(await createStreamingCompletion(options));
     assert.deepEqual(calls, [CEREBRAS_API_URL]);
     assert.equal(capturedBody.model, 'qwen-3.8-27b');
     assert.equal(capturedBody.temperature, 0.7);
     assert.equal(capturedBody.clear_thinking, undefined);
-    assert.equal(capturedBody.reasoning_effort, 'high');
+    assert.equal(capturedBody.reasoning_effort, 'low');
     assert.deepEqual(capturedBody.messages, options.messages);
     assert.deepEqual(capturedBody.response_format, options.response_format);
     const format = capturedBody.response_format as {
@@ -238,7 +237,7 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     if (url === OPENROUTER_API_URL) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       openRouterBodies.push(body);
-      if (body.model === 'openai/gpt-oss-120b') {
+      if (body.model === 'qwen/qwen3.8-27b') {
         glmSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
@@ -253,14 +252,14 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     const text = chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('');
     assert.ok(text.length > 0, 'the independent fallback must rescue both silent Cerebras routes');
 
-    const glmBody = openRouterBodies.find((body) => body.model === 'openai/gpt-oss-120b');
+    const glmBody = openRouterBodies.find((body) => body.model === 'qwen/qwen3.8-27b');
     const fastBody = openRouterBodies.find((body) => body.model === 'z-ai/glm-5.3-flash');
     assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter Cerebras spill');
     assert.ok(fastBody, 'the Cerebras spill must race the measured fast fallback model');
     assert.equal(
       (glmBody.provider as { allow_fallbacks?: boolean }).allow_fallbacks,
       true,
-      'the GLM race branch must be allowed to spill beyond Cerebras'
+      'the Qwen race branch must be allowed to spill beyond Cerebras'
     );
     assert.deepEqual(fastBody.response_format, directGeneratorOptions().response_format);
     assert.deepEqual(
@@ -316,7 +315,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const model = String(body.model);
       openRouterModels.push(model);
-      if (model === 'openai/gpt-oss-120b') return sseResponse(GENERATOR_SSE);
+      if (model === 'qwen/qwen3.8-27b') return sseResponse(GENERATOR_SSE);
       if (model === 'z-ai/glm-5.3-flash') {
         fastSignal = init?.signal;
         return stallingResponse(init?.signal);
@@ -328,11 +327,11 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
 
   try {
     const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
-    assert.ok(chunks.length > 0, 'the winning GLM spill must produce a reply');
+    assert.ok(chunks.length > 0, 'the winning Qwen spill must produce a reply');
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       openRouterModels,
-      ['openai/gpt-oss-120b', 'z-ai/glm-5.3-flash'],
+      ['qwen/qwen3.8-27b', 'z-ai/glm-5.3-flash'],
       'the bounded fast fallback must not advance to the general waterfall'
     );
     assert.equal(fastSignal?.aborted, true, 'the losing fast fallback must be aborted');
@@ -350,12 +349,12 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
   }
 }
 
-// Cerebras GLM-4.7 is rate-capped hard at the org level (5 req/min across all
+// Cerebras Qwen is rate-capped hard at the org level (5 req/min across all
 // models), so a burst of concurrent chats trips a 402 `quota` before any
 // caller-visible content. That must NOT sink the chat AND must NOT drop to a
-// generic model: the request falls over to the SAME model (GLM-4.7) via
+// generic model: the request falls over to the SAME model (qwen/qwen3.8-27b) via
 // OpenRouter with the provider unpinned — OpenRouter still prefers Cerebras but
-// may spill to another GLM-4.7 host past the cap.
+// may spill to another Qwen host past the cap.
 async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
@@ -400,7 +399,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       'a Cerebras 402 quota must fall over to OpenRouter'
     );
     // Same model — never a generic one.
-    assert.equal(openRouterBody.model, 'openai/gpt-oss-120b', 'fallover must stay on gpt-oss-120b');
+    assert.equal(openRouterBody.model, 'qwen/qwen3.8-27b', 'fallover must stay on rose-fast Qwen');
     // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
     const provider = openRouterBody.provider as {
       order?: string[];
@@ -412,11 +411,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       ['cerebras', 'groq'],
       'fallover should prefer Cerebras then Groq'
     );
-    assert.equal(
-      provider.allow_fallbacks,
-      true,
-      'fallover must allow spill to another gpt-oss-120b host'
-    );
+    assert.equal(provider.allow_fallbacks, true, 'fallover must allow spill to another Qwen host');
     assert.equal(provider.only, undefined, 'fallover must not be pinned to Cerebras only');
     assert.ok(chunks.length > 0, 'the fallover must still produce a reply');
   } finally {
@@ -434,7 +429,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  await testPhaseUsesRoseFastPoolCerebras();
+  await testPhaseUsesDirectCerebras();
   await testDirectFailureFallsThroughToWaterfall();
   await testDirectPreHeaderStallFallsThroughToWaterfall();
   await testSilentDirectRouteRacesIndependentFallbacks();

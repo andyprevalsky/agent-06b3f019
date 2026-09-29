@@ -43,16 +43,16 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
 
 const tests: Array<[string, () => Promise<void> | void]> = [
   [
-    'Ultra chat uses rose-fast for both synchronous phases (no provider_route override)',
+    'Ultra chat uses rose-fast via direct-cerebras hedge for both synchronous phases',
     () => {
       const requestedModel = 'rose-labs/rose-1-ultra';
       const selected = selectChatPhaseModels(requestedModel);
 
       assertEqual(selected.requested, requestedModel, 'persisted requested model');
       assertEqual(selected.router, 'rose-labs/rose-1-flash', 'router model');
-      assertEqual(selected.routerProviderRoute, undefined, 'router provider route');
+      assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router provider route');
       assertEqual(selected.generator, 'rose-labs/rose-1-flash', 'generator model');
-      assertEqual(selected.generatorProviderRoute, undefined, 'generator provider route');
+      assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator provider route');
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-flash', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');
@@ -67,8 +67,8 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(selected.router, requestedModel, 'router model');
       assertEqual(selected.generator, requestedModel, 'generator model');
-      assertEqual(selected.routerProviderRoute, undefined, 'no router route override');
-      assertEqual(selected.generatorProviderRoute, undefined, 'no generator route override');
+      assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router hedge route');
+      assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator hedge route');
     },
   ],
   [

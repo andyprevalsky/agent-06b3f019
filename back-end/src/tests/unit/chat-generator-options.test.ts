@@ -21,8 +21,7 @@ async function run(): Promise<void> {
   });
 
   assert.strictEqual(options.model, 'rose-labs/rose-1-flash');
-  assert.strictEqual(options.provider_route, undefined);
-  assert.strictEqual(Object.hasOwn(options, 'provider_route'), false);
+  assert.strictEqual(options.provider_route, 'direct-cerebras');
   assert.strictEqual(options.provider_fast_mode, true);
   assert.strictEqual(options.abort_signal, abortController.signal);
   assert.strictEqual(options.temperature, 0.7);
@@ -66,13 +65,12 @@ async function run(): Promise<void> {
   }) as typeof fetch;
 
   try {
-    // rose-fast has directAuthEnabled=false, so GPT_API_KEY must not be used.
-    // Without Cerebras or OpenRouter keys the pool path fails closed before I/O.
+    // Exclusive direct-cerebras requires CEREBRAS_API_KEY; GPT_API_KEY must not leak.
     await assert.rejects(async () => {
       for await (const chunk of await createStreamingCompletion(options)) {
         assert.fail(`unexpected chunk without provider keys: ${chunk.actual_model}`);
       }
-    }, /OPENROUTER_API_KEY|waterfall|Rose/);
+    }, /CEREBRAS_API_KEY|Rose/);
     assert.strictEqual(providerCalls, 0, 'missing provider keys must fail before provider calls');
   } finally {
     globalThis.fetch = originalFetch;
@@ -85,7 +83,7 @@ async function run(): Promise<void> {
   }
 
   process.stdout.write('PASS chat Generator options exclude ignored compute-auth fields\n');
-  process.stdout.write('PASS Generator rose-fast pool path fails closed without leakage\n');
+  process.stdout.write('PASS Generator direct-cerebras fails closed without leakage\n');
 }
 
 run().catch((error: unknown) => {
