@@ -862,7 +862,7 @@ FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
 CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
-bench_uses_default_pool_shape image-handling ||
+bench_uses_default_pool_shape parallel-tool-calls ||
   fail "ordinary tasks must retain default pool admission"
 if bench_uses_default_pool_shape polar-bu-065; then
   fail "catalog browser tasks must request the large primary shape"
