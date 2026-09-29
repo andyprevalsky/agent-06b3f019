@@ -5656,10 +5656,23 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             stage_logs[aid] = logs if isinstance(logs, dict) else {}
         primary_ids.add(root_ids[-1])
     owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
-    if any(not r.agent_id and r.status != "SKIPPED" for r in results):
+    # The SMS supervisor is an in-backend tool loop, not a Temporal agent.
+    # Its runner returns only after its own seeded-session cleanup completed.
+    # Keep every other missing root fail-closed: an interrupted create may
+    # still own sessions even when its HTTP response never reached us.
+    rootless_sms = [
+        r for r in results
+        if not r.agent_id and r.status != "SKIPPED"
+        and isinstance(getattr(r, "stop_metadata", None), dict)
+        and r.stop_metadata.get("runner") == "sms"
+        and r.stop_metadata.get("owned_cleanup_verified") is True
+    ]
+    if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
+        if failures or not rootless_sms:
+            raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
+        return
     snapshots = {}
     for aid in sorted(owned):
         try:

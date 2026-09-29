@@ -241,6 +241,12 @@ the number of sequential slices. The normal `--timeout` and benchmark
 backstop are each 7,200 seconds. Only the current user-requested accelerated
 validation uses `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and `--timeout 300`,
 with the independent 30-minute end-to-end cutoff described below.
+Capability proof selection excludes rootless SMS supervisor tasks: they have
+no Temporal agent root to anchor an archive or correlate the required three
+LLM completions. An explicit pool containing one fails before provisioning.
+The SMS runner still verifies its own seeded-session cleanup for ordinary
+benchmark runs; a missing root from any other runner remains an ownership
+error.
 
 **If a run goes wrong:** Start with its `summary.json`, `_batch/run.json`,
 `_batch/lifecycle.json`, per-task `cloudbench-run.json`, `fleet-child.log`,

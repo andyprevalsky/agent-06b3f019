@@ -308,6 +308,16 @@ async def test_missing_create_response_never_proves_zero_allocation():
 
 
 @async_case
+async def test_rootless_sms_requires_its_own_completed_cleanup_receipt():
+    row = result("")
+    row.stop_metadata = {"runner": "sms", "owned_cleanup_verified": True}
+    await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+    row.stop_metadata = {"runner": "sms"}
+    with pytest.raises(RuntimeError, match="unknown root creation outcome"):
+        await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+
+
+@async_case
 async def test_composite_result_finalizes_each_exact_root_without_changing_verdict():
     """A prerequisite gate and its task are two roots of one benchmark record."""
     row = result(f"{ROOT},{CHILD}")

@@ -793,6 +793,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         failure_reason=failure_reason,
         stop_metadata={
             "runner": "sms",
+            "owned_cleanup_verified": True,
             "turns": build_report_transcript(turns),
             "declared_evaluators": evaluator_results,
         },

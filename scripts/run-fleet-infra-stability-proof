@@ -146,6 +146,7 @@ if [ -n "$POOL_FILE" ]; then
   POOL_FILE_ARGS=(--pool-file "$POOL_FILE")
 fi
 SAMPLE_ARGS=("${POOL_FILE_ARGS[@]}")
+if [ "$MODE" = capability ]; then SAMPLE_ARGS+=(--require-cloud-root); fi
 if [ -n "$EXCLUDE_FILE" ]; then
   [ -f "$EXCLUDE_FILE" ] && [ ! -L "$EXCLUDE_FILE" ] || {
     echo "❌ --exclude-file must be a regular JSON file" >&2; exit 2;

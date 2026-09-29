@@ -126,6 +126,25 @@ if python3 "$SAMPLER" dry-proof --repo "$ROOT_DIR" --runs 2 --width 2 \
   --seed 1 --disjoint --pool-file "$small_pool" >/dev/null 2>&1; then
   fail "disjoint sampler must reject a campaign wider than its pool"
 fi
+rootless_pool="$(mktemp)"
+printf '["sms-supervisor-closed-no-spawn"]\n' > "$rootless_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$rootless_pool" >/tmp/infra-proof-rootless.out 2>&1; then
+  fail "capability proof must reject a rootless SMS runner before provisioning"
+fi
+grep -Fq 'rootless SMS tasks' /tmp/infra-proof-rootless.out \
+  || fail "rootless capability rejection must explain why"
+python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must exclude rootless SMS"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+names = eligible_pool(root, None, require_cloud_root=True)
+assert "sms-supervisor-closed-no-spawn" not in names
+assert "sms-supervisor-open-spawns-agent" not in names
+PY
+rm -f "$rootless_pool"
 rm -f "$exclude_file" "$capability_sample" "$small_pool"
 
 tmp="$(mktemp -d)"

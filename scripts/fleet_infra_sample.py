@@ -42,7 +42,8 @@ def load_pool(repo_root: Path) -> list[str]:
 
 
 def eligible_pool(
-    repo_root: Path, pool_file: Path | None, exclude_file: Path | None = None
+    repo_root: Path, pool_file: Path | None, exclude_file: Path | None = None,
+    *, require_cloud_root: bool = False,
 ) -> list[str]:
     catalog = load_pool(repo_root)
     names = catalog
@@ -57,6 +58,22 @@ def eligible_pool(
         unknown = set(names) - set(catalog)
         if unknown:
             raise ValueError(f"eligibility pool contains non-ready tasks: {sorted(unknown)}")
+    if require_cloud_root:
+        # The SMS supervisor is a rootless backend loop. Capability proof
+        # requires a root-anchored archive and >=3 correlated live LLM calls;
+        # reject it before provisioning rather than failing at teardown.
+        rootless = {
+            str(task["name"])
+            for task in load_unified_catalog(catalog_path(repo_root))
+            if isinstance(task, dict) and task.get("runner") == "sms"
+        }
+        selected_rootless = set(names) & rootless
+        if pool_file is not None and selected_rootless:
+            raise ValueError(
+                "capability proof requires cloud-root tasks; rootless SMS tasks: "
+                f"{sorted(selected_rootless)}"
+            )
+        names = [name for name in names if name not in rootless]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
@@ -90,7 +107,10 @@ def sample_slice(
 def cmd_sample(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     try:
-        pool = eligible_pool(repo, args.pool_file, args.exclude_file)
+        pool = eligible_pool(
+            repo, args.pool_file, args.exclude_file,
+            require_cloud_root=args.require_cloud_root,
+        )
         names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=args.slice, disjoint=args.disjoint)
     except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
@@ -106,7 +126,10 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
     """Emit all slices for the stability proof; assert uniqueness within each."""
     repo = Path(args.repo).resolve()
     try:
-        pool = eligible_pool(repo, args.pool_file, args.exclude_file)
+        pool = eligible_pool(
+            repo, args.pool_file, args.exclude_file,
+            require_cloud_root=args.require_cloud_root,
+        )
     except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
@@ -170,6 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument("--exclude-file", type=Path, help="JSON list of previously used names")
         sp.add_argument("--disjoint", action="store_true", help="never reuse a name across slices")
+        sp.add_argument(
+            "--require-cloud-root", action="store_true",
+            help="exclude rootless runners from capability proofs",
+        )
 
     sample = sub.add_parser("sample", help="print one newline-separated slice")
     add_repo(sample)
