@@ -157,44 +157,37 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                         (typeof URL !== 'undefined' && scriptURL instanceof URL)
                           ? _absUrl(scriptURL)
                           : String(scriptURL);
-                      // Blob/data PoW workers (FCaptcha): importScripts(blob:) from a
-                      // wrapper blob fails with NetworkError on Kernel Chromium
-                      // (opaque-origin). Inline the body via sync XHR instead.
-                      // http(s): keep importScripts / static import. On any failure
-                      // fall back to Native — an unpatched worker is better than a
-                      // dead one (biometrics 1aba1c91: "FCaptcha worker failed to
-                      // load (NetworkError)").
-                      let wrappedSrc;
-                      if (!isModule && (url.startsWith('blob:') || url.startsWith('data:'))) {
-                        try {
-                          const xhr = new XMLHttpRequest();
-                          xhr.open('GET', url, false);
-                          xhr.send();
-                          if (xhr.status !== 0 && xhr.status !== 200) {
-                            return new Native(...args);
-                          }
-                          wrappedSrc = _workerNavPreamble + '\\n' + xhr.responseText;
-                        } catch (e) {
+                      // Only wrap classic blob/data workers. FCaptcha PoW uses
+                      // blob: workers; importScripts(blob:) from a wrapper blob
+                      // fails with NetworkError on Kernel Chromium (opaque
+                      // origin). Inline via sync XHR + navigator preamble.
+                      // http(s)/module workers keep Native so relative
+                      // importScripts/fetch and module hoist semantics stay
+                      // intact (and SharedWorker identity stays shareable).
+                      if (isModule || !(url.startsWith('blob:') || url.startsWith('data:'))) {
+                        return new Native(...args);
+                      }
+                      try {
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('GET', url, false);
+                        xhr.send();
+                        if (xhr.status !== 0 && xhr.status !== 200) {
                           return new Native(...args);
                         }
-                      } else {
-                        wrappedSrc = isModule
-                          ? _workerNavPreamble + '\\nimport ' + JSON.stringify(url) + ';'
-                          : _workerNavPreamble +
-                            '\\nimportScripts(' +
-                            JSON.stringify(url) +
-                            ');';
+                        const wrappedSrc = _workerNavPreamble + '\\n' + xhr.responseText;
+                        const blobUrl = _blobUrl(wrappedSrc);
+                        const worker = new Native(blobUrl, options);
+                        try {
+                          setTimeout(() => {
+                            try {
+                              URL.revokeObjectURL(blobUrl);
+                            } catch (e) {}
+                          }, 60_000);
+                        } catch (e) {}
+                        return worker;
+                      } catch (e) {
+                        return new Native(...args);
                       }
-                      const blobUrl = _blobUrl(wrappedSrc);
-                      const worker = new Native(blobUrl, options);
-                      try {
-                        setTimeout(() => {
-                          try {
-                            URL.revokeObjectURL(blobUrl);
-                          } catch (e) {}
-                        }, 60_000);
-                      } catch (e) {}
-                      return worker;
                     } catch (e) {
                       return new Native(...args);
                     }
@@ -209,10 +202,9 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                   } catch (e) {}
                   return Wrapped;
                 };
+                // Classic Worker only — wrapping SharedWorker would mint a new
+                // blob URL per construction and break same-URL worker sharing.
                 window.Worker = _wrapWorkerCtor(window.Worker, 'Worker');
-                if (typeof window.SharedWorker === 'function') {
-                  window.SharedWorker = _wrapWorkerCtor(window.SharedWorker, 'SharedWorker');
-                }
               } catch (e) {}
 
               // Override navigator.plugins with user's plugins

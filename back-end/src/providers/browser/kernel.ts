@@ -13,6 +13,7 @@ import { installCaptchaSolveIndicator } from './captchaSolveIndicator';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import { persistBrowserSessionRow } from './sessionPersist';
 import {
+  forgetKernelProxy,
   getOrCreateKernelProxy,
   isKernelProxyAvailabilityError,
   KERNEL_CREATE_REQUEST_OPTIONS,
@@ -20,7 +21,6 @@ import {
   resolveKernelProxyMode,
   type KernelProxyType,
   type ResolvedKernelProxy,
-  forgetKernelProxy,
 } from './kernelProxy';
 import {
   BrowserProviderRateLimitError,
@@ -348,9 +348,20 @@ async function createRemoteSession(
     } catch (error) {
       if (!isKernelProxyAvailabilityError(error) || index + 1 >= candidates.length) throw error;
 
-      // Drop a city/state cache row that timed out or is unavailable so the next
-      // attempt recreates (or skips) instead of replaying a sticky bad proxy_id.
-      if (resolved?.proxyKey !== undefined) {
+      // Only drop a cache row when the error proves this proxy_id is bad.
+      // A browsers.create transport timeout does not mean the remote proxy is
+      // gone — forgetting it would recreate orphans for the same geo key.
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const stickyBadProxy =
+        resolved?.proxyKey !== undefined &&
+        (message.includes('proxy not found') ||
+          message.includes('invalid proxy') ||
+          message.includes('proxy unavailable') ||
+          message.includes('proxy is unavailable') ||
+          message.includes('no_peer') ||
+          message.includes('no peer'));
+      if (stickyBadProxy) {
         await forgetKernelProxy(resolved.proxyKey).catch(() => {});
       }
 

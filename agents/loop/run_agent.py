@@ -2038,7 +2038,11 @@ async def run_agent(
                     completion_error_posted = False
                     if post_message:
                         try:
-                            await post_message(completion_tool_error, "TOOL", error_metadata)
+                            await post_message(
+                                hard_cap_tool_result_text(completion_tool_error),
+                                "TOOL",
+                                error_metadata,
+                            )
                             completion_error_posted = True
                         except Exception as post_error:
                             logger.warning(
@@ -2051,7 +2055,7 @@ async def run_agent(
                         context.append(
                             {
                                 "role": "TOOL",
-                                "text": f"Error: {completion_tool_error}",
+                                "text": hard_cap_tool_result_text(f"Error: {completion_tool_error}"),
                                 "timestamp": _safe_now().isoformat(),
                                 "metadata": {
                                     key: value for key, value in error_metadata.items() if key != "subAgentId"
