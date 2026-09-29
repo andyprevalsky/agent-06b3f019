@@ -825,11 +825,11 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
         [ "$browser_task" = "$1" ] && return 0
     done
     case "$1" in
-        # On smoke-inclusive 10-wide slices these two 4GB/2-CPU guests held
+        # On smoke-inclusive 10-wide slices these 4GB/2-CPU guests held
         # the synchronized barrier for several extra minutes under sustained
         # CPU pressure. The large primary only changes VM resources, not the
         # task or evaluator, and reuses the same pool volume.
-        planner-memory-blue-bottle-on|image-handling|agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
+        planner-memory-blue-bottle-on|image-handling|wait-for-trigger|agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
             return 0
             ;;
     esac
@@ -6947,6 +6947,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         stopped_proof="$output/guest-cleanup.machine-stopped.json"
         zero_evidence="$output/guest-cleanup.zero-allocation.json"
         guest_log="$output/guest-cleanup.guest-recovery.log"
+        state_evidence="$output/guest-cleanup.state.json"
         identity_args=(
             --owner "$owner"
             --fleet-run-id "$RUN_ID"
@@ -6965,6 +6966,7 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             --machine-status "$machine_status_evidence"
             --stopped-proof "$stopped_proof"
             --zero-query-proof "$zero_evidence"
+            --state-receipt "$state_evidence"
             --receipt "$receipt"
         )
 
@@ -7100,6 +7102,7 @@ PY
                         "${identity_args[@]}" \
                         --backend-log "$backend_evidence" \
                         --manifest "$manifest" \
+                        --state-receipt "$state_evidence" \
                         --clone-name "$clone_name" \
                         --machine-status "$machine_status_evidence" \
                         --stopped-proof "$stopped_proof"; then
@@ -7114,6 +7117,7 @@ PY
                     "${identity_args[@]}" \
                     --backend-log "$backend_evidence" \
                     --manifest "$manifest" \
+                    --state-receipt "$state_evidence" \
                     --clone-name "$clone_name" \
                     --machine-status "$machine_status_evidence" \
                     --stopped-proof "$stopped_proof" \
@@ -7134,7 +7138,6 @@ PY
         remote_helper="/data/cloudbench-guest-recovery.py"
         remote_quiescence="/data/cloudbench-guest-quiescence-$guest_run_token.json"
         remote_state="/data/cloudbench-guest-state-$guest_run_token.json"
-        state_evidence="$output/guest-cleanup.state.json"
         [ -s "$GUEST_RECOVERY_HELPER" ] || {
             echo "❌ [$bench] exact guest quiescence helper is unavailable" >&2
             failed=1
@@ -7183,6 +7186,7 @@ PY
                         build-active-provider-manifest \
                         "${identity_args[@]}" \
                         --backend-log "$backend_evidence" \
+                        --state-receipt "$state_evidence" \
                         --manifest "$manifest"; then
                     echo "❌ [$bench] active exact guest has no sealed provider-session identity" >&2
                     failed=1
@@ -7202,6 +7206,7 @@ PY
                             "${identity_args[@]}" \
                             --backend-log "$backend_evidence" \
                             --manifest "$manifest" \
+                            --state-receipt "$state_evidence" \
                             --clone-name "$clone_name" \
                             --machine-status "$machine_status_evidence" \
                             --stopped-proof "$stopped_proof"; then
@@ -7221,6 +7226,7 @@ PY
                         "${identity_args[@]}" \
                         --backend-log "$backend_evidence" \
                         --manifest "$manifest" \
+                        --state-receipt "$state_evidence" \
                         --clone-name "$clone_name" \
                         --machine-status "$machine_status_evidence" \
                         --stopped-proof "$stopped_proof" \

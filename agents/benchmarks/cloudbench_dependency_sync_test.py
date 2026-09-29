@@ -21,6 +21,7 @@ import time
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,6 +65,60 @@ SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 FORENSIC_RETIREMENT_SCRIPT = ROOT / "scripts" / "cloudbench-forensic-retirement.py"
+EXACT_PROVIDER_SCRIPT = ROOT / "scripts" / "cloudbench-exact-session-cleanup.py"
+
+
+def test_prestart_provider_recovery_requires_exact_closed_guest_and_zero_external_ownership(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location("cloudbench_exact_session_cleanup", EXACT_PROVIDER_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    owner = "a" * 32
+    machine = "deadbeef000001"
+    token = owner + "-0"
+    backend = tmp_path / "backend.log"
+    backend.write_text(
+        "[Server] Server started\n"
+        "[Server] SIGTERM received, closing server...\n"
+        "[Prisma] db.query model=BenchmarkTask operation=create\n"
+    )
+    state = tmp_path / "state.json"
+    original_state = {
+        "schema_version": "cloudbench-guest-state-v1", "version": 1,
+        "machine_id": machine, "guest_run_token": token,
+        "state": "exited", "driver_state": "exited", "driver_pid": None,
+        "driver_descendants": [], "services_status": "stopped",
+        "live_service_pids": [], "backend_closed": True,
+        "run_json": {"exists": False, "symlink": False},
+    }
+    state.write_text(json.dumps(original_state))
+    args = SimpleNamespace(
+        owner=owner, fleet_run_id="fixture-run", bench="fixture-bench",
+        machine_id=machine, output_dir=str(tmp_path.resolve()),
+        guest_run_token=token, backend_log=str(backend), state_receipt=str(state),
+    )
+    manifest = module.active_provider_manifest(args)
+    assert manifest["kind"] == "provider-prestart-zero-manifest"
+    assert manifest["root_agent_id"] is None
+    assert manifest["sessions"] == {"kernel": [], "steel": []}
+    for change in (
+        {"guest_run_token": owner + "-1"},
+        {"services_status": "running"},
+        {"run_json": {"exists": True, "symlink": False}},
+    ):
+        state.write_text(json.dumps({**original_state, **change}))
+        with pytest.raises(module.CleanupEvidenceError):
+            module.active_provider_manifest(args)
+    state.write_text(json.dumps(original_state))
+    for extra in (
+        "[HTTP] POST /api/agents -> 500\n",
+        "Created Steel session: abc123\n",
+        "model=Purchase operation=create\n",
+    ):
+        backend.write_text("[Server] Server started\n" + extra +
+                           "[Server] SIGTERM received, closing server...\n")
+        with pytest.raises(module.CleanupEvidenceError):
+            module.active_provider_manifest(args)
 
 
 def test_forensic_clean_stack_status_is_bound_to_exact_run_token() -> None:
@@ -8672,13 +8727,13 @@ FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
 FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
 CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
 {helpers}
-for task in planner-memory-blue-bottle-on image-handling; do
+for task in planner-memory-blue-bottle-on image-handling wait-for-trigger; do
   [ "$(primary_vm_size_for_bench "$task")" = shared-cpu-4x ]
   [ "$(primary_vm_memory_for_bench "$task")" = 8192 ]
   bench_uses_default_pool_shape "$task"
 done
 INFRA_PROBE=1
-for task in planner-memory-blue-bottle-on image-handling; do
+for task in planner-memory-blue-bottle-on image-handling wait-for-trigger; do
   [ "$(primary_vm_size_for_bench "$task")" = shared-cpu-2x ]
 done
 """

@@ -598,8 +598,60 @@ def active_provider_manifest(args: argparse.Namespace) -> dict[str, Any]:
         text = ANSI.sub("", payload.decode("utf-8"))
     except UnicodeDecodeError as error:
         raise CleanupEvidenceError("backend log is not UTF-8") from error
-    root_agent_id = parse_active_root_agent(text)
     sessions, allocation_event_count, mutation_count = collect_session_evidence(text)
+    if "[HTTP] POST /api/agents -> 201" not in text:
+        # A canceled stack can exit before the benchmark creates any root.
+        # Require an exact authenticated guest-state receipt proving the
+        # driver exited, no run record exists, and all services stopped.
+        # The backend independently proves no root or external allocation.
+        state_path = Path(args.state_receipt) if args.state_receipt else None
+        if state_path is None:
+            raise CleanupEvidenceError("prestart cleanup requires exact guest state")
+        state_payload = read_bytes(state_path, maximum=1024 * 1024)
+        state = json.loads(state_payload)
+        run = state.get("run_json")
+        if (
+            state.get("schema_version") != "cloudbench-guest-state-v1"
+            or state.get("version") != 1
+            or state.get("machine_id") != args.machine_id
+            or state.get("guest_run_token") != args.guest_run_token
+            or state.get("state") != "exited"
+            or state.get("driver_state") != "exited"
+            or state.get("driver_pid") is not None
+            or state.get("driver_descendants") != []
+            or state.get("services_status") != "stopped"
+            or state.get("live_service_pids") != []
+            or state.get("backend_closed") is not True
+            or not isinstance(run, dict)
+            or run.get("exists") is not False
+            or run.get("symlink") is not False
+            or "[HTTP] POST /api/agents" in text
+            or "path=/api/agents/" in text
+            or any(sessions.values())
+            or allocation_event_count != 0
+            or mutation_count != 0
+            or payment_mutation_count(text) != 0
+            or text.count("[Server] Server started") != 1
+            or text.count("[Server] SIGTERM received, closing server...") < 1
+        ):
+            raise CleanupEvidenceError("prestart guest has unretired external ownership")
+        return {
+            "schema_version": SCHEMA,
+            "version": 1,
+            "kind": "provider-prestart-zero-manifest",
+            **exact_identity,
+            "root_agent_id": None,
+            "sessions": {"kernel": [], "steel": []},
+            "evidence": {
+                "backend_log_sha256": sha256_bytes(payload),
+                "guest_state_sha256": sha256_bytes(state_payload),
+                "allocation_event_count": 0,
+                "browser_session_mutation_count": 0,
+                "payment_mutation_count": 0,
+                "root_creation_count": 0,
+            },
+        }
+    root_agent_id = parse_active_root_agent(text)
     root_deletes = re.findall(
         rf"\[HTTP\] DELETE /api/agents/{re.escape(root_agent_id)} -> 204\b",
         text,
@@ -1305,7 +1357,9 @@ def validate_recovery_receipt(args: argparse.Namespace) -> int:
             raise CleanupEvidenceError(
                 "provider manifest no longer matches exact durable evidence"
             )
-    elif manifest.get("kind") == "provider-active-exact-manifest":
+    elif manifest.get("kind") in {
+        "provider-active-exact-manifest", "provider-prestart-zero-manifest"
+    }:
         if not all(
             (
                 args.backend_log,
@@ -1359,12 +1413,14 @@ def add_optional_provider_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--machine-status")
     parser.add_argument("--stopped-proof")
     parser.add_argument("--zero-query-proof")
+    parser.add_argument("--state-receipt")
 
 
 def add_active_provider_arguments(parser: argparse.ArgumentParser) -> None:
     add_identity_arguments(parser)
     parser.add_argument("--backend-log", required=True)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--state-receipt")
 
 
 def add_stopped_provider_arguments(parser: argparse.ArgumentParser) -> None:
