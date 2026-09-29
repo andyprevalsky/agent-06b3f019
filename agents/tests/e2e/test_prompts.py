@@ -82,6 +82,25 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
         start_phase="execute",
         workflow_cutover="spawn_agent",
     ),
+    # In-tool park + POST /restart must REPLACE, never mark FAILED.
+    # Excluded from --basic (workflow_cutover); reach with --test wait-seconds-cutover.
+    "wait-seconds-cutover": TestPrompt(
+        name="wait-seconds-cutover",
+        title="Parked wait_seconds survives deploy replace",
+        description=(
+            "Parks on wait_seconds, triggers POST /restart, and asserts the agent is "
+            "replaced onto a new generation instead of marked FAILED"
+        ),
+        prompt=(
+            "You MUST call wait_seconds with seconds=600 as your FIRST and ONLY action. "
+            "Do not call web_search, spawn_agent, spawn_browser_agent, or "
+            "attempt_completion first. After wait_seconds returns, call "
+            "attempt_completion with result 'waited'."
+        ),
+        timeout=420,
+        start_phase="execute",
+        workflow_cutover="wait_seconds",
+    ),
     "chat-mode": TestPrompt(
         name="chat-mode",
         title="Test Chat Mode",
@@ -485,6 +504,7 @@ def get_basic_tests() -> list[TestPrompt]:
         and not test.attachment_urls
         and not test.requires_browser_agent
         and not test.requires_claude_code
+        and not test.workflow_cutover
     ]
 
 

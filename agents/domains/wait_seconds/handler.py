@@ -10,6 +10,11 @@ from typing import Any, AsyncGenerator
 from temporalio import workflow
 
 from domains.wait_seconds.service import format_duration, validate_seconds
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 
@@ -52,9 +57,17 @@ class WaitSecondsManager(ToolManager):
             status=MessageStatus.IN_PROGRESS,
         )
 
-        # 2. Execute wait using workflow.sleep (deterministic)
+        # 2. Execute wait in 30s slices so a long sleep can still cut over.
         try:
-            await workflow.sleep(seconds)
+            await sleep_or_generation_handoff(workflow_instance, seconds, workflow_mod=workflow)
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"\u23f1\ufe0f Waiting {duration}",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+            )
+            raise
         except Exception as exc:
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
