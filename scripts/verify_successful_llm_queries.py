@@ -124,40 +124,71 @@ def verify(payload, minimum=3):
     assert len(payload['tasks']) == 1
     task = payload['tasks'][0]
     root = task['agent_id']
-    assert str(uuid.UUID(root)) == root
+    roots = root.split(',')
+    assert roots and len(roots) == len(set(roots))
+    assert all(str(uuid.UUID(agent_id)) == agent_id for agent_id in roots)
     assert str(uuid.UUID(payload['run_id'])) == payload['run_id']
     start = stamp(payload['timestamp'])
     duration = task['duration_seconds']
     assert isinstance(duration, (float, int)) and math.isfinite(duration) and duration > 0
     finish = start + timedelta(seconds=duration)
-    tree = task['logs']['tree']
-    assert root in tree and tree[root].get('parent_agent_id') in (None, '')
-    owned = {root}
-    while True:
-        added = {key for key, node in tree.items() if node.get('parent_agent_id') in owned} - owned
-        if not added:
-            break
-        owned.update(added)
-    assert owned == set(tree), 'unbound tree nodes'
-    assert all(str(uuid.UUID(key)) == key for key in owned)
+    logs = task['logs']
+    if len(roots) == 1:
+        stages = [(root, logs)]
+    else:
+        # Composite benchmark artifacts keep each root's worker logs under its
+        # stage (for example biometrics gate and X post). The outer worker log
+        # is a duplicate view and must not inflate query counts.
+        nested = [value for value in logs.values()
+                  if isinstance(value, dict) and isinstance(value.get('worker_logs'), list)]
+        assert len(nested) == len(roots), 'composite root stages are incomplete'
+        stages = []
+        for stage in nested:
+            observed = set()
+            for raw in stage['worker_logs']:
+                try:
+                    event = json.loads(raw) if isinstance(raw, str) else raw
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get('agent_id') is not None:
+                    observed.add(event['agent_id'])
+            candidates = observed & set(roots)
+            assert len(candidates) == 1 and observed == candidates, 'unbound composite stage'
+            stages.append((next(iter(candidates)), stage))
+        assert {agent_id for agent_id, _ in stages} == set(roots), 'missing composite root'
     spans = defaultdict(lambda: defaultdict(list))
     usage = []
     rose_events = []
-    for line in task['logs']['worker_logs']:
-        try:
-            event = json.loads(line) if isinstance(line, str) else line
-        except ValueError:
-            continue
-        if not isinstance(event, dict) or event.get('agent_id') not in owned:
-            continue
-        if event.get('root_agent_id') not in (None, root):
-            continue
-        if event.get('event') == 'llm.cache':
-            usage.append(event)
-        elif event.get('event') in ROSE_EVIDENCE_EVENTS:
-            rose_events.append(event)
-        elif event.get('span_name') == 'llm.provider_read' and event.get('event') in ('span.start', 'span.end'):
-            spans[event['span_id']][event['event']].append(event)
+    for stage_root, stage in stages:
+        tree = stage.get('tree')
+        if tree:
+            assert stage_root in tree and tree[stage_root].get('parent_agent_id') in (None, '')
+            owned = {stage_root}
+            while True:
+                added = {key for key, node in tree.items() if node.get('parent_agent_id') in owned} - owned
+                if not added:
+                    break
+                owned.update(added)
+            assert owned == set(tree), 'unbound tree nodes'
+            assert all(str(uuid.UUID(key)) == key for key in owned)
+        else:
+            assert len(roots) > 1, 'missing single-root tree'
+            owned = {stage_root}
+        for line in stage['worker_logs']:
+            try:
+                event = json.loads(line) if isinstance(line, str) else line
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get('agent_id') not in owned:
+                continue
+            if event.get('root_agent_id') not in (None, stage_root):
+                continue
+            if event.get('event') == 'llm.cache':
+                usage.append(event)
+            elif event.get('event') in ROSE_EVIDENCE_EVENTS:
+                rose_events.append(event)
+            elif event.get('span_name') == 'llm.provider_read' and event.get('event') in ('span.start', 'span.end'):
+                spans[event['span_id']][event['event']].append(event)
 
     eligible = {}
     occupied = []

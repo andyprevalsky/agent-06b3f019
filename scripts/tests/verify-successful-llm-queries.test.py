@@ -14,6 +14,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 ROOT_AGENT = "11111111-1111-4111-8111-111111111111"
+SECOND_AGENT = "33333333-3333-4333-8333-333333333333"
 RUN_ID = "22222222-2222-4222-8222-222222222222"
 
 
@@ -82,6 +83,26 @@ class QueryEvidenceTest(unittest.TestCase):
             self.assertEqual(module.main([str(base), str(base / "report.json"),
                                           "--expected-count", "1"]), 70)
             self.assertFalse((base / "report.json").exists())
+
+    def test_composite_benchmark_counts_each_sealed_root_once(self):
+        payload = fixture()
+        task = payload['tasks'][0]
+        original = [json.loads(line) for line in task['logs']['worker_logs']]
+        gate = [event for event in original if event.get('request_id') in
+                ('request-0', 'request-1') or event.get('span_id') in
+                ('call-0', 'call-1')]
+        post = [dict(event, agent_id=SECOND_AGENT) for event in original
+                if event.get('request_id') == 'request-2' or event.get('span_id') == 'call-2']
+        task['agent_id'] = f'{ROOT_AGENT},{SECOND_AGENT}'
+        task['logs'] = {
+            'gate': {'worker_logs': [json.dumps(event) for event in gate]},
+            'post': {'worker_logs': [json.dumps(event) for event in post]},
+            'worker_logs': [json.dumps(event) for event in original],
+        }
+        self.assertEqual(module.verify(payload)['successful_llm_queries'], 3)
+        task['logs']['post']['worker_logs'] = []
+        with self.assertRaises(AssertionError):
+            module.verify(payload)
 
 
 if __name__ == "__main__":
