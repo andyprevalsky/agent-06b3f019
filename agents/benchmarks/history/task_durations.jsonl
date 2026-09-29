@@ -3523,3 +3523,4 @@
 {"task": "agent-payment-test-shop", "duration_seconds": 172.5, "cost_cents": 1.0, "timestamp": "2026-09-29T20:46:30.878703+00:00", "agent_id": "91cf0d24-9c08-4ec6-a91b-bb68f02a43a4"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 452.5, "cost_cents": 3.0, "timestamp": "2026-09-29T20:46:30.878703+00:00", "agent_id": "5419b58c-b037-4a7e-bd08-7a9d4fd4eec6"}
 {"task": "agent-payment-abandonment", "duration_seconds": 276.8, "cost_cents": 1.0, "timestamp": "2026-09-29T20:46:30.878703+00:00", "agent_id": "dd1bd55c-5c54-4799-81be-bd963f596864"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 324.4, "cost_cents": 9.0, "timestamp": "2026-09-29T22:43:40.441594+00:00", "agent_id": "5b54f59b-141f-4ce7-a120-30d8a5858690"}
