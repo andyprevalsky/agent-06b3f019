@@ -10666,6 +10666,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             card.get("error")
                             or f"Purchase is above max limit{limit_text}."
                         )
+                        # action_type must be a FE-terminal browser action
+                        # (task_complete / session_paused / write_lock_rejected)
+                        # or the live browser chip stays open after we return.
                         yield ToolEvent(
                             type=EventType.POST_MESSAGE,
                             title="Purchase above max limit",
@@ -10674,7 +10677,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "toolName": "spawn_browser_agent",
                                 "task_id": result.get("task_id"),
-                                "action_type": "purchase_above_max_limit",
+                                "action_type": "task_complete",
+                                "code": "purchase_above_max_limit",
                                 "maxPurchaseCents": limit,
                             },
                         )
