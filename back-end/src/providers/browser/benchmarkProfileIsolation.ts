@@ -3,10 +3,22 @@ import { createLogger } from '../logger';
 
 const log = createLogger('BenchmarkProfileIsolation');
 
+type AgentKernelProfile = {
+  profileIdPromise: Promise<string>;
+  /**
+   * True once a Kernel browser session successfully used this profile.
+   * Until then, retries must keep advertising `new_user_persistent` — a
+   * timed-out/failed first init that only reserved the in-memory slot must
+   * not poison isolation proofs (webdecoy expects new_user_persistent on the
+   * first published session_init metadata).
+   */
+  boundToSession: boolean;
+};
+
 // Local benchmark stacks share one backend process. Keying provider profiles by
 // agent preserves in-agent session/rotation continuity without funneling every
 // concurrent benchmark through the benchmark user's one persistent profile.
-const kernelProfilesByAgent = new Map<string, Promise<string>>();
+const kernelProfilesByAgent = new Map<string, AgentKernelProfile>();
 
 /**
  * Local benchmark stacks run many agents against one database and backend.
@@ -25,19 +37,46 @@ export async function getOrCreateBenchmarkKernelProfile(
 ): Promise<{ profileId: string; profileSource: string }> {
   const existing = kernelProfilesByAgent.get(agentId);
   if (existing !== undefined) {
-    return { profileId: await existing, profileSource: 'user_persistent' };
+    return {
+      profileId: await existing.profileIdPromise,
+      profileSource: existing.boundToSession ? 'user_persistent' : 'new_user_persistent',
+    };
   }
 
   const pending = client.profiles.create({}).then((profile) => profile.id);
-  kernelProfilesByAgent.set(agentId, pending);
+  const entry: AgentKernelProfile = { profileIdPromise: pending, boundToSession: false };
+  kernelProfilesByAgent.set(agentId, entry);
   try {
     return { profileId: await pending, profileSource: 'new_user_persistent' };
   } catch (error) {
-    if (kernelProfilesByAgent.get(agentId) === pending) {
+    if (kernelProfilesByAgent.get(agentId) === entry) {
       kernelProfilesByAgent.delete(agentId);
     }
     throw error;
   }
+}
+
+/**
+ * Mark the agent's isolated Kernel profile as successfully bound to a session.
+ * Only binds when `profileId` matches the in-memory reservation (recreate can
+ * reuse a persisted remote.profileId that differs).
+ */
+export async function markBenchmarkKernelProfileBound(
+  agentId: string,
+  profileId: string
+): Promise<void> {
+  const entry = kernelProfilesByAgent.get(agentId);
+  if (entry === undefined) return;
+  const entryProfileId = await entry.profileIdPromise.catch(() => undefined);
+  if (entryProfileId !== profileId) return;
+  const current = kernelProfilesByAgent.get(agentId);
+  if (current !== entry) return;
+  entry.boundToSession = true;
+}
+
+/** Test-only: clear in-memory isolated profile state between cases. */
+export function resetBenchmarkKernelProfilesForTests(): void {
+  kernelProfilesByAgent.clear();
 }
 
 export async function cleanupBenchmarkKernelProfiles(client: Kernel): Promise<void> {
@@ -46,8 +85,8 @@ export async function cleanupBenchmarkKernelProfiles(client: Kernel): Promise<vo
   const profiles = [...kernelProfilesByAgent.entries()];
   kernelProfilesByAgent.clear();
   const results = await Promise.allSettled(
-    profiles.map(async ([agentId, pending]) => {
-      const profileId = await pending;
+    profiles.map(async ([agentId, entry]) => {
+      const profileId = await entry.profileIdPromise;
       await client.profiles.delete(profileId);
       return { agentId, profileId };
     })

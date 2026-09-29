@@ -151,6 +151,10 @@ from .visible_result_completion import (
     forced_visible_result_completion_action,
     should_force_visible_result_completion,
 )
+from .verifier_reject_circuit import (
+    next_identical_reject_streak,
+    should_soft_accept_identical_verifier_reject,
+)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
@@ -2862,8 +2866,11 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         },
         (
             "Use generic_write for return/refund confirmations. Put item title in target and "
-            "refund amount, original payment method, drop-off/shipping method, and return-by "
-            "date in payload_summary. Do not invent purchase ratings or product-detail URLs."
+            "refund amount, original payment method, the named drop-off/pickup location from "
+            "the page (e.g. 'Whole Foods Dropoff' — never a bare 'drop-off/pickup' placeholder), "
+            "and return-by date in payload_summary. Do not invent purchase ratings or "
+            "product-detail URLs. If no named drop-off is visible yet, the irreversible commit "
+            "has not been reached — do not fabricate one."
         ),
     ),
     (
@@ -5730,11 +5737,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
             return
-        # Any browser action can navigate (links, forms, redirects, history),
-        # and Kernel may reset the target-scoped WebAuthn environment at that
-        # boundary. Revalidate before every counter poll so the next agent
-        # interaction always sees the held credentials on a live authenticator.
-        await sync_passkeys_onto_target(context="before passkey usage readback")
+        # Read-only. Do NOT re-seed / rebuild the virtual authenticator here.
+        # Agent f380ca3c (browser-amazon-return 2026-09-28): syncing before every
+        # usage poll ran ~3s after Sign-in-with-Passkey clicks, called
+        # WebAuthn.enable + addVirtualAuthenticator mid-ceremony, and surfaced
+        # Amazon's "No passkeys available for amazon.com on this device" dialog
+        # despite a healthy pre-click seed — burning ~5 minutes of the 665s cap
+        # before the return write_lock. Pre-action
+        # ensure_browser_overlays_suppressed() already re-arms before
+        # ceremony-capable clicks/typing; usage readback must not race that.
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,
@@ -5757,6 +5768,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         to re-seed the union onto the fresh authenticator. `inject_passkeys` dedups
         per target instance, so re-calling with the full union is idempotent on an
         existing target and a full restore on a new one.
+
+        Navigation / proxy-rotation boundaries MUST force-rebuild: Kernel can leave
+        ``WebAuthn.getCredentials`` succeeding briefly after a nav while the
+        virtual-authenticator environment is already dying. Agents f380ca3c /
+        c3b1ca09 (browser-amazon-return 2026-09-28): ``after start navigation``
+        logged ``seeded 0`` (health check trusted the stale id), then ~5–6s later
+        ``environment has not been enabled`` — Amazon's sign-in page probed an
+        empty authenticator, disabled the passkey CTA, and burned the write_lock
+        budget on password fallback. Invalidate before those syncs so we always
+        re-enable + re-seed rather than trust a dying health check.
         """
         if dom_service is None:
             return 0
@@ -5766,6 +5787,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 seeded_decrypted_passkeys_by_credential_id[credential_id] = pk
         if not seeded_decrypted_passkeys_by_credential_id:
             return 0
+        # Known target-boundary contexts: never trust cached authenticator health.
+        if context in ("after start navigation", "after proxy rotation"):
+            await dom_service.invalidate_passkey_state_for_live_target()
         injected = await dom_service.inject_passkeys(list(seeded_decrypted_passkeys_by_credential_id.values()))
         logger.info(
             "Seeded cloud-custody passkeys onto browser virtual authenticator",
@@ -6675,6 +6699,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         rose_client = BrowserStreamingRoseClient()
         iteration = resume_step_count
         consecutive_api_failures = 0
+        identical_verifier_reject_fingerprint = ""
+        identical_verifier_reject_streak = 0
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         supervisor_recovery_count = 0
@@ -6987,6 +7013,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
             try:
+                # Kernel drops the WebAuthn VA environment ~5s after seed (agent
+                # c1ebd389 median 5.6s). Re-arm before every state observe so the
+                # passkey CTA Amazon already rendered — or is about to probe —
+                # sees a live authenticator, not the dead environment usage
+                # readback keeps logging between ceremony-capable actions.
+                # Soft-timeout: passkey re-arm can hang on a frozen renderer
+                # (Runtime.evaluate / Page.reload); do not block the guarded
+                # state fetch / supervisor recovery path indefinitely.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        dom_service.ensure_browser_overlays_suppressed(),
+                        timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
+                    )
                 observe_page_state = await asyncio.wait_for(
                     dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -8657,9 +8696,68 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     if progress_result.get("structured_response") is not None:
                         latest_structured_response = progress_result["structured_response"]
 
+                    (
+                        identical_verifier_reject_fingerprint,
+                        identical_verifier_reject_streak,
+                    ) = next_identical_reject_streak(
+                        previous_fingerprint=identical_verifier_reject_fingerprint,
+                        previous_streak=identical_verifier_reject_streak,
+                        reasoning=v_reasoning,
+                        score=float(score or 0.0),
+                    )
+                    # Stuck 0.5 with a fully populated structured output is not
+                    # actionable "need more evidence" — break the loop so the
+                    # browser agent stops instead of hub-pausing (browser-smoke
+                    # 9f53aed4: identical H1-absent rejects ×4). Soft-accept is
+                    # *unverified*: keep structured output for the parent but
+                    # never report verified success=True.
+                    soft_accept_structured_response = (
+                        progress_result.get("structured_response")
+                        or latest_structured_response
+                    )
+                    verifier_soft_accepted = False
+                    soft_accept_original_score = float(score or 0.0)
+                    if (
+                        float(score or 0.0) < 1.0
+                        and should_soft_accept_identical_verifier_reject(
+                            consecutive_identical=identical_verifier_reject_streak,
+                            structured_response=soft_accept_structured_response,
+                            response_schema=remote_session_schema,
+                        )
+                    ):
+                        logger.warning(
+                            "Soft-accepting browser attempt_completion after "
+                            f"{identical_verifier_reject_streak} identical "
+                            "verifier rejects with complete structured output "
+                            "(unverified)",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            score=score,
+                        )
+                        verifier_soft_accepted = True
+                        score = 1.0  # branch gate only; display uses original score
+                        v_reasoning = (
+                            "Identical verifier reject circuit: completing "
+                            "unverified with already-populated structured "
+                            f"output. Original score was "
+                            f"{progress_result.get('score', 0.0)}; "
+                            f"reasoning: {v_reasoning}"
+                        )
+                        identical_verifier_reject_fingerprint = ""
+                        identical_verifier_reject_streak = 0
+
+                    display_score = (
+                        soft_accept_original_score
+                        if verifier_soft_accepted
+                        else float(score or 0.0)
+                    )
+                    progress_title = f"\u2696\ufe0f Progress: {display_score * 100:.0f}%"
+                    if verifier_soft_accepted:
+                        progress_title += " (unverified)"
+
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        title=f"\u2696\ufe0f Progress: {score * 100:.0f}%",
+                        title=progress_title,
                         task_id=task_id,
                         message=v_reasoning,
                         status=MessageStatus.FINISHED,
@@ -8669,14 +8767,21 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     if browser_recorder:
                         await browser_recorder.mark(
-                            f"Verifier progress: {score * 100:.0f}%",
+                            f"Verifier progress: {display_score * 100:.0f}%"
+                            + (" (unverified)" if verifier_soft_accepted else ""),
                             action="verify",
                         )
 
                     if score >= 1.0:
                         completion_tool_status = "FINISHED"
                         execution_time_ms = (safe_time() - start_time) * 1000
-                        structured_response = progress_result.get("structured_response")
+                        # Soft-accept may validate latest_structured_response
+                        # when this verifier call omitted structured_response.
+                        structured_response = (
+                            progress_result.get("structured_response")
+                            or soft_accept_structured_response
+                        )
+                        completion_success = not verifier_soft_accepted
 
                         uploaded_paths = list(available_file_paths.values()) if available_file_paths else []
                         output_files = await extract_session_files(
@@ -8737,7 +8842,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         await close_browser_session(config, session_id, pause=False)
 
                         context_message = build_context_summary(
-                            success=True,
+                            success=completion_success,
                             close_reasoning=close_reasoning,
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
@@ -8748,10 +8853,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_url=current_url,
                             structured_response=structured_response,
                         )
+                        if verifier_soft_accepted:
+                            context_message = (
+                                f"{context_message}\n\n"
+                                "[verifier_soft_accepted] Completion is unverified "
+                                f"(original verifier score "
+                                f"{soft_accept_original_score:.2f}). Structured "
+                                "output is preserved for the parent; do not treat "
+                                "this as a verified success."
+                            )
 
                         await save_browser_action_message(
                             agent_id=agent_id,
-                            title="\u2713 Task Completed",
+                            title=(
+                                "\u2713 Task Completed (unverified)"
+                                if verifier_soft_accepted
+                                else "\u2713 Task Completed"
+                            ),
                             task_id=task_id,
                             message=context_message,
                             status=MessageStatus.FINISHED,
@@ -8776,13 +8894,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             task_id=task_id,
                             browser_url=browser_url,
                             status="completed",
-                            success=True,
+                            success=completion_success,
                             message=context_message,
                         )
 
                         return {
                             "status": "completed",
-                            "success": True,
+                            "success": completion_success,
+                            "verifier_soft_accepted": verifier_soft_accepted,
                             "message": context_message,
                             "browser_url": browser_url,
                             "task_id": task_id,
@@ -9147,31 +9266,55 @@ Based on this feedback, I need to continue working on the task and address the i
                         dom_service.get_browser_state(include_screenshot=True),
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
-                    notification_result = await _generate_write_lock_notification(
-                        rose_client=rose_client,
-                        task_prompt=task_prompt,
-                        dynamic_system_context=dynamic_system_context,
-                        browser_turn_messages=browser_turn_messages,
-                        browser_state=write_lock_browser_state,
-                        action_entries=action_entries,
-                        config=config,
-                        user_id=user_id,
-                        agent_id=agent_id,
-                        browser_task_id=task_id,
-                        iteration=iteration,
-                        token_state=token_state,
-                        gpt_token=gpt_token,
-                        gpt_account_id=gpt_account_id,
-                        gpt_token_source=gpt_token_source,
-                        gpt_token_pool_id=gpt_token_pool_id,
-                        browser_use_mode=browser_use_mode,
-                        approval_type=approval_type,
-                        current_url=current_url,
-                        trusted_page_urls=visited_urls,
-                        pending_action=unified_action,
-                        write_lock_result=result,
-                        system_name=system_name,
-                        fallback_question=question,
+                    if approval_type == "return":
+                        from browser_tools.write_lock import enrich_return_write_lock_question
+
+                        page_text = str(
+                            write_lock_browser_state.get("dom_tree")
+                            or write_lock_browser_state.get("formatted_state")
+                            or ""
+                        )
+                        question = enrich_return_write_lock_question(
+                            question,
+                            page_text,
+                            url=current_url,
+                            system_name=system_name,
+                        )
+                    # Cap the notification fork so a slow waterfall cannot burn the
+                    # remaining bench budget after drop-off is already selected
+                    # (agent 788d17cf: write_lock at T+631s, fork still in flight at
+                    # dynamic timeout). Enriched return fallback already names drop-off.
+                    _notification_timeout_s = (
+                        45.0 if approval_type == "return" else BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS
+                    )
+                    notification_result = await asyncio.wait_for(
+                        _generate_write_lock_notification(
+                            rose_client=rose_client,
+                            task_prompt=task_prompt,
+                            dynamic_system_context=dynamic_system_context,
+                            browser_turn_messages=browser_turn_messages,
+                            browser_state=write_lock_browser_state,
+                            action_entries=action_entries,
+                            config=config,
+                            user_id=user_id,
+                            agent_id=agent_id,
+                            browser_task_id=task_id,
+                            iteration=iteration,
+                            token_state=token_state,
+                            gpt_token=gpt_token,
+                            gpt_account_id=gpt_account_id,
+                            gpt_token_source=gpt_token_source,
+                            gpt_token_pool_id=gpt_token_pool_id,
+                            browser_use_mode=browser_use_mode,
+                            approval_type=approval_type,
+                            current_url=current_url,
+                            trusted_page_urls=visited_urls,
+                            pending_action=unified_action,
+                            write_lock_result=result,
+                            system_name=system_name,
+                            fallback_question=question,
+                        ),
+                        timeout=_notification_timeout_s,
                     )
                     write_lock_notification = notification_result.get("notification")
                     write_lock_notification_usage = {
@@ -10822,11 +10965,20 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
-            final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
+            # Soft-accepted verifier rejects complete with success=False but still
+            # terminate cleanly (FINISHED + structured_response) so the parent can
+            # decide — do not surface ERROR (which historically triggered respawns).
+            final_status = (
+                MessageStatus.FINISHED
+                if result.get("success", True) or result.get("verifier_soft_accepted")
+                else MessageStatus.ERROR
+            )
             # Declare terminality explicitly. The front-end must never have to
             # infer "this browser task is over" from a missing action_type — a
             # workflow-scope progress event would look identical.
             final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
+            if result.get("verifier_soft_accepted"):
+                final_metadata["verifierSoftAccepted"] = True
             for key in (
                 "task_id",
                 "world_model_simulated",

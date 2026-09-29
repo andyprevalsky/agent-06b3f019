@@ -960,6 +960,39 @@ def content_key(goal: str, call_site: str, messages: Any) -> str:
     return build_key("llm", goal, f"{normalize_call_site(call_site)}:c:{sha256(canonical_messages(messages))[:32]}")
 
 
+# Product pool rename rose-1-lite → rose-1-flash (2026-09-27) is part of the
+# content-addressed fingerprint for response_schema / other non-position rows.
+# Dual-read both names so July/Aug warm cache rows keep hitting after the rename.
+_POOL_CONTENT_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "rose-1-flash": ("rose-1-flash", "rose-1-lite"),
+    "rose-1-lite": ("rose-1-lite", "rose-1-flash"),
+}
+
+
+def content_lookup_keys_with_pool_aliases(goal: str, call_site: str, messages: Any) -> list[str]:
+    """Ordered content keys: current pool first, then lite↔flash rename aliases.
+
+    Position rows already dual-read via ``position_lookup_keys``. Content-addressed
+    call sites (notably ``response_schema``) only had a single exact key, so the
+    pool rename silently missed the warm schema row and left root agents untitled.
+    """
+    current = content_key(goal, call_site, messages)
+    keys = [current]
+    if not isinstance(messages, dict):
+        return keys
+    pool = messages.get("pool")
+    aliases = _POOL_CONTENT_KEY_ALIASES.get(pool) if isinstance(pool, str) else None
+    if not aliases:
+        return keys
+    for alias in aliases:
+        if alias == pool:
+            continue
+        aliased_key = content_key(goal, call_site, {**messages, "pool": alias})
+        if aliased_key not in keys:
+            keys.append(aliased_key)
+    return keys
+
+
 # claudeAuth pin bumps inside a family must not bust Fast Mode exact keys.
 # Ultra now routes to claude-opus-5-5 and must not alias onto fable. A leftover
 # fable-5.1 pin still fingerprints as fable-5 so the July / Sep-8 warm cache

@@ -109,8 +109,7 @@ export async function sendEmailOnce(
   }
 
   try {
-    const sendEmail =
-      sendEmailOverride ?? (await import('./service')).sendEmail;
+    const sendEmail = sendEmailOverride ?? (await import('./service')).sendEmail;
     const result = await sendEmail(userId, {
       to: params.to,
       subject: params.subject,

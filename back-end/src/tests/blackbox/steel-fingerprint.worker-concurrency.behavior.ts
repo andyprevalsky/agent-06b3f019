@@ -9,6 +9,12 @@
  * Repro: agent 7f8b9c24-9d64-4244-bac8-5f330b61b46d (browser-biometrics-webdecoy)
  * scored 0.168 with experimental detection worker-hardware-concurrency-mismatch
  * and bot reason "Page and Worker disagree on hardwareConcurrency".
+ *
+ * Follow-up (agent b08b5bd4): wrapping via `importScripts(originalBlobUrl)` races
+ * FCaptcha's immediate `revokeObjectURL` after `new Worker(blob)` and surfaces
+ * "Verification unavailable / Failed to execute 'importScripts'… blob:… failed
+ * to load". The wrap must inline blob/data bodies before revoke, and this probe
+ * cement that by revoking immediately after construction.
  */
 import { buildFingerprintScript } from '../../providers/steel/injectionScripts';
 import type { FingerprintData } from '../../providers/steel/types';
@@ -44,7 +50,10 @@ export async function testWorkerHardwareConcurrencyMatchesPage(
     const result = await page.evaluate(async () => {
       const pageHw = navigator.hardwareConcurrency;
       // Classic Worker via blob URL — the path FCaptcha PoW uses.
-      const workerHw = await new Promise<number | null>((resolve) => {
+      const workerHw = await new Promise<{
+        hw: number | null;
+        errorMessage: string | null;
+      }>((resolve) => {
         const body = `
           self.onmessage = () => {
             self.postMessage({ hw: self.navigator.hardwareConcurrency });
@@ -52,27 +61,30 @@ export async function testWorkerHardwareConcurrencyMatchesPage(
         `;
         const url = URL.createObjectURL(new Blob([body], { type: 'text/javascript' }));
         const worker = new Worker(url);
+        // FCaptcha PoW revokes the blob URL immediately after construction.
+        // importScripts(originalBlob) wrappers fail here with NetworkError.
+        URL.revokeObjectURL(url);
         const timer = setTimeout(() => {
           worker.terminate();
-          URL.revokeObjectURL(url);
-          resolve(null);
+          resolve({ hw: null, errorMessage: 'timeout' });
         }, 2000);
         worker.onmessage = (event: MessageEvent<{ hw: number }>) => {
           clearTimeout(timer);
           const hw = event.data?.hw ?? null;
           worker.terminate();
-          URL.revokeObjectURL(url);
-          resolve(hw);
+          resolve({ hw, errorMessage: null });
         };
-        worker.onerror = () => {
+        worker.onerror = (event: ErrorEvent) => {
           clearTimeout(timer);
           worker.terminate();
-          URL.revokeObjectURL(url);
-          resolve(null);
+          resolve({
+            hw: null,
+            errorMessage: String(event?.message || event?.error || 'worker error'),
+          });
         };
         worker.postMessage('probe');
       });
-      return { pageHw, workerHw };
+      return { pageHw, workerHw: workerHw.hw, workerError: workerHw.errorMessage };
     });
 
     assert(
@@ -81,7 +93,9 @@ export async function testWorkerHardwareConcurrencyMatchesPage(
     );
     assert(
       result.workerHw !== null,
-      'worker probe timed out or errored — Worker constructor wrap may be broken'
+      `worker probe timed out or errored after immediate blob revoke` +
+        (result.workerError ? ` (${result.workerError})` : '') +
+        ` — blob Worker wrap must inline the script body, not importScripts the revoked URL`
     );
     assert(
       result.workerHw === spoofedConcurrency,

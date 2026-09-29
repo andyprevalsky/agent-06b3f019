@@ -837,6 +837,11 @@ action envelope in text; use the provided tool call.
 - When making payments or posting to social media, you may be asked to confirm with the user first
 - Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
 
+# Returns
+
+- When the goal excludes groceries (or food), treat food, beverages, snacks, protein bars, candy, water, soft drinks, and grocery-marketplace packs as groceries even if Amazon shows a Return items button for a packaged SKU. Prefer the most recently delivered eligible non-excluded physical item.
+- If Amazon shows that a return request needs to be reviewed or to contact customer service, that item's self-service return path is blocked. Do not open Contact Us. Leave that item, pick the next eligible non-excluded item, or report the exact visible blocker if none remain.
+
 # Authentication
 
 - Use the cheapest viable authentication path for this single site.
@@ -892,6 +897,8 @@ def format_browser_state_for_tool(browser_state: Dict[str, Any]) -> str:
 
 
 def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
+    from browser_tools.write_lock import detect_amazon_return_self_service_block
+
     bs = browser_state
     timestamp = bs.get("timestamp") or bs.get("current_timestamp") or bs.get("current_time")
     if not timestamp:
@@ -933,14 +940,18 @@ def _format_browser_state_text(task: str, browser_state: Dict[str, Any]) -> str:
 
     viewport = bs.get("viewport") or {}
     title_part = f" - {bs['title']}" if bs.get("title") else ""
+    url = str(bs.get("url") or "")
+    dom_tree = str(bs.get("dom_tree") or "")
+    block_note = detect_amazon_return_self_service_block(url, f"{bs.get('title') or ''}\n{dom_tree}")
+    block_text = f"\nPage Signal: {block_note}\n" if block_note else ""
 
     return (
         f"# Current Browser State\n\n"
         f"Timestamp: {timestamp}\n"
-        f"{stats_text}Current URL: {bs.get('url', '')}{title_part}\n"
+        f"{stats_text}Current URL: {url}{title_part}\n"
         f"Viewport: {viewport.get('width', 0)}x{viewport.get('height', 0)}\n"
-        f"{scroll_text}{tabs_text}{events_text}{popups_text}"
-        f"Interactive elements:\n{bs.get('dom_tree', '')}"
+        f"{scroll_text}{tabs_text}{events_text}{popups_text}{block_text}"
+        f"Interactive elements:\n{dom_tree}"
     )
 
 

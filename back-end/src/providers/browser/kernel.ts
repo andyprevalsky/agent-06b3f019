@@ -32,6 +32,7 @@ import {
   benchmarkIsolatedBrowserProfilesEnabled,
   cleanupBenchmarkKernelProfiles as cleanupIsolatedKernelProfiles,
   getOrCreateBenchmarkKernelProfile,
+  markBenchmarkKernelProfileBound,
 } from './benchmarkProfileIsolation';
 import {
   providerProfileData,
@@ -376,13 +377,13 @@ async function createRemoteSession(
   };
 
   try {
+    let remote;
     if (options.omitManagedProxy) {
-      return await createValidatedSession({
+      remote = await createValidatedSession({
         proxySource: stealth ? 'kernel_stealth' : 'none',
         proxyLocation,
       });
-    }
-    if (options.exactManagedProxy !== undefined) {
+    } else if (options.exactManagedProxy !== undefined) {
       const exact = kernelProxyCandidates(proxyLocation, options.exactManagedProxy.type).find(
         (candidate) => candidate.source.endsWith(`_${options.exactManagedProxy?.specificity}`)
       );
@@ -391,29 +392,34 @@ async function createRemoteSession(
           `Kernel ${options.exactManagedProxy.type} ${options.exactManagedProxy.specificity} proxy is unavailable for the requested location`
         );
       }
-      return await createWithManagedProxy([exact], 0);
-    }
-    if (options.forceManagedProxyType !== undefined) {
-      return await createWithManagedProxy(
+      remote = await createWithManagedProxy([exact], 0);
+    } else if (options.forceManagedProxyType !== undefined) {
+      remote = await createWithManagedProxy(
         kernelProxyCandidates(proxyLocation, options.forceManagedProxyType),
         0
       );
+    } else {
+      const proxyMode = resolveKernelProxyMode();
+      if (proxyMode.kind === 'explicit') {
+        remote = await createValidatedSession({
+          proxyId: proxyMode.proxyId,
+          proxySource: 'kernel_configured',
+          proxyLocation,
+        });
+      } else if (!browserProviderEnabled('KERNEL_PROXY_ENABLED', true)) {
+        remote = await createValidatedSession({
+          proxySource: stealth ? 'kernel_stealth' : 'none',
+          proxyLocation,
+        });
+      } else {
+        remote = await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+      }
     }
-    const proxyMode = resolveKernelProxyMode();
-    if (proxyMode.kind === 'explicit') {
-      return await createValidatedSession({
-        proxyId: proxyMode.proxyId,
-        proxySource: 'kernel_configured',
-        proxyLocation,
-      });
-    }
-    if (!browserProviderEnabled('KERNEL_PROXY_ENABLED', true)) {
-      return await createValidatedSession({
-        proxySource: stealth ? 'kernel_stealth' : 'none',
-        proxyLocation,
-      });
-    }
-    return await createWithManagedProxy(kernelProxyCandidates(proxyLocation), 0);
+    // Do not mark the profile bound here — persistBrowserSessionRow (or the
+    // recreate row update) may still fail and release the remote session. A
+    // premature bind would label the next retry user_persistent instead of
+    // new_user_persistent (breaks webdecoy isolation metadata proofs).
+    return remote;
   } catch (error) {
     if (error instanceof RateLimitError) {
       throw new BrowserProviderRateLimitError('kernel', error.message);
@@ -461,6 +467,11 @@ export async function createKernelSessionWithContext(
       remote.validationBrowser.close(),
     ]);
     throw error;
+  }
+  // Bind only after the session row is durable so a failed persist leaves the
+  // in-memory profile as new_user_persistent for the next create attempt.
+  if (remote.profileId !== null) {
+    await markBenchmarkKernelProfileBound(agentId, remote.profileId);
   }
 
   let validationBrowser: Browser | null = remote.validationBrowser;
@@ -592,6 +603,9 @@ async function recreateKernelSession(
       remote.validationBrowser.close(),
     ]);
     throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
+  }
+  if (remote.profileId !== null) {
+    await markBenchmarkKernelProfileBound(oldSession.agentId, remote.profileId);
   }
 
   // Evict the superseded Kernel browser so we never leak a paid session. On the
