@@ -30,10 +30,7 @@ function isProviderNumericToolCallId(toolCallId: string): boolean {
  * spawn whose provider id happens to end in ``:digits`` (e.g. ``custom:7``)
  * stays parent-visible when it carries ``agentType`` like other GP results.
  */
-function hasHistoricalForEachChildSuffix(
-  toolCallId: string,
-  spawnGroupId: unknown
-): boolean {
+function hasHistoricalForEachChildSuffix(toolCallId: string, spawnGroupId: unknown): boolean {
   if (typeof spawnGroupId !== 'string' || !spawnGroupId) return false;
   if (isProviderNumericToolCallId(toolCallId)) return false;
   const escaped = spawnGroupId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -50,7 +47,8 @@ export function isInternalSubagentMessage(message: ChatMessage): boolean {
   if (metadata.forEachChild === true) return true;
 
   // Direct spawn terminals stamp agentType; historical for_each child rows did not.
-  if (metadata.agentType != null && metadata.agentType !== '') return false;
+  if (metadata.agentType !== null && metadata.agentType !== undefined && metadata.agentType !== '')
+    return false;
 
   const toolCallId = String(metadata.toolCallId ?? '');
   return hasHistoricalForEachChildSuffix(toolCallId, metadata.spawnGroupId);
