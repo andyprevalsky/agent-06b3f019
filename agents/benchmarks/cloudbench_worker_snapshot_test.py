@@ -78,6 +78,36 @@ def test_equal_size_uses_proven_warm_snapshot_without_copy(tmp_path):
         assert module.ensure(args) == "40 vs_warm"
 
 
+def test_pending_snapshot_is_resumed_without_second_upload(tmp_path):
+    args, machines, volumes = fixture(tmp_path)
+    args.ready_attempts = 1
+    calls = []
+    snapshots = []
+
+    def provider(_fly, _app, *command):
+        calls.append(command)
+        if command == ("machines", "list"):
+            return machines
+        if command == ("volumes", "list"):
+            return volumes
+        if command == ("volumes", "snapshots", "create", "vol_0"):
+            snapshots.append({"id": "vs_slow", "status": "running", "size": 0})
+            return {}
+        if command == ("volume", "snapshots", "list", "vol_0"):
+            return list(snapshots)
+        raise AssertionError(command)
+
+    with patch.object(module, "provider", side_effect=provider), patch.object(module.time, "sleep"):
+        with pytest.raises(ValueError, match="did not become complete"):
+            module.ensure(args)
+        assert args.cache.exists()
+        with pytest.raises(ValueError, match="still pending"):
+            module.ensure(args)
+        snapshots[0].update(status="complete", size=1)
+        assert module.ensure(args) == "20 vs_slow"
+    assert calls.count(("volumes", "snapshots", "create", "vol_0")) == 1
+
+
 def test_mixed_pool_sizes_fail_before_any_snapshot(tmp_path):
     args, machines, volumes = fixture(tmp_path, second_size=40)
     with pytest.raises(ValueError, match="mixed volume sizes"):

@@ -102,9 +102,20 @@ def ensure(args: argparse.Namespace) -> str:
     if isinstance(cached, dict) and cached.get("size_gb") == size:
         source = next((s for s in sources if s["volume_id"] == cached.get("volume_id")), None)
         if source and isinstance(cached.get("snapshot_id"), str):
-            snapshots = provider(args.fly, args.app, "volume", "snapshots", "list", str(source["volume_id"]))
-            if snapshot_ready(snapshots, cached["snapshot_id"]):
-                return f"{size} {cached['snapshot_id']}"
+            for _ in range(args.ready_attempts):
+                snapshots = provider(args.fly, args.app, "volume", "snapshots", "list", str(source["volume_id"]))
+                if not isinstance(snapshots, list):
+                    raise ValueError("cached snapshot inventory malformed")
+                if not any(isinstance(item, dict) and item.get("id") == cached["snapshot_id"]
+                           for item in snapshots):
+                    break
+                if snapshot_ready(snapshots, cached["snapshot_id"]):
+                    return f"{size} {cached['snapshot_id']}"
+                time.sleep(args.poll_seconds)
+            else:
+                # A slow first snapshot is still owned. A subsequent run must
+                # keep waiting on this ID rather than uploading a second copy.
+                raise ValueError("cached worker snapshot is still pending")
 
     source = next((s for s in sources if s["state"] == "stopped"), None)
     if source is None:
@@ -128,10 +139,11 @@ def ensure(args: argparse.Namespace) -> str:
             observed_id = next(iter(new_ids))
             if bound_id and bound_id != observed_id:
                 raise ValueError("snapshot identity changed during readiness polling")
+            if not bound_id:
+                write_cache(args.cache, {"volume_id": volume_id,
+                                         "size_gb": size, "snapshot_id": str(observed_id)})
             bound_id = str(observed_id)
         if bound_id and snapshot_ready(snapshots, bound_id):
-            write_cache(args.cache, {"volume_id": volume_id,
-                                     "size_gb": size, "snapshot_id": bound_id})
             return f"{size} {bound_id}"
         time.sleep(args.poll_seconds)
     raise ValueError("worker snapshot did not become complete before deadline")
