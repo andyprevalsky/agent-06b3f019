@@ -157,11 +157,17 @@ def test_failed_started_pool_forensics_preserve_originals_without_proof_credit(t
                       for relative, payload in files.items()},
         }],
     }))
-    receipt = module.verify_started_pool_evidence(registry, run, manifest_path, archive_path)
+    machines_path = tmp_path / "machines.json"
+    volumes_path = tmp_path / "volumes.json"
+    machines_path.write_text(json.dumps([{"id": machine, "state": "stopped"}]))
+    volumes_path.write_text(json.dumps([{"id": volume, "attached_machine_id": machine}]))
+    receipt = module.verify_started_pool_evidence(
+        registry, run, manifest_path, archive_path, machines_path, volumes_path)
     assert receipt["proof_credit"] == 0 and receipt["tasks"] == 1
     (out / "guest-shutdown.confirmed").unlink()
     with pytest.raises((AssertionError, OSError)):
-        module.verify_started_pool_evidence(registry, run, manifest_path, archive_path)
+        module.verify_started_pool_evidence(
+            registry, run, manifest_path, archive_path, machines_path, volumes_path)
 
 
 def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "same") -> None:
