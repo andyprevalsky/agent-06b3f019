@@ -2484,7 +2484,36 @@ def test_resolve_fast_cache_goal_activity_returns_persisted_row_goal(monkeypatch
     monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
 
     async def body():
-        assert await resolve_fast_cache_goal_activity("agent-1") == "persisted row goal"
+        assert await resolve_fast_cache_goal_activity("agent-1") == {
+            "goal": "persisted row goal",
+            "root_goal": "persisted row goal",
+        }
+
+    asyncio.run(body())
+
+
+def test_resolve_fast_cache_goal_activity_returns_child_and_root_goal(monkeypatch):
+    import providers.fast_cache.client as cache_client_module
+    from helpers.fast_cache_goal import (
+        resolve_fast_cache_goal_activity,
+        unpack_fast_cache_goal_resolution,
+    )
+
+    leftover = "Produce fresh tool-grounded evidence for Andy Prevalsky"
+    root = "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
+
+    async def fake_resolve(agent_id: str):
+        assert agent_id == "leftover-child"
+        return True, leftover, True, "root-agent", root, True
+
+    monkeypatch.setattr(cache_client_module, "resolve_agent_fast_mode", fake_resolve)
+
+    async def body():
+        resolved = await resolve_fast_cache_goal_activity("leftover-child")
+        assert resolved == {"goal": leftover, "root_goal": root}
+        assert unpack_fast_cache_goal_resolution(resolved) == (leftover, root)
+        assert unpack_fast_cache_goal_resolution("legacy-string") == ("legacy-string", None)
+        assert unpack_fast_cache_goal_resolution(None) == (None, None)
 
     asyncio.run(body())
 

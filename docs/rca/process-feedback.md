@@ -115,6 +115,20 @@ attempt is the anti-overfit proof; without it the Problem is too specific
 to edit a prompt against.
 Source: `/RCA` Step 5b, user instruction 2026-09-09.
 
+11b. **Never add a keyword classifier that mutates model-chosen schemas,
+    spawn routing, DAG tools, or completion text.** Persist the fields the
+    model emitted. Do not inject, strip, rewrite, or cap from goal
+    substrings (`Purchase Price`, `consolidate`, `MUST NOT use browser`,
+    `one explore sub-agent per city`, `fast mode`, …). Keep
+    `is_oai_demo_goal` as the one catalog-scoped demo exception.
+    Why: the classifier is a second source of truth that fights the model. It
+    required `order_confirmation_id` on a send-Aman offer because the attached
+    catalog said `Purchase Price` / `Source Order Id`. Tightening the regex is
+    still the same rejected layer.
+    Source: `docs/rca/cases/2026-09-29-purchase-noun-markers-classified-offer-as-buy.md`,
+    user 2026-09-29 ("the model determine the schema, not hacky classifiers on top";
+    "keep is_oai_demo_goal / rm the rest").
+
 ## C. How to prove it
 
 12. **Validate credentials and integrations through a blackbox, never ad-hoc
