@@ -9871,7 +9871,7 @@ finalize_terminal_projection() {  # finalize_terminal_projection <controller-exi
 
 cleanup() {
     local result_ec=$? ec teardown_failed="${LOCAL_PROCESS_TEARDOWN_FAILED:-0}"
-    local id claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
+    local id i out claim_path st presence machines round stop_pid pool_volume_id guest_shutdown_failed=0
     local claim_digest machine_reap_status runtime_evidence_failed=0
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
     ec="$result_ec"
@@ -10086,7 +10086,13 @@ cleanup() {
                     && pool_claim_release_exact "$claim_path" "$claim_digest" \
                         "$FLEET_OWNER_TOKEN" "$FLEET_OWNER_HOST" "$$" \
                         "$FLEET_OWNER_PID_START"; then
-                    :
+                    for i in "${!CHILD_MACHINE[@]}"; do
+                        if [ "${CHILD_MACHINE[$i]}" = "$id" ]; then
+                            date +%s > "${CHILD_OUT[$i]}/bench-e2e.finished-epoch" \
+                                || { ec=1; teardown_failed=1; }
+                            break
+                        fi
+                    done
                 else
                     ec=1
                     teardown_failed=1
@@ -10174,6 +10180,19 @@ cleanup() {
         teardown_failed=1
     fi
     cloudbench_controller_lock_release "$LOCK_DIR"
+    # Report each bench's end-to-end duration only after its provider claim has
+    # been released or its exact clone teardown has finished. Pool members get
+    # an earlier, per-machine finish receipt in the claim-release loop below;
+    # this fallback covers fresh clones and recovery paths.
+    if [ "$teardown_failed" = "0" ]; then
+        for out in "${CHILD_OUT[@]}"; do
+            if [ -s "$out/bench-e2e.started-epoch" ] \
+                && [ ! -s "$out/bench-e2e.finished-epoch" ]; then
+                date +%s > "$out/bench-e2e.finished-epoch" \
+                    || { ec=1; teardown_failed=1; }
+            fi
+        done
+    fi
     # Task failure and infrastructure failure both use exit 1. Seal their
     # independent lifecycle verdict only after provider audit publication AND
     # removal of the exact recovery registry, which can itself still fail.
@@ -12424,6 +12443,7 @@ echo "⏳ provisioning ${#BENCHES[@]} isolated machine(s) concurrently (claim-or
 for bench in "${BENCHES[@]}"; do
     out="$FLEET_DIR/$bench"
     rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+    date +%s > "$out/bench-e2e.started-epoch" || exit 1
     (
         bench_vm_size="$(primary_vm_size_for_bench "$bench")"
         bench_vm_memory="$(primary_vm_memory_for_bench "$bench")"
