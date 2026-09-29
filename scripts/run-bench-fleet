@@ -7448,12 +7448,71 @@ fleet_recovery_confirm_pool_claims() {  # <exact recovered owner registry>
     pid="$(registry_meta_value "$meta" pid)"
     pid_start="$(registry_meta_value "$meta" pid_start)"
     plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-confirm-pool.XXXXXX")" || return 1
-    if ! fleet_registry_build_guest_recovery_plan "$registry" "$plan"; then
+    if ! python3 - "$registry" "$plan" "$FLEET_AUDIT_ROOT" "$POOL_CLAIMS_DIR" "$APP" <<'PY'
+import json
+from pathlib import Path
+import re
+import stat
+import sys
+
+registry, plan, audit_root, claims_root = map(Path, sys.argv[1:5])
+app = sys.argv[5]
+def fields(path):
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode) and not path.is_symlink() and info.st_size <= 65536
+    pairs = [line.split('=', 1) for line in path.read_text().splitlines()]
+    assert all(len(pair) == 2 for pair in pairs)
+    value = dict(pairs)
+    assert len(value) == len(pairs)
+    return value
+meta = fields(registry / 'meta')
+owner = registry.name
+assert re.fullmatch(r'[0-9a-f]{32}', owner)
+assert meta['fleet_owner_token'] == owner and meta['app'] == app
+audit = audit_root / owner
+assert Path(meta['audit_dir']) == audit and fields(audit / 'meta')['fleet_owner_token'] == owner
+run = Path(meta['runs_root']) / meta['run_id']
+tasks = json.loads((run / '_batch/benches.json').read_text())
+outputs = {}
+for task in tasks:
+    out = run / task['name']
+    cid = out / '.cid'
+    if not cid.is_file() or cid.is_symlink():
+        continue
+    parts = cid.read_text().split()
+    assert len(parts) == 2
+    if parts[0] == 'pool':
+        assert parts[1] not in outputs
+        outputs[parts[1]] = out
+claimed = {}
+audited = set()
+for record in (audit / 'pool').iterdir():
+    value = fields(record)
+    assert value['machine_id'] == record.name and re.fullmatch(r'[0-9a-f]+', record.name)
+    assert value['fleet_owner_token'] == owner and value['run_id'] == meta['run_id']
+    assert value['app'] == app and value['source'] == 'borrowed-pool'
+    assert value['disposition'] in ('claimed', 'returned-stopped-claim-released', 'destroyed-removed-from-pool')
+    if record.name in outputs:
+        audited.add(record.name)
+    if value['disposition'] != 'claimed':
+        continue
+    assert record.name in outputs and record.name not in claimed
+    claim = fields(claims_root / record.name)
+    assert claim['fleet_owner_token'] == owner
+    assert claim['host'] == meta['host'] and claim['pid'] == meta['pid']
+    assert claim['pid_start'] == meta['pid_start']
+    assert claim['cleanup_state'] in ('unconfirmed', 'owned')
+    claimed[record.name] = outputs[record.name]
+assert audited == set(outputs)
+with plan.open('w') as stream:
+    for machine_id, out in sorted(claimed.items()):
+        stream.write(f'{machine_id}\t{out}\n')
+PY
+    then
         rm -f "$plan"
         return 1
     fi
-    while IFS=$'\t' read -r kind bench clone_name id volume_id out port; do
-        [ "$kind" = "pool-guest" ] || continue
+    while IFS=$'\t' read -r id out; do
         [ -f "$out/guest-shutdown.confirmed" ] \
             && [ ! -L "$out/guest-shutdown.confirmed" ] \
             && [ "$(cat "$out/guest-shutdown.confirmed")" = "$run_id" ] || {
