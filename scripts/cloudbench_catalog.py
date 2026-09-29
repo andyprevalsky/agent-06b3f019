@@ -70,6 +70,7 @@ _METADATA_FIELDS = (
     "max_steps",
     "group",
     "tags",
+    "requires_browser_agent",
 )
 
 CATALOG_GROUPS = (

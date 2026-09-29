@@ -94,6 +94,11 @@ when doing research. Never print or commit their contents. Verify that
 printing it. The `.env.example` files are safe references, not complete
 substitutes for the authoritative files. For credential reconciliation, follow
 **Production Env Vars** below, including the Codex-cloud `rose` environment.
+Exact cloud cancellation must also read the browser provider credentials from
+these env files. Its credential loader accepts a symlink to a regular
+authoritative env file; cleanup evidence and receipts remain symlink-free. If
+recovering an older controller that rejects linked env files, materialize
+private `0600` copies before retrying its exact-owner recovery.
 
 Keep the checkout outside iCloud-synced Desktop or Documents; prefer
 `~/Developer/<unique-clone-name>`. Evicted `dataless` files can stall Git and
@@ -244,6 +249,16 @@ diagnostic on 2026-09-29 was not credited because it interrupted several agents
 before their third LLM response. Set both the environment and CLI backstop to
 7,200 seconds for the counted proof. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
+For the current accelerated validation, the user explicitly requested a
+temporary 300-second benchmark execution limit and a separate 30-minute hard
+cutoff for any bench that has not finished its full end-to-end lifecycle. Apply
+the five-minute limit through `BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=300` and
+`--timeout 300` on the proof command; enforce the 30-minute ceiling through an
+independent monitor of `bench-e2e.started-epoch`/`finished-epoch`. A cutoff is
+an interrupted diagnostic: cancel the exact proof owner, recover and audit its
+resources, and grant no slice credit. Never relabel an interrupted bench as a
+normal evaluator `FAILED` or waive the three successful LLM responses. Restore
+the 7,200-second backstop after this requested validation.
 After each valid slice, report the whole slice's wall-clock time and every
 bench's individual wall-clock time (including startup, evidence collection and
 teardown, alongside the task-execution duration where available). Inspect the

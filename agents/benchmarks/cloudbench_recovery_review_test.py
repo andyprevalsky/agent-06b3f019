@@ -58,6 +58,17 @@ def query_fixture(tmp_path, **digests):
     return args, query
 
 
+def test_exact_cleanup_reads_linked_authoritative_env(cleanup, tmp_path, monkeypatch):
+    monkeypatch.delenv("KERNEL_API_KEY", raising=False)
+    source = tmp_path / "authoritative.env"
+    source.write_text("KERNEL_API_KEY=fixture-key\n")
+    linked = tmp_path / "agents.env"
+    linked.symlink_to(source)
+
+    assert cleanup.load_env_value("KERNEL_API_KEY", (linked,)) == "fixture-key"
+    assert not cleanup.regular_file(linked)  # Evidence receipts remain symlink-free.
+
+
 def test_zero_query_digest_covers_the_validated_bytes(cleanup, tmp_path, monkeypatch):
     args, query = query_fixture(tmp_path)
     validated_payload = args.zero_query_proof.read_bytes()

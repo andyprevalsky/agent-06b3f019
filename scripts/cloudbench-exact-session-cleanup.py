@@ -921,9 +921,18 @@ def load_env_value(name: str, paths: tuple[Path, ...]) -> str:
     if inherited:
         return inherited
     for path in paths:
-        if not regular_file(path):
+        # Fresh clones and Conductor workspaces may link ignored env files from
+        # their authoritative source. This is configuration input, not a proof
+        # artifact: keep receipt files symlink-free, but follow a regular env
+        # target so exact cancellation can authenticate provider cleanup.
+        try:
+            source = path.resolve(strict=True)
+            metadata = source.stat()
+        except OSError:
             continue
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 1024 * 1024:
+            continue
+        for raw in source.read_text(encoding="utf-8").splitlines():
             key, separator, value = raw.partition("=")
             if separator and key == name:
                 return value.strip().strip('"').strip("'")

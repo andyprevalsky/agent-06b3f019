@@ -243,6 +243,47 @@ os.replace(tmp, path)
 PY
 }
 
+# A verified real capability slice has exercised the same bring-up, barrier,
+# autoscaler, and exact provider teardown contracts as the smaller infra canary.
+# Refresh its preflight stamp under the canary's lock so the next sequential
+# slice does not spend minutes rerunning a weaker probe after the TTL expires.
+# If publication fails, leave the old stamp alone; the next slice runs the
+# normal canary preflight.
+refresh_infra_canary_from_capability_slice() {
+  local index="$1"
+  [ "$MODE" = capability ] || return 0
+  python3 - "$SUMMARY_JSON" "$index" "$ROOT_DIR" \
+    "${FLEET_INFRA_CANARY_STAMP:-$ROOT_DIR/.context/fleet-infra-canary.last-pass}" \
+    "${FLEET_INFRA_CANARY_LOCK:-$ROOT_DIR/.context/fleet-infra-canary-preflight.transaction.lock}" <<'PY'
+import fcntl
+import json
+import runpy
+import sys
+from pathlib import Path
+
+summary_path, index, repo, stamp, lock = sys.argv[1:]
+summary = json.loads(Path(summary_path).read_text())
+row = summary["slices"][-1]
+assert row["slice"] == int(index)
+assert row["classification"] in {"pass", "harness"}
+assert row["cleanup_status"] == "verified" and row["passed"] is True
+batch = Path(row["batch_run"])
+receipt = json.loads((batch.parent / "lifecycle.json").read_text())
+assert receipt["status"] == "verified"
+assert receipt["fleet_owner_token"] == row["fleet_owner_token"]
+assert receipt["workspace_root"] == repo
+assert receipt["controller_exit_code"] == row["rc"]
+stamp, lock = Path(stamp), Path(lock)
+stamp.parent.mkdir(parents=True, exist_ok=True)
+lock.parent.mkdir(parents=True, exist_ok=True)
+writer = runpy.run_path(str(Path(repo) / "scripts/cloudbench-infra-canary-preflight.py"))["_write_stamp"]
+with lock.open("a+", encoding="utf-8") as handle:
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    writer(stamp, f"capability-proof={summary['proof_id']} slice={index}")
+print(f"🛡  verified capability slice {index} refreshed infra preflight stamp")
+PY
+}
+
 classify_capability_slice() {
   local log_path="$1" owner_token="$2" controller_exit="$3"
   shift 3
@@ -694,6 +735,9 @@ PYREAD
       exit "$FAILED_RC"
     fi
 
+    if [ "$MODE" = capability ] && ! refresh_infra_canary_from_capability_slice "$i"; then
+      echo "⚠️  capability slice passed but could not refresh infra preflight stamp; next slice will run the normal canary" >&2 || true
+    fi
     PASSED=$((PASSED + 1))
     echo "✅ slice $i NO-INFRA classification=$classification ($PASSED/$RUNS)" || true
   done

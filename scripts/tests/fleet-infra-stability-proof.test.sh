@@ -95,6 +95,8 @@ B="$(python3 "$SAMPLER" sample --repo "$ROOT_DIR" --width 20 --seed 20260908 --s
 [ "$A" = "$B" ] || fail "sampler must be deterministic for a fixed seed/slice"
 
 tmp="$(mktemp -d)"
+export FLEET_INFRA_CANARY_STAMP="$tmp/fleet-infra-canary.last-pass"
+export FLEET_INFRA_CANARY_LOCK="$tmp/fleet-infra-canary-preflight.transaction.lock"
 cleanup() {
   local status=$? diagnostics
   if [ "$status" -ne 0 ]; then
@@ -328,7 +330,7 @@ FLEET_INFRA_PROOF_ARTIFACT_DIR="$tmp/artifacts" \
 FLEET_INFRA_PROOF_STATE_ROOT="$tmp/capability-pass" \
 FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
   "$RUN_BENCH" stability-proof -k=2 --concurrency=3 --seed 17
-python3 - "$tmp/capability-pass" <<'PY' || fail "capability proof summary invalid"
+python3 - "$tmp/capability-pass" "$FLEET_INFRA_CANARY_STAMP" <<'PY' || fail "capability proof summary invalid"
 import json
 import sys
 from pathlib import Path
@@ -345,6 +347,8 @@ assert [item["classification"] for item in summary["slices"]] == [
     "pass",
 ]
 assert all(len(item["names"]) == 3 for item in summary["slices"])
+stamp = Path(sys.argv[2]).read_text()
+assert f"capability-proof={summary['proof_id']} slice=1" in stamp, stamp
 PY
 
 set +e
@@ -356,7 +360,7 @@ FLEET_INFRA_PROOF_FLEET_BIN="$tmp/fake-fleet" \
 infra_status=$?
 set -e
 [ "$infra_status" -ne 0 ] || fail "capability proof must fail on INFRA"
-python3 - "$tmp/capability-infra" <<'PY' || fail "INFRA reset summary invalid"
+python3 - "$tmp/capability-infra" "$FLEET_INFRA_CANARY_STAMP" <<'PY' || fail "INFRA reset summary invalid"
 import json
 import sys
 from pathlib import Path
@@ -371,6 +375,8 @@ assert [item["classification"] for item in summary["slices"]] == [
     "harness",
     "infra",
 ]
+stamp = Path(sys.argv[2]).read_text()
+assert f"capability-proof={summary['proof_id']} slice=0" in stamp, stamp
 PY
 
 python3 "$ROOT_DIR/scripts/tests/fleet-stability-cleanup.test.py"

@@ -820,6 +820,10 @@ bench_needs_large_primary() {  # bench_needs_large_primary <task>
     # would need 8GB only during real execution. Real benches keep their
     # catalog-specific shape below.
     [ "${INFRA_PROBE:-0}" = "1" ] && return 1
+    local browser_task
+    for browser_task in "${CATALOG_BROWSER_REQUIRED_TASKS[@]:-}"; do
+        [ "$browser_task" = "$1" ] && return 0
+    done
     case "$1" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint|browser-*)
             return 0
@@ -1139,22 +1143,35 @@ except CatalogError as exc:
 
 for row in rows:
     world_model_mode = str(row.get("world_model_mode") or "").lower()
-    print("simulate" if world_model_mode == "simulate" else "real")
+    browser_required = row.get("requires_browser_agent")
+    if browser_required is not None and not isinstance(browser_required, bool):
+        print(f"invalid browser requirement for {row['name']}", file=sys.stderr)
+        raise SystemExit(1)
+    print(("simulate" if world_model_mode == "simulate" else "real")
+          + "\t" + ("browser" if browser_required else "plain"))
 PY
 }
 
 CATALOG_MODES=()
+CATALOG_BROWSER_REQUIRED_TASKS=()
 if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
         echo "❌ benchmark catalog preflight failed before Fly provisioning" >&2
         exit 1
     fi
-    while IFS= read -r catalog_mode; do
+    catalog_index=0
+    while IFS=$'\t' read -r catalog_mode browser_requirement; do
         [ -n "$catalog_mode" ] || continue
         case "$catalog_mode" in
             real|simulate) CATALOG_MODES+=("$catalog_mode") ;;
             *) echo "❌ benchmark catalog returned invalid world-model mode: $catalog_mode" >&2; exit 1 ;;
         esac
+        case "$browser_requirement" in
+            browser) CATALOG_BROWSER_REQUIRED_TASKS+=("${BENCHES[$catalog_index]}") ;;
+            plain) ;;
+            *) echo "❌ benchmark catalog returned invalid browser requirement: $browser_requirement" >&2; exit 1 ;;
+        esac
+        catalog_index=$((catalog_index + 1))
     done <<< "$catalog_modes_output"
     if [ "${#CATALOG_MODES[@]}" -ne "${#BENCHES[@]}" ]; then
         echo "❌ benchmark catalog preflight returned ${#CATALOG_MODES[@]}/${#BENCHES[@]} task modes" >&2
@@ -7255,7 +7272,7 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local guest_barrier_token details detail_status state actual_name configuration
     local proxy_port proxy_pid="" marker_tmp preferred_start="" guest_count=0
     local recovery_index shutdown_status proxy_cleanup_status
-    local prestart_inventory prestart_log prestart_status
+    local prestart_inventory prestart_log prestart_status forensic_manifest
     local save_registry="${FLEET_REGISTRY_DIR:-}" save_published="${FLEET_REGISTRY_PUBLISHED:-0}"
     local save_keep="${KEEP_CLONES:-0}" save_run="${RUN_ID:-}" save_barrier="${CLOUDBENCH_BARRIER_TOKEN:-}"
     local -a recovery_benches recovery_outputs recovery_ips recovery_remote
@@ -7512,7 +7529,9 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     # sealed shutdown. Reuse the exact recovered proxy while it is still owned
     # here; later verification must never treat a missing local copy as proof
     # that the original guest runtime was absent.
-    if [ "$shutdown_status" -eq 0 ]; then
+    forensic_manifest="$(registry_meta_value "$meta" runs_root)/$(registry_meta_value "$meta" run_id)/_forensic/manifest.json"
+    if [ "$shutdown_status" -eq 0 ] \
+        && { [ ! -f "$forensic_manifest" ] || [ -L "$forensic_manifest" ]; }; then
         for recovery_index in "${!recovery_outputs[@]}"; do
             output="${recovery_outputs[$recovery_index]}"
             [ -f "$output/runtime-evidence.pending" ] || continue
@@ -7532,6 +7551,12 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
                 echo "✅ [${recovery_benches[$recovery_index]}] sealed runtime evidence recaptured"
             fi
         done
+    elif [ "$shutdown_status" -eq 0 ]; then
+        # An interrupted guest cannot seal run.json after an exact stop. The
+        # archive verifier below checks every original byte and provider state
+        # before releasing the runtime latch or any resource. Do not require a
+        # recapture that this stopped guest cannot produce.
+        echo "🧭 forensic archive present; deferring runtime latch to exact archive verification"
     fi
     if cleanup_stale_owner_recovery_proxies; then
         proxy_cleanup_status=0
@@ -12368,7 +12393,7 @@ fleet_infra_canary_preflight() {
     if [ "${RECOVER_STALE_ONLY:-0}" = "1" ] || [ -n "${PROVISION_POOL:-}" ]; then
         return 0
     fi
-    stamp="$ROOT_DIR/.context/fleet-infra-canary.last-pass"
+    stamp="${FLEET_INFRA_CANARY_STAMP:-$ROOT_DIR/.context/fleet-infra-canary.last-pass}"
     ttl="${FLEET_INFRA_CANARY_TTL_SECONDS:-3600}"
     case "$ttl" in
         ''|*[!0-9]*|0) ttl=3600 ;;
@@ -12385,7 +12410,7 @@ fleet_infra_canary_preflight() {
         ''|*[!0-9]*|0) n=2 ;;
     esac
     mkdir -p "$ROOT_DIR/.context"
-    lock="$ROOT_DIR/.context/fleet-infra-canary-preflight.transaction.lock"
+    lock="${FLEET_INFRA_CANARY_LOCK:-$ROOT_DIR/.context/fleet-infra-canary-preflight.transaction.lock}"
     canary="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-fleet-infra-canary"
     # The helper holds a shared transaction lock while it rechecks the stamp,
     # runs the canary, and stamps PASS. Its lock is distinct from the nested

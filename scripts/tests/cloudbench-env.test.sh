@@ -755,6 +755,20 @@ unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_m
 # The resize optimization only changes pool admission. A real large-primary
 # task keeps its 8GB request, while the default path still forks a separate
 # large Machine when the opt-in is absent.
+python3 - "$ROOT_DIR" <<'PY_BROWSER_METADATA' || fail "browser metadata must reach the fleet shape selector"
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from cloudbench_catalog import get_task_metadata
+
+rows = get_task_metadata(
+    root / "agents/benchmarks/tasks.json", ["polar-bu-065", "image-handling"]
+)
+assert rows[0]["requires_browser_agent"] is True
+assert rows[1]["requires_browser_agent"] is not True
+PY_BROWSER_METADATA
 for function_name in bench_needs_large_primary primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
   function_source="$(awk -v name="$function_name" '
@@ -768,9 +782,13 @@ done
 FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
+CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
-bench_uses_default_pool_shape polar-bu-065 ||
+bench_uses_default_pool_shape image-handling ||
   fail "ordinary tasks must retain default pool admission"
+if bench_uses_default_pool_shape polar-bu-065; then
+  fail "catalog browser tasks must request the large primary shape"
+fi
 if bench_uses_default_pool_shape agent-payment-abandonment; then
   fail "8GB tasks must not claim a 4GB pool without explicit resize"
 fi
@@ -779,7 +797,14 @@ bench_uses_default_pool_shape agent-payment-abandonment ||
   fail "opted-in 8GB tasks must be able to claim a stopped pool Machine"
 [ "$(primary_vm_memory_for_bench agent-payment-abandonment)" = 8192 ] ||
   fail "pool resize admission must preserve the large task's requested memory"
+bench_uses_default_pool_shape polar-bu-065 ||
+  fail "opted-in browser tasks must be able to resize a stopped pool Machine"
+INFRA_PROBE=1
+[ "$(primary_vm_memory_for_bench polar-bu-065)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
+  fail "task-free infra probes must retain the default primary shape"
+INFRA_PROBE=0
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+unset CATALOG_BROWSER_REQUIRED_TASKS
 unset -f bench_needs_large_primary primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape
 

@@ -29,7 +29,7 @@ def _fresh_age(stamp: Path, ttl_seconds: int) -> int | None:
     return age if 0 <= age < ttl_seconds else None
 
 
-def _write_stamp(stamp: Path) -> None:
+def _write_stamp(stamp: Path, source: str | None = None) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         dir=stamp.parent,
         prefix=f".{stamp.name}.",
@@ -38,6 +38,8 @@ def _write_stamp(stamp: Path) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(time.strftime("%Y-%m-%dT%H:%M:%SZ\n", time.gmtime()))
+            if source is not None:
+                handle.write(f"{source}\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, stamp)
