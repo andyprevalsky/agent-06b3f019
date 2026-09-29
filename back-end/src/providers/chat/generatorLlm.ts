@@ -27,6 +27,7 @@ import {
   createGeneratorAttentionLifecycle,
   type GeneratorAttentionLifecycle,
 } from './generatorAttentionStream';
+import { ensureVerbatimIncludes } from './ensureVerbatimIncludes';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
@@ -330,7 +331,7 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
     },
     dump_context: { agent_id: params.agentId, call_site: 'chat_generator' },
     provider_fast_mode: params.providerFastMode,
-    provider_route: params.providerRoute,
+    ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
 }
@@ -339,7 +340,7 @@ type GeneratorLlmParams = {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
 };
@@ -379,9 +380,10 @@ async function callGeneratorLlmCore(
       if (isCloudAgentLifecycleTool(msg.metadata) || !msg.text || msg.text.trim() === '') {
         continue;
       }
-      // Convert TOOL to system message with content (matches worker pattern)
+      // Convert TOOL to user message — Qwen/Cerebras rejects mid-conversation
+      // system turns ("System message must be at the beginning").
       openaiMessages.push({
-        role: 'system',
+        role: 'user',
         content: `[Tool Result]\n${msg.text}`,
       });
     } else if (msg.role === 'USER') {
@@ -732,14 +734,27 @@ async function callGeneratorLlmCore(
     responseLength: parsed.response?.length || 0,
   });
 
-  await attention.complete(parsed.response || '');
+  const userTexts = params.messages
+    .filter((message) => message.role === 'USER' && typeof message.text === 'string')
+    .map((message) => message.text);
+  const response = ensureVerbatimIncludes(userTexts, parsed.response || '');
+  if (response !== (parsed.response || '')) {
+    log.warn('[GeneratorLLM] Appended missing Include-verbatim token(s)', {
+      agentId: params.agentId,
+      streamId,
+      beforeLength: (parsed.response || '').length,
+      afterLength: response.length,
+    });
+  }
+
+  await attention.complete(response);
 
   usage.model = actualModel || params.model;
   usage.from_fast_cache = fcCacheWon;
 
   return {
     reasoning: parsed.reasoning || '',
-    response: parsed.response || '',
+    response,
     streamId,
     toolCallId: attention.toolCallId,
     usage,

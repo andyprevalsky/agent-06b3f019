@@ -67,7 +67,7 @@ rejects a claimed accepted start, a worker clone, and an unrelated boot error.
 ## Solution
 
 The recovery planner admits a zero preferred local port only for a bounded,
-regular capacity-rejection log with no accepted-start marker, run record,
+regular failed-start log with no accepted-start marker, run record,
 guest ACK, worker runtime evidence, or worker clone. This only preserves the
 Machine/output mapping; it does not publish a guest cleanup receipt or release
 any ownership latch. Port allocation prefers the other guests' real published
@@ -77,6 +77,12 @@ produced an exact zero-provider manifest and guest ACK, and stopped. All ten
 original volumes were directly captured, and the 108,815-byte zero-credit
 archive passed exact-owner, file-hash, stopped-Machine, and attached-volume
 verification before the owner and pool claims were released.
+
+After syncing with `main`, the new `CLAUDE.md` rule 25b also ruled out
+classifying provider failures by error-string matching. The final planner
+uses only the structured start/receipt state and a bounded failed-start log;
+an unrelated provider start failure remains mapped for exact cleanup and
+still cannot release a guest latch without independent proof.
 
 The 8 GB Machine remained unstartable on that host; pool replacement is being
 performed once from the existing snapshot. The replacement and ten consecutive

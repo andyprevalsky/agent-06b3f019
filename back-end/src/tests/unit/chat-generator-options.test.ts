@@ -55,7 +55,9 @@ async function run(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   const oldGptKey = process.env.GPT_API_KEY;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   delete process.env.CEREBRAS_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
   process.env.GPT_API_KEY = 'shared-provider-must-not-run';
   let providerCalls = 0;
   globalThis.fetch = (async () => {
@@ -64,22 +66,25 @@ async function run(): Promise<void> {
   }) as typeof fetch;
 
   try {
+    // Exclusive direct-cerebras requires CEREBRAS_API_KEY; GPT_API_KEY must not leak.
     await assert.rejects(async () => {
       for await (const chunk of await createStreamingCompletion(options)) {
-        assert.fail(`unexpected chunk without Cerebras key: ${chunk.actual_model}`);
+        assert.fail(`unexpected chunk without provider keys: ${chunk.actual_model}`);
       }
-    }, /CEREBRAS_API_KEY/);
-    assert.strictEqual(providerCalls, 0, 'missing Cerebras key must fail before provider calls');
+    }, /CEREBRAS_API_KEY|Rose/);
+    assert.strictEqual(providerCalls, 0, 'missing provider keys must fail before provider calls');
   } finally {
     globalThis.fetch = originalFetch;
     if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
     else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
     if (oldGptKey === undefined) delete process.env.GPT_API_KEY;
     else process.env.GPT_API_KEY = oldGptKey;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
   }
 
   process.stdout.write('PASS chat Generator options exclude ignored compute-auth fields\n');
-  process.stdout.write('PASS Generator direct Cerebras route fails closed without leakage\n');
+  process.stdout.write('PASS Generator direct-cerebras fails closed without leakage\n');
 }
 
 run().catch((error: unknown) => {

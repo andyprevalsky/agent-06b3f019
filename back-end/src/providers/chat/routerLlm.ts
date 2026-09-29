@@ -268,7 +268,7 @@ export function buildRouterCompletionOptions(params: ChatCompletionParams): Comp
     },
     dump_context: { agent_id: params.agentId, call_site: 'chat_router' },
     provider_fast_mode: params.providerFastMode,
-    provider_route: params.providerRoute,
+    ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
   };
 }
@@ -277,7 +277,7 @@ export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   onRouterStarted?: () => void;
   onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {
@@ -298,9 +298,10 @@ export async function callRouterLlm(params: {
       if (isCloudAgentLifecycleTool(msg.metadata) || !msg.text || msg.text.trim() === '') {
         continue;
       }
-      // Convert TOOL to system message with content (matches worker pattern)
+      // Convert TOOL to user message — Qwen/Cerebras rejects mid-conversation
+      // system turns ("System message must be at the beginning").
       openaiMessages.push({
-        role: 'system',
+        role: 'user',
         content: `[Tool Result]\n${msg.text}`,
       });
     } else if (msg.role === 'USER') {

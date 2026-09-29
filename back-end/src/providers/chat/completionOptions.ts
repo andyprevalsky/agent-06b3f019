@@ -6,7 +6,7 @@ export interface ChatCompletionParams {
   agentId: string;
   model: string;
   messages: CompletionMessage[];
-  providerRoute: ChatProviderRoute;
+  providerRoute?: ChatProviderRoute;
   providerFastMode: boolean;
   abortSignal?: AbortSignal;
 }
