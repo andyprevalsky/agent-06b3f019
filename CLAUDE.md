@@ -271,7 +271,15 @@ frontend contract. A fresh large-primary clone still inherits the legacy
 donor's 40 GB volume until a verified 20 GB donor replaces it. Keep using the
 existing stopped pool across slices; Fly can transiently return a valid empty
 snapshot list even while completed donor snapshots exist, so the controller
-retries the listing before treating the donor as unprovisioned. Keep
+retries the listing before treating the donor as unprovisioned. For the counted
+mixed-shape fleet proof, set `CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1`: an 8 GB
+browser/payment primary claims a stopped 20 GB pool volume and its boot-config
+update resizes compute to the required shape before guest start. The controller
+verifies the native stopped Machine shape after the update; the next pool
+preflight returns it to the default 4 GB shape. This avoids a per-slice 40 GB
+legacy-donor restore without changing benchmark execution or evaluation.
+An inert provider probe on 2026-09-29 resized one stopped pool Machine 4 GB →
+8 GB → 4 GB with the same volume, env, mounts and command. Keep
 `waiting_for_detach` volumes in the exact-owner ledger: Fly has accepted
 deletion but has not confirmed a terminal state. If a fleet is canceled before
 its boot-config barrier releases, only the exact stopped-Machine, unreleased

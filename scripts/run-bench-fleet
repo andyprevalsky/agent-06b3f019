@@ -844,7 +844,16 @@ primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
     fi
 }
 
-bench_uses_default_pool_shape() {  # <task>; pool machines must already match
+bench_uses_default_pool_shape() {  # <task>; pool claim eligibility
+    # Opt-in proof optimization: a stopped 20GB pool Machine may be resized
+    # during its boot-config update for an 8GB task. The exact same volume and
+    # benchmark bytes are reused; the next pool preflight restores the default
+    # shape after verified teardown. Capacity still accounts for the task's
+    # requested (larger) VM size in enforce_app_capacity_guard.
+    if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
+        && bench_needs_large_primary "$1"; then
+        return 0
+    fi
     [ "$(primary_vm_size_for_bench "$1")" = "$FLEET_PRIMARY_VM_SIZE" ] \
         && [ "$(primary_vm_memory_for_bench "$1")" = "$FLEET_PRIMARY_VM_MEMORY" ]
 }
@@ -12395,6 +12404,11 @@ start_machines_snapshot_loop || exit 1
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
+if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
+    && [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" != "1" ]; then
+    echo "❌ dynamic pool VM shape requires verified boot-launch updates" >&2
+    exit 2
+fi
 # Cloning 28 fresh volumes-from-snapshot one-at-a-time serialized provisioning
 # into a 30-50min window — the window where every clone hang, volume race, and
 # cross-workspace contention event landed and aborted the batch. Fan the
@@ -12418,9 +12432,9 @@ for bench in "${BENCHES[@]}"; do
         # fall back to cloning fresh (bounded + retried) if the pool is empty.
         #
         # A task may claim a stopped pool machine only when its requested shape
-        # exactly matches the shape verified for this pool. A 4GB pool cannot
-        # silently host an 8GB browser/payment guest; a deliberately larger
-        # pool can serve both without another snapshot-volume restore.
+        # matches this pool, or explicit dynamic resize will be verified before
+        # start. A 4GB pool must never silently host an 8GB payment/browser
+        # guest. Both cases reuse the existing 20GB volume.
         if bench_uses_default_pool_shape "$bench"; then
             pcid="$(claim_pool_machine)"
         else
@@ -12482,6 +12496,14 @@ for bench in "${BENCHES[@]}"; do
     # run-bench-cloud owns the clone lifecycle: it waits for snapshot storage to
     # become mountable, then requests the created → started transition.
     echo "   ✅ machine=$cid allocated → launching run-bench-cloud (isolated) ..."
+    pool_boot_vm_size=""
+    pool_boot_vm_memory=""
+    if [ "$src" = "pool" ] \
+        && [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
+        && bench_needs_large_primary "$bench"; then
+        pool_boot_vm_size="$(primary_vm_size_for_bench "$bench")"
+        pool_boot_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+    fi
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
     # autoscaler knows which queue its worker pool must poll.
@@ -12511,6 +12533,8 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
     CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
+    CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
+    CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
     CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=1 \
     CLOUDBENCH_EXECUTION_PROVENANCE_FILE="$EXECUTION_PROVENANCE_FILE" \

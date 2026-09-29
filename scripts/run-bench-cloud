@@ -3629,6 +3629,19 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
         --env "CLOUDBENCH_INFRA_PROBE=${CLOUDBENCH_INFRA_PROBE:-0}"
     )
+    _pool_shape_args=()
+    if [ -n "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" ] \
+        || [ -n "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" ]; then
+        if ! [[ "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" =~ ^shared-cpu-[1-9][0-9]*x$ ]]; then
+            echo "❌ invalid claimed-pool VM size" >&2
+            exit 70
+        fi
+        case "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" in
+            ''|*[!0-9]*|0) echo "❌ invalid claimed-pool VM memory" >&2; exit 70 ;;
+        esac
+        _pool_shape_args=(--vm-size "$CLOUDBENCH_POOL_BOOT_VM_SIZE"
+                          --vm-memory "$CLOUDBENCH_POOL_BOOT_VM_MEMORY")
+    fi
     _boot_file_args=(
         --file-local "/cloudbench-boot.sh=$CLOUDBENCH_GUEST_BOOT_SCRIPT"
         --file-local "/cloudbench-run.sh=$CLOUDBENCH_GUEST_RUN_SCRIPT"
@@ -3803,12 +3816,39 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # boot-config barrier still releases all guest starts together afterward.
     acquire_boot_config_update_slot || exit 1
     if boot_update_with_capacity_recovery "$_update_log" \
-          flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
+          flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_boot_file_args[@]}" \
           --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes; then
         _upd=1
     fi
     release_boot_config_update_slot
+    if [ "$_upd" = 1 ] && [ "${#_pool_shape_args[@]}" -gt 0 ]; then
+        _expected_cpus="${CLOUDBENCH_POOL_BOOT_VM_SIZE##*-}"
+        _expected_cpus="${_expected_cpus%x}"
+        _shape_verified=0
+        for _shape_attempt in 1 2 3 4 5; do
+            _actual_shape="$(FLY machines list -a "$APP" --json 2>/dev/null \
+                | CLOUDBENCH_SHAPE_MACHINE="$mid" python3 -c '
+import json, os, sys
+try:
+    machine = next(m for m in json.load(sys.stdin)
+                   if m.get("id") == os.environ["CLOUDBENCH_SHAPE_MACHINE"])
+    guest = machine["config"]["guest"]
+    print(machine["state"], guest["cpu_kind"], guest["cpus"], guest["memory_mb"])
+except Exception:
+    print("")
+' 2>/dev/null)" || _actual_shape=""
+            if [ "$_actual_shape" = "stopped shared $_expected_cpus $CLOUDBENCH_POOL_BOOT_VM_MEMORY" ]; then
+                _shape_verified=1
+                break
+            fi
+            sleep 2
+        done
+        if [ "$_shape_verified" != 1 ]; then
+            echo "❌ claimed-pool VM resize was not provider-verified before start" >&2
+            _upd=0
+        fi
+    fi
     [ "$_upd" = 1 ] || {
         echo "❌ boot-launch: could not set machine env/command after retries." >&2
         echo "─── final Fly update error ───" >&2

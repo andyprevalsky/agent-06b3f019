@@ -752,6 +752,37 @@ normalize_current_pool_shape || fail "existing stopped pool shape did not normal
   fail "pool normalizer must mutate only the mismatched stopped machine"
 unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_machine FLY
 
+# The resize optimization only changes pool admission. A real large-primary
+# task keeps its 8GB request, while the default path still forks a separate
+# large Machine when the opt-in is absent.
+for function_name in bench_needs_large_primary primary_vm_size_for_bench \
+  primary_vm_memory_for_bench bench_uses_default_pool_shape; do
+  function_source="$(awk -v name="$function_name" '
+    $0 ~ ("^" name "\\(\\)") { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-fleet")"
+  [ -n "$function_source" ] || fail "missing production pool shape selector $function_name"
+  eval "$function_source"
+done
+FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
+INFRA_PROBE=0
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+bench_uses_default_pool_shape polar-bu-065 ||
+  fail "ordinary tasks must retain default pool admission"
+if bench_uses_default_pool_shape agent-payment-abandonment; then
+  fail "8GB tasks must not claim a 4GB pool without explicit resize"
+fi
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1
+bench_uses_default_pool_shape agent-payment-abandonment ||
+  fail "opted-in 8GB tasks must be able to claim a stopped pool Machine"
+[ "$(primary_vm_memory_for_bench agent-payment-abandonment)" = 8192 ] ||
+  fail "pool resize admission must preserve the large task's requested memory"
+unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
+unset -f bench_needs_large_primary primary_vm_size_for_bench \
+  primary_vm_memory_for_bench bench_uses_default_pool_shape
+
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
 read_machine_state() {
