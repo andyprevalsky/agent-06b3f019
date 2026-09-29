@@ -79,11 +79,77 @@ def durable_fe_url(agent_id: str) -> str:
     return f"{DURABLE_ORIGIN}/?agent-id={agent_id}"
 
 
-def upload_run_json(run_json: Path) -> str:
+def evidence_bundle_for_agent(bundle: dict, agent_id: str) -> dict:
+    """Expose one real root from a composite bench without changing its result.
+
+    Composite benches retain their aggregate result under a comma-joined
+    ``agent_id`` and keep each root's captured transcript in a named stage.
+    The Hub cannot resolve either UUID from that aggregate task. Publish a
+    separate, deterministic evidence run containing the original stage logs;
+    never rewrite the aggregate benchmark run or invent transcript messages.
+    """
+    tasks = bundle.get("tasks") or []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        logs = task.get("logs") or {}
+        if task.get("agent_id") == agent_id or (
+            isinstance(logs, dict)
+            and isinstance(logs.get("tree"), dict)
+            and agent_id in logs["tree"]
+        ):
+            return bundle
+
+    matches = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        joined = task.get("agent_id")
+        if not isinstance(joined, str) or agent_id not in joined.split(","):
+            continue
+        logs = task.get("logs") or {}
+        if not isinstance(logs, dict):
+            continue
+        for stage_name, stage_logs in logs.items():
+            if not isinstance(stage_logs, dict):
+                continue
+            tree = stage_logs.get("tree")
+            messages = stage_logs.get("messages")
+            if isinstance(tree, dict) and agent_id in tree and isinstance(messages, list) and messages:
+                matches.append((task, stage_name, stage_logs))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"expected exactly one captured stage transcript for {agent_id}; found {len(matches)}"
+        )
+    task, stage_name, stage_logs = matches[0]
+    run_id = bundle.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        raise SystemExit("run bundle is missing run_id")
+    projected_task = dict(task)
+    projected_task.update(
+        agent_id=agent_id,
+        name=f"{task.get('name', 'composite')} [{stage_name} evidence]",
+        logs=stage_logs,
+        message_count=len(stage_logs["messages"]),
+        tree_agent_count=len(stage_logs["tree"]),
+        evidence_projection_of=task.get("name"),
+    )
+    return {
+        **bundle,
+        "run_id": f"{run_id}.evidence.{agent_id}",
+        "source": "durable-evidence-projection",
+        "source_run_id": run_id,
+        "tasks": [projected_task],
+    }
+
+
+def upload_run_json(run_json: Path, agent_id: str) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
     from benchmarks.hub_upload import upload_run_bundle  # type: ignore
 
-    bundle = json.loads(run_json.read_text(encoding="utf-8"))
+    bundle = evidence_bundle_for_agent(
+        json.loads(run_json.read_text(encoding="utf-8")), agent_id
+    )
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
     if not (os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY")):
         raise SystemExit(
@@ -365,7 +431,7 @@ def main() -> int:
     run_id = ""
     if args.run_json and not args.skip_hub_upload:
         run_path = args.run_json.resolve()
-        run_id = upload_run_json(run_path)
+        run_id = upload_run_json(run_path, agent_id)
         dual_write_claude_code_sessions(run_path, agent_id)
     dump = (args.dump or latest_dump_for_agent(agent_id)).resolve()
     dump_html = publish_llm_dump(dump, agent_id)

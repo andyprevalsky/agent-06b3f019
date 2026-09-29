@@ -71,6 +71,10 @@ GATES = (
         ("bash", "scripts/tests/publish_evidence_links_browser_validation.test.sh"),
     ),
     Gate(
+        "publish-evidence-composite-projection",
+        ("bash", "scripts/tests/publish_evidence_links_composite.test.sh"),
+    ),
+    Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),

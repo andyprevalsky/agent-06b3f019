@@ -115,6 +115,8 @@ grep -Fq 'every `spawn_browser_agent` task on that agent to be terminated' "$FOR
 # 3b) publish_evidence_links enforces browser terminate + recording attach.
 bash "$ROOT/scripts/tests/publish_evidence_links_browser_validation.test.sh" \
   || fail "publish_evidence_links browser validation checks failed"
+bash "$ROOT/scripts/tests/publish_evidence_links_composite.test.sh" \
+  || fail "publish_evidence_links composite projection checks failed"
 
 # 4) Gate must stay wired into /deploy structural suites (both docs + registry).
 DEPLOY="$ROOT/.claude/commands/deploy.md"

@@ -252,8 +252,16 @@ model responses, stale/foreign evidence, or unverified teardown cannot. Stop
 only the exact controller PID/owner recorded for your run and let its traps
 recover resources; use its exact stale-owner recovery path if needed. Publish
 durable evidence with `python3 scripts/publish_evidence_links.py --run-json
-<run.json> --agent-id <id>` before citing an FE link. For new commits with
-unchanged dependency manifests, pooled snapshot dependencies remain reusable;
+<run.json> --agent-id <id>` before citing an FE link. Composite benchmarks
+can carry multiple root UUIDs in a comma-joined
+`agent_id`; publish each real root UUID separately with the same run JSON.
+The publisher creates a separate evidence-only Hub projection from that
+root's captured stage transcript and refuses missing or ambiguous transcripts;
+it does not change the aggregate benchmark result. A Hub 503 saying the
+archive index is warming for a composite root usually means only the joined
+ID was indexed: retry with the real root UUID and the current publisher.
+For new commits with unchanged dependency manifests, pooled snapshot
+dependencies remain reusable;
 `cloudbench-fetch-ref.sh` logs Git fetch, checkout and reset stage durations
 so a slow cold-code bring-up can be separated from stack/worker startup.
 On the 2026-09-29 fresh-code width-ten run, Git fetch took 0–1 seconds and

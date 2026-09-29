@@ -475,6 +475,7 @@ their assertions or test counts:
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/durable-evidence-links.test.sh`,
 `bash scripts/tests/publish_evidence_links_browser_validation.test.sh`,
+`bash scripts/tests/publish_evidence_links_composite.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `bash scripts/tests/cooperative-cutover-monitor.test.sh`,
 `bash scripts/tests/agent-surface-hash.test.sh`,
