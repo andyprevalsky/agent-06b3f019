@@ -886,25 +886,6 @@ def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:
     return all(bool(refs.get(ref)) for ref in PAYMENT_CARD_SECRET_REFS)
 
 
-def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any], last4: Optional[str] = None) -> str:
-    """Report that the pending payment approval completed and refs are ready."""
-    if not has_payment_card_secret_refs(payment_card_refs):
-        return ""
-
-    card_label = f" ending in {last4}" if isinstance(last4, str) and len(last4) == 4 and last4.isdigit() else ""
-    return f"""
-## One-Time Payment Card
-Payment approval is complete. The requested one-time card{card_label} is ready. Do not call request_payment_card again for this checkout.
-
-Type only these secret refs into the payment fields:
-- Card number field: card_number
-- Cardholder name field: card_name
-- Expiry field: card_expiry
-- CVV field: card_cvv
-
-Continue the original browser task, including its instruction on whether to submit checkout."""
-
-
 def build_passwords_prompt_section(passwords: List[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
     """Build the passwords section for the browser agent system prompt.
 

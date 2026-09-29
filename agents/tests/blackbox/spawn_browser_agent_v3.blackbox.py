@@ -5377,39 +5377,6 @@ def test_build_autopay_prompt_section_no_card():
     out = build_autopay_prompt_section({"autoagentpaylimit_cents": 0, "card_number": ""}, "env")
     assert "call request_payment_card" in out
 
-def test_build_payment_card_resume_prompt_section():
-    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
-
-    out = build_payment_card_resume_prompt_section(
-        {
-            "card_number": "4111111111111111",
-            "card_name": "Rose Labs",
-            "card_expiry": "12/30",
-            "card_cvv": "123",
-        },
-        "7406",
-    )
-
-    assert "Payment approval is complete" in out
-    assert "7406" in out
-    assert "Do not call request_payment_card again" in out
-    assert "whether to submit checkout" in out
-    assert "submit the checkout form" not in out
-    assert "card_number" in out
-    assert "card_name" in out
-    assert "card_expiry" in out
-    assert "card_cvv" in out
-    assert "4111111111111111" not in out
-    assert "12/30" not in out
-    assert "123" not in out
-
-def test_build_payment_card_resume_prompt_section_requires_all_refs():
-    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
-
-    out = build_payment_card_resume_prompt_section({"card_number": "4111111111111111"})
-
-    assert out == ""
-
 def test_build_passwords_prompt_section_empty():
     from domains.spawn_browser_agent_v3.service_crypto import (
         build_passwords_prompt_section,
@@ -19789,9 +19756,6 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_cvv": "123",
     }
     assert resume_state["payment_card_last4"] == "4242"
-    assert resume_state["payment_card_request"]["merchant"] == "Blick Art Materials"
-    assert resume_state["payment_card_request"]["totalCents"] == 636
-    assert [item["name"] for item in resume_state["payment_card_request"]["lineItems"]] == ["Brush"]
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
@@ -19799,82 +19763,57 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert final_event.status == MessageStatus.FINISHED
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
 
-def test_payment_card_verifier_evidence_links_approved_request_without_secrets():
+def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
     from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
 
-    request = {
-        "merchant": "Rose Labs Test Payment",
-        "currency": "USD",
-        "totalCents": 4396,
-        "lineItems": [
-            {"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200},
-            {"name": "Ceramic Mug", "quantity": 1, "lineTotalCents": 900},
-            {"name": "Canvas Tote", "quantity": 1, "lineTotalCents": 1500},
-        ],
-        "userId": "private-user",
-        "fingerprint": "private-fingerprint",
-        "card_number": "4242424242424242",
-        "card_cvv": "123",
-    }
-    evidence = _build_payment_card_verifier_evidence("4242", request)
+    evidence = _build_payment_card_verifier_evidence("4242")
     assert evidence == {
         "role": "TOOL",
-        "text": "Approved one-time payment card last four: 4242. Approved request: "
-        + json.dumps(
-            {
-                "merchant": "Rose Labs Test Payment",
-                "currency": "USD",
-                "totalCents": 4396,
-                "lineItems": [
-                    {"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200},
-                    {"name": "Ceramic Mug", "quantity": 1, "lineTotalCents": 900},
-                    {"name": "Canvas Tote", "quantity": 1, "lineTotalCents": 1500},
-                ],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
+        "text": "Approved one-time payment card last four: 4242",
         "metadata": {
             "toolName": "payment_card_ready",
             "toolStatus": "FINISHED",
             "paymentCardLast4": "4242",
         },
     }
-    assert "private-user" not in str(evidence)
-    assert "private-fingerprint" not in str(evidence)
-    assert "4242424242424242" not in str(evidence)
-    assert "123" not in str(evidence)
     assert _build_payment_card_verifier_evidence("4242424242424242") is None
     assert _build_payment_card_verifier_evidence("42x2") is None
     assert _build_payment_card_verifier_evidence(None) is None
 
-async def test_approved_payment_request_is_available_to_browser_verifier():
+async def test_recorded_payment_request_survives_verifier_action_window():
+    from browser_tools.dom_service import ActionHistory
     from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
     from domains.spawn_browser_agent_v3.service import build_browser_verifier_context
 
-    approved_request = {
-        "merchant": "Rose Labs Test Payment",
-        "currency": "USD",
-        "totalCents": 4396,
-        "lineItems": [{"name": "Aurora Notebook", "quantity": 1, "lineTotalCents": 1200}],
-    }
+    action_history = ActionHistory()
+    action_history.restore_entries([
+        {"step": 1, "action": "request_payment_card", "result": {
+            "status": "approved", "payment_request": {
+                "merchant": "Rose Labs Test Payment", "total_cents": 4396,
+                "line_items": [{"name": "Aurora Notebook", "quantity": 1}],
+            }, "card_last4": "4242", "card_secret_refs": ["card_number", "card_name", "card_expiry", "card_cvv"]
+        }},
+        *({"step": step, "action": "input_text", "result": {"success": True}}
+          for step in range(2, 37)),
+    ])
     with patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])):
         context = await build_browser_verifier_context(
             goal="Request a card and leave checkout unsubmitted",
             current_url="https://example.com/checkout",
             browser_state={"dom_tree": "Pay $43.96", "page_stats": {}, "scroll_position": {}},
-            action_history=SimpleNamespace(get_entries=lambda: []),
+            action_history=action_history,
             config=SimpleNamespace(),
             session_id="session-1",
-            payment_card_evidence=_build_payment_card_verifier_evidence("4242", approved_request),
+            payment_card_evidence=_build_payment_card_verifier_evidence("4242"),
         )
-    payment_evidence = next(
-        entry for entry in context if entry.get("metadata", {}).get("toolName") == "payment_card_ready"
+    action_evidence = next(
+        entry for entry in context if entry.get("metadata", {}).get("toolName") == "action_history"
     )
-    assert "Rose Labs Test Payment" in payment_evidence["text"]
-    assert '"totalCents": 4396' in payment_evidence["text"]
-    assert '"name": "Aurora Notebook"' in payment_evidence["text"]
-    assert "4242" in payment_evidence["text"]
+    assert "request_payment_card" in action_evidence["text"]
+    assert "30 actions shown" in action_evidence["text"]
+    assert "Rose Labs Test Payment" in action_evidence["text"]
+    assert "4396" in action_evidence["text"]
+    assert "4242" in action_evidence["text"]
 
 async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
     from domains.spawn_browser_agent_v3.handler import _lookup_payment_purchase
@@ -20627,11 +20566,9 @@ def test_browser_resume_preserves_full_provider_transcript():
         visited_urls=[f"https://shop.example/page/{i}" for i in range(45)],
         verifier_checkpoints=[],
         browser_turn_messages=long_turns,
-        dynamic_system_context="Stable original browser context",
     )
     assert state["browser_turn_messages"] == long_turns
     assert len(state["visited_urls"]) == 45
-    assert state["dynamic_system_context"] == "Stable original browser context"
 
 
 def test_browser_resume_keeps_auth_attempts_and_task_summary():
@@ -20726,15 +20663,22 @@ def test_browser_resume_keeps_embedded_screenshots():
 
 
 def test_browser_payment_resume_keeps_cached_prompt_prefix():
-    from domains.spawn_browser_agent_v3.service_crypto import build_payment_card_resume_prompt_section
+    from copy import deepcopy
+
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.handler import _complete_pending_payment_card_result
     from providers.rose.browser_use import build_browser_use_messages
 
     goal = "Complete the approved checkout"
     dynamic_context = "Original browser context"
     prior_turns = [
         {"role": "assistant", "content": "I requested the card.", "tool_calls": [{"id": "call-payment", "type": "function", "function": {"name": "request_payment_card", "arguments": "{}"}}]},
-        {"role": "tool", "tool_call_id": "call-payment", "name": "request_payment_card", "content": '{"status":"awaiting_payment_card_approval"}'},
+        {"role": "tool", "tool_call_id": "call-payment", "name": "request_payment_card", "content": '{"status":"awaiting_payment_card_approval","payment_request":{"merchant":"Test Shop"}}'},
     ]
+    action_history = ActionHistory()
+    action_history.restore_entries([{"step": 1, "action": "request_payment_card", "result": {
+        "status": "awaiting_payment_card_approval", "payment_request": {"merchant": "Test Shop"}
+    }}])
     original = build_browser_use_messages(
         task=goal,
         browser_state={},
@@ -20743,11 +20687,13 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
         dynamic_system_context=dynamic_context,
         turn_messages=prior_turns,
     )
-    resumed_turns = list(prior_turns)
-    card_guidance = build_payment_card_resume_prompt_section(
-        {"card_number": "test", "card_name": "test", "card_expiry": "test", "card_cvv": "test"}, "7406"
+    resumed_turns = deepcopy(prior_turns)
+    assert _complete_pending_payment_card_result(
+        resumed_turns,
+        action_history,
+        last4="7406",
+        card_refs={"card_number": "PAN-secret", "card_name": "Name-secret", "card_expiry": "Expiry-secret", "card_cvv": "CVV-secret"},
     )
-    resumed_turns.append({"role": "user", "content": card_guidance.strip()})
     resumed = build_browser_use_messages(
         task=goal,
         browser_state={},
@@ -20756,10 +20702,27 @@ def test_browser_payment_resume_keeps_cached_prompt_prefix():
         dynamic_system_context=dynamic_context,
         turn_messages=resumed_turns,
     )
-    assert resumed[: len(original)] == original
-    assert len(resumed) == len(original) + 1
-    assert "7406" in resumed[-1]["content"]
+    assert resumed[:-1] == original[:-1]
+    assert len(resumed) == len(original)
+    result = json.loads(resumed[-1]["content"])
+    assert result["status"] == "approved"
+    assert result["card_last4"] == "7406"
+    assert result["card_secret_refs"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert result["payment_request"] == {"merchant": "Test Shop"}
+    assert action_history.get_entries()[0]["result"] == result
+    assert "PAN-secret" not in resumed[-1]["content"]
     assert sum("request_payment_card" in str(msg.get("tool_calls")) for msg in resumed) == 1
+    legacy_history = ActionHistory()
+    legacy_turns = deepcopy(prior_turns)
+    assert _complete_pending_payment_card_result(
+        legacy_turns, legacy_history, last4="7406",
+        card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"},
+    )
+    assert len(legacy_history.get_entries()) == 1
+    assert legacy_history.get_entries()[0]["result"]["status"] == "approved"
+    assert not _complete_pending_payment_card_result(
+        [], action_history, last4="7406", card_refs={"card_number": "PAN", "card_name": "N", "card_expiry": "E", "card_cvv": "C"}
+    )
 
 
 async def test_browser_resume_store_preserves_inline_and_external_snapshots():
@@ -20937,16 +20900,16 @@ async def run_all_tests():
     )
 
     r.record(
-        "payment_card_verifier_evidence_links_approved_request",
-        test_payment_card_verifier_evidence_links_approved_request_without_secrets,
+        "payment_card_verifier_evidence_only_last_four",
+        test_payment_card_verifier_evidence_exposes_only_valid_last_four,
     )
     r.record(
         "browser_resume_keeps_auth_attempts_and_task_summary",
         test_browser_resume_keeps_auth_attempts_and_task_summary,
     )
     await r.record_async(
-        "approved_payment_request_reaches_verifier",
-        test_approved_payment_request_is_available_to_browser_verifier,
+        "recorded_payment_request_survives_verifier_window",
+        test_recorded_payment_request_survives_verifier_action_window,
     )
     await r.record_async(
         "payment_lookup_backend_matched_legacy_fingerprint",
@@ -21260,11 +21223,6 @@ async def run_all_tests():
 
     r.record("build_autopay_prompt_section", test_build_autopay_prompt_section)
     r.record("build_autopay_prompt_section_no_card", test_build_autopay_prompt_section_no_card)
-    r.record("build_payment_card_resume_prompt_section", test_build_payment_card_resume_prompt_section)
-    r.record(
-        "build_payment_card_resume_prompt_section_requires_all_refs",
-        test_build_payment_card_resume_prompt_section_requires_all_refs,
-    )
     r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
     r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
     r.record("build_passwords_prompt_section_duplicate", test_build_passwords_prompt_section_duplicate_usernames)

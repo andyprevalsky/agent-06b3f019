@@ -168,11 +168,11 @@ from .service_actions import (
 )
 from .service_crypto import (
     PAYMENT_CARD_ENTRY_RULE,
+    PAYMENT_CARD_SECRET_REFS,
     ExtractedOTP,
     auth_realm_from_url,
     auth_realm_matches_url,
     build_autopay_prompt_section,
-    build_payment_card_resume_prompt_section,
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
@@ -254,65 +254,13 @@ def _normalize_funding_retry_seconds(value: Any) -> float:
     return min(max(retry_seconds, 1.0), 60.0)
 
 
-def _payment_card_request_evidence(request: Any) -> Optional[Dict[str, Any]]:
-    """Keep only the approved order facts needed to verify a minted card."""
-    if not isinstance(request, dict):
-        return None
-    merchant = request.get("merchant")
-    currency = request.get("currency")
-    total_cents = request.get("totalCents")
-    items = request.get("lineItems")
-    if (
-        not isinstance(merchant, str)
-        or not merchant.strip()
-        or not isinstance(currency, str)
-        or not currency.strip()
-        or isinstance(total_cents, bool)
-        or not isinstance(total_cents, int)
-        or not isinstance(items, list)
-        or not items
-    ):
-        return None
-    safe_items = []
-    for item in items:
-        if not isinstance(item, dict):
-            return None
-        name, quantity, amount = (
-            item.get("name"),
-            item.get("quantity"),
-            item.get("lineTotalCents"),
-        )
-        if (
-            not isinstance(name, str)
-            or not name.strip()
-            or isinstance(quantity, bool)
-            or not isinstance(quantity, int)
-            or isinstance(amount, bool)
-            or not isinstance(amount, int)
-        ):
-            return None
-        safe_items.append({"name": name, "quantity": quantity, "lineTotalCents": amount})
-    return {
-        "merchant": merchant,
-        "currency": currency,
-        "totalCents": total_cents,
-        "lineItems": safe_items,
-    }
-
-
-def _build_payment_card_verifier_evidence(
-    last4: Any, request: Any = None
-) -> Optional[Dict[str, Any]]:
+def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
     safe_last4 = _normalize_payment_card_last4(last4)
     if safe_last4 is None:
         return None
-    text = f"Approved one-time payment card last four: {safe_last4}"
-    safe_request = _payment_card_request_evidence(request)
-    if safe_request:
-        text += ". Approved request: " + json.dumps(safe_request, ensure_ascii=False, sort_keys=True)
     return {
         "role": "TOOL",
-        "text": text,
+        "text": f"Approved one-time payment card last four: {safe_last4}",
         "metadata": {
             "toolName": "payment_card_ready",
             "toolStatus": "FINISHED",
@@ -786,6 +734,58 @@ def _browser_turn_messages_for_resume(
     return list(browser_turn_messages or [])
 
 
+def _complete_pending_payment_card_result(
+    browser_turn_messages: List[Dict[str, Any]],
+    action_history: Any,
+    *,
+    last4: Optional[str],
+    card_refs: Dict[str, str],
+) -> bool:
+    """Resolve the real pending result in both saved browser histories."""
+    if not has_payment_card_secret_refs(card_refs):
+        return False
+    entries = action_history.get_entries()
+    pending_entry = next(
+        (
+            entry for entry in reversed(entries)
+            if entry.get("action") == "request_payment_card"
+            and (entry.get("result") or {}).get("status") in {
+                "needs_payment_card_approval", "awaiting_payment_card_approval"
+            }
+        ),
+        None,
+    )
+    for message in reversed(browser_turn_messages):
+        if message.get("role") != "tool" or message.get("name") != "request_payment_card":
+            continue
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(result, dict) or result.get("status") not in {
+            "needs_payment_card_approval",
+            "awaiting_payment_card_approval",
+        }:
+            continue
+        result["status"] = "approved"
+        result["card_last4"] = last4
+        result["card_secret_refs"] = list(PAYMENT_CARD_SECRET_REFS)
+        message["content"] = json_dumps_compact(result)
+        if pending_entry is None:
+            # Older paused activities saved the real tool result in the browser
+            # transcript but returned before recording its action-history entry.
+            entries.append({
+                "step": max((entry.get("step", 0) for entry in entries), default=0) + 1,
+                "action": "request_payment_card",
+                "result": dict(result),
+            })
+        else:
+            pending_entry["result"] = dict(result)
+        action_history.restore_entries(entries)
+        return True
+    return False
+
+
 def _browser_resume_continuity_state(
     *,
     action_history: Any,
@@ -795,7 +795,6 @@ def _browser_resume_continuity_state(
     reasoning_messages: Optional[List[str]] = None,
     action_summary: Optional[List[str]] = None,
     auth_runtime_state: Optional[AuthRuntimeState] = None,
-    dynamic_system_context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Serialize exact task continuity for inline or encrypted storage."""
     state = {
@@ -806,7 +805,6 @@ def _browser_resume_continuity_state(
         "reasoning_messages": list(reasoning_messages or []),
         "action_summary": list(action_summary or []),
         "auth_attempts": auth_runtime_state.snapshot() if auth_runtime_state is not None else None,
-        "dynamic_system_context": dynamic_system_context,
     }
     return state
 
@@ -4668,7 +4666,6 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "reasoning_messages",
     "action_summary",
     "auth_attempts",
-    "dynamic_system_context",
     "browser_resume_context_ref",
 )
 
@@ -5690,7 +5687,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
     payment_card_last4: Optional[str] = None
-    payment_card_request: Optional[Dict[str, Any]] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
@@ -5700,9 +5696,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
-        payment_card_request = _payment_card_request_evidence(
-            write_lock_resume_state.get("payment_card_request")
-        )
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -6780,17 +6773,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
-        prior_dynamic_context = (write_lock_resume_state or {}).get("dynamic_system_context")
-        if isinstance(prior_dynamic_context, str) and prior_dynamic_context:
-            if dynamic_system_context != prior_dynamic_context:
-                browser_turn_messages.append(
-                    {"role": "user", "content": "Trusted browser runtime context update:\n" + dynamic_system_context}
-                )
-            dynamic_system_context = prior_dynamic_context
         if (write_lock_resume_state or {}).get("approval_type") == "payment":
-            card_guidance = build_payment_card_resume_prompt_section(card_refs, payment_card_last4)
-            if card_guidance:
-                browser_turn_messages.append({"role": "user", "content": card_guidance.strip()})
+            if not _complete_pending_payment_card_result(
+                browser_turn_messages, action_history, last4=payment_card_last4, card_refs=card_refs
+            ):
+                raise RuntimeError("Approved payment card has no pending browser tool result to complete")
         failed_credential_prep_realms: Dict[str, str] = {}
 
         async def _prepare_credentials_for_url_unquarantined(
@@ -8180,7 +8167,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
                             auth_runtime_state=auth_runtime_state,
-                            dynamic_system_context=dynamic_system_context,
                         ),
                     )),
                 }
@@ -8706,9 +8692,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         action_history=action_history,
                         config=config,
                         session_id=session_id,
-                        payment_card_evidence=_build_payment_card_verifier_evidence(
-                            payment_card_last4, payment_card_request
-                        ),
+                        payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                         browser_checkpoints=verifier_checkpoints,
                     )
 
@@ -9497,7 +9481,6 @@ Based on this feedback, I need to continue working on the task and address the i
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
                             auth_runtime_state=auth_runtime_state,
-                            dynamic_system_context=dynamic_system_context,
                         ),
                     )),
                 }
@@ -9506,6 +9489,12 @@ Based on this feedback, I need to continue working on the task and address the i
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
                 payment_request = result.get("payment_request", {})
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="request_payment_card",
+                    thinking=thinking,
+                    result=dict(result),
+                )
                 logger.info(
                     "Payment card approval required - returning to workflow",
                     agent_id=agent_id,
@@ -9631,7 +9620,6 @@ Based on this feedback, I need to continue working on the task and address the i
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
                             auth_runtime_state=auth_runtime_state,
-                            dynamic_system_context=dynamic_system_context,
                         ),
                     )),
                 }
@@ -9802,9 +9790,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
-                    payment_card_evidence=_build_payment_card_verifier_evidence(
-                        payment_card_last4, payment_card_request
-                    ),
+                    payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                     browser_checkpoints=verifier_checkpoints,
                 )
                 final_verifier_prompt = build_verifier_prompt(
@@ -10413,7 +10399,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         prior_resume = write_lock_resume_state or {}
                         prior_payment_refs = prior_resume.get("payment_card_refs")
                         prior_payment_last4 = prior_resume.get("payment_card_last4")
-                        prior_payment_request = prior_resume.get("payment_card_request")
                         current_approvals = apply_user_write_lock_grant(
                             result.get("write_lock_approvals"),
                             approval_type,
@@ -10440,8 +10425,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state["payment_card_refs"] = prior_payment_refs
                         if prior_payment_last4:
                             write_lock_resume_state["payment_card_last4"] = prior_payment_last4
-                        if prior_payment_request:
-                            write_lock_resume_state["payment_card_request"] = prior_payment_request
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
@@ -10946,7 +10929,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
-                        "payment_card_request": _payment_card_request_evidence(payment_payload),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
@@ -11056,7 +11038,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     for payment_field in (
                         "payment_card_refs",
                         "payment_card_last4",
-                        "payment_card_request",
                     ):
                         if prior_resume.get(payment_field):
                             write_lock_resume_state[payment_field] = prior_resume[payment_field]

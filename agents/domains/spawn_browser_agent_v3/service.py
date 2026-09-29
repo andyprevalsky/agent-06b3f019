@@ -388,7 +388,20 @@ async def build_browser_verifier_context(
     assembly plus one ``list_session_files`` read \u2014 no LLM call, no side
     effects on the caller.
     """
-    action_entries = action_history.get_entries()[-30:]
+    all_action_entries = action_history.get_entries()
+    action_entries = all_action_entries[-30:]
+    # The card request can predate many form-fill actions. Keep its actual
+    # recorded result in the verifier's bounded history when it ages out.
+    if payment_card_evidence and not any(
+        entry.get("action") == "request_payment_card" for entry in action_entries
+    ):
+        card_request = next(
+            (entry for entry in reversed(all_action_entries[:-30])
+             if entry.get("action") == "request_payment_card"),
+            None,
+        )
+        if card_request is not None:
+            action_entries = [card_request, *action_entries[-29:]]
     action_details_lines = []
     for entry in action_entries:
         step = entry.get("step", "?")
