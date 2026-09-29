@@ -36,6 +36,12 @@ interface AgentCardSandboxSettlementDependencies {
   /** Optional override for already-CLEARED replay (unit tests / offline fixtures). */
   findClearedPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
   getCardPan?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
+  /**
+   * Last4 recorded at mint time (wallet-funding metadata). Used when AgentCard refuses
+   * `get_card_details` with `card_closed` so we can still prove the typed PAN belongs to THIS
+   * purchase without falling through to raw-Stripe tokenization.
+   */
+  getPurchaseCardLast4Hint?: (purchaseId: string) => Promise<string | null>;
   claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
   releaseHeldPurchaseClaim?: (purchaseId: string) => Promise<void>;
   testCharge?: (input: {
@@ -116,11 +122,12 @@ export async function getCardPan(
  *
  * A card the provider explicitly does not have (404 — e.g. the static provider rejecting a
  * pre-cutoff AgentCard id via `static_card_id_not_managed`) genuinely means "this stale HELD
- * purchase is somebody else's dead card, keep scanning". The same applies to `card_closed`:
- * AgentCard stops returning credentials after close, so a closed stale HELD purchase must be
- * skipped so settlement can reach the live OPEN card for the same total. Seen in
- * `agent-payment-idempotent-abandonment`: a leftover closed card on an earlier HELD purchase
- * made every confirm 502 with "Could not read the Rose card…" while the live card stayed OPEN.
+ * purchase is somebody else's dead card, keep scanning".
+ *
+ * `card_closed` is handled separately: AgentCard stops returning credentials after close, so a
+ * closed *stale* HELD must be skipped (see `agent-payment-idempotent-abandonment`), but a closed
+ * card whose mint-time last4 matches the typed PAN IS this purchase — settlement must fail closed
+ * (not 404→Stripe PCI) so the shopper can remint rather than raw-tokenizeizing the Rose PAN.
  *
  * Everything else — OAuth/setup gates, org rate limits, MCP transport errors, malformed provider
  * responses — means we simply COULD NOT READ the PAN. Treating those as "not this card" is a
@@ -131,9 +138,38 @@ export async function getCardPan(
 function isCardNotFoundFailure(error: unknown): boolean {
   if (!(error instanceof AgentCardProviderError)) return false;
   if (error.status === 404 || error.code === 'static_card_id_not_managed') return true;
+  return false;
+}
+
+function isCardClosedFailure(error: unknown): boolean {
+  if (!(error instanceof AgentCardProviderError)) return false;
   const code = typeof error.code === 'string' ? error.code.toLowerCase() : '';
   if (code === 'card_closed') return true;
   return /\bcard_closed\b/i.test(error.message);
+}
+
+function normalizeCardLast4(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const digits = value.replace(/\D/g, '');
+  if (digits.length < 4) return null;
+  return digits.slice(-4);
+}
+
+/**
+ * Mint records `last4` on PurchaseWalletFunding.metadata. When AgentCard later refuses
+ * get_card_details with card_closed, this is the only durable proof that the typed PAN belongs
+ * to this purchase (full PAN is gone).
+ */
+export async function getPurchaseCardLast4Hint(purchaseId: string): Promise<string | null> {
+  const funding = await prisma.purchaseWalletFunding.findUnique({
+    where: { purchaseId },
+    select: { metadata: true },
+  });
+  const metadata = funding?.metadata;
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return null;
+  }
+  return normalizeCardLast4((metadata as Record<string, unknown>).last4);
 }
 
 async function testCharge(input: {
@@ -238,19 +274,21 @@ async function readMatchingPurchasePan(
   purchase: HeldPurchase,
   inputCardNumber: string,
   readPan: (userId: string, agentId: string | null, cardId: string) => Promise<string>
-): Promise<'match' | 'mismatch' | 'skip_not_found'> {
+): Promise<'match' | 'mismatch' | 'skip_not_found' | 'skip_closed'> {
   if (purchase.cardId === null) return 'mismatch';
   // A candidate whose card the provider explicitly does not have is simply NOT this card — skip
   // it. Settlement is attempted for every PAN (routing is by ownership, not BIN), so an unrelated
   // shopper card can legitimately scan past stale HELD/CLEARED purchases whose provider card no
   // longer exists; throwing there would fail an ordinary Stripe checkout because of someone else's
-  // abandoned purchase. Any OTHER failure means the PAN could not be READ, which is not evidence
-  // of a mismatch — swallowing it silently mislabels the real Rose card as an ordinary card and
-  // leaves its purchase HELD while Stripe charges it raw. Fail closed on those.
+  // abandoned purchase. `card_closed` is a separate skip: credentials are gone, but mint-time
+  // last4 may still prove ownership (handled by the caller). Any OTHER failure means the PAN
+  // could not be READ — swallowing it silently mislabels the real Rose card as an ordinary card
+  // and leaves its purchase HELD while Stripe charges it raw. Fail closed on those.
   let pan: string;
   try {
     pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
   } catch (error) {
+    if (isCardClosedFailure(error)) return 'skip_closed';
     if (isCardNotFoundFailure(error)) return 'skip_not_found';
     log.error('AgentCard PAN lookup failed during settlement', {
       purchaseId: purchase.id,
@@ -266,6 +304,29 @@ async function readMatchingPurchasePan(
   return pan.replace(/\s+/g, '') === inputCardNumber ? 'match' : 'mismatch';
 }
 
+/**
+ * When get_card_details returns card_closed, prove ownership via mint-time last4.
+ *
+ * - Matching last4 on a still-HELD purchase → 409 (card closed; caller must remint — must NOT
+ *   404 into confirmTestPayment's raw-Stripe fallthrough; seen 2026-09-29 setup-resume).
+ * - Matching last4 on an already-CLEARED purchase → idempotent replay success (Pay re-submit).
+ * - No last4 / non-matching → treat as "not this card" and keep scanning.
+ */
+async function resolveClosedCardCandidate(
+  purchase: HeldPurchase,
+  inputCardNumber: string,
+  readLast4Hint: (purchaseId: string) => Promise<string | null>,
+  mode: 'held' | 'cleared'
+): Promise<'not_this_card' | 'closed_held_match' | 'cleared_replay'> {
+  const hint = normalizeCardLast4(await readLast4Hint(purchase.id));
+  const inputLast4 = normalizeCardLast4(inputCardNumber);
+  if (hint === null || inputLast4 === null || hint !== inputLast4) {
+    return 'not_this_card';
+  }
+  if (mode === 'cleared') return 'cleared_replay';
+  return 'closed_held_match';
+}
+
 export async function settleAgentCardSandboxPayment(
   input: AgentCardSandboxSettlementInput,
   dependencies: AgentCardSandboxSettlementDependencies = {}
@@ -274,6 +335,7 @@ export async function settleAgentCardSandboxPayment(
   const findClearedPurchases =
     dependencies.findClearedPurchasesByTotal ?? findClearedPurchasesByTotal;
   const readPan = dependencies.getCardPan ?? getCardPan;
+  const readLast4Hint = dependencies.getPurchaseCardLast4Hint ?? getPurchaseCardLast4Hint;
   const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
   const releaseClaim = dependencies.releaseHeldPurchaseClaim ?? releaseHeldPurchaseClaim;
   const charge = dependencies.testCharge ?? testCharge;
@@ -284,6 +346,19 @@ export async function settleAgentCardSandboxPayment(
     if (purchase.cardId === null) continue;
     const panMatch = await readMatchingPurchasePan(purchase, input.cardNumber, readPan);
     if (panMatch === 'skip_not_found' || panMatch === 'mismatch') continue;
+    if (panMatch === 'skip_closed') {
+      const closed = await resolveClosedCardCandidate(
+        purchase,
+        input.cardNumber,
+        readLast4Hint,
+        'held'
+      );
+      if (closed === 'not_this_card') continue;
+      throw new AgentCardSandboxSettlementError(
+        'Rose card for this purchase is closed; credentials are unavailable. Issue a new card.',
+        409
+      );
+    }
 
     // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we
     // cannot later capture. ADMIN purchases are the one legitimate exception: `issueAdminCompanyCard`
@@ -334,6 +409,20 @@ export async function settleAgentCardSandboxPayment(
   for (const purchase of clearedCandidates) {
     if (purchase.cardId === null) continue;
     const panMatch = await readMatchingPurchasePan(purchase, input.cardNumber, readPan);
+    if (panMatch === 'skip_closed') {
+      const closed = await resolveClosedCardCandidate(
+        purchase,
+        input.cardNumber,
+        readLast4Hint,
+        'cleared'
+      );
+      if (closed !== 'cleared_replay') continue;
+      return {
+        purchaseId: purchase.id,
+        cardId: purchase.cardId,
+        stripePaymentIntentId: purchase.stripePaymentIntentId,
+      };
+    }
     if (panMatch !== 'match') continue;
     return {
       purchaseId: purchase.id,

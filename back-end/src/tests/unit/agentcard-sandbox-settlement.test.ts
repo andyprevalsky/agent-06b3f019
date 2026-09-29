@@ -437,11 +437,17 @@ async function main(): Promise<void> {
       getCardPan: async (_userId, _agentId, cardId) => {
         if (cardId === 'card-closed-stale') {
           throw new AgentCardProviderError(
-            'get_card_details failed: card_closed: This card is closed and its credentials are no longer available. Issue a new card instead.'
+            'get_card_details failed: card_closed: This card is closed and its credentials are no longer available. Issue a new card instead.',
+            undefined,
+            undefined,
+            'card_closed'
           );
         }
         return '4242424242421316';
       },
+      // Stale closed card has a DIFFERENT last4 than the typed PAN — skip and settle live.
+      getPurchaseCardLast4Hint: async (purchaseId) =>
+        purchaseId === 'purchase-closed-stale' ? '9999' : '1316',
       claimHeldPurchaseForCharge: async () => true,
       testCharge: async () => ({}),
       markPurchaseCleared: async (purchaseId) => {
@@ -451,6 +457,80 @@ async function main(): Promise<void> {
   );
   assert.equal(closedResult.purchaseId, 'purchase-live-open');
   assert.deepEqual(closedCleared, ['purchase-live-open']);
+
+  // REGRESSION (agent-payment-setup-resume 2026-09-29): when the HELD purchase's OWN card is
+  // closed (shared-sandbox reclaim) and mint-time last4 matches the typed PAN, settlement must
+  // 409 — not 404. A 404 lets confirmTestPayment fall through to raw-PAN Stripe tokenization,
+  // which returns the PCI 500 "Sending credit card numbers directly to the Stripe API" while
+  // the agent loops on Pay with a dead Rose card.
+  await assert.rejects(
+    () =>
+      settleAgentCardSandboxPayment(
+        { cardNumber: '4242424242420887', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          findHeldPurchasesByTotal: async () => [
+            {
+              id: 'purchase-closed-own',
+              userId: 'user-1',
+              agentId: 'agent-1',
+              cardId: 'card-closed-own',
+              stripePaymentIntentId: 'pi_hold_closed_own',
+            },
+          ],
+          findClearedPurchasesByTotal: async () => [],
+          getCardPan: async () => {
+            throw new AgentCardProviderError(
+              'get_card_details failed: card_closed: This card is closed and its credentials are no longer available. Issue a new card instead.',
+              undefined,
+              undefined,
+              'card_closed'
+            );
+          },
+          getPurchaseCardLast4Hint: async () => '0887',
+          claimHeldPurchaseForCharge: async () => {
+            throw new Error('must not claim a closed Rose card');
+          },
+          testCharge: async () => {
+            throw new Error('must not charge a closed Rose card');
+          },
+        }
+      ),
+    (error: unknown) =>
+      error instanceof AgentCardSandboxSettlementError &&
+      error.statusCode === 409 &&
+      /closed/i.test(error.message)
+  );
+
+  // Closed CLEARED purchase with matching last4 still replays (Pay re-submit after close).
+  const closedClearedReplay = await settleAgentCardSandboxPayment(
+    { cardNumber: '4242424242420887', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      findHeldPurchasesByTotal: async () => [],
+      findClearedPurchasesByTotal: async () => [
+        {
+          id: 'purchase-cleared-closed',
+          userId: 'user-1',
+          agentId: 'agent-1',
+          cardId: 'card-cleared-closed',
+          stripePaymentIntentId: 'pi_hold_cleared_closed',
+        },
+      ],
+      getCardPan: async () => {
+        throw new AgentCardProviderError(
+          'get_card_details failed: card_closed: This card is closed and its credentials are no longer available. Issue a new card instead.',
+          undefined,
+          undefined,
+          'card_closed'
+        );
+      },
+      getPurchaseCardLast4Hint: async () => '0887',
+    }
+  );
+  assert.deepEqual(closedClearedReplay, {
+    purchaseId: 'purchase-cleared-closed',
+    cardId: 'card-cleared-closed',
+    stripePaymentIntentId: 'pi_hold_cleared_closed',
+  });
 
   // Regression: a failed charge must RELEASE the claim so a retry can settle.
   //
