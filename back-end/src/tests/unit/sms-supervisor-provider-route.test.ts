@@ -23,9 +23,8 @@ test('defaults to rose-fast pool path — no exclusive cerebras / gpt-oss overri
 
   // Default assignment must NOT pin direct-cerebras. The only remaining
   // 'direct-cerebras' mention is inside the benchmark route-override allowlist.
-  const allowlistHits = (
-    SUPERVISOR_LLM_SOURCE.match(/routeOverride === 'direct-cerebras'/g) ?? []
-  ).length;
+  const allowlistHits = (SUPERVISOR_LLM_SOURCE.match(/routeOverride === 'direct-cerebras'/g) ?? [])
+    .length;
   assert.equal(allowlistHits, 1, 'direct-cerebras may appear only as a benchmark allowlist check');
   const allDirectHits = (SUPERVISOR_LLM_SOURCE.match(/direct-cerebras/g) ?? []).length;
   assert.equal(
