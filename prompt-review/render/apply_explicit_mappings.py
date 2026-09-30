@@ -23,6 +23,16 @@ CATALOG = ROOT / "prompt-review" / "catalog.json"
 # "no candidate"). A string = the matched ID in that repo.
 MAPPINGS: dict[str, dict[str, str | None]] = {
     # --- canonical instruction blocks (our shared rules) ----------------------
+    "USER_FACING_WRITING_STYLE": {
+        "claude": None,
+        "openclaw": None,
+        "hermes": None,
+    },
+    "USER_FACING_WRITING_STYLE_TS": {
+        "claude": None,
+        "openclaw": None,
+        "hermes": None,
+    },
     "VERIFICATION_RULES": {
         "claude": None,        # Claude has no separate grader/verifier
         "openclaw": None,
@@ -238,6 +248,16 @@ MAPPINGS: dict[str, dict[str, str | None]] = {
 def main() -> int:
     cat = json.loads(CATALOG.read_text())
     approved_mappings: dict[str, dict[str, str | None]] = {
+        "USER_FACING_WRITING_STYLE": {
+            "claude": None,
+            "openclaw": None,
+            "hermes": None,
+        },
+        "USER_FACING_WRITING_STYLE_TS": {
+            "claude": None,
+            "openclaw": None,
+            "hermes": None,
+        },
         "build_system_prompt": {
             "claude": "claude_getSystemPrompt",
             "openclaw": "openclaw_buildAgentSystemPrompt",
