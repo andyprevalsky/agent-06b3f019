@@ -1,5 +1,6 @@
 import { PrismaClient, IntegrationStatus, IntegrationType } from '@prisma/client';
 import dotenv from 'dotenv';
+import { basename } from 'node:path';
 import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
@@ -21,8 +22,7 @@ const USER_IDS: Record<string, string> = {
  * `ADMIN_BYPASS_USER_ID` in agents/benchmarks/local.py. The admin-bypass gate runs as this user
  * under `purchase-subscription` mode (via BENCHMARK_USER_ID override).
  */
-export const ADMIN_SUBSCRIPTION_BYPASS_USER_ID =
-  '00000000-0000-4000-8000-000000000105'; // pragma: allowlist secret
+export const ADMIN_SUBSCRIPTION_BYPASS_USER_ID = '00000000-0000-4000-8000-000000000105'; // pragma: allowlist secret
 
 type FixtureMode = 'purchase-subscription' | 'purchase-kyc' | 'source-connect';
 
@@ -71,14 +71,16 @@ async function ensureUser(mode: FixtureMode, userId: string): Promise<void> {
  */
 export async function seedOrgManagedAgentCardForUser(
   userId: string,
-  cardholderId: string
+  cardholderId: string,
+  client: PrismaClient = prisma
 ): Promise<void> {
   const config = { orgManaged: true, cardholderId };
-  await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'agentcard' } },
+  await client.integration.upsert({
+    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
       userId,
       name: 'agentcard',
+      accountId: '',
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
@@ -165,11 +167,13 @@ async function main(): Promise<void> {
   }
 }
 
-main()
-  .catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+if (basename(process.argv[1] || '') === 'gate-benchmark-fixture.ts') {
+  main()
+    .catch((error) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}
