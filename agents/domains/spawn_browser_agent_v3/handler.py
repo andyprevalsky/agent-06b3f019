@@ -347,6 +347,33 @@ async def record_used_passkey_credentials(
     return recorded_count
 
 
+async def _await_bounded_browser_cleanup(
+    coro: Any,
+    *,
+    timeout_s: float,
+    timeout_message: str,
+    failure_message: str,
+) -> None:
+    """Run cleanup under a hard deadline that does not await cancellation.
+
+    ``asyncio.wait_for`` cancels the inner awaitable and then waits for that
+    cancellation to finish. ``DomService.disconnect`` catches CancelledError while
+    draining the captcha indicator task, then continues into ``session.stop()`` —
+    so a wedged CDP stop would still block past the deadline. Own the task and
+    abandon it when the deadline expires; unfinished cleanup is logged and left
+    to GC so payment/write-lock returns always resume.
+    """
+    task = asyncio.create_task(coro)
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if task in done:
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(failure_message, error=extract_error_message(exc))
+        return
+    task.cancel()
+    logger.warning(timeout_message, timeout_s=timeout_s)
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
@@ -361,36 +388,18 @@ async def disconnect_browser_after_passkey_capture(
     only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
     Bound both steps so approval/handoff paths always resume.
     """
-    try:
-        await asyncio.wait_for(
-            capture_passkey_usage(),
-            timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Passkey usage capture timed out before disconnect",
-            timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Passkey usage capture failed before disconnect",
-            error=extract_error_message(exc),
-        )
-    try:
-        await asyncio.wait_for(
-            dom_service.disconnect(),
-            timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Browser disconnect timed out; continuing terminal return",
-            timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Browser disconnect failed; continuing terminal return",
-            error=extract_error_message(exc),
-        )
+    await _await_bounded_browser_cleanup(
+        capture_passkey_usage(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Passkey usage capture timed out before disconnect",
+        failure_message="Passkey usage capture failed before disconnect",
+    )
+    await _await_bounded_browser_cleanup(
+        dom_service.disconnect(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser disconnect timed out; continuing terminal return",
+        failure_message="Browser disconnect failed; continuing terminal return",
+    )
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -10708,9 +10717,11 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # simply asked for a cart larger than the org-wallet float).
                     if card.get("status") == "purchase_above_max_limit":
                         limit = card.get("maxPurchaseCents")
-                        limit_text = (
-                            f" of {limit}" if isinstance(limit, int) else ""
-                        )
+                        if isinstance(limit, int):
+                            dollars = limit / 100
+                            limit_text = f" of ${dollars:.2f} ({limit} cents)"
+                        else:
+                            limit_text = ""
                         message = str(
                             card.get("error")
                             or f"Purchase is above max limit{limit_text}."

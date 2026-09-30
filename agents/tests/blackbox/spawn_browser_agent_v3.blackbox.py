@@ -13402,7 +13402,11 @@ async def test_disconnect_browser_captures_passkey_usage_before_disconnect():
 
 
 async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
-    """Payment/write-lock return must not hang forever on wedged CDP disconnect."""
+    """Payment/write-lock return must not hang forever on wedged CDP disconnect.
+
+    Also covers DomService.disconnect swallowing CancelledError then hanging in
+    session.stop() — wait_for would still block; the hard-deadline helper must not.
+    """
     import asyncio
 
     from domains.spawn_browser_agent_v3 import config as browser_config
@@ -13414,11 +13418,16 @@ async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
         events.append("capture_started")
         await asyncio.sleep(3600)
 
-    async def hung_disconnect():
+    async def hung_disconnect_swallows_cancel():
         events.append("disconnect_started")
-        await asyncio.sleep(3600)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("disconnect_cancelled")
+            await asyncio.sleep(3600)
+            events.append("disconnect_post_cancel_hang")
 
-    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=hung_disconnect))
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=hung_disconnect_swallows_cancel))
     original_timeout = browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS
     browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = 0.05
     try:
@@ -13436,7 +13445,8 @@ async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
     finally:
         browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = original_timeout
 
-    assert events == ["capture_started", "disconnect_started"]
+    assert "capture_started" in events and "disconnect_started" in events
+    assert "disconnect_post_cancel_hang" not in events
     assert elapsed < 2.0
     dom_service.disconnect.assert_awaited_once()
 
