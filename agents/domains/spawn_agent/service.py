@@ -857,13 +857,20 @@ async def spawn_explore_agent_activity(
         if _oai_demo:
             result = await run_agent_coro
         else:
+            deadline_expired = False
             try:
-                result = await asyncio.wait_for(
-                    run_agent_coro,
-                    timeout=LIVE_EXPLORE_PARENT_WAIT.total_seconds()
-                    - LIVE_EXPLORE_DRAIN_SLACK_SECONDS,
-                )
+                async with asyncio.timeout(
+                    LIVE_EXPLORE_PARENT_WAIT.total_seconds() - LIVE_EXPLORE_DRAIN_SLACK_SECONDS
+                ) as deadline:
+                    result = await run_agent_coro
             except asyncio.TimeoutError:
+                deadline_expired = True
+            else:
+                deadline_expired = deadline.expired()
+            if deadline_expired:
+                # run_agent catches CancelledError and returns status="paused".
+                # The timeout context distinguishes that local wind-down from
+                # an external pause, which must keep its cancellation behavior.
                 logger.info("Explore agent returning gathered evidence before parent wait")
                 result = {"status": "completed"}
     finally:

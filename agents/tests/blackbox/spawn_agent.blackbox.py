@@ -3292,6 +3292,82 @@ async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
     assert result["tool_call_results"]
 
 
+async def test_spawn_explore_self_wrap_recovers_paused_loop_result():
+    """A loop that swallows the local deadline cancellation still returns evidence."""
+    from datetime import timedelta
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "Denver single-person monthly cost excluding rent: $1,303.8.",
+            "usage": {"llm": [], "service": []},
+        }
+    )
+    caught_cancel = False
+
+    async def fake_run_agent(**kwargs):
+        nonlocal caught_cancel
+        await kwargs["execute_tool"](
+            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
+        )
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            caught_cancel = True
+            return {"status": "paused"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_PARENT_WAIT", timedelta(milliseconds=50)),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert caught_cancel
+    assert result["status"] == "completed"
+    assert "$1,303.8" in result["result"]
+
+
+async def test_spawn_explore_external_pause_is_not_self_wrap():
+    """An external cancellation remains paused while the live deadline is open."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    started = asyncio.Event()
+
+    async def fake_run_agent(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return {"status": "paused"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_PARENT_WAIT", timedelta(seconds=5)),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        task = asyncio.create_task(
+            spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research", model="m")
+        )
+        await started.wait()
+        task.cancel()
+        result = await task
+
+    assert result["status"] == "error"
+    assert result["error_reason"] == "paused"
+
+
 async def test_spawn_explore_self_wrap_without_evidence_fails():
     """The same live deadline cannot turn an empty explore into success."""
     from datetime import timedelta
@@ -4502,6 +4578,14 @@ async def run_all_tests():
     await r.record_async(
         "explore_self_wrap_returns_collected_tool_evidence",
         test_spawn_explore_self_wrap_returns_collected_tool_evidence,
+    )
+    await r.record_async(
+        "explore_self_wrap_recovers_paused_loop_result",
+        test_spawn_explore_self_wrap_recovers_paused_loop_result,
+    )
+    await r.record_async(
+        "explore_external_pause_is_not_self_wrap",
+        test_spawn_explore_external_pause_is_not_self_wrap,
     )
     await r.record_async(
         "explore_self_wrap_without_evidence_fails",
