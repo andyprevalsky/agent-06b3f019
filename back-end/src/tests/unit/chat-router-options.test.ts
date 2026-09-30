@@ -12,6 +12,7 @@ import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import {
   parsePartialRouterDecisionJson,
   parseRouterDecisionAfterDeadline,
+  parseRouterDecisionJson,
 } from '../../providers/chat/routerDecision';
 
 async function run(): Promise<void> {
@@ -36,6 +37,25 @@ async function run(): Promise<void> {
   assert.equal(options.effort, 'minimal');
   assert.equal(options.response_format?.json_schema.name, 'router_decision');
   assert.equal(options.response_format?.json_schema.strict, true);
+
+  const providerAction =
+    'start_superintelligence(goal="Inspect the \\"workspace\\" file list, once", mode="execute")';
+  assert.deepEqual(parseRouterDecisionJson(providerAction), {
+    action: 'start_superintelligence',
+    goal: 'Inspect the "workspace" file list, once',
+    mode: 'execute',
+    reasoning: 'Route selected from a provider action response.',
+  });
+  assert.deepEqual(
+    parseRouterDecisionAfterDeadline(providerAction, providerAction),
+    parseRouterDecisionJson(providerAction)
+  );
+  assert.throws(() =>
+    parseRouterDecisionJson('start_superintelligence(goal="ok", mode="invalid")')
+  );
+  assert.throws(() =>
+    parseRouterDecisionJson('start_superintelligence(goal="ok", mode="plan");do_bad()')
+  );
 
   assert.equal(DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS, 3_000);
   assert.equal(
