@@ -163,5 +163,11 @@ fields matched. The two purchase fingerprints differed, so the backend minted
 another card. Both the agents-side fingerprint builder and the backend's
 stored-receipt backfill now ignore that exact matching quantity echo. A replay
 of the two archived request payloads produces one canonical fingerprint, and
-the tests keep a mismatched quantity distinct. Another exact live run is still
-required to prove settlement and reuse together.
+the tests keep a mismatched quantity distinct. The next exact live run
+(`49095574-4a49-4d4b-ad21-ee8b0b2da186`) passed in 289 seconds: both browser
+requests used fingerprint `d54a9df1…`, the second lookup returned `reusable:
+true`, and both payment-card responses returned the same provider card ID
+`card_b4d522c1e7d8eca7f9af1aa9`. The terminal lifecycle had one purchase,
+one wallet funding, one Stripe payment intent, and one local card. This proves
+the idempotency path in that run; the shared cardholder still needs provider
+isolation to prevent unrelated workspaces from affecting future runs.
