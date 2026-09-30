@@ -374,6 +374,7 @@ async function callGeneratorLlmCore(
     agentId: params.agentId,
     attempt: async (attempt) => {
       lastStreamedText = '';
+      const skipFastCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
       usage.prompt_tokens = 0;
       usage.completion_tokens = 0;
@@ -390,9 +391,10 @@ async function callGeneratorLlmCore(
         await attention.start();
       }
       // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
-      // Retries skip cache — a miss/invalid hit would otherwise replay the same JSON.
+      // After a cache-won miss, skip cache so the same invalid JSON is not replayed.
+      // A live timeout still hedges cache on retry.
       let stream: AsyncIterable<CompletionChunk>;
-      if (attempt === 1 && fcKey && fastModeRead) {
+      if (fcKey && fastModeRead && !skipFastCache) {
         stream = createGeneratorCacheStream({
           agentId: params.agentId,
           cacheKey: fcKey,

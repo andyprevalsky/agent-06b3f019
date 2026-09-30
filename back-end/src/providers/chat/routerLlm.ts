@@ -267,6 +267,7 @@ export async function callRouterLlm(params: {
     agentId: params.agentId,
     attempt: async (attempt) => {
       lastStreamedText = '';
+      const skipFastCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
       usage.prompt_tokens = 0;
       usage.completion_tokens = 0;
@@ -305,7 +306,7 @@ export async function callRouterLlm(params: {
         );
 
       let stream: AsyncIterable<CompletionChunk>;
-      if (attempt === 1 && fcKey && fastModeRead) {
+      if (fcKey && fastModeRead && !skipFastCache) {
         const cacheKey = fcKey;
         stream = delayedCacheStreamHedge({
           readCache: async (): Promise<CacheLookupResult<string>> => {
