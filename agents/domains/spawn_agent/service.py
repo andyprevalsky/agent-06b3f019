@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -115,9 +116,27 @@ def compile_explore_wrap_up(
         elif raw.strip():
             parts.append(raw.strip())
     compiled = "\n\n".join(parts)
-    if len(compiled) > budget:
-        compiled = compiled[:budget] + "\n\n[truncated]"
-    return compiled
+    if len(compiled) <= budget:
+        return compiled
+    if len(parts) == 1:
+        return compiled[:budget] + "\n\n[truncated]"
+
+    # A single web_search result can be >8 KB. Taking the first 12 KB of the
+    # concatenation hides later searches entirely, so the parent sees cost data
+    # but misses neighborhoods or weather and delegates the same work again.
+    # Give each result a share of the bounded payload and retain source URLs.
+    per_result_budget = max(80, (budget - 2 * (len(parts) - 1)) // len(parts))
+    balanced: list[str] = []
+    for part in parts:
+        if len(part) <= per_result_budget:
+            balanced.append(part)
+            continue
+        urls = list(dict.fromkeys(re.findall(r"https?://[^\s\\\"']+", part)))
+        sources = "\nSources: " + ", ".join(urls[:3]) if urls else ""
+        sources = sources[: min(400, per_result_budget // 4)]
+        excerpt_budget = max(1, per_result_budget - len(sources) - len("\n[excerpt truncated]"))
+        balanced.append(part[:excerpt_budget] + sources + "\n[excerpt truncated]")
+    return "\n\n".join(balanced)[:budget]
 
 
 _SOURCE_GOAL_TERMS = {

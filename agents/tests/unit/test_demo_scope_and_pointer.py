@@ -813,6 +813,20 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert "excerpt" in compile_explore_wrap_up("", ["prefix **Result:** excerpt"])
     assert compile_explore_wrap_up("", ["  raw-tool  "]) == "raw-tool"
     assert "[truncated]" in compile_explore_wrap_up("", ["x" * 200], budget=20)
+    balanced = compile_explore_wrap_up(
+        "",
+        [
+            "[web_search] Cost of living " + "x" * 3000 + " https://example.com/cost",
+            "[web_search] Neighborhoods " + "y" * 3000 + " https://example.com/neighborhoods",
+            "[web_search] Weather " + "z" * 3000 + " https://example.com/weather",
+        ],
+        budget=2400,
+    )
+    assert len(balanced) <= 2400
+    assert "Cost of living" in balanced and "Neighborhoods" in balanced and "Weather" in balanced
+    assert "https://example.com/cost" in balanced
+    assert "https://example.com/neighborhoods" in balanced
+    assert "https://example.com/weather" in balanced
     assert _has_usable_tool_evidence(None) is False
     assert _has_usable_tool_evidence("error: nope") is False
     assert _has_usable_tool_evidence("Huberman notes") is True
