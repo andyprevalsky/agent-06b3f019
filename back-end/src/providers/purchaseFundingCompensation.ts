@@ -112,7 +112,7 @@ async function ensureIssuedCardIsRecorded(
     'usd',
     minted.cardId,
     transferId,
-    minted.metadata
+    { ...(minted.metadata ?? {}), last4: minted.last4 }
   );
   return { cardId: minted.cardId, staticCard: false };
 }

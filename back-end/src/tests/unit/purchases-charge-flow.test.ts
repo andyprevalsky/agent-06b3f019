@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { MAX_PURCHASE_CENTS, PURCHASE_ABOVE_MAX_LIMIT_CODE } from '../../domains/purchases/config';
 import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
 import {
@@ -373,8 +374,12 @@ async function main(): Promise<void> {
       /Only USD purchases/
     );
     await assert.rejects(
-      () => mintPurchaseCard(mintInput(userId, { totalCents: 5_000_000 })),
-      (error: unknown) => error instanceof PurchaseError && error.statusCode === 402
+      () => mintPurchaseCard(mintInput(userId, { totalCents: MAX_PURCHASE_CENTS + 1 })),
+      (error: unknown) =>
+        error instanceof PurchaseError &&
+        error.statusCode === 400 &&
+        error.code === PURCHASE_ABOVE_MAX_LIMIT_CODE &&
+        error.message === `Purchase is above max limit of ${MAX_PURCHASE_CENTS}`
     );
   });
 
