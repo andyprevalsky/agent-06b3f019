@@ -256,7 +256,7 @@ export async function classifyFailureBestEffort(
     for await (const chunk of stream) {
       structuredOutput.addCompletionChunk(chunk);
     }
-    const content = structuredOutput.finalText();
+    const content = structuredOutput.currentText();
 
     const parsed = parseClassifierResponse(content);
     return {

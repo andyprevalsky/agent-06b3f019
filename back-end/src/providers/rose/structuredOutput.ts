@@ -62,6 +62,15 @@ export class StructuredOutputAccumulator {
     return this.select(false);
   }
 
+  isAmbiguous(): boolean {
+    const allItems = [...this.items.values()];
+    const finalItems = allItems.filter((item) => item.phase === 'final_answer');
+    if (finalItems.length > 1) return true;
+    if (finalItems.length === 1) return false;
+    const eligibleItems = allItems.filter((item) => !IGNORED_PHASES.has(item.phase));
+    return eligibleItems.length > 1;
+  }
+
   finalText(): string {
     return this.select(true);
   }
@@ -71,6 +80,7 @@ export class StructuredOutputAccumulator {
     const finalItems = allItems.filter((item) => item.phase === 'final_answer');
     if (finalItems.length === 1) return finalItems[0].parts.join('');
     if (finalItems.length > 1) {
+      if (!requireExactlyOne) return '';
       throw new StructuredOutputCardinalityError(
         `Expected one final_answer item, received ${finalItems.length}`
       );

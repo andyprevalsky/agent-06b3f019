@@ -46,7 +46,28 @@ function main(): void {
   );
   assert.throws(
     () => parseRouterDecisionJson(JSON.stringify({ action: 'direct_answer' })),
-    /requires reasoning/
+    /failed schema/i
+  );
+  assert.deepEqual(
+    parseRouterDecisionJson(
+      JSON.stringify({
+        action: 'direct_answer',
+        reasoning: 'answer directly',
+        query: '',
+        goal: '',
+        mode: 'plan',
+      })
+    ),
+    { action: 'direct_answer', reasoning: 'answer directly' },
+    'provider-flat unused fields must strip through the Zod schema'
+  );
+  assert.throws(
+    () =>
+      parseRouterDecisionJson(
+        JSON.stringify({ action: 'web_search', reasoning: 'search', query: '' })
+      ),
+    /failed schema/i,
+    'empty web_search query is not a healthy decision'
   );
 
   // INVARIANT: the cache validator, the live parser, and `RouterDecisionSchema` must never disagree.

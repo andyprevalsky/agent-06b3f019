@@ -14,7 +14,11 @@
 import { createStreamingCompletion, CompletionMessage, CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { createLogger } from '../logger';
-import { SUPERVISOR_RESPONSE_MODEL } from './schema';
+import {
+  SmsSupervisorResponseSchema,
+  SmsSupervisorToolCallSchema,
+  SUPERVISOR_RESPONSE_MODEL,
+} from './schema';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import type { SupervisorComputeToken } from './supervisorComputeToken';
 import type { ToolCall } from './supervisorTools';
@@ -194,21 +198,12 @@ export function finalizeSupervisorResponse(
     };
   }
 
-  // Content-path envelope (Codex / waterfall). finalText() is INSIDE the try:
-  // a reasoning-only / empty / ambiguous stream makes the extractor throw
-  // StructuredOutputCardinalityError — same "nothing actionable" condition as
-  // a JSON parse failure. Empty tool_calls → supervisor loop nudge-and-retry.
-  let accumulatedContent = '';
-  let parsed: SupervisorResponse;
+  // Content-path envelope (Codex / waterfall). currentText() never throws
+  // cardinality. Empty / unparseable / schema-invalid envelopes nudge-retry.
+  const accumulatedContent = structuredOutput.currentText();
+  let candidate: unknown;
   try {
-    accumulatedContent = structuredOutput.finalText();
-    const candidate: unknown = JSON.parse(accumulatedContent);
-    // JSON.parse happily returns null / primitives / arrays. Treat non-objects
-    // as parse failure so we take the nudge-retry path instead of throwing.
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
-    }
-    parsed = candidate as SupervisorResponse;
+    candidate = accumulatedContent ? JSON.parse(accumulatedContent) : null;
   } catch (error) {
     log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
@@ -217,20 +212,43 @@ export function finalizeSupervisorResponse(
     });
     return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
+  if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
+      error: `Structured output was not a JSON object (got ${typeof candidate})`,
+      rawContent: accumulatedContent.substring(0, 500),
+      contentLength: accumulatedContent.length,
+    });
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
+  }
 
-  const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
-  // Provider JSON is untrusted: drop entries without a string `tool` rather
-  // than letting them reach the dispatcher (or throw inside this log call).
-  const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
-  const toolCalls = rawToolCalls.filter(
-    (tc): tc is (typeof rawToolCalls)[number] =>
-      tc !== null && typeof tc === 'object' && typeof (tc as { tool?: unknown }).tool === 'string'
-  );
+  const raw = candidate as { reasoning?: unknown; tool_calls?: unknown };
+  const reasoning = typeof raw.reasoning === 'string' ? raw.reasoning : '';
+  const rawToolCalls = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
+  const toolCalls: ToolCall[] = [];
+  for (const tc of rawToolCalls) {
+    const parsedTool = SmsSupervisorToolCallSchema.safeParse(tc);
+    if (parsedTool.success) {
+      toolCalls.push({
+        tool: parsedTool.data.tool,
+        arguments: parsedTool.data.arguments as Record<string, unknown>,
+      });
+    }
+  }
   if (toolCalls.length !== rawToolCalls.length) {
     log.warn('[SmsSupervisorLLM] Discarded malformed tool_call entries', {
       received: rawToolCalls.length,
       usable: toolCalls.length,
     });
+  }
+
+  const envelope = SmsSupervisorResponseSchema.safeParse({ reasoning, tool_calls: toolCalls });
+  if (!envelope.success) {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
+      error: envelope.error.issues[0]?.message ?? 'invalid supervisor envelope',
+      rawContent: accumulatedContent.substring(0, 500),
+      contentLength: accumulatedContent.length,
+    });
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
   log.info('[SmsSupervisorLLM] Parsed response', {

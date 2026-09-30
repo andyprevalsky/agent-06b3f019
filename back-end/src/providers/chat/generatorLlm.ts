@@ -5,6 +5,7 @@
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
+import { z } from 'zod';
 import {
   createStreamingCompletion,
   markCacheable,
@@ -18,9 +19,18 @@ import { goalHash } from '../fastCacheNormalizeCore';
 import { contentKey } from '../fastCacheNormalizeKeys';
 import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
-import { downloadFromStorage } from '../storage';
 import { createLogger } from '../logger';
-import type { ChatLlmUsage } from './routerLlm';
+import {
+  buildMultimodalContentFromFile,
+  isValidFilePointer,
+  type MultimodalContentBlock,
+} from './chatMultimodal';
+import {
+  accumulateChatLlmUsage,
+  applyChunkUsage,
+  emptyChatLlmUsage,
+  type ChatLlmUsage,
+} from './routerLlm';
 import type { ChatProviderRoute } from './phaseModels';
 import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
 import {
@@ -33,131 +43,48 @@ import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
-import { isValidFilePointer, type FilePointer } from './filePointerValidation';
+import { ChatLlmTransientMissError, regenerateOnChatStructuredMiss } from './chatStructuredRetry';
+
+export const GeneratorResponseSchema = z.object({
+  reasoning: z.string(),
+  response: z.string().min(1),
+});
+
+export function requireGeneratorParsedJson(fullJson: string): {
+  reasoning: string;
+  response: string;
+} {
+  if (!fullJson) {
+    throw new ChatLlmTransientMissError('empty', 'Generator LLM returned no content');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fullJson);
+  } catch (error) {
+    throw new ChatLlmTransientMissError(
+      'parse',
+      `Failed to parse generator response as JSON: ${fullJson.substring(0, 200)}`,
+      { cause: error }
+    );
+  }
+  const result = GeneratorResponseSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new ChatLlmTransientMissError(
+      'parse',
+      `Generator response failed schema: ${result.error.issues[0]?.message ?? 'invalid'}`
+    );
+  }
+  return result.data;
+}
 
 const log = createLogger('GeneratorLLM');
 
-// ============================================
-// Message format for LLM calls
-// ============================================
+// FilePointer interface for type safety when processing
 interface ChatMessage {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   text: string;
-  filePointer?: Record<string, unknown>; // FilePointer from DB JSON - validated at runtime
+  filePointer?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
-}
-
-// File size threshold for inline content (20MB)
-const LLM_INLINE_THRESHOLD = 20 * 1024 * 1024;
-
-// File type helpers
-const IMAGE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-  'image/webp',
-]);
-const TEXT_MIME_TYPES = new Set([
-  'text/plain',
-  'text/csv',
-  'text/markdown',
-  'text/html',
-  'application/json',
-  'application/xml',
-]);
-
-// ============================================
-// Build multimodal content from a file pointer
-// Downloads from storage and converts to base64 for LLM
-// ============================================
-type MultimodalContentBlock = {
-  type: string;
-  text?: string;
-  image_url?: { url: string };
-  file?: { filename: string; file_data: string };
-};
-
-async function buildMultimodalContentFromFile(
-  text: string,
-  filePointer: FilePointer
-): Promise<MultimodalContentBlock[]> {
-  const content: MultimodalContentBlock[] = [];
-
-  // File too large for inline content
-  if (filePointer.size_bytes >= LLM_INLINE_THRESHOLD) {
-    const sizeStr = (filePointer.size_bytes / 1024 / 1024).toFixed(1);
-    content.push({
-      type: 'text',
-      text: text
-        ? `${text}\n\n[Attached: ${filePointer.original_filename} (${sizeStr}MB) - too large for inline viewing]`
-        : `[Attached: ${filePointer.original_filename} (${sizeStr}MB) - too large for inline viewing]`,
-    });
-    return content;
-  }
-
-  try {
-    // Download file from storage
-    const fileBuffer = await downloadFromStorage(filePointer.storage_path);
-    const base64 = fileBuffer.toString('base64');
-
-    if (IMAGE_MIME_TYPES.has(filePointer.mime_type)) {
-      // Image: add as image_url content block
-      if (text) {
-        content.push({ type: 'text', text });
-      }
-      content.push({
-        type: 'image_url',
-        image_url: {
-          url: `data:${filePointer.mime_type};base64,${base64}`,
-        },
-      });
-    } else if (
-      TEXT_MIME_TYPES.has(filePointer.mime_type) ||
-      filePointer.mime_type.startsWith('text/')
-    ) {
-      // Text file: decode and add as text
-      const decoded = fileBuffer.toString('utf-8');
-      content.push({
-        type: 'text',
-        text: text
-          ? `${text}\n\n[File: ${filePointer.original_filename}]\n\`\`\`\n${decoded}\n\`\`\``
-          : `[File: ${filePointer.original_filename}]\n\`\`\`\n${decoded}\n\`\`\``,
-      });
-    } else if (filePointer.mime_type === 'application/pdf') {
-      // PDF: add as file block (for capable models)
-      if (text) {
-        content.push({ type: 'text', text });
-      }
-      content.push({
-        type: 'file',
-        file: {
-          filename: filePointer.original_filename,
-          file_data: `data:${filePointer.mime_type};base64,${base64}`,
-        },
-      });
-    } else {
-      // Other file types: just metadata
-      content.push({
-        type: 'text',
-        text: text
-          ? `${text}\n\n[Attached: ${filePointer.original_filename} (${filePointer.mime_type})]`
-          : `[Attached: ${filePointer.original_filename} (${filePointer.mime_type})]`,
-      });
-    }
-  } catch (error) {
-    log.error('[GeneratorLLM] Failed to download file from storage', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    content.push({
-      type: 'text',
-      text: text
-        ? `${text}\n\n[Attached: ${filePointer.original_filename} - failed to load]`
-        : `[Attached: ${filePointer.original_filename} - failed to load]`,
-    });
-  }
-
-  return content;
 }
 
 // ============================================
@@ -260,21 +187,20 @@ type GeneratorLlmParams = {
 };
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
-  const attention = createGeneratorAttentionLifecycle({
-    agentId: params.agentId,
-    streamGate: params.streamGate,
-  });
+  let attention: GeneratorAttentionLifecycle | undefined;
   try {
-    return await callGeneratorLlmCore(params, attention);
+    return await callGeneratorLlmCore(params, (current) => {
+      attention = current;
+    });
   } catch (error) {
-    await attention.cancel();
+    await attention?.cancel();
     throw error;
   }
 }
 
 async function callGeneratorLlmCore(
   params: GeneratorLlmParams,
-  attention: GeneratorAttentionLifecycle
+  setAttention: (attention: GeneratorAttentionLifecycle) => void
 ): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
@@ -377,6 +303,11 @@ async function callGeneratorLlmCore(
   };
 
   await emitAssistantStream('', false, 0, false, false);
+  let attention = createGeneratorAttentionLifecycle({
+    agentId: params.agentId,
+    streamGate: params.streamGate,
+  });
+  setAttention(attention);
   await attention.start();
 
   // Fast Mode: the chat path runs in-process (not through the Python Rose notch),
@@ -429,129 +360,152 @@ async function callGeneratorLlmCore(
       })
     );
 
-  // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
-  let stream: AsyncIterable<CompletionChunk>;
-  if (fcKey && fastModeRead) {
-    stream = createGeneratorCacheStream({
-      agentId: params.agentId,
-      cacheKey: fcKey,
-      createLive: (abortSignal) => createLiveStream(abortSignal),
-      createCached: syntheticChatStream,
-      goal: fastMode.goal,
-      onWinner: (winner) => {
-        fcCacheWon = winner === 'cache';
-      },
-    });
-  } else {
-    if (fcKey) {
-      log.info('fast_cache.chat_generator_write_only', { agentId: params.agentId, key: fcKey });
-    }
-    stream = await createLiveStream();
-  }
-
-  // isClaude = user's own Claude token was used ($0 cost, "-claude" suffix in actual_model)
   let isClaude = false,
     isGpt = false;
-
-  // Track reasoning and JSON content separately (like agent worker)
-  let accumulatedReasoning = '', // From delta.reasoning (thinking models)
-    accumulatedJson = ''; // From delta.content (JSON structure)
-  const structuredOutput = new StructuredOutputAccumulator();
   let sequence = 1;
-  let lastStreamedText = ''; // What we've sent to FE so far
-  let chunkCount = 0;
-  const usage: ChatLlmUsage = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-    model: '',
-    from_fast_cache: false,
-  };
-  let actualModel = '';
-  let usageData:
-    | {
-        prompt_tokens: number;
-        completion_tokens: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-        finish_reason?: string;
-      }
-    | undefined;
+  let lastStreamedText = '';
+  const usage = emptyChatLlmUsage();
 
-  // Process stream chunks - stream every delta immediately
-  try {
-    for await (const chunk of stream) {
-      chunkCount++;
-
-      // Detect user's Claude token usage from "-claude" suffix in actual_model
-      if (chunk.actual_model) actualModel = chunk.actual_model;
-      if (chunk.usage)
-        usageData = { ...chunk.usage, finish_reason: chunk.choices[0]?.finish_reason ?? undefined };
-      if (!isClaude && actualModel?.endsWith('-claude')) {
-        isClaude = true;
-      }
-      if (!isGpt && actualModel?.endsWith('-gpt')) {
-        isGpt = true;
-      }
-
-      // Get delta from chunk
-      const delta = chunk.choices[0]?.delta;
-
-      // Handle reasoning from thinking models (delta.reasoning)
-      const reasoningDelta = delta?.reasoning || '';
-      if (reasoningDelta) {
-        accumulatedReasoning += reasoningDelta;
-      }
-
-      // Handle JSON content (delta.content)
-      const contentDelta = delta?.content || '';
-      if (contentDelta) {
-        structuredOutput.addCompletionChunk(chunk);
-        accumulatedJson = structuredOutput.currentText();
-      }
-
-      const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
-
-      if (streamableText && streamableText !== lastStreamedText) {
-        const newText = streamableText.slice(lastStreamedText.length);
-        lastStreamedText = streamableText;
-
-        // Stream every delta immediately
-        if (newText) {
-          await emitAssistantStream(newText, false, sequence++, isClaude, isGpt);
+  const attempted = await regenerateOnChatStructuredMiss({
+    callSite: 'chat_generator',
+    agentId: params.agentId,
+    attempt: async (attempt) => {
+      lastStreamedText = '';
+      const skipFastCache = attempt > 1 && fcCacheWon;
+      fcCacheWon = false;
+      const attemptUsage = emptyChatLlmUsage();
+      try {
+        if (attempt > 1) {
+          await attention.cancel();
+          attention = createGeneratorAttentionLifecycle({
+            agentId: params.agentId,
+            streamGate: params.streamGate,
+          });
+          setAttention(attention);
+          await attention.start();
         }
+        // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
+        // After a cache-won miss, skip cache so the same invalid JSON is not replayed.
+        // A live timeout still hedges cache on retry.
+        let stream: AsyncIterable<CompletionChunk>;
+        if (fcKey && fastModeRead && !skipFastCache) {
+          stream = createGeneratorCacheStream({
+            agentId: params.agentId,
+            cacheKey: fcKey,
+            createLive: (abortSignal) => createLiveStream(abortSignal),
+            createCached: syntheticChatStream,
+            goal: fastMode.goal,
+            onWinner: (winner) => {
+              fcCacheWon = winner === 'cache';
+            },
+          });
+        } else {
+          if (fcKey) {
+            log.info('fast_cache.chat_generator_write_only', {
+              agentId: params.agentId,
+              key: fcKey,
+            });
+          }
+          stream = await createLiveStream();
+        }
+
+        // Track reasoning and JSON content separately (like agent worker)
+        let accumulatedReasoning = '', // From delta.reasoning (thinking models)
+          accumulatedJson = ''; // From delta.content (JSON structure)
+        const structuredOutput = new StructuredOutputAccumulator();
+        let chunkCount = 0;
+        let actualModel = '';
+        let usageData:
+          | {
+              prompt_tokens: number;
+              completion_tokens: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+              finish_reason?: string;
+            }
+          | undefined;
+
+        // Process stream chunks - stream every delta immediately
+        for await (const chunk of stream) {
+          chunkCount++;
+
+          // Detect user's Claude token usage from "-claude" suffix in actual_model
+          if (chunk.actual_model) actualModel = chunk.actual_model;
+          if (chunk.usage)
+            usageData = {
+              ...chunk.usage,
+              finish_reason: chunk.choices[0]?.finish_reason ?? undefined,
+            };
+          if (!isClaude && actualModel?.endsWith('-claude')) {
+            isClaude = true;
+          }
+          if (!isGpt && actualModel?.endsWith('-gpt')) {
+            isGpt = true;
+          }
+
+          // Get delta from chunk
+          const delta = chunk.choices[0]?.delta;
+
+          // Handle reasoning from thinking models (delta.reasoning)
+          const reasoningDelta = delta?.reasoning || '';
+          if (reasoningDelta) {
+            accumulatedReasoning += reasoningDelta;
+          }
+
+          // Handle JSON content (delta.content)
+          const contentDelta = delta?.content || '';
+          if (contentDelta) {
+            structuredOutput.addCompletionChunk(chunk);
+            accumulatedJson = structuredOutput.currentText();
+          }
+
+          const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
+
+          if (streamableText && streamableText !== lastStreamedText) {
+            const newText = streamableText.slice(lastStreamedText.length);
+            lastStreamedText = streamableText;
+
+            // Stream every delta immediately
+            if (newText) {
+              await emitAssistantStream(newText, false, sequence++, isClaude, isGpt);
+            }
+          }
+
+          const accumulatedResponse = extractPartialStringField(accumulatedJson, 'response');
+          if (accumulatedResponse) await attention.update(accumulatedResponse);
+
+          if (chunk.usage) {
+            applyChunkUsage(attemptUsage, chunk.usage);
+          }
+
+          // Log progress every 50 chunks
+          if (chunkCount % 50 === 0) {
+            log.info('[GeneratorLLM] Progress', {
+              chunk: chunkCount,
+              reasoning: accumulatedReasoning.length,
+              json: accumulatedJson.length,
+              streamed: sequence,
+            });
+          }
+        }
+
+        const fullJson = structuredOutput.currentText();
+        const parsed = requireGeneratorParsedJson(fullJson);
+        return {
+          fullJson,
+          parsed,
+          usageData,
+          actualModel,
+          chunkCount,
+          reasoningLength: accumulatedReasoning.length,
+        };
+      } finally {
+        accumulateChatLlmUsage(usage, attemptUsage);
       }
+    },
+  });
 
-      const accumulatedResponse = extractPartialStringField(accumulatedJson, 'response');
-      if (accumulatedResponse) await attention.update(accumulatedResponse);
-
-      if (chunk.usage) {
-        usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
-        usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
-        usage.total_tokens = chunk.usage.total_tokens ?? 0;
-        usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
-        usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
-      }
-
-      // Log progress every 50 chunks
-      if (chunkCount % 50 === 0) {
-        log.info('[GeneratorLLM] Progress', {
-          chunk: chunkCount,
-          reasoning: accumulatedReasoning.length,
-          json: accumulatedJson.length,
-          streamed: sequence,
-        });
-      }
-    }
-  } catch (error) {
-    await attention.cancel();
-    throw error;
-  }
-
-  // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = structuredOutput.finalText();
+  const { fullJson, parsed, usageData, actualModel, chunkCount, reasoningLength } = attempted;
 
   // Fast Mode: record the generator response so an identical re-ask replays it.
   const cacheGoal = fastMode.goal;
@@ -590,7 +544,7 @@ async function callGeneratorLlmCore(
     durationMs: streamDuration,
     chunksReceived: chunkCount,
     chunksStreamed: sequence,
-    reasoningLength: accumulatedReasoning.length,
+    reasoningLength,
     jsonLength: fullJson.length,
   });
 
@@ -613,30 +567,6 @@ async function callGeneratorLlmCore(
       cache_hit_pct: cacheHitPct,
       finish: usageData.finish_reason ?? 'unknown',
     });
-  }
-
-  // Parse the complete JSON
-  if (!fullJson) {
-    log.error('[GeneratorLLM] No content received from LLM', {
-      agentId: params.agentId,
-      streamId,
-    });
-    await attention.cancel();
-    throw new Error('Generator LLM returned no content');
-  }
-
-  let parsed: { reasoning: string; response: string };
-  try {
-    parsed = JSON.parse(fullJson);
-  } catch (error) {
-    log.error('[GeneratorLLM] Failed to parse JSON response', {
-      agentId: params.agentId,
-      streamId,
-      error: error instanceof Error ? error.message : String(error),
-      jsonPreview: fullJson.substring(0, 500),
-    });
-    await attention.cancel();
-    throw new Error(`Failed to parse generator response as JSON: ${fullJson.substring(0, 200)}`);
   }
 
   log.info('[GeneratorLLM] Response parsed successfully', {
