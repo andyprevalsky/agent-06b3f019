@@ -3781,6 +3781,7 @@ async def test_workflow_mark_failed_signals_parent_with_context():
             verifier_progress=0.5,
             verifier_reasoning="halfway",
             partial_structured_response={"answer": "best effort"},
+            best_effort_response="I found a grounded partial answer.",
         )
         # Should call update_agent_status and tree state
         activity_names = [c[0] for c in fake.activity_calls]
@@ -3792,6 +3793,7 @@ async def test_workflow_mark_failed_signals_parent_with_context():
         child_completed = next(s[2] for s in fake.signal_calls if s[1] == "child_completed")
         assert child_completed["result"]["status"] == "failed"
         assert child_completed["result"]["structured_response"] == {"answer": "best effort"}
+        assert child_completed["result"]["best_effort_response"] == "I found a grounded partial answer."
     finally:
         _restore_workflow(original)
 
@@ -4150,12 +4152,18 @@ async def test_workflow_handle_incomplete_max_iterations():
             events.append("refresh")
 
         async def mark_failed(**_kwargs):
+            assert _kwargs["best_effort_response"] == "I found a grounded partial answer."
             events.append("failed")
 
         wf._wait_for_response_schema_refresh = wait_for_refresh
         wf._mark_failed = mark_failed
         result = await wf._handle_incomplete(
-            {"status": "max_iterations", "context": [], "verifier_progress": 0.5},
+            {
+                "status": "max_iterations",
+                "context": [],
+                "verifier_progress": 0.5,
+                "best_effort_response": "I found a grounded partial answer.",
+            },
             phase="EXECUTE",
         )
         assert result["status"] == "failed"

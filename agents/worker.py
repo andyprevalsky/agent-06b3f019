@@ -114,6 +114,7 @@ from helpers import (
 )
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
+from helpers.explore_progress import set_temporal_client as set_explore_progress_client
 from helpers.generation_handoff import parse_shutdown_grace_seconds
 from helpers.llm import (
     call_planner_llm_activity,
@@ -992,6 +993,7 @@ async def main():
 
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
+    set_explore_progress_client(client)
 
     # Configure workflow sandbox to passthrough logging libraries
     # These libraries use threading.local which isn't allowed in the sandbox,

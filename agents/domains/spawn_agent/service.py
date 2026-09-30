@@ -15,12 +15,10 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_CANCEL_GRACE,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
-    explore_parent_wait_timeout,
     resolve_explore_depth,
     resolve_explore_oai_demo,
 )
@@ -34,6 +32,7 @@ from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
+from helpers.explore_progress import send_explore_progress
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -369,7 +368,6 @@ async def spawn_explore_agent_activity(
         Dict with status, accumulated_usage, tokens_in, tokens_out
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
-    activity_started_at = asyncio.get_running_loop().time()
 
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
@@ -422,6 +420,7 @@ async def spawn_explore_agent_activity(
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
     has_usable_tool_evidence = bool(local_data_summary.strip())
+    has_successful_tool_evidence = False
     completion_no_evidence_rejects = 0
 
     # Data sources the explore agent tried to grep but whose connector isn't
@@ -434,6 +433,7 @@ async def spawn_explore_agent_activity(
         return {
             "result": compiled,
             "tool_call_results": list(tool_call_results[-8:]),
+            "has_usable_evidence": has_successful_tool_evidence,
         }
 
     async def _heartbeat_loop() -> None:
@@ -596,7 +596,7 @@ async def spawn_explore_agent_activity(
 
     async def explore_execute_tool(tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool inside the explore activity context."""
-        nonlocal has_usable_tool_evidence, completion_no_evidence_rejects
+        nonlocal has_usable_tool_evidence, has_successful_tool_evidence, completion_no_evidence_rejects
         activity.heartbeat(_heartbeat_payload())
 
         tool_call_dict = {"tool": tool_name, **tool_args}
@@ -726,8 +726,7 @@ async def spawn_explore_agent_activity(
 
         if _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
-        activity.heartbeat(_heartbeat_payload())
-
+            has_successful_tool_evidence = True
         # Serialize the actual result into message so run_agent puts it in context.
         try:
             result_str = json.dumps(actual_result, default=str)
@@ -736,6 +735,22 @@ async def spawn_explore_agent_activity(
 
         # Collect raw tool results for callers (e.g. wait_for condition evaluator)
         tool_call_results.append(f"[{tool_name}] {result_str}")
+        checkpoint = _heartbeat_payload()
+        activity.heartbeat(checkpoint)
+        if has_successful_tool_evidence and not _oai_demo:
+            # A TRY_CANCEL activity can lose heartbeat details before the parent
+            # sees them. The signal survives that cancellation in workflow history.
+            remaining = EXPLORE_FALLBACK_PAYLOAD_BUDGET
+            bounded_results = []
+            for entry in reversed(checkpoint["tool_call_results"]):
+                if remaining <= 0:
+                    break
+                bounded_results.append(entry[:remaining])
+                remaining -= len(bounded_results[-1])
+            await send_explore_progress(
+                task_id,
+                {**checkpoint, "tool_call_results": list(reversed(bounded_results))},
+            )
 
         return {"success": True, "message": result_str}
 
@@ -793,24 +808,11 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             oai_demo=_oai_demo,
         )
-    depth_cap, explore_activity_timeout = explore_limits_for_depth(effective_depth)
+    depth_cap, _ = explore_limits_for_depth(effective_depth)
     if max_iterations is None:
         resolved_max_iterations = depth_cap
     else:
         resolved_max_iterations = max_iterations
-    parent_wait = explore_parent_wait_timeout(explore_activity_timeout, oai_demo=_oai_demo)
-    # Return collected tool evidence before the workflow's hard wait cancels
-    # this activity. Temporal cancellation can lose its heartbeat details.
-    soft_budget_seconds = (
-        None
-        if _oai_demo
-        else max(
-            1.0,
-            parent_wait.total_seconds()
-            - EXPLORE_CANCEL_GRACE.total_seconds()
-            - (asyncio.get_running_loop().time() - activity_started_at),
-        )
-    )
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
@@ -833,7 +835,7 @@ async def spawn_explore_agent_activity(
     # exactly the error path where visibility matters most.
     result: Dict[str, Any] = {}
     try:
-        explore_run = run_agent(
+        result = await run_agent(
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=explore_system_prompt,
@@ -865,23 +867,6 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
-        soft_deadline = asyncio.timeout(soft_budget_seconds)
-        try:
-            async with soft_deadline:
-                result = await explore_run
-        except TimeoutError:
-            if not soft_deadline.expired():
-                raise
-        if soft_deadline.expired() and activity.in_activity() and activity.is_cancelled():
-            raise asyncio.CancelledError("Explore activity cancelled by parent")
-        # run_agent can catch CancelledError and return PAUSED. The deadline
-        # still expired in that case, so use the grounded results collected here.
-        if soft_deadline.expired() and result.get("status") != "completed":
-            result = {
-                **result,
-                "status": "completed",
-                "final_response": compile_explore_wrap_up("", tool_call_results),
-            }
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()
@@ -901,6 +886,11 @@ async def spawn_explore_agent_activity(
         result.get("final_response", "") or "",
         tool_call_results,
     )
+    if result.get("status") == "max_iterations" and has_successful_tool_evidence:
+        gathered = compile_explore_wrap_up("", tool_call_results)
+        if gathered and gathered not in final_response:
+            final_response = f"{final_response}\n\nCollected evidence:\n{gathered}".strip()
+            final_response = final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET]
 
     # Disconnected sources are a gap notice, not a hard explore failure. Grep
     # already skipped them and the parent still raises source_connect gates;
@@ -930,7 +920,21 @@ async def spawn_explore_agent_activity(
         and not attachment_texts
         and not local_data_summary
     )
-    run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
+    # The final-turn nudge may still reach the turn cap without an explicit
+    # completion tool call. Preserve the model's best effort and grounded tool
+    # evidence instead of reporting only "Reached max iterations" upstream.
+    run_completed = (
+        result.get("status") == "completed" and not completed_without_tool_evidence
+    ) or (
+        result.get("status") == "max_iterations"
+        and (
+            has_successful_tool_evidence
+            or (
+                bool(local_data_summary.strip() or attachment_texts)
+                and bool(result.get("best_effort_response"))
+            )
+        )
+    )
     result_payload = {
         "status": "completed" if run_completed else "error",
         "result": final_response,

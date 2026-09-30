@@ -16,6 +16,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
@@ -105,21 +106,26 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
 
 
 def _explore_result_after_activity_failure(
-    exc: BaseException, *, user_paused: bool
+    exc: BaseException, *, user_paused: bool, checkpoint: Optional[Dict[str, Any]] = None
 ) -> tuple[Dict[str, Any], bool]:
     """Map an explore activity failure to (result, was_cancelled).
 
-    Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
+    Timeout / wait-budget cancel with checkpoint or heartbeat evidence FINISHES so the
     parent can synthesize. A user pause still ERROR-cancels. Unexpected
     ActivityError without wrap-up is re-raised for the outer ERROR path.
     """
-    recovered = wrap_up_payload_from_failure(exc)
+    recovered = checkpoint or wrap_up_payload_from_failure(exc)
     cancel_cause = not isinstance(exc, ActivityError) or isinstance(
         exc.cause, (asyncio.CancelledError, TemporalCancelledError)
     )
+    timeout_cause = isinstance(exc, ActivityError) and isinstance(
+        exc.cause, (TimeoutError, TemporalTimeoutError)
+    )
     if user_paused and cancel_cause:
         return {}, True
-    if recovered:
+    if recovered and recovered.get("has_usable_evidence") is not False and compile_explore_wrap_up(
+        recovered.get("result") or "", recovered.get("tool_call_results") or []
+    ):
         return {
             "status": "completed",
             "result": recovered.get("result")
@@ -130,12 +136,13 @@ def _explore_result_after_activity_failure(
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
         }, False
-    if isinstance(exc, ActivityError) and not cancel_cause:
+    if isinstance(exc, ActivityError) and not cancel_cause and not timeout_cause:
         raise exc
-    if cancel_cause and not user_paused:
+    if (cancel_cause or timeout_cause) and not user_paused:
         return {
-            "status": "completed",
-            "result": "Research finished with the evidence gathered so far.",
+            "status": "error",
+            "result": "Explore timed out before usable evidence was collected.",
+            "error_reason": "explore timed out without evidence",
             "tool_call_results": [],
             "accumulated_usage": [],
             "llm_iteration_usage": [],
@@ -657,14 +664,27 @@ class SpawnAgentManager(ToolManager):
                 local_data_summary,
                 oai_demo,
             ]
-            activity_handle = workflow.start_activity(
-                spawn_explore_agent_activity,
-                args=activity_args,
-                start_to_close_timeout=explore_activity_timeout,
-                heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
-                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                retry_policy=RetryPolicy(maximum_attempts=1),
-            )
+            active_explore_tasks = getattr(workflow_instance, "_active_explore_tasks", None)
+            if active_explore_tasks is None:
+                active_explore_tasks = set()
+                workflow_instance._active_explore_tasks = active_explore_tasks
+            explore_progress = getattr(workflow_instance, "_explore_progress", None)
+            if explore_progress is None:
+                explore_progress = {}
+                workflow_instance._explore_progress = explore_progress
+            active_explore_tasks.add(task_id)
+            try:
+                activity_handle = workflow.start_activity(
+                    spawn_explore_agent_activity,
+                    args=activity_args,
+                    start_to_close_timeout=explore_activity_timeout,
+                    heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
+                    cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except BaseException:
+                active_explore_tasks.discard(task_id)
+                raise
             parent_wait = explore_parent_wait_timeout(explore_activity_timeout, oai_demo=oai_demo)
 
             async with span(
@@ -719,17 +739,20 @@ class SpawnAgentManager(ToolManager):
                     if activity_handle.done() or oai_demo:
                         result = await activity_handle
                     else:
-                        result = {
-                            "status": "completed",
-                            "result": "Research finished with the evidence gathered so far.",
-                            "tool_call_results": [],
-                            "accumulated_usage": [],
-                            "llm_iteration_usage": [],
-                        }
+                        result, was_cancelled = _explore_result_after_activity_failure(
+                            asyncio.CancelledError(),
+                            user_paused=bool(getattr(workflow_instance, "is_paused", False)),
+                            checkpoint=explore_progress.get(task_id),
+                        )
                 except (asyncio.CancelledError, ActivityError) as e:
                     result, was_cancelled = _explore_result_after_activity_failure(
-                        e, user_paused=bool(getattr(workflow_instance, "is_paused", False))
+                        e,
+                        user_paused=bool(getattr(workflow_instance, "is_paused", False)),
+                        checkpoint=explore_progress.get(task_id),
                     )
+                finally:
+                    active_explore_tasks.discard(task_id)
+                    explore_progress.pop(task_id, None)
 
             if was_cancelled:
                 logger.info("Explore agent cancelled", goal=goal[:100])
@@ -796,7 +819,13 @@ class SpawnAgentManager(ToolManager):
             # User-visible message is the explore result (including any
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
-            event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
+            event_message = explore_result
+            if explore_failed and explore_error_reason:
+                event_message = (
+                    f"{explore_error_reason}\n\n{explore_result}"
+                    if explore_result and explore_result != explore_error_reason
+                    else explore_error_reason
+                )
 
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
@@ -808,6 +837,8 @@ class SpawnAgentManager(ToolManager):
             )
 
         except BaseException as e:
+            getattr(workflow_instance, "_active_explore_tasks", set()).discard(task_id)
+            getattr(workflow_instance, "_explore_progress", {}).pop(task_id, None)
             if isinstance(e, GeneratorExit):
                 raise  # Never suppress GeneratorExit
             error_msg = str(e)
