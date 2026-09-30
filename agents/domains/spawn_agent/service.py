@@ -15,10 +15,12 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
+    EXPLORE_CANCEL_GRACE,
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
+    explore_parent_wait_timeout,
     resolve_explore_depth,
     resolve_explore_oai_demo,
 )
@@ -367,6 +369,7 @@ async def spawn_explore_agent_activity(
         Dict with status, accumulated_usage, tokens_in, tokens_out
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    activity_started_at = asyncio.get_running_loop().time()
 
     from loop.activity_helper import call_temporal_activity_from_activity
     from loop.run_agent import run_agent
@@ -790,11 +793,24 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             oai_demo=_oai_demo,
         )
-    depth_cap = explore_limits_for_depth(effective_depth)[0]
+    depth_cap, explore_activity_timeout = explore_limits_for_depth(effective_depth)
     if max_iterations is None:
         resolved_max_iterations = depth_cap
     else:
         resolved_max_iterations = max_iterations
+    parent_wait = explore_parent_wait_timeout(explore_activity_timeout, oai_demo=_oai_demo)
+    # Return collected tool evidence before the workflow's hard wait cancels
+    # this activity. Temporal cancellation can lose its heartbeat details.
+    soft_budget_seconds = (
+        None
+        if _oai_demo
+        else max(
+            1.0,
+            parent_wait.total_seconds()
+            - EXPLORE_CANCEL_GRACE.total_seconds()
+            - (asyncio.get_running_loop().time() - activity_started_at),
+        )
+    )
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
     if local_data_summary:
@@ -817,7 +833,7 @@ async def spawn_explore_agent_activity(
     # exactly the error path where visibility matters most.
     result: Dict[str, Any] = {}
     try:
-        result = await run_agent(
+        explore_run = run_agent(
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=explore_system_prompt,
@@ -849,6 +865,23 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
+        soft_deadline = asyncio.timeout(soft_budget_seconds)
+        try:
+            async with soft_deadline:
+                result = await explore_run
+        except TimeoutError:
+            if not soft_deadline.expired():
+                raise
+        if soft_deadline.expired() and activity.in_activity() and activity.is_cancelled():
+            raise asyncio.CancelledError("Explore activity cancelled by parent")
+        # run_agent can catch CancelledError and return PAUSED. The deadline
+        # still expired in that case, so use the grounded results collected here.
+        if soft_deadline.expired() and result.get("status") != "completed":
+            result = {
+                **result,
+                "status": "completed",
+                "final_response": compile_explore_wrap_up("", tool_call_results),
+            }
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()

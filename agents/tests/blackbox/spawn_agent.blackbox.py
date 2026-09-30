@@ -2870,6 +2870,121 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert "42 messages" in user_msg["text"]
 
 
+async def test_spawn_explore_soft_budget_returns_parallel_evidence():
+    """Two slow explores return their own research before the parent cancels."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    real_timeout = asyncio.timeout
+    budgets = []
+
+    def short_deadline(seconds):
+        budgets.append(seconds)
+        return real_timeout(0.02)
+
+    async def search_result(**kwargs):
+        city = kwargs["tool_call"]["query"]
+        return {"result": f"{city} population evidence"}
+
+    fake_search = MagicMock()
+    fake_search.execute_tool = AsyncMock(side_effect=search_result)
+
+    async def fake_run_agent(**kwargs):
+        city = kwargs["agent_id"]
+        await kwargs["execute_tool"]("web_search", {"query": city}, f"tc-{city}")
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            if city == "denver":
+                return {"status": "paused", "final_response": ""}
+            raise
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_search),
+        patch("domains.spawn_agent.service.asyncio.timeout", side_effect=short_deadline),
+    ):
+        results = await asyncio.gather(
+            *(
+                spawn_explore_agent_activity(
+                    agent_id=city,
+                    user_id="u-7",
+                    goal=f"Research {city}",
+                    model="rose-1-flash",
+                )
+                for city in ("denver", "lisbon")
+            )
+        )
+
+    assert len(budgets) == 2
+    assert all(134.0 < seconds <= 135.0 for seconds in budgets)
+    for city, result in zip(("denver", "lisbon"), results):
+        assert result["status"] == "completed"
+        assert f"{city} population evidence" in result["result"]
+        assert any(f"{city} population evidence" in entry for entry in result["tool_call_results"])
+        assert not any(other in result["result"] for other in ({"denver", "lisbon"} - {city}))
+
+
+async def test_spawn_explore_soft_budget_without_evidence_remains_error():
+    """Deadline expiry cannot turn an empty exploration into a success."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    real_timeout = asyncio.timeout
+
+    async def slow_run_agent(**kwargs):
+        await asyncio.sleep(1)
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=slow_run_agent),
+        patch("domains.spawn_agent.service.asyncio.timeout", side_effect=lambda _: real_timeout(0.02)),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="empty-research",
+            user_id="u-7",
+            goal="Research an answer",
+            model="rose-1-flash",
+        )
+
+    assert result["status"] == "error"
+    assert result["tool_call_results"] == []
+    assert result["error_reason"] == "explore completed without tool evidence"
+
+
+async def test_spawn_explore_soft_budget_keeps_parent_cancelled():
+    """A real parent pause wins over a simultaneous soft deadline."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    real_timeout = asyncio.timeout
+
+    async def paused_run_agent(**kwargs):
+        try:
+            await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            return {"status": "paused"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.in_activity", return_value=True),
+        patch("temporalio.activity.is_cancelled", return_value=True),
+        patch("loop.run_agent.run_agent", new=paused_run_agent),
+        patch("domains.spawn_agent.service.asyncio.timeout", side_effect=lambda _: real_timeout(0.02)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="parent-paused",
+            user_id="u-7",
+            goal="Research an answer",
+            model="rose-1-flash",
+        )
+
+
 async def test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence():
     """Soft-complete plumbing must not become the explore chip summary."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -4326,6 +4441,18 @@ async def run_all_tests():
     await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
+    await r.record_async(
+        "explore_soft_budget_returns_parallel_evidence",
+        test_spawn_explore_soft_budget_returns_parallel_evidence,
+    )
+    await r.record_async(
+        "explore_soft_budget_without_evidence_remains_error",
+        test_spawn_explore_soft_budget_without_evidence_remains_error,
+    )
+    await r.record_async(
+        "explore_soft_budget_keeps_parent_cancelled",
+        test_spawn_explore_soft_budget_keeps_parent_cancelled,
+    )
     await r.record_async(
         "explore_activity_replaces_fast_mode_stub",
         test_spawn_explore_agent_activity_replaces_fast_mode_stub_with_tool_evidence,
