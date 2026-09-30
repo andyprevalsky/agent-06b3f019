@@ -3501,3 +3501,4 @@
 {"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 146.0, "cost_cents": 5.0, "timestamp": "2026-09-30T18:12:18.881386+00:00", "agent_id": "fee26875-f75b-4c60-bd32-56186466ae16"}
 {"task": "grep-agent-trajectories-followup", "duration_seconds": 153.3, "cost_cents": 4.0, "timestamp": "2026-09-30T18:12:18.881386+00:00", "agent_id": "c2e7d05d-5748-42b2-af50-4c358eac6b99"}
 {"task": "grep-agent-trajectories-isolation", "duration_seconds": 203.8, "cost_cents": 0.0, "timestamp": "2026-09-30T18:12:18.881386+00:00", "agent_id": "3d7134c5-898d-48cb-8f43-11675e0e9bab"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 185.5, "cost_cents": 6.0, "timestamp": "2026-09-30T18:19:26.565296+00:00", "agent_id": "6d5c4b34-595c-4f2b-9307-29520ecfb6ae"}
