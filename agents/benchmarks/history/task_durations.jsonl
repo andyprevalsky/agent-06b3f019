@@ -3489,3 +3489,4 @@
 {"task": "browser-smoke", "duration_seconds": 45.2, "cost_cents": 3.0, "timestamp": "2026-09-30T03:18:21.347611+00:00", "agent_id": "6bf5cc59-62cc-4a77-be0f-f44657307a92"}
 {"task": "chat-mode", "duration_seconds": 15.1, "cost_cents": 0.0, "timestamp": "2026-09-30T03:18:21.347611+00:00", "agent_id": "2c044e0c-a73a-47a7-bf27-0a4b2b8b46b5"}
 {"task": "parallel-tool-calls", "duration_seconds": 432.5, "cost_cents": 49.0, "timestamp": "2026-09-30T03:18:21.347611+00:00", "agent_id": "eb2da1ae-1e0d-4926-b8e6-9042049422cc"}
+{"task": "spawn-sub-agents", "duration_seconds": 251.3, "cost_cents": 39.0, "timestamp": "2026-09-30T17:21:30.304485+00:00", "agent_id": "713e7eee-5af8-4e11-9af0-0b9fc89b309c"}
