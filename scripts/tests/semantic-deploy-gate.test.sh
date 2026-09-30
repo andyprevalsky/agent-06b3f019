@@ -144,6 +144,9 @@ if grep -Fq "WHERE directory_name =" "$DEPLOY_COMMAND"; then
   fail "/deploy must not update Conductor PR title locks by basename; multiple archived workspaces can share the same directory name"
 fi
 require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
+require_text "$DEPLOY_COMMAND" 'SEMANTIC_GREP_INVERT="chat full-lifecycle latency"' "/deploy local UI semantic job must exclude the separately gated latency spec"
+require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=1" "/deploy local latency ratchet must avoid renderer contention"
+require_text "$DEPLOY_COMMAND" "chat-lifecycle-latency" "/deploy local gate must run the lifecycle ratchet separately"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "/deploy must load canonical workspace identity normalization"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
 require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
