@@ -1936,6 +1936,51 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
     )
 
 
+def test_payment_lifecycle_merchant_allows_environment_suffix():
+    """Catalog merchant must match free-form labels with environment suffixes.
+
+    Local smoke repro (2026-09-30): agent-payment-setup-resume purchased successfully
+    but failed with payment_lifecycle.purchase.merchant mismatch expected
+    'Rose Labs Test Payment' vs 'Rose Labs Test Payment (ngrok test checkout)'.
+    """
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = BenchmarkTask(
+        name="payment-lifecycle-merchant",
+        title="Payment Lifecycle Merchant",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_lifecycle={
+            "purchase": {"status": "CLEARED", "merchant": "Rose Labs Test Payment"},
+        },
+    )
+    ok = {
+        "purchase": {
+            "status": "CLEARED",
+            "merchant": "Rose Labs Test Payment (ngrok test checkout)",
+        },
+    }
+    assert _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": ok}}) is None
+    wrong = {
+        "purchase": {"status": "CLEARED", "merchant": "Totally Different Shop"},
+    }
+    assert (
+        _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": wrong}})
+        == "payment_lifecycle.purchase.merchant mismatch: expected 'Rose Labs Test Payment', "
+        "got 'Totally Different Shop'"
+    )
+
+
 async def test_payment_cleanup_reuses_an_already_valid_terminal_snapshot():
     """Finalization must not re-abandon a lifecycle the task already reconciled."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -18732,6 +18777,10 @@ async def run_all_tests():
     r.record(
         "payment_lifecycle_cross_provider_state",
         test_payment_lifecycle_validation_cross_checks_nested_provider_state,
+    )
+    r.record(
+        "payment_lifecycle_merchant_allows_environment_suffix",
+        test_payment_lifecycle_merchant_allows_environment_suffix,
     )
     await r.record_async(
         "payment_cleanup_reuses_terminal_snapshot",

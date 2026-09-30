@@ -81,6 +81,7 @@ from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
+    BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -183,6 +184,7 @@ from .service_crypto import (
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
+    finalize_parked_payment_card_approval_history,
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
@@ -345,15 +347,70 @@ async def record_used_passkey_credentials(
     return recorded_count
 
 
+async def _await_bounded_browser_cleanup(
+    coro: Any,
+    *,
+    timeout_s: float,
+    timeout_message: str,
+    failure_message: str,
+) -> None:
+    """Run cleanup under a hard deadline that does not await cancellation.
+
+    ``asyncio.wait_for`` cancels the inner awaitable and then waits for that
+    cancellation to finish. ``DomService.disconnect`` catches CancelledError while
+    draining the captcha indicator task, then continues into ``session.stop()`` —
+    so a wedged CDP stop would still block past the deadline. Own the task and
+    abandon it when the deadline expires; unfinished cleanup is logged and left
+    to GC so payment/write-lock returns always resume.
+    """
+    task = asyncio.create_task(coro)
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if task in done:
+        exc = None if task.cancelled() else task.exception()
+        if exc is not None:
+            logger.warning(failure_message, error=extract_error_message(exc))
+        return
+    task.cancel()
+    # Keep a strong reference + retrieve the eventual result so a late
+    # non-CancelledError from session.stop() is not logged as "Task exception
+    # was never retrieved" after we abandon the deadline.
+    _background_browser_cleanup_tasks.add(task)
+
+    def _discard(done_task: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done_task)
+        with contextlib.suppress(BaseException):
+            done_task.result()
+
+    task.add_done_callback(_discard)
+    logger.warning(timeout_message, timeout_s=timeout_s)
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
 ) -> None:
-    """Capture credential evidence before a terminal browser disconnect."""
-    try:
-        await capture_passkey_usage()
-    finally:
-        await dom_service.disconnect()
+    """Capture credential evidence before a terminal browser disconnect.
+
+    Both the passkey readback and BrowserSession.stop() talk to CDP. When the
+    remote session is already gone (or CDP is wedged), either await can hang
+    indefinitely — which strands payment/write-lock returns before the workflow
+    can create the attention request (local repro: agent-payment-idempotent-
+    abandonment hung for 7+ minutes after write_lock_notification dump with
+    only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
+    Bound both steps so approval/handoff paths always resume.
+    """
+    await _await_bounded_browser_cleanup(
+        capture_passkey_usage(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Passkey usage capture timed out before disconnect",
+        failure_message="Passkey usage capture failed before disconnect",
+    )
+    await _await_bounded_browser_cleanup(
+        dom_service.disconnect(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser disconnect timed out; continuing terminal return",
+        failure_message="Browser disconnect failed; continuing terminal return",
+    )
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -5641,6 +5698,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
+        # Belt-and-suspenders: older resume payloads may still carry awaiting tool
+        # rows if they were parked before finalize-on-mint shipped.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            finalize_parked_payment_card_approval_history(
+                write_lock_resume_state,
+                last4=payment_card_last4,
+            )
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -10662,6 +10728,38 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
                         card = await mint_payment_card()
 
+                    # Over-limit: mint exceeded MAX_PURCHASE_CENTS. Hard tool error —
+                    # do NOT raise a subscribe gate (that mislabel hung agents that
+                    # simply asked for a cart larger than the org-wallet float).
+                    if card.get("status") == "purchase_above_max_limit":
+                        limit = card.get("maxPurchaseCents")
+                        if isinstance(limit, int):
+                            dollars = limit / 100
+                            limit_text = f" of ${dollars:.2f} ({limit} cents)"
+                        else:
+                            limit_text = ""
+                        message = str(
+                            card.get("error")
+                            or f"Purchase is above max limit{limit_text}."
+                        )
+                        # action_type must be a FE-terminal browser action
+                        # (task_complete / session_paused / write_lock_rejected)
+                        # or the live browser chip stays open after we return.
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Purchase above max limit",
+                            message=message,
+                            status=MessageStatus.ERROR,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "task_complete",
+                                "code": "purchase_above_max_limit",
+                                "maxPurchaseCents": limit,
+                            },
+                        )
+                        return
+
                     # Subscription gate: minting real money requires an active
                     # plan. If the backend says so, raise a subscription gate
                     # ORGANICALLY (not injected) and retry once it's resolved.
@@ -10828,6 +10926,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         current_url=result.get("current_url"),
                     )
 
+                    payment_card_last4 = _normalize_payment_card_last4(card.get("last4"))
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": current_approvals,
@@ -10838,11 +10937,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
-                        "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
+                        "payment_card_last4": payment_card_last4,
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    # Parked activity left request_payment_card as awaiting; mint finished —
+                    # complete that tool outcome before the resumed browser model reads history.
+                    finalize_parked_payment_card_approval_history(
+                        write_lock_resume_state,
+                        last4=payment_card_last4,
+                    )
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,

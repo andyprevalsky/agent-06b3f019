@@ -904,6 +904,98 @@ Type only these secret refs into the payment fields:
 After filling the payment fields, submit the checkout form and continue until the merchant confirmation page is shown."""
 
 
+def payment_card_ready_tool_result(last4: Optional[str] = None) -> Dict[str, Any]:
+    """Final tool outcome after outer-loop approval+mint replaces a parked awaiting result."""
+    safe_last4 = last4 if isinstance(last4, str) and re.fullmatch(r"\d{4}", last4) else None
+    result: Dict[str, Any] = {
+        "success": True,
+        "status": "payment_card_ready",
+        "message": (
+            "Payment approval is complete and the one-time card is ready. "
+            "Do not call request_payment_card again. Type secret refs "
+            "card_number, card_name, card_expiry, and card_cvv into the payment fields."
+        ),
+    }
+    if safe_last4 is not None:
+        result["last4"] = safe_last4
+    return result
+
+
+def _is_awaiting_payment_card_approval_result(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return result.get("status") == "awaiting_payment_card_approval"
+
+
+def _tool_message_content_is_awaiting_payment_card(content: Any) -> bool:
+    if not isinstance(content, str) or "awaiting_payment_card_approval" not in content:
+        return False
+    try:
+        parsed = json.loads(content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    return _is_awaiting_payment_card_approval_result(parsed)
+
+
+def finalize_parked_payment_card_approval_history(
+    resume_state: Dict[str, Any],
+    *,
+    last4: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rewrite parked request_payment_card awaiting outcomes to payment_card_ready.
+
+    The browser activity parks with ``awaiting_payment_card_approval`` while the
+    outer Temporal loop runs approval+mint. On resume that stale tool result is
+    still the last turn the model sees, so it waits for minutes (and AgentCard
+    may close the unused card before the second browser can reuse last4).
+    Completing the parked tool result is the real post-mint outcome — not a
+    recovery nudge.
+    """
+    if not isinstance(resume_state, dict):
+        return resume_state
+    ready = payment_card_ready_tool_result(last4)
+    ready_json = json.dumps(ready, separators=(",", ":"), ensure_ascii=False)
+
+    history = resume_state.get("action_history")
+    if isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("action") != "request_payment_card":
+                continue
+            if _is_awaiting_payment_card_approval_result(entry.get("result")):
+                entry["result"] = dict(ready)
+
+    simulated = resume_state.get("simulated_action_entries")
+    if isinstance(simulated, list):
+        for entry in simulated:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("action") != "request_payment_card":
+                continue
+            if _is_awaiting_payment_card_approval_result(entry.get("result")):
+                entry["result"] = dict(ready)
+
+    for turns_key in ("browser_turn_messages", "simulated_turn_messages"):
+        turns = resume_state.get(turns_key)
+        if not isinstance(turns, list):
+            continue
+        for message in turns:
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") != "tool":
+                continue
+            # Compact resumes may omit tool name; only rewrite awaiting payment rows.
+            name = message.get("name")
+            if name not in {None, "", "request_payment_card"}:
+                continue
+            if _tool_message_content_is_awaiting_payment_card(message.get("content")):
+                message["content"] = ready_json
+                message["name"] = "request_payment_card"
+
+    return resume_state
+
+
 def build_passwords_prompt_section(passwords: List[Dict[str, Any]]) -> Tuple[str, Dict[str, str]]:
     """Build the passwords section for the browser agent system prompt.
 

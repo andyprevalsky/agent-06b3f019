@@ -1477,6 +1477,17 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
                 if error:
                     return error
             return None
+        # Merchant labels are free-form ("Rose Labs Test Payment (ngrok test
+        # checkout)" vs catalog "Rose Labs Test Payment"). Reuse the payment
+        # identity matcher so parenthetical environment suffixes do not fail a
+        # successful purchase lifecycle.
+        if path.endswith(".merchant"):
+            identity_error = _validate_payment_merchant_identity(
+                expected_value, actual_value, {}, None
+            )
+            if identity_error is None:
+                return None
+            return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
         if expected_value != actual_value:
             return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
         return None
