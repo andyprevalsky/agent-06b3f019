@@ -350,14 +350,15 @@ before provisioning. Cached-only mass-agent/demo replays cannot establish live
 model progress; keep their normal cache and evaluator contracts intact. They
 remain available for ordinary benchmark and infrastructure-probe runs without
 that live-query requirement. Choose compatible smoke tasks for the proof.
-For a live-query proof, set `BENCHMARK_FAST_MODE_CACHE=false` on the command.
-This existing benchmark A/B setting requests real model calls for tasks with no
-pinned cache setting; catalog `fast_cache: on/off` declarations still win.
-Without it, an unspecified task can inherit backend cache replay and complete
-with zero live calls. Do not count those replays, add synthetic calls, or override
-a task that explicitly requires cached execution. The same live setting is
-already used by the predeploy smoke lane. Keep dependency snapshot reuse enabled;
-model-response replay and dependency caching are separate settings.
+The existing `BENCHMARK_FAST_MODE_CACHE` A/B setting controls the Fast Mode provider-speed button;
+it does not disable DEMO cache replay. Catalog `fast_cache: on/off` declarations
+still win at request construction, and simulation forces provider Fast Mode off.
+Live-query selection also excludes goals admitted by the runtime's DEMO replay
+policy, including an identity-bound creator child without a DEMO tag or
+zero-spend evaluator. Those runs cannot certify live progress even with the
+button off. Never count cached outputs or add synthetic calls to qualify them.
+Keep dependency snapshot reuse enabled; provider speed, model-response replay
+and dependency caching are separate controls.
 For the current accelerated validation, the user explicitly requested a
 temporary 300-second benchmark execution limit and a separate 30-minute hard
 cutoff for any bench that has not finished its full end-to-end lifecycle. Apply

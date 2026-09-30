@@ -439,6 +439,21 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
                                   capture_output=True, timeout=30)
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
         assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
+        # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
+        # tag. The Fast Mode button controls provider speed, not replay policy.
+        pool.write_text(json.dumps(["single-creator-arm"]))
+        for speed in ("false", "true"):
+            rejected_child = subprocess.run(
+                command + ["--min-successful-llm", "3"], cwd=repo_root,
+                env={**os.environ, "BENCHMARK_FAST_MODE_CACHE": speed},
+                text=True, capture_output=True, timeout=30,
+            )
+            assert rejected_child.returncode == 2, rejected_child.stdout + rejected_child.stderr
+            assert "DEMO-replay tasks" in rejected_child.stderr
+        ordinary_child = subprocess.run(command, cwd=repo_root, text=True,
+                                        capture_output=True, timeout=30)
+        assert ordinary_child.returncode == 0, ordinary_child.stdout + ordinary_child.stderr
+        assert json.loads(ordinary_child.stdout)["slices"][0]["names"] == ["single-creator-arm"]
         sampled = subprocess.run(
             [sys.executable, str(repo_root / "scripts/fleet_infra_sample.py"),
              "dry-proof", "--repo", str(repo_root), "--runs", "1", "--width", "10",
@@ -456,7 +471,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
         )
         assert full.returncode == 0, full.stderr
         assert not {"test-mass-agent-run-0", "demo-fleet-alpha", "demo-fleet-beta",
-                    "demo-fleet-gamma"}.intersection(full.stdout.splitlines())
+                    "demo-fleet-gamma", "single-creator-arm"}.intersection(full.stdout.splitlines())
         pool.write_text(json.dumps(["polar-bu-070"]))
         live = subprocess.run(command + ["--min-successful-llm", "3"], cwd=repo_root,
                               text=True, capture_output=True, timeout=30)
@@ -12028,7 +12043,7 @@ async def test_create_agent_uses_model_override_when_env_set():
 
 
 async def test_live_benchmark_cache_setting_preserves_catalog_contracts():
-    """Live proof configuration reaches creation; pinned cache tasks still win."""
+    """Provider-speed configuration reaches creation; catalog declarations win."""
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 

@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import random
+import runpy
 import sys
 from pathlib import Path
 
@@ -150,9 +151,10 @@ def eligible_pool(
     if minimum_successful_llm:
         # These tasks intentionally grade zero live spend. Their cache replay
         # cannot satisfy a live-completion proof without changing that contract.
+        unified = load_unified_catalog(catalog_path(repo_root))
         zero_live_spend = {
             str(task["name"])
-            for task in load_unified_catalog(catalog_path(repo_root))
+            for task in unified
             if any(check.get("type") == "zero_live_spend"
                    for evaluator in task.get("evaluators") or []
                    for check in evaluator.get("checks") or [])
@@ -163,7 +165,26 @@ def eligible_pool(
                 "live-query proof cannot run zero-live-spend tasks: "
                 f"{sorted(selected_zero_live)}"
             )
-        names = [name for name in names if name not in zero_live_spend]
+        # Replay admission is independent of the provider-speed button and can
+        # include a DEMO-bound child without a DEMO tag or zero-spend evaluator.
+        # Reuse the runtime's pure policy rather than duplicating its goal rules.
+        sys.path.insert(0, str(repo_root / "agents"))
+        try:
+            replay_policy = runpy.run_path(str(
+                repo_root / "agents/providers/fast_cache/normalize.py"))
+        finally:
+            sys.path.pop(0)
+        demo_replay = {
+            str(task["name"]) for task in unified
+            if replay_policy["demo_cache_allowed"](task.get("prompt"))
+        }
+        selected_replay = set(names) & demo_replay
+        if pool_file is not None and selected_replay:
+            raise ValueError(
+                "live-query proof cannot run DEMO-replay tasks: "
+                f"{sorted(selected_replay)}"
+            )
+        names = [name for name in names if name not in zero_live_spend | demo_replay]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):

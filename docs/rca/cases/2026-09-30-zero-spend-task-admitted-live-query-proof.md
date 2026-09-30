@@ -1,7 +1,7 @@
 ---
 id: 2026-09-30-zero-spend-task-admitted-live-query-proof
 date: 2026-09-30
-title: Live-query proof admitted a benchmark that requires zero live spend
+title: Live-query proof admitted tasks whose runtime policy requires cache replay
 surface: infra
 component: fleet-capability-selection
 classification: our-bug
@@ -11,6 +11,8 @@ symptoms:
   - "test-mass-agent-run-0 successful_llm_queries 0"
   - "slice-0.llm-proof.json status failed"
   - "zero-live-spend tasks"
+  - "single-creator-arm successful_llm_queries 0 despite fast_mode_cache_enabled false"
+  - "DEMO-replay tasks"
 tags:
   - cloud-fleet
   - capability-proof
@@ -18,6 +20,7 @@ tags:
 sources:
   - PR #1299
   - fleet run capability-stability-20260930153454-11271
+  - fleet run 20260930-162657-18852
 repro: agents/tests/blackbox/benchmark.blackbox.py:test_live_query_proof_rejects_zero_spend_tasks_before_provisioning
 status: mitigated
 ---
@@ -65,6 +68,42 @@ pool exclusion, ordinary cached-task admission and compatible live-task
 admission. The fleet stability suite also passed its 25 checks. The resource
 profile's real startup/archive/retirement boundary worked, but a compatible
 ten-slice live acceptance campaign remains pending, so this case is mitigated.
+
+### Recurrence: an untagged DEMO-bound child
+
+Proof79 reproduced the same eligibility defect for `single-creator-arm`. Its
+catalog entry has no DEMO tag, pinned `fast_cache` value, or zero-spend check.
+The terminal run and backend request both recorded the Fast Mode button off,
+yet the exact worker trace contained 102 `llm.cache.replay` events and no live
+provider completions. Gmail in the same slice had 21 live completions. The
+slice was interrupted with zero credit and exact-owner retirement verified.
+
+`agentExecutionMode.ts` distinguishes the provider-speed button from DEMO
+replay. The runtime's pure `demo_cache_allowed` policy also admits an
+identity-bound creator child. The evaluator-only filter missed that owning
+policy; setting the button off cannot establish live transport activity.
+
+The sampler now calls that same pure policy for catalog goals when the requested
+live-query minimum is positive. It excludes those tasks from random selection
+and rejects an explicit conflicting pool before allocation. It does not change
+the runtime cache, task contracts, or provider-speed setting. Ordinary runs
+without that minimum still admit the creator child and zero-spend tasks.
+
+The existing registered `live_query_proof_zero_spend_admission` gate dispatches
+through `run_all_tests`: unchanged new assertions failed on the evaluator-only
+sampler (creator child admitted, exit 0 instead of 2), then passed after the
+policy integration. Both provider-speed values are tested, along with ordinary
+creator admission, zero-spend rejection, full-pool exclusion and a live Polar
+control. Evidence: `.context/acceptance/demo-bound-admission-before.log` and
+`demo-bound-admission-after.log`. A final-source ten-slice acceptance remains
+pending; this recurrence also stays mitigated.
+
+At 10,000 agents, this policy integration still runs only during local catalog
+selection, once per sampled command. It creates no network requests, polling,
+per-agent subscriptions, shared runtime counters, or production hot-path work.
+The required read-only adversarial review found no blocking issues in the
+policy reuse, ordinary admission, registered coverage, or independent speed
+and replay controls.
 
 ## Human feedback
 
