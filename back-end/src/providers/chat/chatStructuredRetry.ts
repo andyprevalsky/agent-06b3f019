@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../logger';
+import { StructuredOutputCardinalityError } from '../rose/structuredOutput';
 
 const log = createLogger('ChatStructuredRetry');
 
@@ -35,6 +36,14 @@ export function isChatLlmTransientMiss(error: unknown): error is ChatLlmTransien
   return error instanceof ChatLlmTransientMissError;
 }
 
+function asChatStructuredMiss(error: unknown): ChatLlmTransientMissError | null {
+  if (isChatLlmTransientMiss(error)) return error;
+  if (error instanceof StructuredOutputCardinalityError) {
+    return new ChatLlmTransientMissError('empty', error.message, { cause: error });
+  }
+  return null;
+}
+
 export async function regenerateOnChatStructuredMiss<T>(params: {
   callSite: 'chat_router' | 'chat_generator';
   agentId: string;
@@ -45,17 +54,18 @@ export async function regenerateOnChatStructuredMiss<T>(params: {
     try {
       return await params.attempt(attempt);
     } catch (error) {
-      if (!isChatLlmTransientMiss(error)) throw error;
-      lastMiss = error;
+      const miss = asChatStructuredMiss(error);
+      if (!miss) throw error;
+      lastMiss = miss;
       log.warn('[ChatStructuredRetry] Transient structured-output miss; regenerating', {
         callSite: params.callSite,
         agentId: params.agentId,
-        kind: error.kind,
+        kind: miss.kind,
         attempt,
         attempts: MAX_CHAT_STRUCTURED_ATTEMPTS,
-        error: error.message,
+        error: miss.message,
       });
-      if (attempt === MAX_CHAT_STRUCTURED_ATTEMPTS) throw error;
+      if (attempt === MAX_CHAT_STRUCTURED_ATTEMPTS) throw miss;
     }
   }
   throw (

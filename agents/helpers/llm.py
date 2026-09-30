@@ -3144,7 +3144,10 @@ async def call_llm_structured_streaming(
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
         elif structured_output.has_content():
-            accumulated_json = structured_output.final_text()
+            # Degrade selector: never throw cardinality. A reasoning-only /
+            # empty / ambiguous stream used to escape the parse-retry try
+            # below and kill the turn.
+            accumulated_json = structured_output.current_text()
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -4411,7 +4414,9 @@ async def _call_llm_verifier(
             raise ValueError(f"Verifier native tool payload must be an object (got {type(first_input).__name__})")
         accumulated_json = json.dumps(first_input)
     elif structured_output.has_content():
-        accumulated_json = structured_output.final_text()
+        # Same degrade path as the agent loop: empty / reasoning-only /
+        # ambiguous streams become "" and fall into the no-JSON retry.
+        accumulated_json = structured_output.current_text()
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.
