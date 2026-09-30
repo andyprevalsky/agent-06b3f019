@@ -376,8 +376,7 @@ def test_general_purpose_faulty_tool_retry_warns_recursion():
     assert recursion_rule in PROMPT
     assert "intelligent retry for a faulty tool" in PROMPT
     assert "not to spawn more general_purpose sub-agents" in PROMPT
-    assert "intelligent retry for a faulty tool" in MAIN_SYSTEM_PROMPT
-    assert "not to spawn more general_purpose sub-agents" in MAIN_SYSTEM_PROMPT
+    assert "intelligent retry for a faulty tool" not in MAIN_SYSTEM_PROMPT
     assert "circumvent faulty tools" not in doc
     assert "circumvent faulty tools" not in type_desc
     assert "circumvent faulty tools" not in PROMPT
