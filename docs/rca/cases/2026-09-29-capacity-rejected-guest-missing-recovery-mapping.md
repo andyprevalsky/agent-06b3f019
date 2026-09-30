@@ -93,6 +93,41 @@ provider-cleanup ownership until Fly confirms destruction. Ten consecutive
 complete slices are still needed before this case can be marked fixed. No task,
 model, prompt, evaluator, scoring rule, or benchmark timeout changed.
 
+## 2026-09-30 recurrence: stopped pool volume retained a prior run
+
+Counted candidate `20260929-235637-18520` again reached the same Fly host-local
+capacity boundary, this time on `polar-odysseys-82af9358ab6a`. Four provider
+starts for pooled Machine `8445e5b279d128` returned `could not start machine
+due to lack of capacity`; nine peers produced real results and acknowledged
+guest cleanup. The candidate has zero proof credit. The existing recovery mapping
+correctly retained the stopped Machine, but the guest-receipt path required a
+backend log and exact guest state that could not exist because the guest never
+started. This member's original volume still held a **different, previously
+completed run**; treating those stale bytes as the current task would be unsafe.
+
+The exact owner was `4986a735e7924cf5b7b8f7de5ad97eae`. After stopping only
+its nine acknowledged Machines, an inert 512 MB `sleep` boot on the failed
+Machine captured its original 20 GB volume. The 7,551,386-byte capture had a
+stopped services manifest, an exited driver, a prior `run.json`, and no current
+owner or run ID in any captured file. The original Machine was stopped and its
+boot configuration restored. This evidence distinguishes the external placement
+failure from both a task verdict and a partially started guest.
+
+The local owning-boundary reproduction is
+`python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`: it accepts
+the exact four-rejection, stopped-volume case and rejects an accepted start,
+three rejections, current-owner bytes on the original volume, and a started
+Machine. Before this change, exact stale-owner recovery of the live candidate
+failed with `stopped exact Machine has no sealed provider-state proof`, leaving
+all ten claims retained. The new zero-credit rejected-start receipt is bound to
+the exact owner, Machine, volume, original-capture hashes, and provider rejection
+log. The forensic archive verifier independently checks those fields and the
+prior-run bytes before it can release resource ownership. The receipt never
+creates a benchmark result or changes evaluation.
+
+This recurrence remains open until the live exact-owner recovery and subsequent
+ten-slice no-INFRA streak are verified.
+
 ## Human feedback
 
 The user requires ten sequential slices of ten real benches, zero INFRA,

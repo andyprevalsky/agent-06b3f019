@@ -23041,6 +23041,50 @@ def test_capacity_rejected_guest_without_proxy_remains_mapped_for_exact_recovery
         assert not plan.exists()
 
 
+@pytest.mark.parametrize("corrupt", [None, "wrong-owner", "wrong-volume", "wrong-shutdown", "changed-log", "accepted-start", "worker-clone", "missing-receipt"])
+def test_published_rejected_start_receipt_maps_only_exact_zero_credit_guest(
+    tmp_path: Path, corrupt: str | None
+) -> None:
+    registry, audit, _, expected = _private_source_guest_plan_fixture(tmp_path)
+    output = Path(expected[0].split("\t")[5])
+    machine = expected[0].split("\t")[3]
+    (output / "status-proxy.port").unlink()
+    (output / "worker-clones.ids").write_text("")
+    start_log = b"Error: could not start machine due to lack of capacity\n"
+    (output / "cloudbench-boot-start.log").write_bytes(start_log)
+    receipt = {
+        "version": 1, "kind": "provider-rejected-no-guest-start",
+        "fleet_owner_token": registry.name, "run_id": "fixture-run",
+        "bench": "bench-owned", "machine_id": machine,
+        "volume_id": "vol_child", "run_token": registry.name + "-0",
+        "provider_state": "stopped", "proof_credit": 0,
+        "start_log_sha256": hashlib.sha256(start_log).hexdigest(),
+    }
+    if corrupt == "wrong-owner":
+        receipt["fleet_owner_token"] = "a" * 32
+    elif corrupt == "wrong-volume":
+        receipt["volume_id"] = "vol_other"
+    if corrupt != "missing-receipt":
+        (output / "guest-start-rejected.confirmed").write_text(json.dumps(receipt) + "\n")
+    (output / "guest-shutdown.confirmed").write_text(
+        "other-run\n" if corrupt == "wrong-shutdown" else "fixture-run\n"
+    )
+    if corrupt == "changed-log":
+        (output / "cloudbench-boot-start.log").write_bytes(start_log + b"changed\n")
+    elif corrupt == "accepted-start":
+        (output / "post-config-start.accepted").write_text(machine + "\n")
+    elif corrupt == "worker-clone":
+        (output / "worker-clones.ids").write_text("deadbeef000002\n")
+    plan = tmp_path / "plan"
+    result = _private_source_guest_plan_command(registry, audit, plan)
+    if corrupt is None:
+        assert result.returncode == 0, result.stderr
+        assert plan.read_text().splitlines() == [expected[0].rsplit("\t", 1)[0] + "\t0"]
+    else:
+        assert result.returncode != 0, f"mapped corrupt receipt: {corrupt}"
+        assert not plan.exists()
+
+
 @pytest.mark.parametrize("corrupt", [
     "unknown-key", "duplicate-key", "invalid-digest", "audit-digest-mismatch",
     "registry-digest-missing", "audit-digest-missing", "both-digests-missing",

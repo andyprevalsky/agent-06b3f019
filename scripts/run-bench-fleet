@@ -6478,15 +6478,43 @@ for candidate in run_dir.iterdir():
     if not regular_file(port_path):
         # A provider-rejected post-config start never reaches proxy attach.
         # Admit this output into the exact recovery plan with no preferred
-        # local port; this is a mapping only, never a guest cleanup receipt.
+        # local port. A published rejected-start receipt is still only a
+        # mapping here; forensic retirement verifies the original volume.
         start_log = candidate / "cloudbench-boot-start.log"
+        shutdown = candidate / "guest-shutdown.confirmed"
+        rejected = candidate / "guest-start-rejected.confirmed"
+        if shutdown.exists() or shutdown.is_symlink() or rejected.exists() or rejected.is_symlink():
+            if (
+                not regular_file(shutdown)
+                or shutdown.read_bytes() != (run_id + "\n").encode()
+                or not regular_file(rejected)
+                or rejected.stat().st_size > 65_536
+            ):
+                raise ValueError("invalid rejected-start recovery marker")
+            receipt = json.loads(rejected.read_bytes())
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("version") != 1
+                or receipt.get("kind") != "provider-rejected-no-guest-start"
+                or receipt.get("fleet_owner_token") != owner
+                or receipt.get("run_id") != run_id
+                or receipt.get("bench") != candidate.name
+                or receipt.get("machine_id") != machine_id
+                or receipt.get("volume_id") != machine_records[machine_id][1]
+                or not re.fullmatch(re.escape(owner) + r"-[0-9]+", str(receipt.get("run_token", "")))
+                or receipt.get("provider_state") != "stopped"
+                or receipt.get("proof_credit") != 0
+                or not regular_file(start_log)
+                or receipt.get("start_log_sha256") != hashlib.sha256(start_log.read_bytes()).hexdigest()
+            ):
+                raise ValueError("unbound rejected-start recovery receipt")
         if (
             not regular_file(start_log)
             or not 0 < start_log.stat().st_size <= 65_536
             or any(
                 (candidate / name).exists() or (candidate / name).is_symlink()
                 for name in ("post-config-start.accepted", "cloudbench-run.json",
-                             "guest-shutdown.confirmed", "worker-runtime-evidence")
+                             "worker-runtime-evidence")
             )
             or not regular_file(candidate / "worker-clones.ids")
             or (candidate / "worker-clones.ids").read_bytes()

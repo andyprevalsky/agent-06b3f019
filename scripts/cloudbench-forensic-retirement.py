@@ -481,6 +481,10 @@ def verify_interrupted_pool_evidence(
     assert archive_path.stat().st_size == manifest["archive_bytes"] <= 512 * 1024 * 1024
     assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
     expected_files = {}
+    rejected_names = {
+        row["task"] for row in rows
+        if (run / row["task"] / "guest-start-rejected.confirmed").is_file()
+    }
     incomplete = 0
     for ordinal, (task, row) in enumerate(zip(tasks, rows, strict=True)):
         name = row["task"]
@@ -538,7 +542,13 @@ def verify_interrupted_pool_evidence(
                 "original/repo/.context/cloudbench/run.json" in row["missing"])
             stopped_path = out / "guest-cleanup.machine-stopped.json"
             receipt_path = out / "guest-cleanup.recovery-receipt.json"
-            if stopped_path.is_file():
+            if (out / "guest-start-rejected.confirmed").is_file():
+                assert not stopped_path.exists() and not receipt_path.exists()
+                assert not (out / "post-config-start.accepted").exists()
+                assert not (out / "status-proxy.port").exists()
+                assert not (out / "cloudbench-run.json").exists()
+                assert regular_bytes(out / "worker-clones.ids", 4096) == b""
+            elif stopped_path.is_file():
                 assert receipt_path.is_file()
                 stopped = object_file(stopped_path)
                 receipt = object_file(receipt_path)
@@ -576,6 +586,7 @@ def verify_interrupted_pool_evidence(
     assert incomplete > 0
     seen = set()
     archived = {}
+    rejected_originals = {name: {} for name in rejected_names}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_files
@@ -587,6 +598,9 @@ def verify_interrupted_pool_evidence(
             data = stream.read(member.size + 1)
             assert len(data) == member.size
             assert hashlib.sha256(data).hexdigest() == info["sha256"]
+            task_name, _, original_relative = member.name.partition("/original/")
+            if task_name in rejected_names and original_relative:
+                rejected_originals[task_name][original_relative] = data
             if member.name.endswith("/sealed/run.json") or member.name.endswith(
                     "/original/repo/.context/cloudbench/run.json"):
                 archived[member.name] = json.loads(data)
@@ -612,7 +626,12 @@ def verify_interrupted_pool_evidence(
             services = archived[prefix + "repo/.context/cloudbench/services.json"]
             if "original/cloudbench-driver.pid" in row["missing"]:
                 assert state == b"exited"
-                if (run / row["task"] / "guest-cleanup.recovery-receipt.json").is_file():
+                if row["task"] in rejected_names:
+                    verify_rejected_start_archive(
+                        run / row["task"], row, owner, meta["run_id"],
+                        rejected_originals[row["task"]],
+                    )
+                elif (run / row["task"] / "guest-cleanup.recovery-receipt.json").is_file():
                     out = run / row["task"]
                     provider = object_file(out / "guest-cleanup.provider-manifest.json")
                     if provider["kind"] == "provider-prestart-zero-manifest":
@@ -639,7 +658,7 @@ def verify_interrupted_pool_evidence(
                     verify_clean_stack_status(status, token)
             else:
                 assert state == b"running" and services["status"] == "running"
-        if path in archived:
+        if path in archived and row["task"] not in rejected_names:
             results = archived[path].get("tasks")
             assert isinstance(results, list) and len(results) == 1
             assert results[0]["name"] == row["task"]
@@ -648,6 +667,53 @@ def verify_interrupted_pool_evidence(
             "incomplete_tasks": incomplete, "unallocated_workers": len(list(fresh.iterdir())),
             "files": len(seen), "archive_sha256": manifest["archive_sha256"],
             "proof_credit": 0}
+
+
+def verify_rejected_start_archive(
+    out: Path, row: dict[str, object], owner: str, run_id: str,
+    originals: dict[str, bytes],
+) -> None:
+    """A provider-rejected start preserves the prior pool contents, not a run."""
+    receipt = object_file(out / "guest-start-rejected.confirmed")
+    machine = row["machine_id"]
+    volume = row["volume_id"]
+    assert receipt["version"] == 1
+    assert receipt["kind"] == "provider-rejected-no-guest-start"
+    assert receipt["fleet_owner_token"] == owner and receipt["run_id"] == run_id
+    assert receipt["bench"] == row["task"]
+    assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
+    assert receipt["run_token"] == row["run_token"]
+    assert receipt["provider_state"] == "stopped" and receipt["proof_credit"] == 0
+    provenance = receipt["capture_provenance"]
+    assert provenance["direct_original_volume"] is True
+    assert provenance["source_machine_id"] == machine
+    assert provenance["source_volume_id"] == volume
+    assert provenance["archive_sha256"] == receipt["capture_sha256"]
+    assert provenance["proof_credit"] == 0
+    assert set(provenance["files"]) == set(originals)
+    assert receipt["original_file_sha256"] == {
+        name: hashlib.sha256(data).hexdigest() for name, data in sorted(originals.items())
+    }
+    start = regular_bytes(out / "cloudbench-boot-start.log", 65536)
+    assert receipt["start_log_sha256"] == hashlib.sha256(start).hexdigest()
+    lines = start.decode().splitlines()
+    assert len(lines) == 4
+    error = re.compile(
+        rf"Error: could not start machine due to lack of capacity\. "
+        rf"Try 'flyctl machine clone {re.escape(machine)} -a [A-Za-z0-9._-]+'"
+    )
+    assert all(error.fullmatch(line) for line in lines)
+    child = regular_bytes(out / "fleet-child.log", 1048576).decode()
+    assert "provider did not accept the required post-config start" in child
+    assert "Original exit code: 125" in child
+    assert "post-config start accepted" not in child
+    assert originals["cloudbench-driver.state"].strip() == b"exited"
+    services = json.loads(originals["repo/.context/cloudbench/services.json"])
+    prior = json.loads(originals["repo/.context/cloudbench/run.json"])
+    assert services["status"] == "stopped" and prior["run_id"] != run_id
+    assert all(owner.encode() not in data and run_id.encode() not in data
+               for data in originals.values())
+    assert regular_bytes(out / "guest-shutdown.confirmed", 256) == (run_id + "\n").encode()
 
 
 def verify_clean_stack_status(status: bytes, token: str) -> None:
