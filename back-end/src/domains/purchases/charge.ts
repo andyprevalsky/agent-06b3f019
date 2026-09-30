@@ -69,13 +69,10 @@ async function persistMintedCard(
   // Card + transfer are one durable fact. If the process dies before this transaction, replaying
   // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
   // always has both identifiers required to close and release the card.
-  await recordIssuedPurchaseCardFunding(
-    purchase,
-    'usd',
-    minted.cardId,
-    transferId,
-    { ...(minted.metadata ?? {}), last4: minted.last4 }
-  );
+  await recordIssuedPurchaseCardFunding(purchase, 'usd', minted.cardId, transferId, {
+    ...(minted.metadata ?? {}),
+    last4: minted.last4,
+  });
   state.issuedCardId = minted.cardId;
   state.issuedStaticCard = false;
   state.walletWasFunded = true;
