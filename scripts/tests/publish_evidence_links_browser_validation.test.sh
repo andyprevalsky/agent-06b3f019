@@ -47,6 +47,21 @@ assert snippets == {
     "assistant": ["Setting the plan"],
 }, snippets
 
+literal_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Investigate foo_bar failure"},
+        {"role": "ASSISTANT", "text": "**Inspect `foo_bar` before retrying**"},
+    ]
+)
+assert literal_snippets == {
+    "user": ["Investigate foo_bar failure"],
+    "assistant": ["Inspect foo_bar before retrying"],
+}, literal_snippets
+
+fe_url = mod.durable_fe_url(agent, agent, "run.signature")
+assert "?agent-id=" in fe_url and "#benchmark-share=run.signature" in fe_url, fe_url
+assert "benchmark-share=" not in fe_url.split("#", 1)[0], fe_url
+
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 

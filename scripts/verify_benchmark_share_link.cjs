@@ -20,12 +20,18 @@ async function main() {
     const context = await browser.newContext();
     const page = await context.newPage();
     const apiStatuses = [];
+    const apiFailures = [];
     page.on("response", (response) => {
       if (
         new URL(response.url()).pathname.endsWith(
           `/api/benchmarks/shared-agent/${agentId}`,
         )
       ) {
+        const requestUrl = new URL(response.url());
+        if (requestUrl.searchParams.has("share"))
+          apiFailures.push("bearer token was sent in the API URL");
+        if (!response.request().headers()["authorization"]?.startsWith("BenchmarkShare "))
+          apiFailures.push("shared agent API request lacked bearer header");
         apiStatuses.push(response.status());
       }
     });
@@ -34,7 +40,7 @@ async function main() {
       .getByText("Read-only benchmark recording")
       .waitFor({ timeout: 30000 });
     await assertTranscript(page, snippets);
-    if (new URL(page.url()).searchParams.has("benchmark-share"))
+    if (page.url().includes("benchmark-share="))
       throw new Error("bearer token remained in the browser URL");
     await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
     await page
@@ -43,6 +49,7 @@ async function main() {
     await assertTranscript(page, snippets);
     if (!apiStatuses.includes(200))
       throw new Error("shared agent API did not return HTTP 200");
+    if (apiFailures.length) throw new Error(apiFailures.join("; "));
     if (await page.getByText("You're On The Waitlist!").isVisible()) {
       throw new Error("waitlist gate obscures the shared agent");
     }

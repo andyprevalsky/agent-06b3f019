@@ -176,12 +176,12 @@ describe('useAgentProvider', () => {
 
   it('loads a shared benchmark transcript without a session or agent API auth', async () => {
     localStorage.clear();
-    window.history.replaceState({}, '', '/?agent-id=shared-agent&benchmark-share=run.token');
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=run.token');
     captureBenchmarkShareToken();
     server.use(
       http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, ({ request, params }) => {
-        expect(new URL(request.url).searchParams.get('share')).toBe('run.token');
-        expect(request.headers.has('authorization')).toBe(false);
+        expect(new URL(request.url).searchParams.has('share')).toBe(false);
+        expect(request.headers.get('authorization')).toBe('BenchmarkShare run.token');
         expect(request.headers.has('x-api-key')).toBe(false);
         return HttpResponse.json({
           agent: makeAgent({ agent_id: params.agentId as string, goal: 'shared recording' }),

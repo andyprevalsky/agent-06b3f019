@@ -20,8 +20,10 @@ function token(runId: string, expiry: number): string {
   return `${runId}.${expiry}.${signature}`;
 }
 
-async function expectStatus(url: string, status: number): Promise<Response> {
-  const response = await fetch(url);
+async function expectStatus(url: string, status: number, shareToken?: string): Promise<Response> {
+  const response = await fetch(url, {
+    headers: shareToken ? { Authorization: `BenchmarkShare ${shareToken}` } : {},
+  });
   if (response.status !== status) {
     throw new Error(`${url.split('?')[0]}: expected ${status}, got ${response.status}`);
   }
@@ -63,13 +65,14 @@ async function main(): Promise<void> {
     const now = Math.floor(Date.now() / 1000);
     const url = `${base}/api/benchmarks/shared-agent/${agentId}`;
     await expectStatus(url, 403);
-    await expectStatus(`${url}?share=${token(runId, now - 1)}`, 403);
-    await expectStatus(`${url}?share=${token(runId, now + 32 * 86400)}`, 403);
-    await expectStatus(`${url}?share=${token(otherAgentId, now + 3600)}`, 404);
+    await expectStatus(`${url}?share=${token(runId, now + 3600)}`, 403);
+    await expectStatus(url, 403, token(runId, now - 1));
+    await expectStatus(url, 403, token(runId, now + 32 * 86400));
+    await expectStatus(url, 404, token(otherAgentId, now + 3600));
     const valid = token(runId, now + 3600);
     const tampered = `${valid.slice(0, -1)}${valid.endsWith('0') ? '1' : '0'}`;
-    await expectStatus(`${url}?share=${tampered}`, 403);
-    const response = await expectStatus(`${url}?share=${valid}`, 200);
+    await expectStatus(url, 403, tampered);
+    const response = await expectStatus(url, 200, valid);
     const detail = (await response.json()) as {
       agent: { agent_id: string };
       messages: Array<{ text: string }>;
@@ -80,7 +83,7 @@ async function main(): Promise<void> {
     ) {
       throw new Error('unauthenticated shared view did not return the recorded agent');
     }
-    await expectStatus(`${base}/api/benchmarks/shared-agent/${otherAgentId}?share=${valid}`, 404);
+    await expectStatus(`${base}/api/benchmarks/shared-agent/${otherAgentId}`, 404, valid);
     process.stdout.write('benchmark-share blackbox: scoped anonymous transcript visible\n');
   } finally {
     const cleanup = await fetch(`${base}/api/benchmarks/runs/${runId}`, {

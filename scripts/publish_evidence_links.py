@@ -92,10 +92,9 @@ def benchmark_share_token(run_id: str) -> str:
 
 
 def durable_fe_url(agent_id: str, run_id: str, token: str) -> str:
-    query = urllib.parse.urlencode(
-        {"agent-id": agent_id, "benchmark-share": token}
-    )
-    return f"{DURABLE_ORIGIN}/?{query}"
+    query = urllib.parse.urlencode({"agent-id": agent_id})
+    fragment = urllib.parse.urlencode({"benchmark-share": token})
+    return f"{DURABLE_ORIGIN}/?{query}#{fragment}"
 
 
 def upload_run_json(run_json: Path) -> str:
@@ -278,7 +277,11 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
         for line in content.splitlines():
             # React renders Markdown markers as formatting, so match the text
             # the signed-out visitor sees instead of the raw Markdown source.
-            visible_line = re.sub(r"[`*_#>~]", "", line).strip()
+            visible_line = re.sub(r"^\s{0,3}(?:#{1,6}\s+|>\s?)", "", line)
+            visible_line = re.sub(r"`([^`]+)`", r"\1", visible_line)
+            visible_line = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m[1] or m[2], visible_line)
+            visible_line = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)|(?<!\w)_([^_]+)_(?!\w)", lambda m: m[1] or m[2], visible_line)
+            visible_line = re.sub(r"~~([^~]+)~~", r"\1", visible_line).strip()
             if len(visible_line) >= 12:
                 snippets[str(role).lower()].append(visible_line[:60])
                 break
@@ -293,11 +296,10 @@ def verify_agent_reachable(
     Fails closed when any browser agent on the FE link is still live or missing
     a correctly attached recording.
     """
-    url = (
-        f"{DEFAULT_HUB}/api/benchmarks/shared-agent/{agent_id}"
-        f"?share={urllib.parse.quote(token, safe='')}"
+    url = f"{DEFAULT_HUB}/api/benchmarks/shared-agent/{agent_id}"
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"BenchmarkShare {token}"}, method="GET"
     )
-    request = urllib.request.Request(url, method="GET")
     try:
         with _opener().open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")

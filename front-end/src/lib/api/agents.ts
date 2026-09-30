@@ -102,8 +102,11 @@ export async function getBenchmarkSharedAgent(
 ): Promise<AgentDetailResponse> {
   const token = benchmarkShareToken();
   if (!token) throw new Error('Missing benchmark share token');
-  const url = `${API_BASE_WITH_PATH}/benchmarks/shared-agent/${encodeURIComponent(agentId)}?share=${encodeURIComponent(token)}`;
-  const response = await fetch(url, { signal });
+  const url = `${API_BASE_WITH_PATH}/benchmarks/shared-agent/${encodeURIComponent(agentId)}`;
+  const response = await fetch(url, {
+    signal,
+    headers: { Authorization: `BenchmarkShare ${token}` },
+  });
   if (!response.ok) throw new Error('Failed to fetch shared benchmark agent');
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }

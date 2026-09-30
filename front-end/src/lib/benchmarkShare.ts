@@ -7,16 +7,18 @@ interface CapturedBenchmarkShare {
 
 const SHARE_HISTORY_KEY = '__roseBenchmarkShare';
 
-/** Strip the bearer query before analytics starts, retaining it for this history entry. */
+/** Strip the bearer fragment before analytics starts, retaining it for this history entry. */
 export function captureBenchmarkShareToken(): void {
   const params = getQueryParams();
   const agentId = params.get('agent-id');
-  const token = params.get('benchmark-share');
+  const fragmentParams = new URLSearchParams(window.location.hash.slice(1));
+  const token = fragmentParams.get('benchmark-share');
   if (!agentId || !token) return;
 
   const capturedShare: CapturedBenchmarkShare = { agentId, token };
   const url = new URL(window.location.href);
-  url.searchParams.delete('benchmark-share');
+  fragmentParams.delete('benchmark-share');
+  url.hash = fragmentParams.toString();
   const priorState: unknown = window.history.state;
   const state =
     priorState && typeof priorState === 'object' && !Array.isArray(priorState)
@@ -34,8 +36,6 @@ export function benchmarkShareToken(): string | null {
   const params = getQueryParams();
   const agentId = params.get('agent-id');
   if (!agentId) return null;
-  const queryToken = params.get('benchmark-share');
-  if (queryToken) return queryToken;
   const state: unknown = window.history.state;
   const entry =
     state && typeof state === 'object'

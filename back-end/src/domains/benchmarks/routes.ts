@@ -250,7 +250,8 @@ router.get(
   asyncHandler(async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    const token = typeof req.query.share === 'string' ? req.query.share : '';
+    const authorization = req.get('Authorization') ?? '';
+    const token = /^BenchmarkShare ([^\s]+)$/i.exec(authorization)?.[1] ?? '';
     const runId = verifyBenchmarkShareToken(token, benchmarkShareSecret());
     if (runId === null) {
       res.status(403).json({ error: 'Invalid or expired benchmark share link' });

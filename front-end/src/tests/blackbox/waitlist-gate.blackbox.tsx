@@ -18,6 +18,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import { WaitlistGate } from '@/features/auth';
+import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -123,7 +124,8 @@ describe('WaitlistGate', () => {
   it('does not cover a shared benchmark recording for a waitlisted visitor', async () => {
     mockSession();
     gateOn();
-    window.history.replaceState({}, '', '/?agent-id=shared-agent&benchmark-share=signed-run-token');
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=signed-run-token');
+    captureBenchmarkShareToken();
     server.use(
       http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, () =>
         HttpResponse.json({
@@ -134,7 +136,7 @@ describe('WaitlistGate', () => {
       ),
     );
     renderWithProviders(<WaitlistGate />, {
-      route: '/?agent-id=shared-agent&benchmark-share=signed-run-token',
+      route: '/?agent-id=shared-agent',
     });
     await waitFor(() => {
       expect(capturedRequests.some((r) => r.url.includes('/benchmarks/shared-agent/'))).toBe(true);
@@ -145,14 +147,15 @@ describe('WaitlistGate', () => {
   it('keeps the gate for an invalid shared benchmark token', async () => {
     mockSession();
     gateOn();
-    window.history.replaceState({}, '', '/?agent-id=shared-agent&benchmark-share=invalid');
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=invalid');
+    captureBenchmarkShareToken();
     server.use(
       http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, () =>
         HttpResponse.json({ error: 'Invalid share' }, { status: 403 }),
       ),
     );
     renderWithProviders(<WaitlistGate />, {
-      route: '/?agent-id=shared-agent&benchmark-share=invalid',
+      route: '/?agent-id=shared-agent',
     });
     await waitFor(() => {
       expect(screen.getByText("You're On The Waitlist!")).toBeInTheDocument();
