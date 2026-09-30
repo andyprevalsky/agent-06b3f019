@@ -38,7 +38,7 @@ async def fetch_explore_tool_evidence(agent_id: str, user_id: str, task_id: str)
     """Read only this explore task's persisted, completed tool results.
 
     The backend scopes the read to the parent agent and user, scans at most
-    eight rows, and returns at most eight 1,200-character excerpts. A failed read
+    16 rows, and returns at most eight 1,200-character excerpts. A failed read
     never becomes a successful explore result.
     """
     config = load_config()

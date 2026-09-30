@@ -2895,6 +2895,104 @@ async def test_fetch_network_metadata_empty_people():
 # ── service.py: spawn_explore_agent_activity ──────────────────────────
 
 
+def test_compile_explore_wrap_up_renders_late_verified_evidence():
+    """A large escaped search result must not hide a later sourced fetch."""
+    from domains.spawn_agent.service import compile_explore_wrap_up
+
+    stale_search = json.dumps({
+        "answer": "**住民基本台帳による世帯と人口：毎月**\nJuly 2026: 14,301,986\n" + "古い資料\n" * 900,
+        "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
+    })
+    failed_fetch = json.dumps({
+        "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
+        "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
+    })
+    current_fetch = json.dumps({
+        "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
+        "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
+    })
+    valid_404_discussion = json.dumps({
+        "content": "This valid page discusses 404 responses in its documentation.",
+        "url": "https://example.com/http-status-guide",
+    })
+    result = compile_explore_wrap_up("", [
+        f"[web_search] {stale_search}",
+        f"[web_search] {stale_search}",
+        f"[web_fetch] {failed_fetch}",
+        f"[web_fetch] {valid_404_discussion}",
+        f"[web_fetch] {current_fetch}",
+    ])
+    assert len(result) <= 12_000
+    assert "14,303,513" in result
+    assert "js268f0000.pdf" in result
+    assert "\\u4f4f" not in result
+    assert "Page not found" not in result
+    assert "valid page discusses 404" in result
+
+
+async def test_explore_web_tool_messages_are_readable_and_skip_failed_fetch():
+    """The model and fallback receive readable sources, including late evidence."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    stale_answer = "**住民基本台帳による世帯と人口：毎月**\nJuly: 14,301,986\n" + "古い資料\n" * 2000
+    search = MagicMock()
+    search.execute_tool = AsyncMock(return_value={
+        "result": {
+            "answer": stale_answer,
+            "sources": ["https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm"],
+            "query": "Tokyo population",
+        },
+        "usage": {"llm": [], "service": []},
+    })
+    fetch = MagicMock()
+    fetch.execute_tool = AsyncMock(side_effect=[
+        {"result": {
+            "content": "The URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf returned a Page not found / 404 error page.",
+            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js269f0000.pdf",
+            "status_code": 404,
+        }, "usage": {"llm": [], "service": []}},
+        {"result": {
+            "content": "Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — 東京都の人口（推計）令和8年8月1日現在. 人口総数: 14,303,513人.",
+            "url": "https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf",
+        }, "usage": {"llm": [], "service": []}},
+    ])
+    model_messages = []
+
+    async def fake_run_agent(**kwargs):
+        call = kwargs["execute_tool"]
+        model_messages.append(await call("web_search", {"query": "Tokyo"}, "tc-search-1"))
+        model_messages.append(await call("web_search", {"query": "Tokyo"}, "tc-search-2"))
+        model_messages.append(await call("web_fetch", {"url": "https://example.com/404"}, "tc-404"))
+        model_messages.append(await call("web_fetch", {"url": "https://example.com/current"}, "tc-current"))
+        return {"status": "completed", "final_response": ""}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("providers.fast_cache.client.resolve_agent_fast_mode", new=AsyncMock(return_value=(False, "g", True, None, None, True))),
+        patch("tools.web_search.WebSearchManager", return_value=search),
+        patch("tools.web_fetch.WebFetchManager", return_value=fetch),
+    ):
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
+
+    assert model_messages[0]["success"] is True
+    assert "住民基本台帳" in model_messages[0]["message"]
+    assert "\\u4f4f" not in model_messages[0]["message"]
+    assert len(model_messages[0]["message"]) > 8_000
+    assert "[...truncated...]" not in model_messages[0]["message"]
+    assert "https://www.toukei.metro.tokyo.lg.jp/juukim/jm-index.htm" in model_messages[0]["message"]
+    assert model_messages[2]["error"] is True
+    assert model_messages[3]["success"] is True
+    assert result["status"] == "completed"
+    assert len(result["tool_call_results"]) == 3
+    assert len(result["result"]) <= 12_000
+    assert "14,303,513" in result["result"]
+    assert "js268f0000.pdf" in result["result"]
+    assert "Page not found" not in result["result"]
+
+
 async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     """spawn_explore_agent_activity calls run_agent with proper args, returns shaped dict."""
     from unittest.mock import AsyncMock, patch
@@ -4224,6 +4322,11 @@ async def test_tagged_execute_activity_injects_taskid_for_post_agent_message():
 async def run_all_tests():
     print("spawn-agent blackbox tests:")
     r = BlackboxResult()
+    r.record("explore_wrap_up_renders_late_verified_evidence", test_compile_explore_wrap_up_renders_late_verified_evidence)
+    await r.record_async(
+        "explore_web_tool_messages_readable_skip_failed_fetch",
+        test_explore_web_tool_messages_are_readable_and_skip_failed_fetch,
+    )
     await r.record_async("fetch_network_metadata_happy_path", test_fetch_full_network_metadata_happy_path)
     await r.record_async("fetch_network_metadata_boundary", test_fetch_full_network_metadata_boundary)
     await r.record_async("fetch_explore_tool_evidence_scoped_bounded", test_fetch_explore_tool_evidence_is_scoped_and_bounded)
