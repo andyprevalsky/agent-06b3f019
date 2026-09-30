@@ -33,14 +33,15 @@ clone_or_refresh() {
 
 clone_or_refresh openclaw https://github.com/openclaw/openclaw.git
 clone_or_refresh hermes-agent https://github.com/nousresearch/hermes-agent.git
+clone_or_refresh codex https://github.com/openai/codex.git
 
 # Persist tip SHAs for the committed golden-ref pin file.
 {
   echo "# Pinned tips of gitignored reference harness clones used for golden prompt"
-  echo "# snapshots under prompt-review/rendered/{openclaw,hermes-agent}/."
+  echo "# snapshots under prompt-review/rendered/{openclaw,hermes-agent,codex}/."
   echo "# Refresh with: bash scripts/sync-reference-repos.sh --force"
   echo "# then re-run the prompt-review renderers (see prompt-review/run.sh)."
-  for dir in openclaw hermes-agent; do
+  for dir in openclaw hermes-agent codex; do
     if [ -f "$dir/.ref-sha" ]; then
       echo "$dir $(cat "$dir/.ref-sha")"
     fi

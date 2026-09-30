@@ -10,7 +10,7 @@ cd "$ROOT"
 PORT="${PROMPT_REVIEW_PORT:-8765}"
 
 # 1. Make sure reference repos exist.
-if [ ! -d openclaw ] || [ ! -d hermes-agent ]; then
+if [ ! -d openclaw ] || [ ! -d hermes-agent ] || [ ! -d codex ]; then
   echo "[run] reference repos missing — bootstrapping..."
   bash scripts/sync-reference-repos.sh
 fi
@@ -22,6 +22,7 @@ echo "[run] rendering runtime prompt values..."
 python3 prompt-review/render/render_ours_python.py || echo "[run] (skipped ours-python renderer — non-fatal)"
 bash   prompt-review/render/render_ours_ts.sh   || echo "[run] (skipped ours-ts renderer — non-fatal)"
 python3 prompt-review/render/render_hermes.py  || echo "[run] (skipped hermes renderer — non-fatal)"
+python3 prompt-review/render/render_codex.py   || echo "[run] (skipped codex renderer — non-fatal)"
 python3 prompt-review/render/capture_claude_system_prompt.py || echo "[run] (skipped claude system prompt capture — non-fatal)"
 ( cd prompt-review/render && bun intercept_claude.ts ) || echo "[run] (skipped claude runtime interceptor — non-fatal)"
 python3 prompt-review/render/render_claude_remaining.py || echo "[run] (skipped claude renderer — non-fatal)"

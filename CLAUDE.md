@@ -32,9 +32,15 @@ hermes-agent/     → Cloned Nous Research hermes-agent (READ-ONLY reference,
                     + reasoning prompts. Re-clone with
                     `git clone --depth 1 https://github.com/nousresearch/hermes-agent.git`
                     if missing locally.
+codex/            → Cloned OpenAI Codex CLI (READ-ONLY reference, gitignored,
+                    Apache-2.0). Terminal coding agent harness; prompts live
+                    under `codex-rs/prompts/` + `codex-rs/core/*_prompt.md`.
+                    Re-clone with
+                    `git clone --depth 1 https://github.com/openai/codex.git`
+                    if missing locally.
 ```
 
-> **Reference repos policy:** `openclaw/` and `hermes-agent/` are gitignored
+> **Reference repos policy:** `openclaw/`, `hermes-agent/`, and `codex/` are gitignored
 > (sit alongside `claude-code-src/` but are NOT committed). Treat as
 > read-only research material — do not edit them. If they're missing on a
 > fresh clone, run `bash scripts/sync-reference-repos.sh` to restore.
@@ -42,8 +48,8 @@ hermes-agent/     → Cloned Nous Research hermes-agent (READ-ONLY reference,
 ## Prompt review tool
 
 `prompt-review/` ships a small local web app for reviewing every prompt in
-this repo against three reference codebases side by side. Five columns:
-**current → ~1 month ago → Claude Code → OpenClaw → Hermes**. Notes are
+this repo against reference codebases side by side. Columns:
+**current → ~1 month ago → Claude Code → OpenClaw → Hermes → Codex**. Notes are
 saved per prompt; checkpoint state persists across reloads.
 
 ```bash
@@ -53,7 +59,7 @@ PROMPT_REVIEW_PORT=9000 bash prompt-review/run.sh   # custom port
 
 - Catalog: `prompt-review/catalog.json` (edit to add/remove prompts).
   Each OUR entry has a `matches` field with hand-picked semantic pairings
-  for each reference repo (`claude`, `openclaw`, `hermes`); a value of
+  for each reference repo (`claude`, `openclaw`, `hermes`, `codex`); a value of
   `null` means "no equivalent in that repo" and the column shows
   "no equivalent" instead of a low-quality keyword match. Edit
   `prompt-review/render/apply_explicit_mappings.py` to refine pairings.
