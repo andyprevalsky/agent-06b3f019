@@ -20,7 +20,7 @@ tags:
   - context-window
 sources:
   - agent a890a362-9775-410c-beb0-c251cd511845
-repro: agents/tests/blackbox/run_agent.blackbox.py::test_activity_tool_results_are_hard_capped_before_context_append
+repro: agents/tests/blackbox/run_agent.blackbox.py::test_activity_tool_result_cap_prevents_protected_tail_overflow
 status: fixed
 ---
 
@@ -45,6 +45,10 @@ still exceeds trigger 167000 (original estimate 183388).
 `error_reason` with those strings. LLM usage on the first failure showed
 iteration 3 `tokens_in=139694` after a successful grep — then compaction
 ran and could not get under the 167k trigger.
+For the second failure, retained worker logs show four `Grep completed`
+events followed by four grep TOOL appends (`context_len` 12–15), then
+`Context overflow` at 183388 tokens. The grep results had 8, 0, 144,
+and 23 matches; the exact result byte lengths were not captured.
 
 ## Diagnosis
 
@@ -59,19 +63,20 @@ Critical path:
 
 1. Explore activity builds a clean `initial_context` and runs `run_agent` with
    `poll_messages=None` (`spawn_agent/service.py`).
-2. Grep returns large match dumps (email/message bodies) as `message` JSON.
+2. Grep returns match dumps (email/message bodies) as `message` JSON.
 3. `run_agent` appends the full tool result into context with no size bound
    (web_fetch already uses `summarize_tool_result`; grep does not).
 4. Head/tail-protected compaction keeps recent TOOL turns verbatim
-   (`HEAD_TAIL_PROTECTED_TURNS`); a single oversized dump in the tail cannot
-   be summarized away.
+   (`HEAD_TAIL_PROTECTED_TURNS`); oversized recent results cannot be
+   summarized away.
 5. `compressed_tokens >= compaction_trigger` → explore returns
    `status=error` with the compression-ineffective message.
 
 Step 5a ladder:
 
 - Why 1: compaction stayed above 167k.
-- Why 2: protected tail still held ~180–210k of tool payload.
+- Why 2: the post-compaction context estimate stayed at ~183–211k with recent
+  tool turns protected; the exact contribution of each grep result was not logged.
 - Why 3: activity-mode append had no hard cap (web_fetch had one; grep shared
   the uncapped path). **Deepest owned cause.** Sibling: any large
   activity-mode tool result (future tools, huge error blobs).
@@ -88,12 +93,27 @@ Cemented by
 (pre-fix: 520000-char grep result in context; post-fix: capped with
 `truncated, original_len=` marker).
 
+On 2026-09-29, the user pointed to the explore agent's trajectory and its
+compression check specifically. A second blackbox,
+`test_activity_tool_result_cap_prevents_protected_tail_overflow`, now exercises
+that check in `run_agent` with a protected head and four-result grep tail. On
+`cf8368122^`, the unchanged assertion fails: the check sees 181291 original
+and 180600 compressed tokens, above the 167000 trigger, and returns
+`Context compression ineffective`. On the fixed branch it reaches the next
+iteration without calling the compactor. This is a local replay of the same
+boundary and failure condition, not the exact production context payload.
+The compactor is mocked to keep the protected head and latest four results;
+the test proves this oversized-result mechanism, not every possible explore
+compression failure.
+
 10k-agent behavior: O(1) string slice per tool result on the activity path;
 no new fan-in, queries, or broadcasts.
 
 ## Human feedback
 
-None recorded.
+On 2026-09-29, the user clarified that the observed failure was the explore
+agent in the trajectory failing the context compression check, correcting the
+earlier focus on the tool-result cap assertion alone.
 
 ## Reusable lesson
 

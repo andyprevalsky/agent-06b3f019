@@ -514,7 +514,10 @@ describe('Integrations page', () => {
 
       // Click the Gmail sync button
       const gmailRow = screen.getByText('Gmail').closest('.flex.items-center.justify-between')!;
-      const gmailButton = within(gmailRow).getByRole('button');
+      expect(
+        within(gmailRow).getByText(/Google consent also requests Calendar and Drive access/),
+      ).toBeInTheDocument();
+      const gmailButton = within(gmailRow).getByRole('button', { name: 'Connect Google' });
       await user.click(gmailButton);
 
       // Verify the API call was made
