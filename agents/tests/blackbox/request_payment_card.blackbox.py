@@ -629,6 +629,55 @@ async def test_mint_purchase_card_activity_maps_kyc_required():
     assert "KYC" in result["error"]
 
 
+async def test_mint_purchase_card_activity_maps_purchase_above_max_limit():
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 400,
+                "json": {
+                    "error": "Purchase is above max limit of 63288",
+                    "code": "purchase_above_max_limit",
+                    "maxPurchaseCents": 63288,
+                },
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    payload["agentId"] = "agent-1"
+
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "purchase_above_max_limit"
+    assert result["code"] == "purchase_above_max_limit"
+    assert result["maxPurchaseCents"] == 63288
+    assert "above max limit of 63288" in result["error"]
+
+
+async def test_mint_purchase_card_activity_maps_402_to_subscription_required():
+    """Plain 402 without purchase_above_max_limit code still means subscribe."""
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 402,
+                "json": {"error": "User does not have a Stripe billing customer"},
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "subscription_required"
+    assert "Stripe billing customer" in result["error"]
+
+
 async def test_mint_purchase_card_activity_maps_company_funding_in_progress():
     setup_mock(
         {
@@ -852,6 +901,14 @@ async def run_all_tests():
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("mint_maps_kyc_required", test_mint_purchase_card_activity_maps_kyc_required)
+    await result.record_async(
+        "mint_maps_purchase_above_max_limit",
+        test_mint_purchase_card_activity_maps_purchase_above_max_limit,
+    )
+    await result.record_async(
+        "mint_maps_402_subscription_required",
+        test_mint_purchase_card_activity_maps_402_to_subscription_required,
+    )
     await result.record_async(
         "mint_maps_company_funding_in_progress",
         test_mint_purchase_card_activity_maps_company_funding_in_progress,

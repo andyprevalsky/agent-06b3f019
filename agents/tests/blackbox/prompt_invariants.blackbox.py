@@ -356,6 +356,33 @@ def test_spawn_agent_prompt_defines_param_wording_taxonomy():
     assert "Ignored for type='X'" in PROMPT
 
 
+def test_general_purpose_faulty_tool_retry_warns_recursion():
+    """GP may retry faulty tools, but prompts must warn against GP→GP recursion."""
+    from tools.prompts.spawn_agent import PROMPT
+    from utils.prompts import MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import SpawnAgentTool
+
+    retry_rule = (
+        "When using one as an intelligent retry for a faulty tool, instruct it not "
+        "to spawn more general_purpose sub-agents"
+    )
+    recursion_rule = "Be wary of infinite recursion"
+    doc = SpawnAgentTool.__doc__ or ""
+    type_desc = SpawnAgentTool.model_fields["type"].description or ""
+    assert recursion_rule in " ".join(doc.split())
+    assert retry_rule in " ".join(doc.split())
+    assert recursion_rule in type_desc
+    assert retry_rule in type_desc
+    assert recursion_rule in PROMPT
+    assert "intelligent retry for a faulty tool" in PROMPT
+    assert "not to spawn more general_purpose sub-agents" in PROMPT
+    assert "intelligent retry for a faulty tool" not in MAIN_SYSTEM_PROMPT
+    assert "circumvent faulty tools" not in doc
+    assert "circumvent faulty tools" not in type_desc
+    assert "circumvent faulty tools" not in PROMPT
+    assert "circumvent faulty tools" not in MAIN_SYSTEM_PROMPT
+
+
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -1729,15 +1756,16 @@ def test_tool_prompts_open_with_declarative_sentence():
 # session-isolation contract on every call without a cross-reference. The
 # prompt also defines the canonical Required/Optional/Ignored subtype-field
 # wording, so the local cap is intentionally higher than ordinary tool prompts.
-# The recursive same-goal GP rule (distinct goal + <½ complexity + no
-# faulty-tool workaround) is load-bearing anti-recursion text on the wire.
+# The recursive same-goal GP rule (distinct goal + <½ complexity) plus the
+# faulty-tool intelligent-retry recursion warning are load-bearing
+# anti-recursion text on the wire.
 #
 # grep carries load-bearing source/filter guidance for documents and
 # transactions so local-data benchmarks use the scoped DB search path instead
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
     "grep": 1600,
-    "spawn_agent": 3300,
+    "spawn_agent": 3600,
 }
 _TOOL_PROMPT_CHAR_CAP_DEFAULT = 1500
 _TOOL_PROMPT_CHAR_FLOOR = 100
@@ -1880,6 +1908,10 @@ async def run_all_tests():
     r.record(
         "spawn_agent_prompt_param_wording_taxonomy",
         test_spawn_agent_prompt_defines_param_wording_taxonomy,
+    )
+    r.record(
+        "general_purpose_faulty_tool_retry_warns_recursion",
+        test_general_purpose_faulty_tool_retry_warns_recursion,
     )
     r.record(
         "planner_spawn_aliases_documented_in_prompt",
