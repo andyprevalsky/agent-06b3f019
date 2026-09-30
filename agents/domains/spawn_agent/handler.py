@@ -73,6 +73,8 @@ def user_facing_explore_result(text: Any) -> str:
     if not raw or raw.lower() in {"research started.", "research started"}:
         return ""
     lowered = raw.lower()
+    if lowered.startswith("starting explore agent:"):
+        return ""
     if any(marker in lowered for marker in _FAST_MODE_USER_COPY) and len(raw) < 400:
         return ""
     return raw
@@ -119,13 +121,11 @@ def _explore_result_after_activity_failure(
     )
     if user_paused and cancel_cause:
         return {}, True
-    if recovered:
+    recovered_text = _explore_chip_text(recovered) if recovered else ""
+    if recovered_text:
         return {
             "status": "completed",
-            "result": recovered.get("result")
-            or recovered.get("final_response")
-            or recovered.get("summary")
-            or "",
+            "result": recovered_text,
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -134,8 +134,9 @@ def _explore_result_after_activity_failure(
         raise exc
     if cancel_cause and not user_paused:
         return {
-            "status": "completed",
-            "result": "Research finished with the evidence gathered so far.",
+            "status": "failed",
+            "result": "",
+            "error_reason": "Explore agent stopped before returning usable research.",
             "tool_call_results": [],
             "accumulated_usage": [],
             "llm_iteration_usage": [],
@@ -713,8 +714,9 @@ class SpawnAgentManager(ToolManager):
                         result = await activity_handle
                     else:
                         result = {
-                            "status": "completed",
-                            "result": "Research finished with the evidence gathered so far.",
+                            "status": "failed",
+                            "result": "",
+                            "error_reason": "Explore agent stopped before returning usable research.",
                             "tool_call_results": [],
                             "accumulated_usage": [],
                             "llm_iteration_usage": [],
@@ -735,7 +737,7 @@ class SpawnAgentManager(ToolManager):
                 )
                 return
 
-            explore_result = result.get("result", "No results found.")
+            explore_result = _explore_chip_text(result)
             explore_tool_call_results = result.get("tool_call_results") or []
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
@@ -746,16 +748,18 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
+            if not explore_result:
+                explore_failed = True
+                explore_error_reason = explore_error_reason or "Explore agent returned no usable research."
             # Fast Mode: a truncated/malformed cached explore turn (e.g. the
             # identify-50 attempt_completion JSON) used to ERROR the spawn after
             # 3 parse retries of the same row. Finish with gathered evidence.
-            if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
+            if (
+                explore_failed
+                and explore_result
+                and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+            ):
                 explore_failed = False
-                if not explore_result or explore_result == "No results found.":
-                    explore_result = (
-                        explore_error_reason
-                        or "Research finished with the evidence gathered so far."
-                    )
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted

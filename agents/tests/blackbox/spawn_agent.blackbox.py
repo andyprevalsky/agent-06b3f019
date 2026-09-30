@@ -1149,8 +1149,41 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     assert fake.wait_condition_timeouts[0] is not None
 
 
-async def test_handler_explore_timeout_without_heartbeat_still_finishes():
-    """Wait-budget cancel without heartbeat still FINISHES so the parent can continue."""
+async def test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence():
+    """A heartbeat with only tool results supplies bounded, grounded research."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    evidence = {
+        "result": "",
+        "tool_call_results": [
+            "[web_fetch] **Result:** Denver single-person monthly costs excluding rent: $1,303.8."
+        ],
+    }
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(exception=_explore_timeout_activity_error(evidence)),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "research Denver cost"},
+                tool_call_id="tc-timeout-evidence",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
+    assert "$1,303.8" in finished.message
+    assert finished.data["result"] == finished.message
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_timeout_without_heartbeat_reports_error():
+    """TRY_CANCEL without heartbeat must not invent a successful research result."""
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
@@ -1170,13 +1203,14 @@ async def test_handler_explore_timeout_without_heartbeat_still_finishes():
     finally:
         restore()
 
-    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "evidence gathered" in finished.message.lower()
-    assert not any(event.status == MessageStatus.ERROR for event in events)
+    error = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert "before returning usable research" in error.message
+    assert error.data["result"] == ""
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
 
 
 async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
-    """Hung explore after parent wait + cancel grace FINISHES without unbounded await.
+    """Hung explore after parent wait + cancel grace ERRORs without unbounded await.
 
     53831ac9 cancelled at the parent-wait budget then `await activity_handle`
     blocked until the 600s activity timeout, tying the 600s smoke cap.
@@ -1205,11 +1239,17 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     finally:
         restore()
 
-    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "evidence gathered" in finished.message.lower()
-    assert not any(event.status == MessageStatus.ERROR for event in events)
+    error = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert "before returning usable research" in error.message
+    assert error.data["result"] == ""
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
     assert handle._cancelled
     assert not handle._awaited
+    from temporalio import workflow
+
+    assert fake.start_activity_calls[0]["kwargs"]["cancellation_type"] == (
+        workflow.ActivityCancellationType.TRY_CANCEL
+    )
     assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
 
@@ -3215,6 +3255,98 @@ async def test_spawn_explore_agent_activity_error_status_returned():
     assert result["structured_response"] == {"topic": "partial"}
 
 
+async def test_spawn_explore_self_wrap_returns_collected_tool_evidence():
+    """A blocked live explore returns grounded evidence before the parent's wait."""
+    from datetime import timedelta
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "Denver single-person monthly cost excluding rent: $1,303.8.",
+            "usage": {"llm": [], "service": []},
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"](
+            "grep", {"pattern": "Denver cost", "sources": ["agent_trajectories"]}, "tc1"
+        )
+        await asyncio.Event().wait()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_PARENT_WAIT", timedelta(milliseconds=50)),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert result["status"] == "completed"
+    assert "$1,303.8" in result["result"]
+    assert result["tool_call_results"]
+
+
+async def test_spawn_explore_self_wrap_without_evidence_fails():
+    """The same live deadline cannot turn an empty explore into success."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        await asyncio.Event().wait()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_PARENT_WAIT", timedelta(milliseconds=50)),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a", user_id="u", goal="research Denver cost", model="m"
+        )
+
+    assert result["status"] == "error"
+    assert result["result"] == ""
+    assert result["error_reason"] == "explore completed without tool evidence"
+
+
+async def test_spawn_explore_demo_keeps_full_activity_budget():
+    """The live parent deadline does not truncate a demo explore."""
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        await asyncio.sleep(0.06)
+        return {"status": "completed", "final_response": "Grounded demo result"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_PARENT_WAIT", timedelta(milliseconds=50)),
+        patch("domains.spawn_agent.service.LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0.01),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="demo research",
+            model="m",
+            local_data_summary="Grounded local input",
+            oai_demo=True,
+        )
+
+    assert result["status"] == "completed"
+    assert result["result"] == "Grounded demo result"
+
+
 async def test_spawn_explore_agent_activity_unavailable_sources_still_completed():
     """Unavailable grep sources append a notice but do not force explore status=error."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -4206,8 +4338,12 @@ async def run_all_tests():
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
     )
     await r.record_async(
-        "handler_explore_timeout_without_heartbeat_still_finishes",
-        test_handler_explore_timeout_without_heartbeat_still_finishes,
+        "handler_explore_timeout_finishes_with_heartbeat_tool_evidence",
+        test_handler_explore_timeout_finishes_with_heartbeat_tool_evidence,
+    )
+    await r.record_async(
+        "handler_explore_timeout_without_heartbeat_reports_error",
+        test_handler_explore_timeout_without_heartbeat_reports_error,
     )
     await r.record_async(
         "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
@@ -4363,6 +4499,18 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_keeps_rejecting_no_evidence_outside_demo,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
+    await r.record_async(
+        "explore_self_wrap_returns_collected_tool_evidence",
+        test_spawn_explore_self_wrap_returns_collected_tool_evidence,
+    )
+    await r.record_async(
+        "explore_self_wrap_without_evidence_fails",
+        test_spawn_explore_self_wrap_without_evidence_fails,
+    )
+    await r.record_async(
+        "explore_demo_keeps_full_activity_budget",
+        test_spawn_explore_demo_keeps_full_activity_budget,
+    )
     await r.record_async(
         "explore_activity_unavailable_sources_still_completed",
         test_spawn_explore_agent_activity_unavailable_sources_still_completed,

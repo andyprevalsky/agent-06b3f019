@@ -3449,3 +3449,7 @@
 {"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 128.0, "cost_cents": 0.0, "timestamp": "2026-09-30T05:38:37.913856+00:00", "agent_id": "0ceba9d6-f91b-4e2b-8273-d2bb186bbdd7"}
 {"task": "grep-agent-trajectories-isolation", "duration_seconds": 212.7, "cost_cents": 1.0, "timestamp": "2026-09-30T05:38:37.913856+00:00", "agent_id": "735c6bf1-788c-41e5-8c82-ed670d3eb9c3"}
 {"task": "chat-mode", "duration_seconds": 1370.7, "cost_cents": 0.0, "timestamp": "2026-09-30T05:45:37.274676+00:00", "agent_id": "8e455ba5-d112-4d29-959a-dd2d776b3fb0"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 327.0, "cost_cents": 10.0, "timestamp": "2026-09-30T13:09:20.408346+00:00", "agent_id": "0c89e14e-7f16-4636-bce6-04240ca702da"}
+{"task": "claude-code-agent", "duration_seconds": 90.8, "cost_cents": 7.0, "timestamp": "2026-09-30T13:09:20.408346+00:00", "agent_id": "3b6b6ce4-e825-4d0b-9fd8-05d2075b3b0e"}
+{"task": "plaid-transactions-monthly-spend", "duration_seconds": 104.8, "cost_cents": 5.0, "timestamp": "2026-09-30T13:09:20.408346+00:00", "agent_id": "db4abe22-29d0-4e4a-8b58-fe424c1461f4"}
+{"task": "chat-mode", "duration_seconds": 345.3, "cost_cents": 0.0, "timestamp": "2026-09-30T13:09:20.408346+00:00", "agent_id": "38add385-7ee8-4aed-b62a-5eacbd0fa241"}

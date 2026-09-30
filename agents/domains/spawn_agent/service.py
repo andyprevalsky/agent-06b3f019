@@ -18,6 +18,7 @@ from domains.spawn_agent.config import (
     EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
+    LIVE_EXPLORE_PARENT_WAIT,
     explore_limits_for_depth,
     resolve_explore_depth,
     resolve_explore_oai_demo,
@@ -39,6 +40,10 @@ from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import get_explore_agent_tools
 
 logger = structlog.get_logger()
+
+# Return partial tool evidence before the live parent's 150s wait expires.
+# Leave room to drain pending FE posts and persist the final explore chip.
+LIVE_EXPLORE_DRAIN_SLACK_SECONDS = 15
 
 COMMON_CSV_HEADER_NAMES = {
     "address",
@@ -817,7 +822,7 @@ async def spawn_explore_agent_activity(
     # exactly the error path where visibility matters most.
     result: Dict[str, Any] = {}
     try:
-        result = await run_agent(
+        run_agent_coro = run_agent(
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=explore_system_prompt,
@@ -849,6 +854,18 @@ async def spawn_explore_agent_activity(
             fast_mode_cache_enabled=_explore_fast_mode_enabled,
             goal_text=_explore_fast_mode_goal,
         )
+        if _oai_demo:
+            result = await run_agent_coro
+        else:
+            try:
+                result = await asyncio.wait_for(
+                    run_agent_coro,
+                    timeout=LIVE_EXPLORE_PARENT_WAIT.total_seconds()
+                    - LIVE_EXPLORE_DRAIN_SLACK_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.info("Explore agent returning gathered evidence before parent wait")
+                result = {"status": "completed"}
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()
