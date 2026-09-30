@@ -333,8 +333,10 @@ async function run(): Promise<void> {
     if (!String(tool.content).includes('tool_status: ❌ FAILED')) {
       throw new Error(`Tool status was lost from the matching snippet: ${JSON.stringify(tool)}`);
     }
-    if (!String(tool.content).includes('message_role: TOOL')) {
-      throw new Error(`Message role was lost from the citation: ${JSON.stringify(tool)}`);
+    if (
+      !String(tool.content).includes(`trace_path: ${tool.path}\nmessage_role: TOOL\nagent_title:`)
+    ) {
+      throw new Error(`Message path or role was lost from the citation: ${JSON.stringify(tool)}`);
     }
     requireResult(
       await grep(ownerId, { source: 'agent_trajectories', pattern: 'current-only' }),

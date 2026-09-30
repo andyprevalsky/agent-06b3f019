@@ -171,9 +171,9 @@ export function buildAgentTrajectoryMatch(
   const path = buildAgentTrajectoryPath(row.rootAgentId, row.agentId, row.role, row.messageId);
   const toolStatus = /^\*\*Status\*\*:\s*(.+)$/i.exec(row.searchText.split('\n', 1)[0])?.[1];
   const heading = [
-    `agent: ${row.agentTitle !== null && row.agentTitle !== '' ? row.agentTitle : row.agentGoal}`,
-    `trace_path: agent_trajectories/${row.rootAgentId}`,
+    `trace_path: ${path}`,
     `message_role: ${row.role}`,
+    `agent_title: ${row.agentTitle !== null && row.agentTitle !== '' ? row.agentTitle : row.agentGoal}`,
     ...(row.role === 'TOOL' && toolStatus !== undefined ? [`tool_status: ${toolStatus}`] : []),
     ...(row.archivePath !== null ? [`archive: ${row.archivePath}`] : []),
   ].join('\n');
