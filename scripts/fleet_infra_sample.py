@@ -77,6 +77,11 @@ def eligible_pool(
             if isinstance(task, dict)
             and "macOS Messages bridge" in (task.get("environment") or {}).get("services", [])
         }
+        production_only = {
+            str(task["name"])
+            for task in unified
+            if isinstance(task, dict) and task.get("production_only") is True
+        }
         selected_rootless = set(names) & rootless
         if pool_file is not None and selected_rootless:
             raise ValueError(
@@ -89,7 +94,14 @@ def eligible_pool(
                 "capability proof requires Linux/cloud runnable tasks; Mac Messages relay tasks: "
                 f"{sorted(selected_mac_relay)}"
             )
-        names = [name for name in names if name not in rootless | mac_relay]
+        selected_production_only = set(names) & production_only
+        if pool_file is not None and selected_production_only:
+            raise ValueError(
+                "capability proof requires isolated-stack tasks; production-only tasks: "
+                f"{sorted(selected_production_only)}"
+            )
+        names = [name for name in names
+                 if name not in rootless | mac_relay | production_only]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):

@@ -153,6 +153,24 @@ if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
 fi
 grep -Fq 'Mac Messages relay tasks' /tmp/infra-proof-mac-relay.out \
   || fail "Mac relay capability rejection must explain why"
+production_only_pool="$(mktemp)"
+printf '["agent-payment-production-purchase"]\n' > "$production_only_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$production_only_pool" >/tmp/infra-proof-production-only.out 2>&1; then
+  fail "capability proof must reject production-only tasks on isolated cloud stacks"
+fi
+grep -Fq 'production-only tasks' /tmp/infra-proof-production-only.out \
+  || fail "production-only capability rejection must explain why"
+python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must exclude production-only tasks"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+assert "agent-payment-production-purchase" not in eligible_pool(
+    root, None, require_cloud_root=True)
+PY
+rm -f "$production_only_pool"
 rm -f "$mac_relay_pool"
 rm -f "$rootless_pool"
 rm -f "$exclude_file" "$capability_sample" "$small_pool"

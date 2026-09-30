@@ -22,6 +22,7 @@ sources:
   - PR #1299
   - fleet run 20260929-161610-10375
   - fleet run 20260929-183257-2121
+  - fleet run 20260930-033934-26671
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -158,6 +159,39 @@ At 10,000 agents, this adds one bounded status request only for a guest missing
 its normal shutdown confirmation. It does not inventory other agents or
 providers. In the observed terminal state, the collector's futile wait falls
 from 600 seconds to under one second in the local boundary repro.
+
+### Stale running manifest after a required service exits
+
+The fourth slice of the September 30 capability proof had nine evaluated,
+sealed tasks and one interrupted `polar-odysseys-dd2eedbc88cb` guest. Its
+original supervisor log recorded `back-end (PID 1510) exited with code 137`
+followed by stack shutdown. The driver exited and wrote an `ERROR` run record,
+but the original `services.json` still said `running`. The exact Machine was
+stopped, its provider session was released with a bound receipt, and all ten
+original volumes were archived. The archive verifier rejected that stale
+service status before it could release the runtime-evidence latch, retaining
+the owner. Exit 137 proves SIGKILL of the backend child; the reason for that
+signal is still unproven and remains an open infrastructure issue.
+
+The first bad recovery boundary was the interrupted archive verifier's
+assumption that a stopped guest with an exact provider receipt must have a
+`failed` service manifest. A required service can exit before the supervisor
+flushes the manifest. The local reproduction
+`python3 scripts/tests/cloudbench-prestack-recovery.test.py` failed on the
+unchanged positive case at `assert services["status"] == "failed"` (six other
+tests passed). The same command passed all nine tests after the fix, including
+negative tests for absent supervisor exit, wrong backend PID, and incomplete
+provider receipt. The Cloud controller ran the same suite and then recovered
+the exact owner; no interrupted task received benchmark proof credit.
+
+The zero-credit verifier now accepts this narrow stale-`running` case only
+when the archived supervisor log names the original backend PID and its
+code-137 exit before shutdown, the original run record identifies the single
+`ERROR` task, the captured backend bytes reproduce the active provider
+manifest, and the stopped-Machine proof plus exact provider cleanup receipt
+validate together. Native inventory and original archive hashes remain
+mandatory. This extends the existing recovery case rather than treating the
+backend's unexplained SIGKILL as fixed.
 
 ## Human feedback
 
