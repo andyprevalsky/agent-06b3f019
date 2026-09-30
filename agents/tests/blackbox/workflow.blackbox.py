@@ -3,7 +3,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from _test_utils import BlackboxResult, teardown_mock
@@ -66,6 +66,18 @@ def test_usage_model_falls_back_when_cache_provenance_is_unknown():
     assert _resolve_usage_model(None, requested) == requested
     assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
     assert _resolve_usage_model("fast-cache", requested) == "fast-cache"
+
+
+def test_general_purpose_child_completion_deadline_is_absolute_and_scoped():
+    from workflows.agent_workflow import _general_purpose_child_completion_deadline
+
+    start = datetime(2026, 9, 30, 13, 17, tzinfo=timezone.utc)
+    expected = start + timedelta(seconds=240)
+    assert _general_purpose_child_completion_deadline(start, "parent-workflow", 1) == expected
+    assert _general_purpose_child_completion_deadline(start, "parent-workflow", 1) == expected
+    assert _general_purpose_child_completion_deadline(start, None, 0) is None
+    assert _general_purpose_child_completion_deadline(start, "parent-workflow", 0) is None
+    assert _general_purpose_child_completion_deadline(None, "parent-workflow", 1) is None
 
 
 def test_task_dag_sequential():
@@ -7659,6 +7671,10 @@ async def run_all_tests():
     r.record("extract_error_simple", test_extract_error_message_simple)
     r.record("extract_error_chained", test_extract_error_message_chained)
     r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
+    r.record(
+        "general_purpose_child_completion_deadline_is_absolute_and_scoped",
+        test_general_purpose_child_completion_deadline_is_absolute_and_scoped,
+    )
 
     # AgentWorkflow pure-method tests
     r.record("wf_restore_deploy_state", test_workflow_restore_deployment_state_preserves_all_durable_counters)
