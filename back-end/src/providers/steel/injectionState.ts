@@ -1,69 +1,57 @@
 import { log } from './types';
+import {
+  injectOriginPayload,
+  type InitScriptContext,
+  type OriginPayloadRef,
+} from './injectionOriginPayload';
 
-interface InitScriptContext {
-  addInitScript(script: string): Promise<unknown>;
-}
+type LocalStorageOriginState = OriginPayloadRef | { origin: string; entries: unknown };
+type IndexedDBOriginState = OriginPayloadRef | { origin: string; databases: unknown };
+type CacheStorageOriginState = OriginPayloadRef | { origin: string; caches: unknown };
 
 export async function injectLocalStorageState(
   context: InitScriptContext,
-  localStorageOrigins: Array<{ origin: string; entries: unknown }>,
-  startTime: number
+  localStorageOrigins: LocalStorageOriginState[],
+  startTime: number,
+  signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
   log.info(`  [localStorage] Injecting for ${localStorageOrigins.length} origins...`);
-  const localStorageByOrigin: Record<string, Array<{ key: string; value: string }>> = {};
   for (const origin of localStorageOrigins) {
     let cleanOrigin = origin.origin;
-    if (cleanOrigin.startsWith('ttps://')) {
-      cleanOrigin = 'https://' + cleanOrigin.slice(7);
-    } else if (!cleanOrigin.startsWith('http')) {
-      cleanOrigin = 'https://' + cleanOrigin;
-    }
-    if (cleanOrigin.includes('/^0')) {
-      cleanOrigin = cleanOrigin.split('/^0')[0];
-    }
-    localStorageByOrigin[cleanOrigin] = origin.entries as Array<{ key: string; value: string }>;
+    if (cleanOrigin.startsWith('ttps://')) cleanOrigin = 'https://' + cleanOrigin.slice(7);
+    else if (!cleanOrigin.startsWith('http')) cleanOrigin = 'https://' + cleanOrigin;
+    if (cleanOrigin.includes('/^0')) cleanOrigin = cleanOrigin.split('/^0')[0];
+    await injectOriginPayload(
+      context,
+      origin,
+      'LocalStorageOrigin',
+      `
+      for (const entry of data) {
+        try { localStorage.setItem(entry.key, entry.value); } catch (e) {}
+      }`,
+      'entries' in origin ? origin.entries : undefined,
+      cleanOrigin,
+      signal
+    );
   }
-
-  await context.addInitScript(`
-    (function() {
-      const allLocalStorage = ${JSON.stringify(localStorageByOrigin)};
-      const currentOrigin = window.location.origin;
-      for (const [origin, entries] of Object.entries(allLocalStorage)) {
-        if (currentOrigin === origin) {
-          for (const entry of entries) {
-            try { localStorage.setItem(entry.key, entry.value); } catch (e) {}
-          }
-          log.info('[localStorage] Injected', entries.length, 'entries for', currentOrigin);
-        }
-      }
-    })();
-  `);
   log.info(`  [localStorage] Injected (${Date.now() - startTime}ms)`);
   return { injected: true, originCount: localStorageOrigins.length };
 }
 
 export async function injectIndexedDBState(
   context: InitScriptContext,
-  indexedDBOrigins: Array<{ origin: string; databases: unknown }>,
-  startTime: number
+  indexedDBOrigins: IndexedDBOriginState[],
+  startTime: number,
+  signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
   log.info(`  [indexedDB] Injecting for ${indexedDBOrigins.length} origins...`);
-  const indexedDBByOrigin: Record<string, unknown> = {};
   for (const origin of indexedDBOrigins) {
-    indexedDBByOrigin[origin.origin] = origin.databases;
-  }
-
-  await context.addInitScript(`
-    (function() {
-      const allIndexedDB = ${JSON.stringify(indexedDBByOrigin)};
-      const currentOrigin = window.location.origin;
-      let matchingDatabases = null;
-      for (const [origin, databases] of Object.entries(allIndexedDB)) {
-        if (currentOrigin === origin) {
-          matchingDatabases = databases;
-          break;
-        }
-      }
+    await injectOriginPayload(
+      context,
+      origin,
+      'IndexedDBOrigin',
+      `
+      const matchingDatabases = data;
       if (!matchingDatabases) return;
       async function injectDatabase(dbInfo) {
         return new Promise((resolve) => {
@@ -107,8 +95,12 @@ export async function injectIndexedDBState(
           await injectDatabase(dbInfo);
         }
       })();
-    })();
-  `);
+`,
+      'databases' in origin ? origin.databases : undefined,
+      origin.origin,
+      signal
+    );
+  }
   log.info(`  [indexedDB] Injected (${Date.now() - startTime}ms)`);
   return { injected: true, originCount: indexedDBOrigins.length };
 }
@@ -161,36 +153,32 @@ export async function injectPermissionState(
 
 export async function injectCacheStorageState(
   context: InitScriptContext,
-  cacheStorageOrigins: Array<{ origin: string; caches: unknown }>,
-  startTime: number
+  cacheStorageOrigins: CacheStorageOriginState[],
+  startTime: number,
+  signal?: AbortSignal
 ): Promise<{ injected: boolean; originCount: number }> {
   log.info(`  [cacheStorage] Injecting metadata for ${cacheStorageOrigins.length} origins...`);
-  const cachesByOrigin: Record<string, Array<{ name: string }>> = {};
   for (const origin of cacheStorageOrigins) {
-    const caches = origin.caches as Array<{ name: string; size?: number }>;
-    cachesByOrigin[origin.origin] = caches.map((c) => ({ name: c.name }));
-  }
-
-  await context.addInitScript(`
-    (function() {
-      'use strict';
-      const cachesByOrigin = ${JSON.stringify(cachesByOrigin)};
-      const currentOrigin = window.location.origin;
-      let matchingCaches = null;
-      for (const [origin, caches] of Object.entries(cachesByOrigin)) {
-        if (currentOrigin === origin) {
-          matchingCaches = caches;
-          break;
-        }
-      }
-      if (!matchingCaches || matchingCaches.length === 0) return;
+    const names =
+      'caches' in origin
+        ? (origin.caches as Array<{ name: string }>).map((c) => ({ name: c.name }))
+        : undefined;
+    await injectOriginPayload(
+      context,
+      origin,
+      'CacheStorageOrigin',
+      `
+      if (!data || data.length === 0) return;
       (async function() {
-        for (const cache of matchingCaches) {
+        for (const cache of data) {
           try { await caches.open(cache.name); } catch (e) {}
         }
-      })();
-    })();
-  `);
+      })();`,
+      names,
+      origin.origin,
+      signal
+    );
+  }
   log.info(`  [cacheStorage] Injected (${Date.now() - startTime}ms)`);
   return { injected: true, originCount: cacheStorageOrigins.length };
 }

@@ -334,6 +334,18 @@ models and evaluators. Require actual startup, progress, terminal evaluation and
 verified teardown; do not repair task-success behavior merely to improve this
 proof's scores. A task-level `FAILED` remains a valid outcome under this gate.
 
+Browser credential preparation reads LocalStorage, IndexedDB and CacheStorage
+payloads as opaque PostgreSQL text. Keep their ORM selects metadata-only and
+bound the serialized CDP envelope, including JSON escaping; a row-count limit
+does not bound one large origin. Decode only in the matching document after all
+parts arrive, and preserve the selected user/origin/revision and cancellation
+fence. `browser-origin-injection-memory` transfers a 78.6 MB synthetic origin
+through real `injectUserData` and Postgres under an unchanged 1,200 MB RSS budget;
+`browser-origin-payload` owns assembly, storage behavior, wire bounds and revision
+isolation. Both are discovered by the backend blackbox runner in `/deploy`.
+These causal tests do not prove that an earlier live OOM had the same allocation
+source; retain its evidence and verify fresh fleet outcomes separately.
+
 PR #1299's infrastructure acceptance requires **ten consecutive slices of ten
 benchmarks**, with **at least three successful LLM queries per benchmark's own
 agent tree**. Verify completed provider responses with correlated, nonduplicated
@@ -618,7 +630,15 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
 2. **History gate (added canaries only)** — floor canaries + path extras are eligible only when their **last 3 eligibility attempts** in `agents/benchmarks/history/task_attempts.jsonl` all passed; otherwise skipped (`SKIPPED (need last 3 historic passes)`). New/flaky canaries stay off `/deploy` until they earn that streak on the daily path. Predeploy / active-worktree runs set `counts_for_deploy_eligibility=false` so they cannot invalidate a canary after it is assigned.
 3. **Floor canaries** — one history-qualified canary each for `payment`, `grep`, `sms`, `browser_stateful` (uncovered categories are reported)
 4. **Path extras** — more category depth when the git diff touches matching paths (history-qualified only)
-5. **Hard cap 20** — floor must always fit; extras truncate with a loud scream (`PREDEPLOY BENCH HARD CAP HIT`). Override only via `PREDEPLOY_BENCH_CAP` with review.
+5. **Hard cap 20** — floor must always fit; extras truncate with a loud scream (`PREDEPLOY BENCH HARD CAP HIT`). The CLI clamps `--cap` / `PREDEPLOY_BENCH_CAP` values above 20; changing the ceiling requires a reviewed source change.
+
+Preview selection with `cd agents && source venv/bin/activate && python
+benchmarks/select_predeploy_benches.py --surface local --format report` (use
+`--surface cloud` for cloud-compatible tasks). Repeat `--changed-file <path>` to
+inspect a specific diff, or use `--changed-files-from <file>`. The selector keeps
+the mandatory floor, deduplicates tasks, then adds history-qualified depth for
+changed areas up to 20. Read its coverage gaps, history skips and dropped extras;
+do not label tasks `smoke` or adjust their evaluators to force selection.
 
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
