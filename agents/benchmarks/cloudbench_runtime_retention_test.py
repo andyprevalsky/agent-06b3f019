@@ -193,10 +193,15 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
     token = "a" * 32
     registry = tmp_path / token
     registry.mkdir()
-    (registry / "meta").write_text(f"version=2\napp=app\nfleet_owner_token={token}\nhost=host\ncleanup_policy=reap\n")
+    audit = tmp_path / "audit" / token
+    (audit / "pool").mkdir(parents=True)
+    (audit / "fresh").mkdir()
+    (audit / "meta").write_text(f"fleet_owner_token={token}\napp=app\n")
+    (registry / "meta").write_text(f"version=2\napp=app\nfleet_owner_token={token}\nhost=host\ncleanup_policy=reap\naudit_dir={audit}\n")
     (registry / "runtime-evidence-unconfirmed").touch()
     functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
-        "registry_meta_value", "fleet_registry_cleanup_state", "recover_exact_stale_fleet_owner"))
+        "registry_meta_value", "fleet_registry_cleanup_state", "exact_owner_pool_claim_ids",
+        "fleet_recovery_confirm_pool_claims", "recover_exact_stale_fleet_owner"))
     result = subprocess.run(["bash", "-c", functions + '''
 registry_owner_alive() { return 1; }
 release_cleanup_disk_reserve() { :; }
@@ -218,7 +223,7 @@ recover_exact_stale_fleet_owner "$TOKEN"
            "FLEET_OWNER_HOST": "host", "APP": "app", "TOKEN": token,
            "EVENTS": str(tmp_path / "events"), "VALID_COPIES": str(int(valid_copies))},
         capture_output=True, text=True, timeout=10, check=False)
-    assert (tmp_path / "events").read_text().splitlines() == (["verify-evidence", "destroy"] if valid_copies else ["verify-evidence"])
+    assert (tmp_path / "events").read_text().splitlines() == (["verify-evidence", "destroy"] if valid_copies else ["verify-evidence"]), result.stderr
     assert (result.returncode == 0) == valid_copies
     assert (registry / "runtime-evidence-unconfirmed").exists() != valid_copies
 
@@ -230,6 +235,7 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     registry.mkdir(parents=True)
     audit = tmp_path / "audits" / token
     (audit / "fresh").mkdir(parents=True)
+    (audit / "pool").mkdir()
     (audit / "meta").write_text(f"fleet_owner_token={token}\n")
     (audit / "fresh/primary").write_text("source_machine_id=123456\nmachine_id=abc123\n")
     runs = tmp_path / "runs"
@@ -246,7 +252,7 @@ def test_recovery_revalidates_exact_complete_copies_before_clearing_latch(tmp_pa
     (run / "execution-task-matrix.json").write_text(json.dumps(matrix))
     out = run / "task"
     raw = primary_fixture(out, token + "-0")
-    (out / ".cid").write_text("fresh abc123\n")
+    (out / ".cid").write_text("clone abc123\n")
     (out / "post-config-start.accepted").write_text("abc123\n")
     (out / "cloudbench-run.json").write_bytes((raw / "run.json").read_bytes())
     (out / "runtime-evidence.pending").write_bytes((out / "runtime-evidence.owner.json").read_bytes())

@@ -5212,11 +5212,20 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ] && [ -f "$IMESSAGE_RELAY_LOG" ]; then
 fi
 
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
-    # Boot-launch's authoritative log already carries both artifacts between
-    # run-scoped markers. Never re-enter Machines-API SSH after DONE: seven
-    # sequential 3x60s reads left a passed box/controller hanging for minutes.
+    # The sealed runtime capture is already collected with exact ownership,
+    # byte counts and hashes. Driver log transport can truncate a multi-MiB
+    # JSON string, so terminal run records must come from that complete file.
+    # Keep the marker path only for the existing held-driver teardown fixture.
+    # Never re-enter Machines-API SSH after DONE.
     CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
-    RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+    if cloudbench_skip_held_driver_teardown_race; then
+        RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+    else
+        RUN_JSON="$(cat "$OUT_DIR/remote-logs/runtime-evidence/run.json")" || {
+            echo "❌ sealed runtime result is unavailable -- infrastructure failure" >&2
+            exit 70
+        }
+    fi
 else
     CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
     if [ -z "$CARD_JSON" ]; then

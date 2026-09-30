@@ -87,6 +87,37 @@ async def test_final_archive_refreshes_normalized_child_transcripts():
 
 
 @async_case
+async def test_large_archive_tree_does_not_overload_snapshot_reads():
+    """A 51-agent paused tree must survive a bounded backend read capacity."""
+    ids = [ROOT] + [f"00000000-0000-4000-8000-{i:012d}" for i in range(2, 52)]
+    infos = [{"agent_id": aid, **({"parent_agent_id": ROOT} if aid != ROOT else {})} for aid in ids]
+    active = 0
+    completed = set()
+
+    async def fetch(_url, aid):
+        nonlocal active
+        active += 1
+        try:
+            # Overloaded reads miss the same fixed archive deadline; increasing
+            # that deadline or returning a partial tree cannot make this pass.
+            await asyncio.sleep(1 if active > 8 else 0.005)
+            completed.add(aid)
+            return {"messages": [{"text": aid}]}
+        finally:
+            active -= 1
+
+    logs = {}
+    with patch.object(bench, "get_agent_tree", AsyncMock(return_value=infos)), patch.object(bench, "get_agent", fetch):
+        await bench._refresh_browser_archive_snapshot(
+            "http://localhost:1", ROOT, {}, logs, expected_agent_ids=set(ids), timeout_seconds=0.2
+        )
+    assert completed == set(ids)
+    assert set(logs["tree"]) == set(ids)
+    assert all(logs["tree"][aid]["messages"][0]["message"] == aid for aid in ids)
+    assert active == 0
+
+
+@async_case
 async def test_archive_deadline_bounds_slow_fetch_and_rejects_incomplete_tree():
     async def slow_fetch(*_args):
         await asyncio.sleep(10)

@@ -269,8 +269,16 @@ only the exact controller PID/owner recorded for your run and let its traps
 recover resources; use its exact stale-owner recovery path if needed.
 If archive finalization reports `TimeoutError`, inspect the last
 `browser_archive_observation`, exact `cloud_cleanup_evidence` session snapshots,
-and worker cancellation timestamps before blaming recording upload. A browser
-tool canceled before allocating a session has no recording to attach; only a
+and worker cancellation timestamps before blaming recording upload. The
+archive observation records `tree_fetch`, `agent_snapshots` (including completed
+and expected IDs), or `browser_readiness` so a slow HTTP read can be separated
+from a missing recording. Full-transcript snapshot reads use eight concurrent
+slots per paused tree; they retain every agent and the existing archive bound.
+Boot-mode terminal results come from the already sealed, owner/hash-verified
+`remote-logs/runtime-evidence/run.json`, never a multi-megabyte JSON value
+extracted from the progress log. A truncated log is diagnostic evidence;
+missing or corrupt sealed files remain INFRA and retain the owner.
+A browser tool canceled before allocating a session has no recording to attach; only a
 task-bound `browser_zero_allocation_receipt` plus zero sessions in the exact
 before/archive/after/final ownership reads and a clean provider receipt can
 establish that exception. Any allocated session still owes a playable recording.

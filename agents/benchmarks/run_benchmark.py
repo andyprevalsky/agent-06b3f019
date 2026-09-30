@@ -5539,15 +5539,33 @@ async def _refresh_browser_archive_snapshot(
     async with asyncio.timeout(timeout_seconds):
         deadline = time.monotonic() + timeout_seconds
         while True:
+            observation = {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "ready": False, "phase": "tree_fetch", "completed_agent_ids": [],
+            }
+            logs["browser_archive_observation"] = observation
             tree_agents = await get_agent_tree(base_url, agent_id)
             ids = {str(info.get("agent_id")) for info in tree_agents}
             expected = expected_agent_ids or {agent_id}
             if not expected.issubset(ids):
                 raise RuntimeError("archive tree omitted an owned agent")
-            snapshots = dict(zip(sorted(ids), await asyncio.gather(*(get_agent(base_url, aid) for aid in sorted(ids)))))
+            # Large paused trees share one backend/database. Avoid a burst of
+            # dozens of full-transcript reads while retaining every agent and
+            # the same archive deadline and terminal/recording requirements.
+            read_slots = asyncio.Semaphore(8)
+            observation["phase"] = "agent_snapshots"
+            observation["expected_agent_ids"] = sorted(ids)
+
+            async def fetch_snapshot(aid):
+                async with read_slots:
+                    snapshot = await get_agent(base_url, aid)
+                    observation["completed_agent_ids"].append(aid)
+                    return snapshot
+
+            snapshots = dict(zip(sorted(ids), await asyncio.gather(*(fetch_snapshot(aid) for aid in sorted(ids)))))
             logs["browser_archive_observation"] = {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
-                "ready": False,
+                "ready": False, "phase": "browser_readiness",
                 "snapshots": snapshots,
             }
             latest = snapshots[agent_id]

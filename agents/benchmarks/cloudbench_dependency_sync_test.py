@@ -1143,6 +1143,70 @@ def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
     assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
 
 
+@pytest.mark.parametrize("fault", ["truncated-stream", "missing-capture", "foreign-owner", "foreign-task"])
+def test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated(tmp_path: Path, fault: str) -> None:
+    """Run the actual artifact selection and identity checks after collection."""
+    source = CLOUD_SCRIPT.read_text()
+    start = source.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then', source.index('# ── 5. Retrieve report-card.json'))
+    end = source.index('\necho ""\necho "════════════════════ REPORT CARD', start)
+    block = source[start:end]
+    token, machine = "owned-terminal-0", "abcdef12345678"
+    output = tmp_path / "bench"
+    capture = output / "remote-logs/runtime-evidence"
+    capture.mkdir(parents=True)
+    document = {
+        "timestamp": "2026-09-30T14:00:00+00:00",
+        "summary": {"total": 1, "passed": 0, "failed": 1, "pass_rate": 0},
+        "tasks": [{"name": "owned-bench", "world_model_mode": "real", "passed": False,
+                   "benchmark_status": "FAILED", "messages": [{"message": "x" * (13 * 1024 * 1024)}]}],
+    }
+    raw = json.dumps(document, indent=2) + "\n"
+    if fault != "missing-capture":
+        (capture / "run.json").write_text(raw)
+    owner = {"version": 1, "run_token": token, "machine_id": machine}
+    (output / "runtime-evidence.pending").write_text(json.dumps(owner))
+    (output / "runtime-evidence.owner.json").write_text(json.dumps(
+        owner | ({"run_token": "foreign-terminal-0"} if fault == "foreign-owner" else {})))
+    if fault == "foreign-task":
+        document["tasks"][0]["name"] = "foreign-bench"
+        raw = json.dumps(document, indent=2) + "\n"
+        (capture / "run.json").write_text(raw)
+    streamed = raw
+    if fault == "truncated-stream":
+        offset = raw.index('"message": "') + len('"message": "')
+        streamed = raw[:offset + 4 * 1024 * 1024] + "\n" + raw[offset + 11 * 1024 * 1024:]
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(streamed)
+    log = tmp_path / "driver.log"
+    log.write_text(f"RESULT-BEGIN\n{streamed}RESULT-END\n")
+    selected = tmp_path / "selected.json"
+    setup = '\n'.join([
+        'cloudbench_skip_held_driver_teardown_race() { return 1; }',
+        'CLOUDBENCH_BOOT_LAUNCH=1', 'BENCH_SIMULATE=0',
+        'CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0',
+        'REPORT_BEGIN=REPORT-BEGIN', 'REPORT_END=REPORT-END',
+        'RESULT_BEGIN=RESULT-BEGIN', 'RESULT_END=RESULT-END',
+        'BENCH_TASKS=(owned-bench)',
+        'SSH_LOG=' + shlex.quote(str(log)),
+        'OUT_DIR=' + shlex.quote(str(output)),
+        'RUN_LOG_TOKEN=' + shlex.quote(token), 'mid=' + shlex.quote(machine),
+        'CLOUDBENCH_RESULT_SCRIPT=' + shlex.quote(str(CLOUDBENCH_RESULT_SCRIPT)),
+    ])
+    result = subprocess.run(
+        ['bash', '-c', setup + '\n' + block + '\n[ "$RUN_IDENTITY_OK" = "1" ] || exit 70\nprintf "%s\\n" "$RUN_JSON" > ' + shlex.quote(str(selected))],
+        capture_output=True, text=True, timeout=20,
+    )
+    if fault == "truncated-stream":
+        assert result.returncode == 0, result.stdout[-600:] + result.stderr[-600:]
+        assert json.loads(selected.read_text()) == document
+        assert json.loads(selected.read_text())["tasks"][0]["benchmark_status"] == "FAILED"
+        assert not (output / "runtime-evidence.pending").exists()
+    else:
+        assert result.returncode != 0, "unowned or invalid evidence was admitted"
+        assert not selected.exists()
+        assert (output / "runtime-evidence.pending").exists()
+
+
 def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path: Path) -> None:
     reason = "Claude Code credentials unavailable: no synced Claude token and no available pool token"
 

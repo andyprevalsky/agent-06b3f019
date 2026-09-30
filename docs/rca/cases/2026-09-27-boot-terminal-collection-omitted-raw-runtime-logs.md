@@ -529,6 +529,23 @@ comparison has its own bounded 64 MiB limit. A read-only native-inventory
 preflight accepted proof24's exact ten archived tasks, one retired unadmitted
 clone, and two incomplete task archives with zero credit.
 
+### Proof74 permanent recovery fixtures omitted pool admission bindings
+
+The terminal-evidence blackbox gate failed two legacy runtime-retention controls
+with 122 passing cases. One extracted exact-owner recovery without its real
+pool-confirmation dependencies or empty owned audit. The other described an
+admitted fresh-clone primary with obsolete `.cid` kind `fresh`, while the real
+runtime accepts `clone`, and omitted the now-required empty pool audit directory.
+These failures are fixture-contract recurrences, not permission to weaken
+recovery or evidence requirements.
+
+The fixtures now supply the complete empty owner-bound fresh/pool audit, extract
+the real pool helpers, and use the actual `clone` identity. Their original event,
+native status, corruption and durability assertions remain intact. The exact
+owning gate `test_boot_terminal_runtime_evidence_is_in_permanent_gate` first
+failed with the two controls above, then passed all 124 checks. No production
+recovery predicate, timeout or proof criterion changed for this repair.
+
 ## Human feedback
 
 The user requires infrastructure-only changes and no infrastructure failures

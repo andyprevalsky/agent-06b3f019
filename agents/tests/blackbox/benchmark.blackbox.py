@@ -400,6 +400,7 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q",
          suite + "::test_boot_terminal_runtime_evidence_collects_complete_logs",
+         suite + "::test_boot_terminal_result_preserves_sealed_capture_when_stream_is_truncated",
          suite + "::test_controller_term_collects_original_runtime_evidence_before_proxy_retirement",
          suite + "::test_failed_fleet_forensic_retirement_requires_originals_and_provider_absence",
          suite + "::test_boot_terminal_runtime_evidence_admission_precedes_guest_start",
