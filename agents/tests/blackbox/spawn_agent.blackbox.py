@@ -3084,6 +3084,54 @@ async def test_spawn_explore_does_not_preempt_normal_winddown():
     assert "finished after final turn" in result["result"]
 
 
+async def test_spawn_explore_checkpoint_keeps_recent_synthesis():
+    """Timeout checkpoints favor the leaf's last grounded synthesis and sources."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    checkpoints = []
+
+    async def checkpoint(task_id, payload):
+        checkpoints.append(payload)
+
+    async def search_result(**kwargs):
+        query = kwargs["tool_call"]["query"]
+        return {"result": query * 1000}
+
+    search = MagicMock()
+    search.execute_tool = AsyncMock(side_effect=search_result)
+
+    async def fake_run_agent(**kwargs):
+        for query in ("old irrelevant ", "official source "):
+            await kwargs["execute_tool"]("web_search", {"query": query}, "tc")
+        await kwargs["post_message"]("Official Tokyo total 14,303,513", "ASSISTANT")
+        await kwargs["execute_tool"]("web_search", {"query": "latest source "}, "tc")
+        return {"status": "completed", "final_response": "14,303,513"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=search),
+        patch("domains.spawn_agent.service.send_explore_progress", new=checkpoint),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="tokyo-checkpoint",
+            user_id="u-7",
+            goal="Research Tokyo",
+            model="rose-1-flash",
+            task_id="task-tokyo-checkpoint",
+        )
+
+    latest = checkpoints[-1]
+    assert len(checkpoints) == 4
+    assert latest["result"].startswith("Official Tokyo total 14,303,513")
+    assert "latest source" in latest["result"]
+    assert "old irrelevant" not in latest["result"]
+    assert len(latest["tool_call_results"]) == 2
+    assert len(latest["result"]) <= 12_000
+
+
 async def test_spawn_explore_turn_limit_without_evidence_remains_error():
     """A turn cap without evidence cannot become a successful exploration."""
     from unittest.mock import patch
@@ -4606,6 +4654,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_does_not_preempt_normal_winddown",
         test_spawn_explore_does_not_preempt_normal_winddown,
+    )
+    await r.record_async(
+        "explore_checkpoint_keeps_recent_synthesis",
+        test_spawn_explore_checkpoint_keeps_recent_synthesis,
     )
     await r.record_async(
         "explore_turn_limit_without_evidence_remains_error",

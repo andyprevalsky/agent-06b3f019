@@ -416,6 +416,8 @@ async def spawn_explore_agent_activity(
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
+    successful_tool_results: List[str] = []
+    latest_assistant_text = ""
     # The local summary is fetched by a trusted backend activity before this
     # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
     # lookup can complete without a redundant grep solely to satisfy the guard.
@@ -429,12 +431,23 @@ async def spawn_explore_agent_activity(
     unavailable_sources_collected: List[Dict] = []
 
     def _heartbeat_payload() -> Dict[str, Any]:
-        compiled = compile_explore_wrap_up("", tool_call_results)
+        # Keep the leaf's own interpretation and the newest successful sources.
+        # The first 12 KB of raw search output often predates the decisive find.
+        recent = []
+        for entry in successful_tool_results[-2:]:
+            recent.append(entry if len(entry) <= 2500 else f"{entry[:2100]}\n...\n{entry[-400:]}")
+        compiled = "\n\n".join(filter(None, (latest_assistant_text[:2000], *recent)))
         return {
-            "result": compiled,
-            "tool_call_results": list(tool_call_results[-8:]),
+            "result": compiled[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
+            "tool_call_results": recent,
             "has_usable_evidence": has_successful_tool_evidence,
         }
+
+    async def _send_checkpoint(checkpoint: Dict[str, Any]) -> None:
+        if has_successful_tool_evidence and not _oai_demo:
+            # A TRY_CANCEL activity can lose heartbeat details before the parent
+            # sees them. The signal survives that cancellation in workflow history.
+            await send_explore_progress(task_id, checkpoint)
 
     async def _heartbeat_loop() -> None:
         """Keep the activity alive during wrap-up LLM calls; details hold evidence."""
@@ -724,7 +737,8 @@ async def spawn_explore_agent_activity(
         else:
             actual_result = result
 
-        if _has_usable_tool_evidence(actual_result):
+        current_tool_has_evidence = _has_usable_tool_evidence(actual_result)
+        if current_tool_has_evidence:
             has_usable_tool_evidence = True
             has_successful_tool_evidence = True
         # Serialize the actual result into message so run_agent puts it in context.
@@ -734,28 +748,25 @@ async def spawn_explore_agent_activity(
             result_str = str(actual_result)
 
         # Collect raw tool results for callers (e.g. wait_for condition evaluator)
-        tool_call_results.append(f"[{tool_name}] {result_str}")
+        raw_result = f"[{tool_name}] {result_str}"
+        tool_call_results.append(raw_result)
+        if current_tool_has_evidence:
+            successful_tool_results.append(raw_result)
         checkpoint = _heartbeat_payload()
         activity.heartbeat(checkpoint)
-        if has_successful_tool_evidence and not _oai_demo:
-            # A TRY_CANCEL activity can lose heartbeat details before the parent
-            # sees them. The signal survives that cancellation in workflow history.
-            remaining = EXPLORE_FALLBACK_PAYLOAD_BUDGET
-            bounded_results = []
-            for entry in reversed(checkpoint["tool_call_results"]):
-                if remaining <= 0:
-                    break
-                bounded_results.append(entry[:remaining])
-                remaining -= len(bounded_results[-1])
-            await send_explore_progress(
-                task_id,
-                {**checkpoint, "tool_call_results": list(reversed(bounded_results))},
-            )
+        if current_tool_has_evidence:
+            await _send_checkpoint(checkpoint)
 
         return {"success": True, "message": result_str}
 
     async def explore_post_message(message: str, role: str, metadata: Optional[Dict] = None):
         """Post messages from the explore agent to DB."""
+        nonlocal latest_assistant_text
+        if role == "ASSISTANT" and has_successful_tool_evidence and (message or "").strip():
+            latest_assistant_text = message.strip()
+            checkpoint = _heartbeat_payload()
+            activity.heartbeat(checkpoint)
+            await _send_checkpoint(checkpoint)
         is_tool_error = role == "TOOL" and bool(metadata and metadata.get("error"))
         message_status = MessageStatus.ERROR if is_tool_error else MessageStatus.FINISHED
         title = str(metadata.get("title")) if metadata and metadata.get("title") else "Explore agent thinking"
