@@ -11,12 +11,12 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('web_search'),
     reasoning: z.string(),
-    query: z.string(),
+    query: z.string().min(1),
   }),
   z.object({
     action: z.literal('start_superintelligence'),
     reasoning: z.string(),
-    goal: z.string(),
+    goal: z.string().min(1),
     mode: z.enum(['plan', 'execute']),
   }),
 ]);
@@ -25,12 +25,22 @@ export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 
 const DEADLINE_REASONING = 'Route selected before the provider stream finished.';
 
-interface RawRouterDecision {
-  reasoning?: unknown;
-  action?: unknown;
-  query?: unknown;
-  goal?: unknown;
-  mode?: unknown;
+/** Provider JSON always includes unused fields as "". Legacy cache may omit mode. */
+function normalizeRouterDecisionInput(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  const raw = value as Record<string, unknown>;
+  if (raw.action !== 'start_superintelligence' || raw.mode !== undefined) return value;
+  return { ...raw, mode: 'plan' };
+}
+
+function parseRouterDecisionObject(value: unknown): RouterDecision {
+  const result = RouterDecisionSchema.safeParse(normalizeRouterDecisionInput(value));
+  if (!result.success) {
+    throw new Error(
+      `Router response failed schema: ${result.error.issues[0]?.message ?? 'invalid'}`
+    );
+  }
+  return result.data;
 }
 
 export function parseRouterDecisionJson(json: string): RouterDecision {
@@ -42,41 +52,7 @@ export function parseRouterDecisionJson(json: string): RouterDecision {
       cause: error,
     });
   }
-
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('Router response must be a JSON object');
-  }
-  const raw = parsed as RawRouterDecision;
-  if (typeof raw.reasoning !== 'string') {
-    throw new Error('Router response requires reasoning');
-  }
-
-  switch (raw.action) {
-    case 'direct_answer':
-      return { action: 'direct_answer', reasoning: raw.reasoning };
-    case 'web_search':
-      if (typeof raw.query !== 'string' || raw.query === '') {
-        throw new Error('web_search action requires a query');
-      }
-      return { action: 'web_search', reasoning: raw.reasoning, query: raw.query };
-    case 'start_superintelligence': {
-      if (typeof raw.goal !== 'string' || raw.goal === '') {
-        throw new Error('start_superintelligence action requires a goal');
-      }
-      const mode = raw.mode === undefined ? 'plan' : raw.mode;
-      if (mode !== 'plan' && mode !== 'execute') {
-        throw new Error('start_superintelligence action requires a valid mode');
-      }
-      return {
-        action: 'start_superintelligence',
-        reasoning: raw.reasoning,
-        goal: raw.goal,
-        mode,
-      };
-    }
-    default:
-      throw new Error(`Unknown action: ${String(raw.action)}`);
-  }
+  return parseRouterDecisionObject(parsed);
 }
 
 /**
@@ -90,18 +66,37 @@ export function parsePartialRouterDecisionJson(json: string): RouterDecision | n
   const reasoning =
     fields.reasoning ?? extractPartialStringField(json, 'reasoning') ?? DEADLINE_REASONING;
 
-  if (action === 'direct_answer') return { action, reasoning };
+  if (action === 'direct_answer') {
+    try {
+      return parseRouterDecisionObject({ action, reasoning });
+    } catch {
+      return null;
+    }
+  }
 
   if (action === 'web_search') {
     const query = fields.query?.trim();
-    return query ? { action, reasoning, query } : null;
+    if (!query) return null;
+    try {
+      return parseRouterDecisionObject({ action, reasoning, query });
+    } catch {
+      return null;
+    }
   }
 
   if (action === 'start_superintelligence') {
     const goal = fields.goal?.trim();
-    const mode = fields.mode;
-    if (!goal || (mode !== 'plan' && mode !== 'execute')) return null;
-    return { action, reasoning, goal, mode };
+    if (!goal) return null;
+    try {
+      return parseRouterDecisionObject({
+        action,
+        reasoning,
+        goal,
+        ...(fields.mode !== undefined ? { mode: fields.mode } : {}),
+      });
+    } catch {
+      return null;
+    }
   }
 
   return null;

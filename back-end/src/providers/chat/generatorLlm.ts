@@ -5,6 +5,7 @@
  * Uses structured output with separate reasoning (thinking) and response (true message) fields.
  */
 
+import { z } from 'zod';
 import {
   createStreamingCompletion,
   markCacheable,
@@ -39,6 +40,11 @@ import { createGeneratorCacheStream } from './generatorCacheStream';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ChatLlmTransientMissError, regenerateOnChatStructuredMiss } from './chatStructuredRetry';
 
+export const GeneratorResponseSchema = z.object({
+  reasoning: z.string(),
+  response: z.string().min(1),
+});
+
 export function requireGeneratorParsedJson(fullJson: string): {
   reasoning: string;
   response: string;
@@ -46,8 +52,9 @@ export function requireGeneratorParsedJson(fullJson: string): {
   if (!fullJson) {
     throw new ChatLlmTransientMissError('empty', 'Generator LLM returned no content');
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(fullJson) as { reasoning: string; response: string };
+    parsed = JSON.parse(fullJson);
   } catch (error) {
     throw new ChatLlmTransientMissError(
       'parse',
@@ -55,6 +62,14 @@ export function requireGeneratorParsedJson(fullJson: string): {
       { cause: error }
     );
   }
+  const result = GeneratorResponseSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new ChatLlmTransientMissError(
+      'parse',
+      `Generator response failed schema: ${result.error.issues[0]?.message ?? 'invalid'}`
+    );
+  }
+  return result.data;
 }
 
 const log = createLogger('GeneratorLLM');

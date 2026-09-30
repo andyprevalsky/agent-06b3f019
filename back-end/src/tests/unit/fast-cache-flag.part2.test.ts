@@ -153,7 +153,7 @@ test('chat router caches successful output without gating downstream work', () =
     'router must validate cached output before accepting a hit'
   );
   assert.ok(
-    router.indexOf('cacheSet({') > router.indexOf('parseRouterDecisionJson(fullJson)'),
+    router.indexOf('cacheSet({') > router.indexOf('requireRouterDecision'),
     'router must validate generated output before caching it'
   );
   assert.ok(router.includes('fast_cache.chat_router_hit'), 'router must log Fast Mode hits');

@@ -161,6 +161,16 @@ function testRequireGeneratorParsedJsonTypesEveryMiss(): void {
     reasoning: 'r',
     response: 'hello',
   });
+  assert.throws(
+    () => requireGeneratorParsedJson('{}'),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
+    'JSON.parse of {} is not a healthy generator response'
+  );
+  assert.throws(
+    () => requireGeneratorParsedJson('{"reasoning":"r","response":""}'),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
+    'empty generator response field is a typed regenerate miss'
+  );
 }
 
 async function testFirstMissRegeneratesInsteadOfApologizing(): Promise<void> {
@@ -261,6 +271,17 @@ function testCallSitesUseSharedRegenerate(): void {
   );
   assert.match(generator, /regenerateOnChatStructuredMiss/, 'generator must regenerate in place');
   assert.match(generator, /requireGeneratorParsedJson/, 'generator must use the typed miss seam');
+  assert.match(
+    generator,
+    /GeneratorResponseSchema/,
+    'generator health check must be the Zod schema'
+  );
+  const decision = readFileSync(join(here, '../../providers/chat/routerDecision.ts'), 'utf8');
+  assert.match(
+    decision,
+    /RouterDecisionSchema\.safeParse/,
+    'router health check must be the Zod schema, not a hand-rolled switch'
+  );
   assert.match(
     speculation,
     /isChatLlmTransientMiss/,
