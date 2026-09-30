@@ -55,7 +55,6 @@ export function buildOpenRouterBody(opts: {
     messages: normalizeOpenAiToolCalls(opts.messages),
     stream: true,
     stream_options: { include_usage: true },
-    provider: { zdr: true, data_collection: 'deny' },
     // Always stamp reasoning.effort (default xhigh) so every waterfall step
     // body is well-formed. OpenRouter accepts max/xhigh/high/medium/low/none.
     // Map our "minimal" sentinel → "low" (matches gpt_auth / PY waterfall).

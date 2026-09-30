@@ -97,8 +97,6 @@ async function run(): Promise<void> {
       only: ['cerebras'],
       allow_fallbacks: false,
       require_parameters: true,
-      zdr: true,
-      data_collection: 'deny',
     });
     assert.deepEqual(capturedBody.messages, [
       { role: 'system', content: 'exact-router-system-prompt' },

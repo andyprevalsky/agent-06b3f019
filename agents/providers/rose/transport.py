@@ -92,7 +92,6 @@ def _openrouter_headers(openrouter_key: str, referer: str = "https://roselabs.ai
         "Content-Type": "application/json",
         "HTTP-Referer": referer,
         "X-Title": "Rose Agents",
-        "X-OpenRouter-Cache": "false",
     }
 
 

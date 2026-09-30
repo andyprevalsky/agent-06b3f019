@@ -98,7 +98,6 @@ async function testOpenRouterAbortRemainsConnectedAfterHeaders(): Promise<void> 
 
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     providerSignal = init?.signal as AbortSignal;
-    assert.equal((init?.headers as Record<string, string>)['X-OpenRouter-Cache'], 'false');
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         providerSignal?.addEventListener(

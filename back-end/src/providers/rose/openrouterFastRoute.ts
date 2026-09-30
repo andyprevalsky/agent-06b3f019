@@ -46,7 +46,6 @@ export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
-    provider: { zdr: true, data_collection: 'deny' },
     // Always stamp reasoning.effort so every Rose body builder is well-formed.
     // Callers (chat router/generator) may pass effort:'minimal' for latency;
     // omit → xhigh to match the rest of the Rose surface.

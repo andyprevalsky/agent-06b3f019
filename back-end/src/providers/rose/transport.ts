@@ -99,7 +99,6 @@ function openrouterHeaders(openrouterKey: string): Record<string, string> {
     'Content-Type': 'application/json',
     'HTTP-Referer': 'https://roselabs.ai',
     'X-Title': 'Rose Chat',
-    'X-OpenRouter-Cache': 'false',
   };
 }
 

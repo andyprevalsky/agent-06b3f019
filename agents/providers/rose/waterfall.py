@@ -155,7 +155,6 @@ def build_openrouter_body(
         ),
         "stream": True,
         "stream_options": {"include_usage": True},
-        "provider": {"zdr": True, "data_collection": "deny"},
         "reasoning": {"effort": _normalize_reasoning_effort(effort)},
     }
     if openrouter_tools:
