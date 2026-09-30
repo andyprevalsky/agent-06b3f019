@@ -356,6 +356,28 @@ def test_spawn_agent_prompt_defines_param_wording_taxonomy():
     assert "Ignored for type='X'" in PROMPT
 
 
+def test_browser_failure_next_step_wraps_general_purpose():
+    """After a browser agent fails, prompts must require wrapping the retry in GP."""
+    from tools.prompts.spawn_agent import PROMPT
+    from utils.prompts import MAIN_SYSTEM_PROMPT
+    from utils.tool_schemas import SpawnAgentTool
+
+    wrap_rule = (
+        "after type='browser' fails, wrap next attempt in type='general_purpose' "
+        "for error handling; do not re-spawn type='browser'"
+    )
+    doc = SpawnAgentTool.__doc__ or ""
+    type_desc = SpawnAgentTool.model_fields["type"].description or ""
+    assert wrap_rule in " ".join(doc.split())
+    assert wrap_rule in type_desc
+    assert "Exception: after browser fails" in PROMPT
+    assert "type='general_purpose' for error handling" in PROMPT
+    assert 'wrap the next attempt in spawn_agent(type="general_purpose")' in MAIN_SYSTEM_PROMPT
+    assert "circumvent faulty tools" not in doc
+    assert "circumvent faulty tools" not in type_desc
+    assert "circumvent faulty tools" not in PROMPT
+
+
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -1880,6 +1902,10 @@ async def run_all_tests():
     r.record(
         "spawn_agent_prompt_param_wording_taxonomy",
         test_spawn_agent_prompt_defines_param_wording_taxonomy,
+    )
+    r.record(
+        "browser_failure_next_step_wraps_general_purpose",
+        test_browser_failure_next_step_wraps_general_purpose,
     )
     r.record(
         "planner_spawn_aliases_documented_in_prompt",
