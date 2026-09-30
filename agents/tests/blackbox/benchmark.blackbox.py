@@ -421,6 +421,49 @@ def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
+    repo_root = Path(__file__).resolve().parents[3]
+    with tempfile.TemporaryDirectory() as scratch:
+        pool = Path(scratch) / "pool.json"
+        pool.write_text(json.dumps(["test-mass-agent-run-0"]))
+        command = ["bash", str(repo_root / "scripts/run-fleet-infra-stability-proof"),
+                   "--capability", "--dry-sample", "--runs", "1", "--width", "1",
+                   "--pool-file", str(pool)]
+        rejected = subprocess.run(
+            command + ["--min-successful-llm", "3"], cwd=repo_root,
+            text=True, capture_output=True, timeout=30,
+        )
+        assert rejected.returncode == 2, rejected.stdout + rejected.stderr
+        assert "zero-live-spend tasks" in rejected.stderr
+        ordinary = subprocess.run(command, cwd=repo_root, text=True,
+                                  capture_output=True, timeout=30)
+        assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
+        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
+        sampled = subprocess.run(
+            [sys.executable, str(repo_root / "scripts/fleet_infra_sample.py"),
+             "dry-proof", "--repo", str(repo_root), "--runs", "1", "--width", "10",
+             "--seed", "1", "--min-successful-llm", "3"], cwd=repo_root,
+            text=True, capture_output=True, timeout=30,
+        )
+        assert sampled.returncode == 0, sampled.stderr
+        # Sampling the full eligible pool makes exclusion independent of seed.
+        count = json.loads(sampled.stdout)["pool_size"]
+        full = subprocess.run(
+            [sys.executable, str(repo_root / "scripts/fleet_infra_sample.py"),
+             "sample", "--repo", str(repo_root), "--width", str(count), "--seed", "1",
+             "--min-successful-llm", "3"], cwd=repo_root,
+            text=True, capture_output=True, timeout=30,
+        )
+        assert full.returncode == 0, full.stderr
+        assert not {"test-mass-agent-run-0", "demo-fleet-alpha", "demo-fleet-beta",
+                    "demo-fleet-gamma"}.intersection(full.stdout.splitlines())
+        pool.write_text(json.dumps(["polar-bu-070"]))
+        live = subprocess.run(command + ["--min-successful-llm", "3"], cwd=repo_root,
+                              text=True, capture_output=True, timeout=30)
+        assert live.returncode == 0, live.stdout + live.stderr
+        assert json.loads(live.stdout)["slices"][0]["names"] == ["polar-bu-070"]
+
+
 def test_cloudbench_codex_auth_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(

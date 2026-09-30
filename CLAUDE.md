@@ -344,6 +344,12 @@ responses, a real evaluator result, and full cleanup/evidence; an interrupted
 diagnostic that misses those requirements earns no credit. Restore the normal
 backstop after this validation. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
+With `--min-successful-llm`, sampling excludes catalog tasks whose declared
+checks require `zero_live_spend` and rejects an explicit pool containing one
+before provisioning. Cached-only mass-agent/demo replays cannot establish live
+model progress; keep their normal cache and evaluator contracts intact. They
+remain available for ordinary benchmark and infrastructure-probe runs without
+that live-query requirement. Choose compatible smoke tasks for the proof.
 For the current accelerated validation, the user explicitly requested a
 temporary 300-second benchmark execution limit and a separate 30-minute hard
 cutoff for any bench that has not finished its full end-to-end lifecycle. Apply

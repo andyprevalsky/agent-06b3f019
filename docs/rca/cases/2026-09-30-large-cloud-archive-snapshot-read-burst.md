@@ -92,6 +92,17 @@ models, evaluators, deadlines and evidence gates. It also exposed the separate
 shared-only pool admission defect recorded in
 `2026-09-30-pool-cpu-kind-validation-assumed-shared`.
 
+## Proof77 boundary observation
+
+Proof77 on a1363effb exercised the dedicated CPU profile: all ten tasks emitted
+ordinary FAILED results and verified guest/provider retirement. Mass-agent
+finished its task/archive boundary in 308 seconds without the prior archive
+timeout. This is a successful boundary observation, not proof that shared CPU
+quota alone caused proof75's timeout. The campaign still earned zero credit:
+mass-agent's intentional cache replay had no live queries, contradicting this
+proof's three-live-completion requirement. See the separate zero-spend admission
+case; nine other tasks had 14–70 correlated live completions.
+
 ## Human feedback
 
 Inspect runtime issues that disguise infrastructure failures, check concurrency

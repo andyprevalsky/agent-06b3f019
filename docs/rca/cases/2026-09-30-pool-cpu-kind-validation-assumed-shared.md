@@ -73,6 +73,13 @@ terminal-evidence gate retains its existing checks and deadline. Live canonical
 guest startup and the unchanged ten-slice acceptance remain pending, so this
 case is not reported as a completed benchmark fix.
 
+Proof77 on a1363effb subsequently verified all ten canonical guest starts,
+ordinary task results and exact guest/provider retirement with the configured
+dedicated profile. Mass-agent's archive boundary finished without the earlier
+timeout. The campaign still received zero credit because that cached-only task
+had zero live queries; see the separate selection-contract case. Full compatible
+ten-slice acceptance remains pending.
+
 This removes duplicated shared-only assumptions rather than adding a separate
 dedicated runner or relaxing its provider fence.
 

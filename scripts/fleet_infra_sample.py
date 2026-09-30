@@ -73,8 +73,10 @@ def configured_callee_names(repo_root: Path) -> set[str] | None:
 
 def eligible_pool(
     repo_root: Path, pool_file: Path | None, exclude_file: Path | None = None,
-    *, require_cloud_root: bool = False,
+    *, require_cloud_root: bool = False, minimum_successful_llm: int = 0,
 ) -> list[str]:
+    if minimum_successful_llm != 0 and minimum_successful_llm < 3:
+        raise ValueError("minimum successful LLM queries must be zero or at least three")
     catalog = load_pool(repo_root)
     names = catalog
     if pool_file is not None:
@@ -145,6 +147,23 @@ def eligible_pool(
             )
         names = [name for name in names
                  if name not in rootless | mac_relay | production_only | unassigned_callees]
+    if minimum_successful_llm:
+        # These tasks intentionally grade zero live spend. Their cache replay
+        # cannot satisfy a live-completion proof without changing that contract.
+        zero_live_spend = {
+            str(task["name"])
+            for task in load_unified_catalog(catalog_path(repo_root))
+            if any(check.get("type") == "zero_live_spend"
+                   for evaluator in task.get("evaluators") or []
+                   for check in evaluator.get("checks") or [])
+        }
+        selected_zero_live = set(names) & zero_live_spend
+        if pool_file is not None and selected_zero_live:
+            raise ValueError(
+                "live-query proof cannot run zero-live-spend tasks: "
+                f"{sorted(selected_zero_live)}"
+            )
+        names = [name for name in names if name not in zero_live_spend]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
@@ -181,6 +200,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
         pool = eligible_pool(
             repo, args.pool_file, args.exclude_file,
             require_cloud_root=args.require_cloud_root,
+            minimum_successful_llm=args.min_successful_llm,
         )
         names = sample_slice(pool, width=args.width, seed=args.seed, slice_index=args.slice, disjoint=args.disjoint)
     except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
@@ -200,6 +220,7 @@ def cmd_dry_proof(args: argparse.Namespace) -> int:
         pool = eligible_pool(
             repo, args.pool_file, args.exclude_file,
             require_cloud_root=args.require_cloud_root,
+            minimum_successful_llm=args.min_successful_llm,
         )
     except (CatalogError, ValueError, OSError, json.JSONDecodeError) as exc:
         print(f"❌ {exc}", file=sys.stderr)
@@ -264,6 +285,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument("--exclude-file", type=Path, help="JSON list of previously used names")
         sp.add_argument("--disjoint", action="store_true", help="never reuse a name across slices")
+        sp.add_argument(
+            "--min-successful-llm", type=int, default=0,
+            help="exclude tasks whose zero-live-spend contract conflicts with this minimum",
+        )
         sp.add_argument(
             "--require-cloud-root", action="store_true",
             help="exclude rootless and Mac-only runners from cloud capability proofs",

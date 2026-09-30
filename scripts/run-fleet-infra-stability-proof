@@ -147,6 +147,9 @@ if [ -n "$POOL_FILE" ]; then
 fi
 SAMPLE_ARGS=("${POOL_FILE_ARGS[@]}")
 if [ "$MODE" = capability ]; then SAMPLE_ARGS+=(--require-cloud-root); fi
+if [ "$MIN_SUCCESSFUL_LLM" -gt 0 ]; then
+  SAMPLE_ARGS+=(--min-successful-llm "$MIN_SUCCESSFUL_LLM")
+fi
 if [ -n "$EXCLUDE_FILE" ]; then
   [ -f "$EXCLUDE_FILE" ] && [ ! -L "$EXCLUDE_FILE" ] || {
     echo "❌ --exclude-file must be a regular JSON file" >&2; exit 2;
