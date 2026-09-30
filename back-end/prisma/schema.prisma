@@ -571,7 +571,9 @@ model MessageRecord {
 model GoogleDataPurge {
   id          String    @id @default(uuid())
   userId      String
-  email       String
+  email       String?
+  /// Encrypted token kept only until Google confirms revocation.
+  revocationToken String?
   requestedAt DateTime  @default(now())
   claimedUntil DateTime?
   processedAt DateTime?
@@ -796,6 +798,7 @@ model UserDataDocument {
   id              String                 @id @default(uuid())
   userId          String
   source          String
+  googleAccountEmail String?
   externalId      String
   title           String
   content         String
@@ -812,6 +815,7 @@ model UserDataDocument {
 
   @@unique([userId, source, externalId])
   @@index([userId, source])
+  @@index([userId, source, googleAccountEmail])
   @@index([userId, updatedAt])
   @@index([userId, source, deletedAt])
 }
@@ -856,6 +860,7 @@ model UserSnapshotRevision {
   snapshotId String
   documentId String?
   source     String
+  googleAccountEmail String?
   before     Json              @default("{}")
   after      Json              @default("{}")
   changes    Json?             @default("{}")
@@ -870,6 +875,7 @@ model UserSnapshotRevision {
   @@index([snapshotId])
   @@index([documentId])
   @@index([source])
+  @@index([userId, source, googleAccountEmail])
 }
 
 model EmailIntegrationCredential {

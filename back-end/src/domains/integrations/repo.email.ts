@@ -7,7 +7,7 @@ import { type Prisma, EmailProvider, IntegrationStatus } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
 import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
-import { revokeGoogleGrant } from '../../providers/googleRevoke';
+import { revokeQueuedGoogleGrants } from '../../services/integrations/googleDisconnect';
 
 export async function createEmailCredential(params: {
   userId: string;
@@ -60,21 +60,30 @@ export async function findExistingCredential(params: {
 }
 
 export async function deleteEmailCredential(credentialId: string) {
-  const credential = await prisma.emailIntegrationCredential.findUnique({
-    where: { id: credentialId },
-    select: { provider: true, userId: true, email: true, accessToken: true, refreshToken: true },
-  });
-  if (credential?.provider === EmailProvider.GMAIL) {
-    await revokeGoogleGrant(credential.refreshToken, credential.accessToken);
-  }
-  return runTransactionWithRetry(async (tx) => {
-    if (credential?.provider === EmailProvider.GMAIL && credential.email !== null) {
-      await tx.googleDataPurge.create({
-        data: { userId: credential.userId, email: credential.email.toLowerCase() },
-      });
+  const { deleted, revocations } = await runTransactionWithRetry(async (tx) => {
+    const credential = await tx.emailIntegrationCredential.findUnique({
+      where: { id: credentialId },
+      select: { provider: true, userId: true, email: true, accessToken: true, refreshToken: true },
+    });
+    const revocations = [];
+    if (credential?.provider === EmailProvider.GMAIL) {
+      const token = credential.refreshToken ?? credential.accessToken;
+      if (credential.email !== null || token !== null) {
+        const job = await tx.googleDataPurge.create({
+          data: {
+            userId: credential.userId,
+            email: credential.email?.toLowerCase() ?? null,
+            revocationToken: token === null ? null : encryptGoogleToken(token),
+          },
+        });
+        revocations.push({ id: job.id, token });
+      }
     }
-    return tx.emailIntegrationCredential.delete({ where: { id: credentialId } });
+    const deleted = await tx.emailIntegrationCredential.delete({ where: { id: credentialId } });
+    return { deleted, revocations };
   });
+  await revokeQueuedGoogleGrants(revocations);
+  return deleted;
 }
 
 export async function updateEmailCredential(

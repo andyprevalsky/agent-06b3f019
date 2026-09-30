@@ -149,7 +149,6 @@ export function transformEmailsToContacts(
         userEmailSet.add(topAddr);
         foundNew = true;
         log.info('Detected imported account', {
-          address: topAddr,
           from_count: topCount,
           to_count: toCounts.get(topAddr) || 0,
           next_count: secondCount,

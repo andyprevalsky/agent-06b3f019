@@ -71,6 +71,12 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import { processGoogleDataPurge } from '../../services/integrations/googleDataPurge';
+import { revokeQueuedGoogleGrants } from '../../services/integrations/googleDisconnect';
+import {
+  classifyEmailAuthFailure,
+  markCredentialFailure,
+} from '../../services/integrations/emailCredentialHealth';
 import {
   __resetAnthropicApiKeyCooldown,
   isAnthropicApiKeyOnCooldown,
@@ -2681,6 +2687,66 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     ],
   });
 
+  const person = await prisma.person.create({
+    data: { userId, firstName: 'Google', lastName: 'Purge' },
+  });
+  const purgedMessageId = crypto.randomUUID();
+  const keptMessageId = crypto.randomUUID();
+  const legacyCrossAccountId = crypto.randomUUID();
+  await prisma.messageRecord.createMany({
+    data: [
+      {
+        id: purgedMessageId,
+        personId: person.id,
+        channel: 'EMAIL',
+        from: 'primary@gmail.com',
+        to: 'secondary@gmail.com',
+        timestamp: new Date(),
+        message: 'from disconnected account',
+        googleAccountEmail: 'primary@gmail.com',
+      },
+      {
+        id: keptMessageId,
+        personId: person.id,
+        channel: 'EMAIL',
+        from: 'primary@gmail.com',
+        to: 'secondary@gmail.com',
+        timestamp: new Date(),
+        message: 'from connected account',
+        googleAccountEmail: 'secondary@gmail.com',
+      },
+      {
+        id: legacyCrossAccountId,
+        personId: person.id,
+        channel: 'EMAIL',
+        from: 'primary@gmail.com',
+        to: 'secondary@gmail.com',
+        timestamp: new Date(),
+        message: 'ambiguous legacy account',
+      },
+    ],
+  });
+  const snapshot = await prisma.userSnapshot.create({ data: { userId } });
+  await prisma.userDataDocument.createMany({
+    data: ['primary@gmail.com', 'secondary@gmail.com', null].map((email, index) => ({
+      userId,
+      source: 'gmail',
+      externalId: `purge-${index}`,
+      title: 'Gmail document',
+      content: 'account data',
+      contentHash: `purge-${index}`,
+      googleAccountEmail: email,
+    })),
+  });
+  await prisma.userSnapshotRevision.createMany({
+    data: ['primary@gmail.com', 'secondary@gmail.com', null].map((email) => ({
+      userId,
+      snapshotId: snapshot.id,
+      source: 'gmail',
+      googleAccountEmail: email,
+    })),
+  });
+
   const res = await request(
     `${BASE_URL}/api/integrations/email/gmail/accounts/${encodeURIComponent('primary@gmail.com')}`,
     { method: 'DELETE', headers: authHeaders(accessToken) }
@@ -2703,6 +2769,37 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     where: { userId, email: 'primary@gmail.com', processedAt: null },
   });
   assert(purge !== null, 'disconnect should queue cached Google data for deletion');
+  await prisma.googleDataPurge.update({
+    where: { id: purge.id },
+    data: { revocationToken: null },
+  });
+  await processGoogleDataPurge(purge.id);
+  assert(
+    (await prisma.messageRecord.findUnique({ where: { id: purgedMessageId } })) === null,
+    'purge should delete records attributed to the disconnected account'
+  );
+  assert(
+    (await prisma.messageRecord.count({
+      where: { id: { in: [keptMessageId, legacyCrossAccountId] } },
+    })) === 2,
+    'purge must preserve the connected account and ambiguous legacy records'
+  );
+  const remainingDocuments = await prisma.userDataDocument.findMany({
+    where: { userId, source: 'gmail' },
+    select: { googleAccountEmail: true },
+  });
+  const remainingRevisions = await prisma.userSnapshotRevision.findMany({
+    where: { userId, source: 'gmail' },
+    select: { googleAccountEmail: true },
+  });
+  for (const remaining of [remainingDocuments, remainingRevisions]) {
+    assert(
+      remaining.length === 2 &&
+        remaining.some((row) => row.googleAccountEmail === 'secondary@gmail.com') &&
+        remaining.some((row) => row.googleAccountEmail === null),
+      'purge must retain other-account and ambiguous Gmail documents and revisions'
+    );
+  }
 
   const updated = await prisma.integration.findUnique({ where: { id: integration.id } });
   const config = updated?.config as { connectedEmail?: unknown; connectedEmails?: unknown };
@@ -2717,6 +2814,78 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
       config.connectedEmails.length === 1 &&
       config.connectedEmails[0] === 'secondary@gmail.com',
     'connectedEmails config should be recomputed'
+  );
+}
+
+async function testGoogleRevocationFailure_retainsDurableRetry() {
+  const job = await prisma.googleDataPurge.create({
+    data: { userId: crypto.randomUUID(), email: null, revocationToken: 'pending-token' },
+  });
+  const unavailable = (async () => new Response('', { status: 503 })) as typeof fetch;
+  await revokeQueuedGoogleGrants([{ id: job.id, token: 'pending-token' }], unavailable);
+  await processGoogleDataPurge(job.id, unavailable);
+  const pending = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: job.id } });
+  assert(
+    pending.processedAt === null && pending.revocationToken === 'pending-token',
+    'failed immediate and background revocation must retain the encrypted retry obligation'
+  );
+
+  const available = (async () => new Response('', { status: 200 })) as typeof fetch;
+  await processGoogleDataPurge(job.id, available);
+  const processed = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: job.id } });
+  assert(
+    processed.processedAt !== null && processed.revocationToken === null,
+    'successful retry must clear the token and finish the obligation'
+  );
+}
+
+async function testGoogleExternalRevocation_queuesPurgeAndReconnect() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: { userId, name: 'gmail', type: 'DATA_SOURCE', status: 'CONNECTED', isActive: true },
+  });
+  const credential = await prisma.emailIntegrationCredential.create({
+    data: {
+      userId,
+      integrationId: integration.id,
+      provider: 'GMAIL',
+      email: 'revoked@gmail.com',
+      accessToken: 'old-access',
+      refreshToken: 'old-refresh',
+    },
+  });
+  await markCredentialFailure(
+    credential.id,
+    classifyEmailAuthFailure({ status: 400, body: '{"error":"invalid_grant"}' })
+  );
+  const after = await prisma.emailIntegrationCredential.findUniqueOrThrow({
+    where: { id: credential.id },
+  });
+  assert(
+    after.state === 'needs_reconnect' && after.accessToken === null && after.refreshToken === null,
+    'externally revoked account should remain visible for reconnect without stored tokens'
+  );
+  assert(
+    (await prisma.googleDataPurge.count({ where: { userId, email: 'revoked@gmail.com' } })) === 1,
+    'invalid_grant should queue data cleanup for the revoked account'
+  );
+  const listed = await request(`${BASE_URL}/api/integrations`, {
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(listed.status, 200, listed.data);
+  const integrations = (listed.data as { integrations?: Array<{ emailCredentials?: unknown[] }> })
+    .integrations;
+  assert(
+    integrations?.some((item) =>
+      item.emailCredentials?.some(
+        (account) =>
+          typeof account === 'object' &&
+          account !== null &&
+          'email' in account &&
+          account.email === 'revoked@gmail.com'
+      )
+    ),
+    'revoked account must remain listed for the Reconnect Google prompt'
   );
 }
 
@@ -6907,6 +7076,14 @@ async function runAll() {
     {
       name: 'DELETE /email/gmail/accounts/:email removes one credential',
       fn: testEmailGmailAccountDelete_removesOneCredential,
+    },
+    {
+      name: 'Google revocation retries after failure',
+      fn: testGoogleRevocationFailure_retainsDurableRetry,
+    },
+    {
+      name: 'Google external revocation queues data purge',
+      fn: testGoogleExternalRevocation_queuesPurgeAndReconnect,
     },
     {
       name: 'POST /email/gmail/start abandoned flow preserves connectedEmails',
