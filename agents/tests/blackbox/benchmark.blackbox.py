@@ -12027,6 +12027,42 @@ async def test_create_agent_uses_model_override_when_env_set():
     assert bodies[2].get("fast_mode_cache_enabled") is True
 
 
+async def test_live_benchmark_cache_setting_preserves_catalog_contracts():
+    """Live proof configuration reaches creation; pinned cache tasks still win."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class Response:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-cache-mode-fixture"}
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return Response()
+
+    with patch.dict(os.environ, {"BENCHMARK_FAST_MODE_CACHE": "false"}), \
+            patch.object(bench, "_api_headers", AsyncMock(return_value={})), \
+            patch.object(bench.httpx, "AsyncClient", Client):
+        for name in ("single-creator-arm", "test-mass-agent-run-0", "message-person-agent-sms"):
+            await bench.create_agent("http://localhost:55120", get_task_by_name(name))
+    assert [body.get("fast_mode_cache_enabled") for body in bodies] == [False, True, False]
+
+
 async def test_create_agent_sends_task_response_schema():
     """Lifecycle tasks can prevent an inferred verifier schema from contradicting the prompt."""
     import benchmarks.run_benchmark as bench
@@ -18570,6 +18606,8 @@ async def run_all_tests():
         "cloudbench_codex_auth_permanent_gate",
         test_cloudbench_codex_auth_is_in_permanent_gate,
     )
+    r.record("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate)
+    r.record("live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning)
     r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
@@ -18844,6 +18882,7 @@ async def run_all_tests():
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     await r.record_async("create_agent_model_override", test_create_agent_uses_model_override_when_env_set)
+    await r.record_async("live_benchmark_cache_contracts", test_live_benchmark_cache_setting_preserves_catalog_contracts)
     await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)

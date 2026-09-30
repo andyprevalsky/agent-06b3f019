@@ -350,6 +350,14 @@ before provisioning. Cached-only mass-agent/demo replays cannot establish live
 model progress; keep their normal cache and evaluator contracts intact. They
 remain available for ordinary benchmark and infrastructure-probe runs without
 that live-query requirement. Choose compatible smoke tasks for the proof.
+For a live-query proof, set `BENCHMARK_FAST_MODE_CACHE=false` on the command.
+This existing benchmark A/B setting requests real model calls for tasks with no
+pinned cache setting; catalog `fast_cache: on/off` declarations still win.
+Without it, an unspecified task can inherit backend cache replay and complete
+with zero live calls. Do not count those replays, add synthetic calls, or override
+a task that explicitly requires cached execution. The same live setting is
+already used by the predeploy smoke lane. Keep dependency snapshot reuse enabled;
+model-response replay and dependency caching are separate settings.
 For the current accelerated validation, the user explicitly requested a
 temporary 300-second benchmark execution limit and a separate 30-minute hard
 cutoff for any bench that has not finished its full end-to-end lifecycle. Apply
@@ -431,6 +439,10 @@ that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
 against the original run/backend bytes before releasing the owner. Such an
 archive is always zero proof credit, even when the benchmark itself evaluated.
+The same recovery archive may contain only sealed guests when controller
+collection was interrupted after their cleanup. Completeness does not turn a
+failed controller into a valid slice: exact owner/hash/native-stop checks and
+zero proof credit remain mandatory before releasing its claims.
 An interrupted primary may have an autoscaled worker. Preserve its
 `worker-runtime-evidence/<machine-id>/capture` and owner record as well: recovery
 uses the same exact terminal/log-hash/provider-inventory verification as a sealed
@@ -443,6 +455,7 @@ through the existing fleet settings, retaining catalog-specific memory:
 CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
 CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
 CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
+BENCHMARK_FAST_MODE_CACHE=false \
 scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer> \
   --exclude-file <prior-successful-names.json> --min-successful-llm 3
 ```

@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import runpy
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -97,6 +99,109 @@ def primary_fixture(out: Path, token: str = "run-0") -> Path:
         manifest["files"][name] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
     (root / "manifest.json").write_text(json.dumps(manifest))
     return root
+
+
+@pytest.mark.parametrize("fault", ["none", "live-machine", "foreign-volume", "foreign-owner", "archive", "credit", "successful-controller"])
+def test_failed_controller_all_sealed_archive_retires_with_zero_credit(tmp_path: Path, fault: str) -> None:
+    """A canceled collector can retain its latch after every guest seals."""
+    owner = "a" * 32
+    run_id = "failed-controller"
+    registry = tmp_path / "owners" / owner
+    audit = tmp_path / "audits" / owner
+    run = tmp_path / "runs" / run_id
+    (registry / "clones").mkdir(parents=True)
+    for directory in ("pool", "fresh", "expected-fresh", "by-machine-id"):
+        (audit / directory).mkdir(parents=True)
+    (registry / "meta").write_text(
+        f"version=2\nfleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n"
+        f"runs_root={run.parent}\naudit_dir={audit}\ncleanup_policy=reap\n"
+    )
+    latch = registry / "runtime-evidence-unconfirmed"
+    latch.touch()
+    (audit / "meta").write_text(f"fleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n")
+    (run / "_batch").mkdir(parents=True)
+    tasks = [{"name": f"task-{i}"} for i in range(10)]
+    lifecycle = {"status": "failed", "controller_exit_code": 143, "fleet_owner_token": owner}
+    (run / "_batch/benches.json").write_text(json.dumps(tasks))
+    (run / "_batch/lifecycle.json").write_text(json.dumps(lifecycle))
+    machines, volumes = [], []
+    for i, task in enumerate(tasks):
+        machine, volume, token = f"abc{i:011x}", f"vol_fixture{i}", f"{owner}-{i}"
+        out = run / task["name"]
+        root = primary_fixture(out, token)
+        identity = {"version": 1, "machine_id": machine, "run_token": token}
+        (out / "runtime-evidence.owner.json").write_text(json.dumps(identity))
+        payload = json.dumps({"tasks": [{"name": task["name"], "status": "FAILED"}]}).encode()
+        (root / "run.json").write_bytes(payload)
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest.update(identity)
+        manifest["files"]["run.json"] = {"bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        (out / ".cid").write_text(f"pool {machine}\n")
+        (out / "guest-shutdown.confirmed").write_text(run_id + "\n")
+        (audit / "pool" / machine).write_text(
+            f"fleet_owner_token={owner}\napp=bench-app\nrun_id={run_id}\n"
+            f"machine_id={machine}\nvolume_id={volume}\nsource=borrowed-pool\ndisposition=claimed\n"
+        )
+        machines.append({"id": machine, "state": "stopped"})
+        volumes.append({"id": volume, "attached_machine_id": machine})
+    builder = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+         "--registry", str(registry), "--capture-dir", str(tmp_path / "unused-captures")],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert builder.returncode == 0, builder.stderr
+    assert json.loads(builder.stdout)["incomplete"] == 0
+    assert json.loads(builder.stdout)["proof_credit"] == 0
+    archive = run / "_forensic/originals.tar.gz"
+    manifest_path = run / "_forensic/manifest.json"
+    if fault == "live-machine":
+        machines[0]["state"] = "started"
+    elif fault == "foreign-volume":
+        volumes[0]["attached_machine_id"] = "def456"
+    elif fault == "foreign-owner":
+        path = run / "task-0/runtime-evidence.owner.json"
+        identity = json.loads(path.read_text())
+        identity["run_token"] = "foreign-0"
+        path.write_text(json.dumps(identity))
+    elif fault == "archive":
+        archive.write_bytes(archive.read_bytes() + b"altered")
+    elif fault == "credit":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["proof_credit"] = 1
+        manifest_path.write_text(json.dumps(manifest))
+    elif fault == "successful-controller":
+        lifecycle.update(status="completed", controller_exit_code=0)
+        (run / "_batch/lifecycle.json").write_text(json.dumps(lifecycle))
+    machines_path, volumes_path = tmp_path / "machines.json", tmp_path / "volumes.json"
+    machines_path.write_text(json.dumps(machines))
+    volumes_path.write_text(json.dumps(volumes))
+    functions = "\n".join(_extract_fleet_function(FLEET.read_text(), name + "() {") for name in (
+        "registry_meta_value", "fleet_recovery_confirm_forensic_retirement"))
+    script = functions + f'''
+APP=bench-app
+FORENSIC_RETIREMENT_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-forensic-retirement.py"))}
+cloudbench_fsync_directory() {{ :; }}
+fly_with_timeout() {{
+    case "$2" in
+        machines) cat {shlex.quote(str(machines_path))} ;;
+        volumes) cat {shlex.quote(str(volumes_path))} ;;
+        *) return 90 ;;
+    esac
+}}
+fleet_recovery_confirm_forensic_retirement {shlex.quote(str(registry))}
+'''
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, check=False)
+    receipt_path = run / "_forensic/retirement-verified.json"
+    if fault == "none":
+        assert result.returncode == 0, result.stdout + result.stderr
+        receipt = json.loads(receipt_path.read_text())
+        assert receipt["proof_credit"] == 0 and receipt["tasks"] == 10
+        assert receipt["incomplete_tasks"] == 0
+        assert not latch.exists()
+    else:
+        assert result.returncode != 0, f"unsafe {fault} released this owner's latch"
+        assert latch.exists() and not receipt_path.exists()
 
 
 @pytest.mark.parametrize("corrupt", ["none", "missing", "hash", "symlink", "extra-worker", "wrong-owner", "borrowed-sibling"])

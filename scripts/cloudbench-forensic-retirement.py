@@ -655,7 +655,9 @@ def verify_interrupted_pool_evidence(
             member = f"{name}/{rel}"
             assert member not in expected_files
             expected_files[member] = info
-    assert incomplete > 0
+    # Controller collection can be interrupted after every guest seals. The
+    # failed lifecycle and zero-credit manifest govern retirement, independently
+    # of whether any original guest capture is incomplete.
     seen = set()
     archived = {}
     failed_stack_names = {
