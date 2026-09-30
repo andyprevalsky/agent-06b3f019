@@ -1065,6 +1065,119 @@ async def test_handler_explore_unavailable_sources_still_finished():
     assert not any(event.status == MessageStatus.ERROR for event in events)
 
 
+async def test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_results():
+    """A later sourced round gets one advisory; sparse and failed rounds do not."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from helpers.context_scope import filter_internal_subagent_messages
+    from helpers.llm import build_llm_messages
+    from tools.base import MessageStatus
+
+    sourced = "Sourced cost, neighborhoods, and weather facts. " * 6 + "https://example.com/city"
+    prior_context = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "prior-a"},
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "prior-b"},
+                ]
+            },
+        },
+        *[
+            {
+                "role": "TOOL",
+                "text": sourced,
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "explore",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": call_id,
+                    "data": {"result": sourced},
+                },
+            }
+            for call_id in ("prior-a", "prior-b")
+        ],
+    ]
+
+    async def run_result(result, context, *, wf=None):
+        fake = _FakeSpawnWF(
+            activity_results={"fetch_local_data_summary": ""},
+            start_activity_result=_Activity(result=result),
+        )
+        instance = wf or _FakeWFInstance(context=context)
+        restore = _patch_spawn_workflow(fake)
+        try:
+            events = await _collect(
+                SpawnAgentManager()._spawn_explore(
+                    workflow_instance=instance,
+                    tool_call={"type": "explore", "goal": "Follow up on a city"},
+                    tool_call_id="followup",
+                )
+            )
+        finally:
+            restore()
+        return next(event for event in events if event.status != MessageStatus.IN_PROGRESS), instance
+
+    grounded = {
+        "status": "completed",
+        "result": sourced,
+        "tool_call_results": ["[web_search] https://example.com/city"],
+    }
+    event, wf = await run_result(grounded, prior_context)
+    assert "Research checkpoint for the parent agent" in event.message
+    assert event.data["result"] == sourced  # Guidance never becomes research evidence.
+    model_context = [
+        {"role": "USER", "text": "Compare these cities", "timestamp": "2026-09-30T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-09-30T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "spawn_agent", "type": "explore", "tool_call_id": "followup"}
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": event.message,
+            "timestamp": "2026-09-30T00:00:02Z",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "followup",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+            },
+        },
+    ]
+    llm_messages = await build_llm_messages(filter_internal_subagent_messages(model_context), "system")
+    assert any(
+        message["role"] == "tool" and "Research checkpoint for the parent agent" in message["content"]
+        for message in llm_messages
+    )
+    again, _ = await run_result(grounded, prior_context, wf=wf)
+    assert "Research checkpoint" not in again.message
+
+    sparse, _ = await run_result({"status": "completed", "result": "Brief result"}, prior_context)
+    assert "Research checkpoint" not in sparse.message
+    failed, _ = await run_result(
+        {"status": "error", "result": sourced, "tool_call_results": ["[web_search] source"]},
+        prior_context,
+    )
+    assert "Research checkpoint" not in failed.message
+    only_one_prior, _ = await run_result(grounded, prior_context[:-1])
+    assert "Research checkpoint" not in only_one_prior.message
+    resumed_context = prior_context + [
+        {
+            "role": "TOOL",
+            "text": event.message,
+            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        }
+    ]
+    after_resume, _ = await run_result(grounded, resumed_context)
+    assert "Research checkpoint" not in after_resume.message
+
+
 async def test_handler_explore_cancelled_yields_error():
     """Explore activity CancelledError -> ERROR event."""
     import asyncio as _a
@@ -4407,6 +4520,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_explore_unavailable_sources_still_finished",
         test_handler_explore_unavailable_sources_still_finished,
+    )
+    await r.record_async(
+        "handler_explore_synthesis_checkpoint_requires_grounded_prior_batch",
+        test_handler_explore_synthesis_checkpoint_requires_two_grounded_prior_results,
     )
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
     await r.record_async(

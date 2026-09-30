@@ -106,6 +106,69 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
     )
 
 
+_EXPLORE_SYNTHESIS_CHECKPOINT = (
+    "Research checkpoint for the parent agent: you have sourced findings from "
+    "multiple explore rounds. Compare them with the original user's requested "
+    "facts and synthesize if those facts are covered. Continue researching a "
+    "specific missing requested fact if needed; state uncertainty instead of "
+    "chasing optional precision. This checkpoint is guidance, not evidence."
+)
+
+
+def _source_linked_explore_text(text: str) -> bool:
+    return len(text.strip()) >= 200 and any(
+        marker in text for marker in ("https://", "http://", "@ref:", "grep:")
+    )
+
+
+def _grounded_explore_text(text: str, tool_results: List[str]) -> bool:
+    """A substantive, source-linked result rather than a sparse/failed chip."""
+    return bool(tool_results) and _source_linked_explore_text(text)
+
+
+def _has_prior_grounded_explore_batch(context: Any, current_tool_call_id: str) -> bool:
+    """Find a prior parent turn with at least two grounded explore results."""
+    if not isinstance(context, list):
+        return False
+    grounded_ids: set[str] = set()
+    for message in context:
+        if not isinstance(message, dict) or str(message.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = message.get("metadata") or {}
+        if (
+            metadata.get("toolName") == "spawn_agent"
+            and _EXPLORE_SYNTHESIS_CHECKPOINT in str(message.get("text") or "")
+        ):
+            return False  # Persist the one-time choice through continue-as-new.
+        if (
+            metadata.get("toolName") != "spawn_agent"
+            or metadata.get("agentType") != "explore"
+            or metadata.get("toolStatus") != "FINISHED"
+        ):
+            continue
+        call_id = str(metadata.get("toolCallId") or "")
+        if call_id and call_id != current_tool_call_id:
+            data = metadata.get("data")
+            payload = data.get("result") if isinstance(data, dict) else None
+            text = str(payload or message.get("text") or "")
+            if _source_linked_explore_text(text):
+                grounded_ids.add(call_id)
+    if len(grounded_ids) < 2:
+        return False
+    for message in context:
+        if not isinstance(message, dict) or str(message.get("role") or "").upper() != "ASSISTANT":
+            continue
+        calls = (message.get("metadata") or {}).get("tool_calls") or []
+        batch_ids = {
+            str(call.get("tool_call_id") or "")
+            for call in calls
+            if isinstance(call, dict) and call.get("tool") == "spawn_agent" and call.get("type") == "explore"
+        }
+        if current_tool_call_id not in batch_ids and len(batch_ids & grounded_ids) >= 2:
+            return True
+    return False
+
+
 def _explore_result_after_activity_failure(
     exc: BaseException, *, user_paused: bool
 ) -> tuple[Dict[str, Any], bool]:
@@ -794,6 +857,19 @@ class SpawnAgentManager(ToolManager):
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
             event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
+            if (
+                not oai_demo
+                and not explore_failed
+                and _grounded_explore_text(explore_result, explore_tool_call_results)
+                and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
+                and _has_prior_grounded_explore_batch(
+                    getattr(workflow_instance, "context", None), tool_call_id
+                )
+            ):
+                # One advisory after a grounded follow-up round. It must not
+                # replace evidence or prevent another necessary targeted search.
+                workflow_instance._explore_synthesis_checkpoint_sent = True
+                event_message = f"{event_message}\n\n{_EXPLORE_SYNTHESIS_CHECKPOINT}"
 
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
