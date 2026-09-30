@@ -12,11 +12,29 @@ function parsePositiveIntEnv(name: string, raw: string | undefined, fallback: nu
   return parsed;
 }
 
+/**
+ * Per-mint spend ceiling. Default matches the live AgentCard org-wallet available
+ * balance ($632.88 as of 2026-09-29) so company_flow cards cannot request more
+ * float than the org pool holds. Override via MAX_PURCHASE_CENTS when the wallet
+ * is topped up or drawn down.
+ *
+ *   mint totalCents
+ *        │
+ *        ▼
+ *   totalCents > MAX_PURCHASE_CENTS? ──yes──► 400 purchase_above_max_limit
+ *        │                                   (tool error; NOT a subscribe gate)
+ *        no
+ *        ▼
+ *   resolveAndIssuePurchaseCard (...)
+ */
 export const MAX_PURCHASE_CENTS = parsePositiveIntEnv(
   'MAX_PURCHASE_CENTS',
   process.env.MAX_PURCHASE_CENTS,
-  5000
+  63_288
 );
+
+/** API / activity code for a mint that exceeds {@link MAX_PURCHASE_CENTS}. */
+export const PURCHASE_ABOVE_MAX_LIMIT_CODE = 'purchase_above_max_limit';
 export const PURCHASE_APPROVAL_CACHE_HOURS = 24;
 export const AGENTCARD_WEBHOOK_SECRET = process.env.AGENTCARD_WEBHOOK_SECRET ?? '';
 

@@ -18,6 +18,10 @@ KYC_REQUIRED_CODES = {
     "cardholder_kyc_required",
 }
 
+# Backend code for a mint that exceeds MAX_PURCHASE_CENTS. Must NOT be treated as
+# subscription_required (historically every 402 was) — the browser tool errors.
+PURCHASE_ABOVE_MAX_LIMIT_CODE = "purchase_above_max_limit"
+
 
 def _logger():
     import structlog
@@ -180,6 +184,28 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
             ):
                 _logger().info("Mint requires KYC", code=code, detail=detail[:200])
                 return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}
+
+            # Over-limit mint (was historically a bare 402 and got mislabeled as a
+            # subscribe gate). Surface as a dedicated status so the browser tool
+            # errors with the limit instead of pausing on a subscription checkout.
+            if code == PURCHASE_ABOVE_MAX_LIMIT_CODE or (
+                response.status_code in (400, 402)
+                and "above max limit" in detail.lower()
+            ):
+                max_cents = payload.get("maxPurchaseCents")
+                _logger().info(
+                    "Mint above max purchase limit",
+                    detail=detail[:200],
+                    max_purchase_cents=max_cents,
+                )
+                result: Dict[str, Any] = {
+                    "status": PURCHASE_ABOVE_MAX_LIMIT_CODE,
+                    "error": detail,
+                    "code": PURCHASE_ABOVE_MAX_LIMIT_CODE,
+                }
+                if isinstance(max_cents, int):
+                    result["maxPurchaseCents"] = max_cents
+                return result
 
             # 402 = the user needs an active subscription before Rose can spend real
             # money. Surface it as a signal (not an exception) so the workflow can

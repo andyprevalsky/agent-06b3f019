@@ -74,7 +74,7 @@ async function persistMintedCard(
     'usd',
     minted.cardId,
     transferId,
-    minted.metadata
+    { ...(minted.metadata ?? {}), last4: minted.last4 }
   );
   state.issuedCardId = minted.cardId;
   state.issuedStaticCard = false;
