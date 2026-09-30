@@ -54,6 +54,82 @@ def fixture():
 
 
 class QueryEvidenceTest(unittest.TestCase):
+    def test_terminal_model_failure_invalidates_three_successes(self):
+        payload = fixture()
+        task = payload['tasks'][0]
+        task['benchmark_status'] = 'FAILED'
+        common = {'agent_id': ROOT_AGENT, 'request_id': 'stalled-request',
+                  'span_id': 'stalled-call'}
+        events = [
+            {**common, 'event': 'rose.complete.start',
+             'timestamp': '2026-09-29T00:00:30Z'},
+            {**common, 'event': 'rose.complete.first_productive_chunk',
+             'timestamp': '2026-09-29T00:00:31Z'},
+            {**common, 'event': 'rose.complete.failed',
+             'timestamp': '2026-09-29T00:00:40Z',
+             'error_type': 'RoseDeadlineError', 'active_route': 'waterfall'},
+        ]
+        task['logs']['worker_logs'].extend(json.dumps(event) for event in events)
+        # Duplicate collected views must not create more failed requests.
+        task['logs']['worker_logs'].append(json.dumps(events[-1]))
+        result = module.verify(payload)
+        self.assertEqual(result['successful_llm_queries'], 3)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(len(result['failed_queries']), 1)
+        self.assertEqual(result['failed_queries'][0]['request_id'], 'stalled-request')
+        self.assertEqual(task['benchmark_status'], 'FAILED')
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            task_dir = base / 'example-task'
+            task_dir.mkdir()
+            original = json.dumps(payload)
+            (task_dir / 'cloudbench-run.json').write_text(original)
+            report = base / 'report.json'
+            self.assertEqual(module.main([str(base), str(report),
+                                          '--expected-count', '1']), 70)
+            self.assertEqual(json.loads(report.read_text())['status'], 'failed')
+            self.assertEqual((task_dir / 'cloudbench-run.json').read_text(), original)
+
+    def test_cleanup_and_foreign_failures_do_not_change_execution_verdict(self):
+        payload = fixture()
+        common = {'event': 'rose.complete.failed', 'agent_id': ROOT_AGENT,
+                  'request_id': 'outside', 'span_id': 'outside-call',
+                  'error_type': 'RoseDeadlineError'}
+        payload['tasks'][0]['logs']['worker_logs'].extend([
+            json.dumps({**common, 'timestamp': '2026-09-29T00:00:46Z'}),
+            json.dumps({**common, 'agent_id': SECOND_AGENT,
+                        'timestamp': '2026-09-29T00:00:40Z'}),
+        ])
+        result = module.verify(payload)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['failed_queries'], [])
+
+    def test_owned_child_failure_invalidates_three_root_successes(self):
+        payload = fixture()
+        logs = payload['tasks'][0]['logs']
+        logs['tree'][SECOND_AGENT] = {'parent_agent_id': ROOT_AGENT}
+        logs['worker_logs'].append(json.dumps({
+            'event': 'rose.complete.failed', 'agent_id': SECOND_AGENT,
+            'root_agent_id': ROOT_AGENT, 'request_id': 'child-stall',
+            'span_id': 'child-call', 'timestamp': '2026-09-29T00:00:40Z',
+            'error_type': 'RoseDeadlineError',
+        }))
+        result = module.verify(payload)
+        self.assertEqual(result['successful_llm_queries'], 3)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['failed_queries'][0]['agent_id'], SECOND_AGENT)
+
+    def test_recovered_primary_rejection_does_not_invalidate_live_completion(self):
+        payload = fixture()
+        payload['tasks'][0]['logs']['worker_logs'].append(json.dumps({
+            'event': 'rose.transport.cerebras.error', 'status': 429,
+            'agent_id': ROOT_AGENT, 'request_id': 'request-0',
+            'span_id': 'call-0', 'timestamp': '2026-09-29T00:00:00Z',
+        }))
+        result = module.verify(payload)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['failed_queries'], [])
+
     def test_three_completed_queries_pass_and_duplicate_lines_do_not_inflate(self):
         payload = fixture()
         payload["tasks"][0]["logs"]["worker_logs"].extend(

@@ -2,8 +2,9 @@
 
 This is an acceptance observer; it does not alter tasks, calls or evaluation.
 Conservatively counts only correlated provider read spans with positive output
-usage and a normal stop/tool-call finish. Retries and duplicated log lines do
-not increase the number of distinct queries.
+usage and a normal stop/tool-call finish. Terminal model-request failures inside
+the owned execution window invalidate the proof even when three other queries
+completed. Retries and duplicated log lines do not inflate counts.
 """
 import argparse
 import hashlib
@@ -255,7 +256,22 @@ def verify(payload, minimum=3):
         queries.setdefault(key, {'agent_id': key[0], 'request_id': key[1], 'provider_read_span_id': span_id, 'evidence_kind': 'provider_read_span', 'started_at': opening['timestamp'], 'completed_at': closing['timestamp'], 'completion_tokens': tokens, 'finish': event['finish']})
     for key, row in _rose_completed_queries(rose_events, usage, start, finish).items():
         queries.setdefault(key, row)
-    result = {'task': task['name'], 'agent_id': root, 'run_id': payload['run_id'], 'minimum_required': minimum, 'successful_llm_queries': len(queries), 'status': 'passed' if len(queries) >= minimum else 'failed', 'queries': sorted(queries.values(), key=lambda e: (e['completed_at'], e['agent_id'], e['request_id']))}
+    # A genuine terminal request failure can be hidden by an ordinary task
+    # FAILED verdict and enough unrelated successful queries. Recovered route
+    # rejections are not terminal completion failures; cleanup after the task's
+    # execution window is outside this progress proof. Ownership was checked
+    # while collecting rose_events above, including composite-stage roots.
+    failed_queries = []
+    failures = [event for event in rose_events if event.get('event') == 'rose.complete.failed']
+    for event in _unique_events(failures):
+        when = stamp(event['timestamp'])
+        if start <= when <= finish:
+            failed_queries.append({key: event.get(key) for key in (
+                'agent_id', 'request_id', 'span_id', 'timestamp',
+                'error_type', 'active_route',
+            )})
+    failed_queries.sort(key=lambda e: (e['timestamp'], e['agent_id'], e['request_id'] or ''))
+    result = {'task': task['name'], 'agent_id': root, 'run_id': payload['run_id'], 'minimum_required': minimum, 'successful_llm_queries': len(queries), 'status': 'passed' if len(queries) >= minimum and not failed_queries else 'failed', 'queries': sorted(queries.values(), key=lambda e: (e['completed_at'], e['agent_id'], e['request_id'])), 'failed_queries': failed_queries}
     return result
 
 
@@ -281,12 +297,12 @@ def main(argv=None):
         row.update(run_json=str(path), run_json_sha256=hashlib.sha256(data).hexdigest())
         rows.append(row)
     assert len({r['agent_id'] for r in rows}) == args.expected_count
-    report = {'status': 'passed' if all(r['status'] == 'passed' for r in rows) else 'failed', 'scope': 'Successful LLM query evidence only; infrastructure, task outcome and cleanup gates remain separately mandatory', 'minimum_per_benchmark': args.minimum, 'benchmark_count': args.expected_count, 'tasks': rows}
+    report = {'status': 'passed' if all(r['status'] == 'passed' for r in rows) else 'failed', 'scope': 'Successful LLM queries and terminal model-request failures; startup, task outcome and cleanup gates remain separately mandatory', 'minimum_per_benchmark': args.minimum, 'benchmark_count': args.expected_count, 'tasks': rows}
     target = args.report_json
     assert not target.exists(), 'preserve original evidence receipts'
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, indent=2) + '\n')
-    print(json.dumps({'status': report['status'], 'counts': {r['task']: r['successful_llm_queries'] for r in rows}}))
+    print(json.dumps({'status': report['status'], 'counts': {r['task']: r['successful_llm_queries'] for r in rows}, 'failed_query_counts': {r['task']: len(r['failed_queries']) for r in rows}}))
     return 0 if report['status'] == 'passed' else 70
 
 

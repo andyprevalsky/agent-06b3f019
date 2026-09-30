@@ -344,6 +344,14 @@ responses, a real evaluator result, and full cleanup/evidence; an interrupted
 diagnostic that misses those requirements earns no credit. Restore the normal
 backstop after this validation. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
+The live-query verifier also rejects an owned terminal `rose.complete.failed`
+inside the benchmark's execution window, even if three other calls completed.
+An ordinary task verdict cannot hide a model-request stall. Its `failed_queries`
+receipt identifies the exact request and route; foreign trees and post-execution
+cleanup failures cannot be borrowed into this progress check. A rejected primary
+route that recovers to a completed call is distinct from a terminal request
+failure. Inspect both rather than treating every fallback as an infrastructure
+failure or counting partial output as a completion.
 With `--min-successful-llm`, sampling excludes catalog tasks whose declared
 checks require `zero_live_spend` and rejects an explicit pool containing one
 before provisioning. Cached-only mass-agent/demo replays cannot establish live
