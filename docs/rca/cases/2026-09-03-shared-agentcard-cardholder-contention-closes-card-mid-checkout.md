@@ -171,3 +171,6 @@ true`, and both payment-card responses returned the same provider card ID
 one wallet funding, one Stripe payment intent, and one local card. This proves
 the idempotency path in that run; the shared cardholder still needs provider
 isolation to prevent unrelated workspaces from affecting future runs.
+
+The full four-task AgentCard gate then exposed two more browser-rendering
+variants (`20260930_025123_agent-payment-test-shop,agent-payment-setup-resume,agent-payment-idempotent-abandonment,agent-payment-abandonment.json`): setup/resume sent `http://placehold.co/...` for the three image URLs shown with `https://` in the checkout fixture, and the idempotency task's second browser appended `x1 (Rose Labs Test Payment)` to each product title. Its two fingerprints differed, giving two purchases. The payment payload now upgrades only the known placeholder image host to HTTPS; both fingerprint builders strip a quantity-plus-merchant suffix only when it matches the separate quantity and merchant fields. Replaying the archived requests now produces secure receipt image URLs and one fingerprint. A full four-task passing gate is still required before closing this case.

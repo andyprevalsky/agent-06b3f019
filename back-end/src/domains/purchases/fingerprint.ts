@@ -17,6 +17,12 @@ function canonicalizeReviewCount(value: unknown): unknown {
   return typeof value === 'string' ? value.replace(/(\p{Nd}),(?=\p{Nd})/gu, '$1') : value;
 }
 
+function canonicalizeImageUrl(value: unknown): unknown {
+  return typeof value === 'string'
+    ? value.replace(/^http:\/\/placehold\.co(?=\/|$)/i, 'https://placehold.co')
+    : value;
+}
+
 function asPositiveInt(value: unknown): number {
   if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
     return value;
@@ -35,10 +41,19 @@ function asPositiveInt(value: unknown): number {
 function canonicalizeLineItemName(
   name: unknown,
   quantity: unknown,
-  unitPriceCents: unknown
+  unitPriceCents: unknown,
+  merchant: string
 ): unknown {
   if (typeof name !== 'string') return name;
   const qty = asPositiveInt(quantity);
+  const merchantEcho = /\s+(?:-\s*)?x(\d+)\s+\(([^()]*)\)\s*$/i.exec(name);
+  if (
+    merchantEcho !== null &&
+    Number.parseInt(merchantEcho[1], 10) === qty &&
+    merchantEcho[2].trim().toLowerCase() === merchant.trim().toLowerCase()
+  ) {
+    return name.slice(0, merchantEcho.index).trimEnd();
+  }
   const priced = /\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$/i.exec(name);
   if (
     priced !== null &&
@@ -53,7 +68,7 @@ function canonicalizeLineItemName(
   return name.slice(0, match.index).trimEnd();
 }
 
-function canonicalizeLineItems(value: unknown): unknown[] | null {
+function canonicalizeLineItems(value: unknown, merchant: string): unknown[] | null {
   if (!Array.isArray(value)) return null;
   return value.map((rawItem) => {
     const item = asRecord(rawItem);
@@ -61,7 +76,8 @@ function canonicalizeLineItems(value: unknown): unknown[] | null {
       ? rawItem
       : {
           ...item,
-          name: canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents),
+          name: canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents, merchant),
+          imageUrl: canonicalizeImageUrl(item.imageUrl),
           reviewCount: canonicalizeReviewCount(item.reviewCount),
         };
   });
@@ -97,7 +113,7 @@ function pythonAsciiJson(value: unknown): string {
 export function canonicalStoredPurchaseFingerprint(input: StoredPurchaseIdentity): string | null {
   const receipt = asRecord(input.lineItemsJson);
   if (receipt === null) return null;
-  const lineItems = canonicalizeLineItems(receipt.lineItems);
+  const lineItems = canonicalizeLineItems(receipt.lineItems, input.merchant);
   if (lineItems === null) return null;
 
   const identity = {

@@ -426,6 +426,26 @@ def test_fingerprint_ignores_display_only_review_formatting():
     )
 
 
+def test_placeholder_image_scheme_is_canonical_for_receipt_and_fingerprint():
+    """An agent's HTTP spelling of the same placeholder image stays one cart."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    secure = _sample_tool_call()
+    secure["line_items"][0]["image_url"] = "https://placehold.co/320x220/png?text=Desk+Lamp"
+    insecure = _sample_tool_call()
+    insecure["line_items"][0]["image_url"] = "http://placehold.co/320x220/png?text=Desk+Lamp"
+    secure_payload = normalize_payment_payload(secure, "user-123")
+    insecure_payload = normalize_payment_payload(insecure, "user-123")
+    assert insecure_payload["lineItems"][0]["imageUrl"] == secure_payload["lineItems"][0]["imageUrl"]
+    assert insecure_payload["fingerprint"] == secure_payload["fingerprint"]
+
+    other_host = _sample_tool_call()
+    other_host["line_items"][0]["image_url"] = "http://other.example/320x220/png?text=Desk+Lamp"
+    assert normalize_payment_payload(other_host, "user-123")["fingerprint"] != secure_payload[
+        "fingerprint"
+    ]
+
+
 def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     """Order-summary names like 'Aurora Notebook x1' must reuse the bare-title card."""
     from domains.request_payment_card.service import normalize_payment_payload
@@ -450,6 +470,22 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     assert (
         normalize_payment_payload(hyphen_echo, "user-123")["fingerprint"]
         == bare_payload["fingerprint"]
+    )
+
+    merchant_echo = _sample_tool_call()
+    merchant_echo["line_items"][0]["name"] = "Aurora Notebook x1 (Example Shop)"
+    merchant_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(merchant_echo, "user-123")["fingerprint"]
+        == bare_payload["fingerprint"]
+    )
+
+    other_merchant_echo = _sample_tool_call()
+    other_merchant_echo["line_items"][0]["name"] = "Aurora Notebook x1 (Different Shop)"
+    other_merchant_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(other_merchant_echo, "user-123")["fingerprint"]
+        != bare_payload["fingerprint"]
     )
 
     mismatched = _sample_tool_call()
@@ -876,6 +912,10 @@ async def run_all_tests():
     result.record(
         "fingerprint_display_metadata_stability",
         test_fingerprint_ignores_display_only_review_formatting,
+    )
+    result.record(
+        "placeholder_image_scheme_stability",
+        test_placeholder_image_scheme_is_canonical_for_receipt_and_fingerprint,
     )
     result.record(
         "fingerprint_quantity_echo_stability",

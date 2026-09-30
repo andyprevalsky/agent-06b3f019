@@ -45,6 +45,13 @@ def _to_int(value: Any) -> int:
     return 0
 
 
+def _canonicalize_image_url(value: Any) -> Any:
+    """Use the secure origin for the test checkout's placeholder image host."""
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"^http://placehold\.co(?=/|$)", "https://placehold.co", value, flags=re.I)
+
+
 def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     line_items = []
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
@@ -56,7 +63,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
         line_items.append(
             {
                 "name": str(item.get("name") or "").strip(),
-                "imageUrl": item.get("image_url") or item.get("imageUrl"),
+                "imageUrl": _canonicalize_image_url(item.get("image_url") or item.get("imageUrl")),
                 "productUrl": product_url,
                 "rating": rating,
                 "reviewCount": review_count,
@@ -108,13 +115,18 @@ def _canonicalize_review_count(value: str) -> str:
 
 
 _LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+(?:-\s*)?x(\d+)\s*$", re.IGNORECASE)
+_LINE_ITEM_QTY_MERCHANT_SUFFIX_RE = re.compile(
+    r"\s+(?:-\s*)?x(\d+)\s+\(([^()]*)\)\s*$", re.IGNORECASE
+)
 _LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
     r"\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$", re.IGNORECASE
 )
 
 
-def _canonicalize_line_item_name(name: Any, quantity: Any, unit_price_cents: Any) -> Any:
-    """Strip a trailing ` x{quantity}` or ` - x{quantity}` quantity echo.
+def _canonicalize_line_item_name(
+    name: Any, quantity: Any, unit_price_cents: Any, merchant: Any
+) -> Any:
+    """Strip matching quantity and merchant echoes from an item title.
 
     Browser agents often copy order-summary prose ("Aurora Notebook x1") into
     `name` while also setting `quantity: 1`. That display-only suffix must not
@@ -125,6 +137,13 @@ def _canonicalize_line_item_name(name: Any, quantity: Any, unit_price_cents: Any
     qty = quantity if isinstance(quantity, int) and not isinstance(quantity, bool) else _to_int(quantity)
     if qty <= 0:
         qty = 1
+    merchant_echo = _LINE_ITEM_QTY_MERCHANT_SUFFIX_RE.search(name)
+    if (
+        merchant_echo is not None
+        and int(merchant_echo.group(1)) == qty
+        and merchant_echo.group(2).strip().casefold() == str(merchant or "").strip().casefold()
+    ):
+        return name[: merchant_echo.start()].rstrip()
     priced = _LINE_ITEM_PRICED_SUFFIX_RE.search(name)
     if priced is not None:
         echoed_price = int(priced.group(2)) * 100 + int(priced.group(3))
@@ -145,11 +164,13 @@ def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
+        if "imageUrl" in item:
+            item["imageUrl"] = _canonicalize_image_url(item["imageUrl"])
         review_count = item.get("reviewCount")
         if isinstance(review_count, str):
             item["reviewCount"] = _canonicalize_review_count(review_count)
         item["name"] = _canonicalize_line_item_name(
-            item.get("name"), item.get("quantity"), item.get("unitPriceCents")
+            item.get("name"), item.get("quantity"), item.get("unitPriceCents"), payload.get("merchant")
         )
         candidate["lineItems"].append(item)
     return candidate
