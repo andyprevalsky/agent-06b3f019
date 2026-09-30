@@ -918,20 +918,4 @@ async def spawn_explore_agent_activity(
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
     }
-    if final_response and init_tool_call_id:
-        # Same spawn_agent chip the parent left IN_PROGRESS. Post FINISHED
-        # here so a later parent-side timeout still leaves T3 a summary.
-        _dispatch_fe_post(
-            init_tool_call_id,
-            lambda: save_explore_message(
-                agent_id=agent_id,
-                title=(goal or "Explore")[:EXPLORE_GOAL_DISPLAY_LEN],
-                message=final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
-                status=MessageStatus.FINISHED,
-                task_id=task_id,
-                tool_call_id=init_tool_call_id,
-                tool_name="spawn_agent",
-            ),
-        )
-        await _drain_pending_fe_posts()
     return result_payload

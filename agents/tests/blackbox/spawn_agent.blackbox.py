@@ -61,6 +61,25 @@ async def test_fetch_full_network_metadata_boundary():
     assert "x-user-id" in headers_lower
 
 
+async def test_fetch_explore_tool_evidence_is_scoped_and_bounded():
+    from domains.spawn_agent.repo import fetch_explore_tool_evidence
+
+    source = "[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/ — 14,303,513"
+    setup_mock({
+        "/api/agents/parent-1/explore-tool-evidence": {
+            "status": 200,
+            "json": {"results": [source] + ["x" * 2000] * 12},
+        },
+    })
+    results = await fetch_explore_tool_evidence("parent-1", "owner-1", "task-1")
+    assert len(results) == 8
+    assert results[0] == source
+    assert all(len(result) <= 1280 for result in results)
+    call = assert_captured_call(url_contains="/api/agents/parent-1/explore-tool-evidence", method="GET")
+    assert "taskId=task-1" in call["url"]
+    assert call["requestHeaders"].get("x-user-id") == "owner-1"
+
+
 # ── validate_spawn_params ─────────────────────────────────────────────
 
 
@@ -947,7 +966,7 @@ async def test_handler_explore_failed_result_yields_error():
 
 
 async def test_handler_explore_failed_result_fast_mode_finishes():
-    """Fast Mode replay of a truncated explore turn must FINISH, not ERROR."""
+    """Fast Mode replay of a truncated turn can finish with prior tool evidence."""
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
@@ -957,6 +976,7 @@ async def test_handler_explore_failed_result_fast_mode_finishes():
             result={
                 "status": "error",
                 "result": "LLM call failed 3 consecutive times: Unterminated string",
+                "tool_call_results": ["[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/ — 14,303,513"],
                 "accumulated_usage": [],
                 "llm_iteration_usage": [],
             }
@@ -976,8 +996,37 @@ async def test_handler_explore_failed_result_fast_mode_finishes():
     finally:
         restore()
 
-    assert any(event.status == MessageStatus.FINISHED for event in events)
+    assert any(event.status == MessageStatus.FINISHED and "14,303,513" in event.message for event in events)
     assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
+async def test_handler_explore_failed_result_fast_mode_without_evidence_errors():
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(result={
+            "status": "error",
+            "result": "LLM call failed 3 consecutive times: Unterminated string",
+            "tool_call_results": [],
+            "accumulated_usage": [],
+            "llm_iteration_usage": [],
+        }),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        wf = _FakeWFInstance()
+        wf.fast_mode_cache_enabled = True
+        events = await _collect(SpawnAgentManager()._spawn_explore(
+            workflow_instance=wf,
+            tool_call={"type": "explore", "goal": "g"},
+            tool_call_id="tc-fast-empty",
+        ))
+    finally:
+        restore()
+    assert any(event.status == MessageStatus.ERROR for event in events)
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
 
 
 async def test_handler_explore_failed_result_forwards_error_reason():
@@ -1149,13 +1198,19 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     assert fake.wait_condition_timeouts[0] is not None
 
 
-async def test_handler_explore_timeout_without_heartbeat_still_finishes():
-    """Wait-budget cancel without heartbeat still FINISHES so the parent can continue."""
+async def test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence():
+    """A cancelled explore only succeeds with its own persisted tool evidence."""
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
     fake = _FakeSpawnWF(
-        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        activity_results={
+            "fetch_full_network_metadata": "",
+            "fetch_local_data_summary": "",
+            "fetch_explore_tool_evidence": [
+                "[web_fetch] **Result:** Source: https://www.toukei.metro.tokyo.lg.jp/jsuikei/2026/js268f0000.pdf — August 2026 population: 14,303,513"
+            ],
+        },
         start_activity_result=_Activity(cancel_on_await=True),
     )
     restore = _patch_spawn_workflow(fake)
@@ -1171,12 +1226,15 @@ async def test_handler_explore_timeout_without_heartbeat_still_finishes():
         restore()
 
     finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "evidence gathered" in finished.message.lower()
+    assert "14,303,513" in finished.message
+    assert "toukei.metro.tokyo.lg.jp" in finished.message
+    assert "evidence gathered" not in finished.message.lower()
     assert not any(event.status == MessageStatus.ERROR for event in events)
+    assert any(call["name"] == "fetch_explore_tool_evidence" for call in fake.activity_calls)
 
 
 async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
-    """Hung explore after parent wait + cancel grace FINISHES without unbounded await.
+    """Hung explore after parent wait + cancel grace ERRORS without unbounded await.
 
     53831ac9 cancelled at the parent-wait budget then `await activity_handle`
     blocked until the 600s activity timeout, tying the 600s smoke cap.
@@ -1205,13 +1263,42 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     finally:
         restore()
 
-    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "evidence gathered" in finished.message.lower()
-    assert not any(event.status == MessageStatus.ERROR for event in events)
+    error = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert "no tool evidence" in error.message.lower()
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
     assert handle._cancelled
     assert not handle._awaited
     assert fake.wait_condition_timeouts == [LIVE_EXPLORE_PARENT_WAIT, EXPLORE_CANCEL_GRACE]
     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
+
+
+async def test_handler_explore_empty_recovery_stays_error_in_fast_mode():
+    """Fast Mode must not turn an evidence-free cancellation into a success."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={
+            "fetch_full_network_metadata": "",
+            "fetch_local_data_summary": "",
+            "fetch_explore_tool_evidence": [],
+        },
+        start_activity_result=_Activity(done=False),
+        wait_condition_raises=[True, True],
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        wf = _FakeWFInstance()
+        wf.fast_mode_cache_enabled = True
+        events = await _collect(SpawnAgentManager()._spawn_explore(
+            workflow_instance=wf,
+            tool_call={"type": "explore", "goal": "research Denver weather"},
+            tool_call_id="tc-fast-mode-empty",
+        ))
+    finally:
+        restore()
+    assert any(event.status == MessageStatus.ERROR and "no tool evidence" in event.message.lower() for event in events)
+    assert not any(event.status == MessageStatus.FINISHED for event in events)
 
 
 async def test_handler_explore_cancel_grace_awaits_when_handle_completes():
@@ -4139,6 +4226,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("fetch_network_metadata_happy_path", test_fetch_full_network_metadata_happy_path)
     await r.record_async("fetch_network_metadata_boundary", test_fetch_full_network_metadata_boundary)
+    await r.record_async("fetch_explore_tool_evidence_scoped_bounded", test_fetch_explore_tool_evidence_is_scoped_and_bounded)
     # validation
     r.record("validate_missing_type", test_validate_spawn_missing_type)
     r.record("validate_invalid_type", test_validate_spawn_invalid_type)
@@ -4193,6 +4281,10 @@ async def run_all_tests():
         test_handler_explore_failed_result_fast_mode_finishes,
     )
     await r.record_async(
+        "handler_explore_failed_result_fast_mode_without_evidence_errors",
+        test_handler_explore_failed_result_fast_mode_without_evidence_errors,
+    )
+    await r.record_async(
         "handler_explore_failed_result_forwards_error_reason",
         test_handler_explore_failed_result_forwards_error_reason,
     )
@@ -4206,12 +4298,16 @@ async def run_all_tests():
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
     )
     await r.record_async(
-        "handler_explore_timeout_without_heartbeat_still_finishes",
-        test_handler_explore_timeout_without_heartbeat_still_finishes,
+        "handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence",
+        test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence,
     )
     await r.record_async(
         "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
         test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle,
+    )
+    await r.record_async(
+        "handler_explore_empty_recovery_stays_error_in_fast_mode",
+        test_handler_explore_empty_recovery_stays_error_in_fast_mode,
     )
     await r.record_async(
         "handler_explore_cancel_grace_awaits_when_handle_completes",

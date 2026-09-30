@@ -13,6 +13,7 @@ import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
+import * as repo from './repo';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
@@ -109,6 +110,36 @@ router.get(
     } catch (error) {
       handleRouteError(res, error, 'Failed to fetch agent', { agent_id: req.params.id });
     }
+  })
+);
+
+router.get(
+  '/:id/explore-tool-evidence',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    if (req.isInternal !== true || typeof req.userId !== 'string') {
+      res.status(403).json({ error: 'Internal agent access required' });
+      return;
+    }
+    const taskId = typeof req.query.taskId === 'string' ? req.query.taskId : '';
+    if (taskId.length < 1 || taskId.length > 128) {
+      res.status(400).json({ error: 'Valid taskId is required' });
+      return;
+    }
+    const rows = await repo.findExploreToolEvidence(req.params.id, req.userId, taskId);
+    const results = rows
+      .filter((row) => {
+        const metadata = row.metadata as Record<string, unknown> | null;
+        return metadata?.toolName !== 'spawn_agent' && metadata?.error !== true &&
+          typeof metadata?.toolName === 'string' && typeof row.text === 'string' && row.text.trim() !== '';
+      })
+      .slice(0, 8)
+      .map((row) => {
+        const metadata = row.metadata as Record<string, unknown>;
+        return `[${metadata.toolName}] ${row.text.slice(0, 1200)}`;
+      });
+    noCacheHeaders(res);
+    res.json({ results });
   })
 );
 

@@ -16,6 +16,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
@@ -43,6 +44,7 @@ from domains.spawn_agent.service import (
     spawn_explore_agent_activity,
     validate_spawn_params,
 )
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
@@ -65,6 +67,7 @@ _FAST_MODE_USER_COPY = (
     "cached trajectory",
     "from_fast_cache",
 )
+_EXPLORE_NO_EVIDENCE = "Explore stopped before completion with no tool evidence."
 
 
 def user_facing_explore_result(text: Any) -> str:
@@ -110,7 +113,7 @@ def _explore_result_after_activity_failure(
     """Map an explore activity failure to (result, was_cancelled).
 
     Timeout / wait-budget cancel with heartbeat evidence FINISHES so the
-    parent can synthesize. A user pause still ERROR-cancels. Unexpected
+    parent can synthesize. An empty cancellation is an error. Unexpected
     ActivityError without wrap-up is re-raised for the outer ERROR path.
     """
     recovered = wrap_up_payload_from_failure(exc)
@@ -119,7 +122,7 @@ def _explore_result_after_activity_failure(
     )
     if user_paused and cancel_cause:
         return {}, True
-    if recovered:
+    if recovered.get("tool_call_results") and _explore_chip_text(recovered):
         return {
             "status": "completed",
             "result": recovered.get("result")
@@ -130,12 +133,14 @@ def _explore_result_after_activity_failure(
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
         }, False
-    if isinstance(exc, ActivityError) and not cancel_cause:
+    timed_out = isinstance(exc, ActivityError) and isinstance(exc.cause, (TimeoutError, TemporalTimeoutError))
+    if isinstance(exc, ActivityError) and not (cancel_cause or timed_out):
         raise exc
-    if cancel_cause and not user_paused:
+    if (cancel_cause or timed_out) and not user_paused:
         return {
-            "status": "completed",
-            "result": "Research finished with the evidence gathered so far.",
+            "status": "error",
+            "result": "",
+            "error_reason": _EXPLORE_NO_EVIDENCE,
             "tool_call_results": [],
             "accumulated_usage": [],
             "llm_iteration_usage": [],
@@ -713,8 +718,9 @@ class SpawnAgentManager(ToolManager):
                         result = await activity_handle
                     else:
                         result = {
-                            "status": "completed",
-                            "result": "Research finished with the evidence gathered so far.",
+                            "status": "error",
+                            "result": "",
+                            "error_reason": _EXPLORE_NO_EVIDENCE,
                             "tool_call_results": [],
                             "accumulated_usage": [],
                             "llm_iteration_usage": [],
@@ -723,6 +729,31 @@ class SpawnAgentManager(ToolManager):
                     result, was_cancelled = _explore_result_after_activity_failure(
                         e, user_paused=bool(getattr(workflow_instance, "is_paused", False))
                     )
+
+            if not was_cancelled and result.get("error_reason") == _EXPLORE_NO_EVIDENCE:
+                # TRY_CANCEL can resolve before the child worker's last heartbeat.
+                # Recover only completed tool text already saved under this task.
+                try:
+                    persisted_results = await workflow.execute_activity(
+                        fetch_explore_tool_evidence,
+                        args=[workflow_instance.agent_id, workflow_instance.user_id, task_id],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                except Exception as recovery_error:
+                    logger.warning("Explore evidence recovery failed", task_id=task_id, error=str(recovery_error))
+                    persisted_results = []
+                # The backend excerpts are already bounded. Keep the saved
+                # tool label, URL, and original result text together.
+                recovered_text = "\n\n".join(persisted_results)
+                if recovered_text:
+                    result = {
+                        "status": "completed",
+                        "result": recovered_text,
+                        "tool_call_results": persisted_results,
+                        "accumulated_usage": [],
+                        "llm_iteration_usage": [],
+                    }
 
             if was_cancelled:
                 logger.info("Explore agent cancelled", goal=goal[:100])
@@ -746,16 +777,13 @@ class SpawnAgentManager(ToolManager):
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
-            # Fast Mode: a truncated/malformed cached explore turn (e.g. the
-            # identify-50 attempt_completion JSON) used to ERROR the spawn after
-            # 3 parse retries of the same row. Finish with gathered evidence.
+            # Fast Mode may soft-complete a malformed cached LLM turn only
+            # when prior tool calls produced evidence to pass to the parent.
             if explore_failed and bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)):
-                explore_failed = False
-                if not explore_result or explore_result == "No results found.":
-                    explore_result = (
-                        explore_error_reason
-                        or "Research finished with the evidence gathered so far."
-                    )
+                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results)
+                if cached_evidence and explore_error_reason != _EXPLORE_NO_EVIDENCE:
+                    explore_result = cached_evidence
+                    explore_failed = False
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted

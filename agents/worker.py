@@ -70,6 +70,7 @@ from domains.spawn_agent.service import (
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,
     spawn_browser_agent_activity_v3,
@@ -1101,6 +1102,7 @@ async def main():
         summarize_tool_result,
         summarize_and_filter_links,
         spawn_explore_agent_activity,
+        fetch_explore_tool_evidence,
         _resolve_explore_attachments_activity,
         fetch_full_network_metadata,
         evaluate_condition_activity,
