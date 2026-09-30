@@ -5,6 +5,7 @@ import { createLogger } from '../../providers/logger';
 
 const log = createLogger('GoogleDataPurge');
 const BATCH_SIZE = 1_000;
+const REVOCATION_RETRY_DELAY_MS = 30 * 60_000;
 
 async function deleteMessageBatch(job: GoogleDataPurge): Promise<boolean> {
   // Legacy Gmail imports did not record their source account. Every ambiguous
@@ -80,7 +81,12 @@ export async function processGoogleDataPurge(
     const job = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: jobId } });
     await processClaimedJob(job, fetcher);
   } catch {
-    await prisma.googleDataPurge.update({ where: { id: jobId }, data: { claimedUntil: null } });
+    // Keep failed revocations retryable without letting the oldest failures
+    // occupy every slot of the minute-by-minute purge queue.
+    await prisma.googleDataPurge.update({
+      where: { id: jobId },
+      data: { claimedUntil: new Date(Date.now() + REVOCATION_RETRY_DELAY_MS) },
+    });
     log.error('Google data purge failed; obligation retained', { jobId });
   }
 }

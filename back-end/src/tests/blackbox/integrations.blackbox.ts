@@ -71,7 +71,10 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
-import { processGoogleDataPurge } from '../../services/integrations/googleDataPurge';
+import {
+  processGoogleDataPurge,
+  runGoogleDataPurgeJob,
+} from '../../services/integrations/googleDataPurge';
 import { revokeQueuedGoogleGrants } from '../../services/integrations/googleDisconnect';
 import {
   classifyEmailAuthFailure,
@@ -2835,17 +2838,55 @@ async function testGoogleRevocationFailure_retainsDurableRetry() {
   await processGoogleDataPurge(job.id, unavailable);
   const pending = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: job.id } });
   assert(
-    pending.processedAt === null && pending.revocationToken === 'pending-token',
-    'failed immediate and background revocation must retain the encrypted retry obligation'
+    pending.processedAt === null &&
+      pending.revocationToken === 'pending-token' &&
+      pending.claimedUntil !== null &&
+      pending.claimedUntil > new Date(),
+    'failed revocation must retain the token and defer its next attempt'
   );
 
   const available = (async () => new Response('', { status: 200 })) as typeof fetch;
+  await prisma.googleDataPurge.update({ where: { id: job.id }, data: { claimedUntil: null } });
   await processGoogleDataPurge(job.id, available);
   const processed = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: job.id } });
   assert(
     processed.processedAt !== null && processed.revocationToken === null,
     'successful retry must clear the token and finish the obligation'
   );
+}
+
+async function testGoogleRevocationFailures_doNotStarveLaterPurge() {
+  const blockedUserId = crypto.randomUUID();
+  const readyUserId = crypto.randomUUID();
+  const unavailable = (async () => new Response('', { status: 503 })) as typeof fetch;
+  try {
+    await prisma.googleDataPurge.createMany({
+      data: Array.from({ length: 20 }, () => ({
+        userId: blockedUserId,
+        revocationToken: 'pending-token',
+        requestedAt: new Date('2000-01-01T00:00:00Z'),
+      })),
+    });
+    const blocked = await prisma.googleDataPurge.findMany({
+      where: { userId: blockedUserId },
+      select: { id: true },
+    });
+    for (const job of blocked) await processGoogleDataPurge(job.id, unavailable);
+
+    const ready = await prisma.googleDataPurge.create({
+      data: { userId: readyUserId, requestedAt: new Date('2000-01-02T00:00:00Z') },
+    });
+    await runGoogleDataPurgeJob();
+    const result = await prisma.googleDataPurge.findUniqueOrThrow({ where: { id: ready.id } });
+    assert(
+      result.processedAt !== null,
+      'twenty failed older revocations must not block a later data-purge obligation'
+    );
+  } finally {
+    await prisma.googleDataPurge.deleteMany({
+      where: { userId: { in: [blockedUserId, readyUserId] } },
+    });
+  }
 }
 
 async function testGoogleExternalRevocation_queuesPurgeAndReconnect() {
@@ -7089,6 +7130,10 @@ async function runAll() {
     {
       name: 'Google revocation retries after failure',
       fn: testGoogleRevocationFailure_retainsDurableRetry,
+    },
+    {
+      name: 'Google revocation failures do not starve later purges',
+      fn: testGoogleRevocationFailures_doNotStarveLaterPurge,
     },
     {
       name: 'Google external revocation queues data purge',
