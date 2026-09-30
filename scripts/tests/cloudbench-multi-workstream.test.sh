@@ -474,7 +474,9 @@ def run_fake_driver(mdir):
         os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
         or os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down"))
     ):
-        deadline = time.time() + 30
+        # A busy local host can spend more than 30s on two fake SSH staging
+        # attempts before the failed worker reaches its cleanup marker.
+        deadline = time.time() + 90
         scaled_down = os.path.join(MARKERS, "worker-scale-down-complete")
         while not os.path.exists(scaled_down):
             if time.time() >= deadline:
