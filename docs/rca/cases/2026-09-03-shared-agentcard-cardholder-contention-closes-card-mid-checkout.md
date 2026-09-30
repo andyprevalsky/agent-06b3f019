@@ -21,7 +21,7 @@ tags:
 sources:
   - agent d12b582c-f7ec-419e-9633-8e1d7b882900
   - agent a4a282c5-697c-49b0-b553-9d0e0c6fbbf7
-repro: none
+repro: back-end/src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts
 status: open
 ---
 
@@ -109,3 +109,39 @@ inside an unrelated change.
    instead of burning the task's whole timeout budget.
 3. Do not run the AgentCard gate concurrently from more than one machine while
    the shared cardholder remains first preference.
+
+## 2026-09-30 recurrence: treasury test closed foreign cards
+
+The local AgentCard lifecycle gate failed `agent-payment-idempotent-abandonment`
+for agent `6baad852-3cad-4d0a-89cd-2623e585b101`. Its two sequential browser
+tasks sent the same purchase fingerprint (`ed2c4449…b8177`) for the same
+agent. The first request minted a card at 01:19:29Z and left checkout
+unsubmitted. At 01:21:14Z, the second request's liveness check got AgentCard
+`card_closed` for that card; Rose marked the first purchase `CLEARED` and minted
+a second card at 01:21:19Z. The differing last four prevented checkout, and
+the task timed out at its 900-second cap. This local backend issued no
+`close_card` call for the first card. The provider response proves closure but
+does not identify the external caller that closed this particular card.
+
+The current sandbox org differs from the earlier case: live read-only
+`list_cardholders` returned `agentcard-benchmark@roselabs.ai` as verified,
+and its ID matches the configured fixture cardholder (`…gfto`). The old
+`andy@roselabs.ai` candidate was absent. All four lifecycle tasks in this
+isolated stack minted against `…gfto`; other workspaces using the same sandbox
+org credentials can also target it. Selecting the dedicated email again would
+therefore select the same ID and would not isolate the run.
+
+The owned cross-workspace hazard is in
+`back-end/src/tests/blackbox/treasury-rails.blackbox.ts`: its final cleanup
+listed every OPEN card on this shared cardholder and closed each one, including
+cards minted by other active workspaces. The safe cleanup now filters to card
+IDs returned by this test's own `create_card`. A permanent owning-boundary
+blackbox supplies one owned OPEN card and one foreign OPEN card. Before the fix,
+`npx tsx src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts` failed
+with `2 !== 1` because both cards were closed. After the fix, the identical
+command passed, leaving the foreign card OPEN. The backend blackbox runner
+discovers and passes this test. This removes a proven mechanism, while the
+specific external caller in the failed run remains unattributed.
+
+The exact unchanged `agent-payment-idempotent-abandonment` benchmark still
+needs a passing local run after this fix before this RCA can be marked fixed.
