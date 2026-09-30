@@ -70,6 +70,28 @@ burst behavior, not proof of an unchanged live benchmark result. A live rerun
 must establish archive success; a repeated timeout must be investigated using
 the newly preserved exact phase rather than merely retried.
 
+## Recurrence on 2026-09-30
+
+Proof75 on `030678c366ae5ac648e61148b554f23a4c8eb2d5` reproduced the archive
+failure on the unchanged mass smoke. Its observation now identifies
+`agent_snapshots`: 48 of 51 expected IDs completed before the existing 60-second
+bound. The native guest was shared-cpu-2x/4 GB; transcript HTTP responses took
+roughly 1–2 seconds, but successive read groups were several seconds farther
+apart. A quiescent client-construction probe took about 0.03–0.04 CPU seconds
+per warm client, which alone does not establish the live delay. Host quota
+metrics were inaccessible with the available token. Do not call the CPU
+hypothesis proved from these observations.
+
+Bounded fanout did not resolve the live outcome; its phase capture held and
+narrows the investigation. The exact deletion fence and provider retirement
+again verified. Nine other benches returned real evaluations with 5–60
+correlated successful LLM responses each. Proof75 remains zero slice credit;
+all original failed bytes were preserved and exact-owner retirement completed.
+A controlled dedicated-CPU comparison preserves the same task plan, prompts,
+models, evaluators, deadlines and evidence gates. It also exposed the separate
+shared-only pool admission defect recorded in
+`2026-09-30-pool-cpu-kind-validation-assumed-shared`.
+
 ## Human feedback
 
 Inspect runtime issues that disguise infrastructure failures, check concurrency

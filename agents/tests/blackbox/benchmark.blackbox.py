@@ -411,6 +411,16 @@ def test_boot_terminal_runtime_evidence_is_in_permanent_gate():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_cloudbench_pool_vm_shapes_are_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q",
+         str(repo_root / "agents/benchmarks/cloudbench_vm_shape_test.py")],
+        cwd=repo_root, text=True, capture_output=True, check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cloudbench_codex_auth_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(

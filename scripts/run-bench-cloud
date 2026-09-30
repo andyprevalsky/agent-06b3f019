@@ -3664,7 +3664,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     _pool_shape_args=()
     if [ -n "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" ] \
         || [ -n "${CLOUDBENCH_POOL_BOOT_VM_MEMORY:-}" ]; then
-        if ! [[ "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" =~ ^shared-cpu-[1-9][0-9]*x$ ]]; then
+        if ! [[ "${CLOUDBENCH_POOL_BOOT_VM_SIZE:-}" =~ ^(shared-cpu|performance)-[1-9][0-9]*x$ ]]; then
             echo "❌ invalid claimed-pool VM size" >&2
             exit 70
         fi
@@ -3855,6 +3855,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     fi
     release_boot_config_update_slot
     if [ "$_upd" = 1 ] && [ "${#_pool_shape_args[@]}" -gt 0 ]; then
+        _expected_kind="${CLOUDBENCH_POOL_BOOT_VM_SIZE%%-*}"
         _expected_cpus="${CLOUDBENCH_POOL_BOOT_VM_SIZE##*-}"
         _expected_cpus="${_expected_cpus%x}"
         _shape_verified=0
@@ -3870,7 +3871,7 @@ try:
 except Exception:
     print("")
 ' 2>/dev/null)" || _actual_shape=""
-            if [ "$_actual_shape" = "stopped shared $_expected_cpus $CLOUDBENCH_POOL_BOOT_VM_MEMORY" ]; then
+            if [ "$_actual_shape" = "stopped $_expected_kind $_expected_cpus $CLOUDBENCH_POOL_BOOT_VM_MEMORY" ]; then
                 _shape_verified=1
                 break
             fi

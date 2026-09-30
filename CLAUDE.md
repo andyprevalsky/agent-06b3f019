@@ -430,6 +430,33 @@ An interrupted primary may have an autoscaled worker. Preserve its
 uses the same exact terminal/log-hash/provider-inventory verification as a sealed
 primary. A destroyed worker's missing or mismatched capture cannot be replaced
 by an empty worker ledger or by clearing audit records.
+For sustained mixed or load-test validation, select dedicated primary CPUs
+through the existing fleet settings, retaining catalog-specific memory:
+
+```bash
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=performance-1x \
+CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE=performance-1x \
+CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE=1 \
+scripts/run-bench stability-proof -k 10 --concurrency 10 --seed <integer> \
+  --exclude-file <prior-successful-names.json> --min-successful-llm 3
+```
+
+Pooled boot admission checks the requested CPU kind, count, memory and native
+stopped state exactly; shared CPUs cannot satisfy a dedicated request. Dynamic
+pool reuse retains admitted 8 GB shapes for either CPU kind and prefers an exact
+shape before resizing. The fleet-wide default remains shared to fit larger
+daily fleets' reservation budget. The dedicated profile is under live PR #1299
+verification; passing resource tests alone is not a benchmark outcome.
+If a stopped member cannot reserve the requested CPU on its current host,
+stop before starting tasks and inspect its exact resize log. Preserve the member
+and its evidence while replacing that exact unclaimed slot from an existing
+verified 20 GB snapshot. A snapshot-backed clone may remain `created` until its
+volume is ready and its initial config update commits; neither a stop nor a
+start request from `created` proves readiness. Admit the replacement only after
+an inert boot, native stop, exact CPU/memory/volume verification and durable pool
+transfer. A timed-out config update may commit later: reconcile its exact native
+state before repeating it or allocating another clone.
+
 For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
 `CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
 nondefault machine uses its own git-common dependency/snapshot proof file, so

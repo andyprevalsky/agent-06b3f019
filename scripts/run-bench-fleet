@@ -9580,12 +9580,14 @@ resize_pool_machine() {  # resize_pool_machine <id>
 normalize_current_pool_shape() {
     local id shape state kind cpus memory failed=0 inventory
     local target_kind="shared" target_cpus
-    local large_cpus
+    local large_cpus large_kind
     local -a resize_ids=() resize_pids=()
     export -n inventory POOL_INVENTORY_JSON 2>/dev/null || true
     [ -f "$POOL_IDS_FILE" ] || return 0
     target_cpus="$(printf '%s' "$FLEET_PRIMARY_VM_SIZE" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
-    large_cpus="$(printf '%s' "${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
+    large_cpus="$(printf '%s' "${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+    large_kind="${FLEET_BUNDLED_FRONTEND_VM_SIZE:-}"
+    large_kind="${large_kind%%-*}"
     case "$FLEET_PRIMARY_VM_SIZE" in performance-*) target_kind="performance" ;; esac
     [ -n "$target_cpus" ] || { echo "❌ invalid fleet primary VM size: $FLEET_PRIMARY_VM_SIZE" >&2; return 1; }
     inventory="$POOL_INVENTORY_JSON"
@@ -9600,7 +9602,7 @@ normalize_current_pool_shape() {
         # next browser task grows it again; that reservation can be unavailable
         # even though the stopped 8GB Machine was already admitted.
         if [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ] \
-            && [ "$kind" = "shared" ] && [ "$cpus" = "$large_cpus" ] \
+            && [ "$kind" = "$large_kind" ] && [ "$cpus" = "$large_cpus" ] \
             && [ "$memory" = "${FLEET_BUNDLED_FRONTEND_VM_MEMORY:-}" ]; then
             continue
         fi
@@ -9670,9 +9672,10 @@ finally:
 claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
-    local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus
+    local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus desired_kind
     local shape_pass candidate_shape shape_matches hints="$FLEET_DIR/pool-shapes.tsv"
-    desired_cpus="$(printf '%s' "$desired_size" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
+    desired_cpus="$(printf '%s' "$desired_size" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+    desired_kind="${desired_size%%-*}"
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     for shape_pass in exact fallback; do
     while read -r id; do
@@ -9680,7 +9683,7 @@ claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none 
         if [ -n "$desired_cpus" ] && [ -f "$hints" ]; then
             candidate_shape="$(awk -v id="$id" '$1 == id { print $2, $3, $4; exit }' "$hints")"
             shape_matches=0
-            [ "$candidate_shape" = "shared $desired_cpus $desired_memory" ] && shape_matches=1
+            [ "$candidate_shape" = "$desired_kind $desired_cpus $desired_memory" ] && shape_matches=1
             if [ "$shape_pass" = exact ] && [ "$shape_matches" = 0 ]; then continue; fi
             if [ "$shape_pass" = fallback ] && [ "$shape_matches" = 1 ]; then continue; fi
         elif [ "$shape_pass" = fallback ]; then
@@ -12912,9 +12915,10 @@ for bench in "${BENCHES[@]}"; do
         && [ "${CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE:-0}" = "1" ]; then
         desired_vm_size="$(primary_vm_size_for_bench "$bench")"
         desired_vm_memory="$(primary_vm_memory_for_bench "$bench")"
-        desired_vm_cpus="$(printf '%s' "$desired_vm_size" | sed -nE 's/^shared-cpu-([0-9]+)x$/\1/p')"
+        desired_vm_cpus="$(printf '%s' "$desired_vm_size" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+        desired_vm_kind="${desired_vm_size%%-*}"
         current_pool_shape="$(awk -v id="$cid" '$1 == id { print $2, $3, $4; exit }' "$FLEET_DIR/pool-shapes.tsv")"
-        if [ "$current_pool_shape" != "shared $desired_vm_cpus $desired_vm_memory" ]; then
+        if [ "$current_pool_shape" != "$desired_vm_kind $desired_vm_cpus $desired_vm_memory" ]; then
             pool_boot_vm_size="$desired_vm_size"
             pool_boot_vm_memory="$desired_vm_memory"
         fi
