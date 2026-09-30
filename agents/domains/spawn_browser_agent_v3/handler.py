@@ -367,7 +367,7 @@ async def _await_bounded_browser_cleanup(
     task = asyncio.create_task(coro)
     done, _pending = await asyncio.wait({task}, timeout=timeout_s)
     if task in done:
-        exc = task.exception()
+        exc = None if task.cancelled() else task.exception()
         if exc is not None:
             logger.warning(failure_message, error=extract_error_message(exc))
         return
