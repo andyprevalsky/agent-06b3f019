@@ -43,7 +43,9 @@ fleet_bench_app() {
     printf '%s' "$app"
 }
 
-TMP_ROOT="$(mktemp -d)"
+# macOS maps /var to /private/var. The recovery contract correctly requires a
+# canonical runs root, so create the fixture under its physical path.
+TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 SCRIPT_SNAPSHOT_TMP="$TMP_ROOT/script-snapshots"
 mkdir -p "$SCRIPT_SNAPSHOT_TMP"
 PIDS=()
@@ -727,7 +729,7 @@ reset_fake_state() {
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",
-     "config": {"mounts": [{"volume": "vol_aaaa0001"}]}}
+     "config": {"mounts": [{"volume": "vol_aaaa0001", "size_gb": 40}]}}
   ],
   "volumes": [
     {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created"}
@@ -1293,7 +1295,7 @@ elif args[:2] == ["machine", "clone"]:
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad",
             "private_ip": f"fdaa::{machine_id[:4]}",
-            "config": {"mounts": [{"volume": volume_id}],
+            "config": {"mounts": [{"volume": volume_id, "size_gb": 40}],
                        "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                  "memory_mb": vm_memory}},
         })
@@ -3904,7 +3906,7 @@ grep -qF "reconnecting exact owned guests for authenticated cleanup acknowledgem
 grep -qF "every guest acknowledged browser/session cleanup before fleet machine teardown" \
     "$cancel_launcher_log" ||
     fail "real exact-owner entrypoint did not prove guest shutdown acknowledgement"
-grep -qF "exact stale-owner runtime evidence is incomplete; original volumes remain retained" "$cancel_launcher_log" ||
+grep -qF "sealed runtime evidence could not be recaptured" "$cancel_launcher_log" ||
     fail "out-of-process recovery did not explain its evidence retention boundary"
 if grep -qF "command not found" "$cancel_launcher_log"; then
     fail "real exact-owner entrypoint failed its source ordering"

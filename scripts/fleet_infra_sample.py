@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -38,6 +39,35 @@ def load_pool(repo_root: Path) -> list[str]:
     ]
     if not names:
         raise CatalogError("unified catalog produced an empty name pool")
+    return names
+
+
+def configured_callee_names(repo_root: Path) -> set[str] | None:
+    """Mirror the benchmark's env lookup before admitting phone-callee tasks.
+
+    An empty mapping leaves the benchmark's dynamic-number path available.
+    A nonempty mapping makes every phone persona require an exact assignment.
+    """
+    key = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
+    raw = os.environ.get(key, "")
+    if not raw:
+        path = repo_root / "back-end" / ".env"
+        if path.is_file():
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(key + "="):
+                    raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if " #" in raw:
+                        raw = raw[: raw.index(" #")].rstrip()
+                    break
+    if not raw:
+        return None
+    names: set[str] = set()
+    for entry in raw.split(","):
+        name, separator, number_id = entry.strip().partition("=")
+        if not separator or not name or not number_id or name in names:
+            raise ValueError(f"invalid {key} task assignment")
+        names.add(name)
     return names
 
 
@@ -82,6 +112,13 @@ def eligible_pool(
             for task in unified
             if isinstance(task, dict) and task.get("production_only") is True
         }
+        callee_names = configured_callee_names(repo_root)
+        unassigned_callees = {
+            str(task["name"])
+            for task in unified
+            if isinstance(task, dict) and task.get("phone_persona")
+            and callee_names is not None and str(task.get("name")) not in callee_names
+        }
         selected_rootless = set(names) & rootless
         if pool_file is not None and selected_rootless:
             raise ValueError(
@@ -100,8 +137,14 @@ def eligible_pool(
                 "capability proof requires isolated-stack tasks; production-only tasks: "
                 f"{sorted(selected_production_only)}"
             )
+        selected_unassigned_callees = set(names) & unassigned_callees
+        if pool_file is not None and selected_unassigned_callees:
+            raise ValueError(
+                "capability proof requires configured callee numbers; unassigned phone tasks: "
+                f"{sorted(selected_unassigned_callees)}"
+            )
         names = [name for name in names
-                 if name not in rootless | mac_relay | production_only]
+                 if name not in rootless | mac_relay | production_only | unassigned_callees]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):

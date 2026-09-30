@@ -170,6 +170,27 @@ from fleet_infra_sample import eligible_pool
 assert "agent-payment-production-purchase" not in eligible_pool(
     root, None, require_cloud_root=True)
 PY
+unassigned_callee_pool="$(mktemp)"
+printf '["phone-call-ivr-dtmf"]\n' > "$unassigned_callee_pool"
+if BENCHMARK_CALLEE_PHONE_NUMBER_IDS='phone-call-client-intake=fake-intake,phone-call-payment=fake-payment' \
+  "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$unassigned_callee_pool" >/tmp/infra-proof-callee.out 2>&1; then
+  fail "capability proof must reject a phone persona without an assigned callee number"
+fi
+grep -Fq 'unassigned phone tasks' /tmp/infra-proof-callee.out \
+  || fail "unassigned phone rejection must explain why"
+BENCHMARK_CALLEE_PHONE_NUMBER_IDS='phone-call-client-intake=fake-intake,phone-call-payment=fake-payment' \
+  python3 - "$ROOT_DIR" <<'PY' || fail "capability pool must retain only configured phone callees"
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+from fleet_infra_sample import eligible_pool
+names = eligible_pool(root, None, require_cloud_root=True)
+assert "phone-call-ivr-dtmf" not in names
+assert "phone-call-payment" in names
+PY
+rm -f "$unassigned_callee_pool"
 rm -f "$production_only_pool"
 rm -f "$mac_relay_pool"
 rm -f "$rootless_pool"
