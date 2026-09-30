@@ -1,4 +1,26 @@
 import { type EmailProviderConfig, type EmailProviderSlug, EmailProvider } from './types';
+import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
+
+export function googleClientId(): string | undefined {
+  // Keep the old production env key until the new Render setting is verified.
+  const id =
+    process.env.GOOGLE_CLIENT_ID ??
+    (process.env.NODE_ENV === 'production' ? process.env.GMAIL_WEB_CLIENT_ID : undefined);
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    id === '1089369266084-hb7bfkb80edcjjtvhdkvemkbf5ro0hp8.apps.googleusercontent.com'
+  ) {
+    throw new Error('Local development must use a separate Google OAuth client');
+  }
+  return id;
+}
+
+export function googleClientSecret(): string | undefined {
+  return (
+    process.env.GOOGLE_CLIENT_SECRET ??
+    (process.env.NODE_ENV === 'production' ? process.env.GMAIL_WEB_CLIENT_SECRET : undefined)
+  );
+}
 
 function resolveBackendBaseUrl(): string {
   const configuredUrl = process.env.BACKEND_URL ?? process.env.RENDER_EXTERNAL_URL;
@@ -34,13 +56,9 @@ export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfi
     provider: EmailProvider.GMAIL,
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
-    clientId: process.env.GMAIL_WEB_CLIENT_ID,
-    clientSecret: process.env.GMAIL_WEB_CLIENT_SECRET,
-    scopes: [
-      'https://www.googleapis.com/auth/gmail.readonly',
-      'https://www.googleapis.com/auth/gmail.send',
-      'https://www.googleapis.com/auth/userinfo.email',
-    ],
+    clientId: googleClientId(),
+    clientSecret: googleClientSecret(),
+    scopes: [...GOOGLE_OAUTH_SCOPES],
     requiresClientSecret: false,
   },
   yahoo: {

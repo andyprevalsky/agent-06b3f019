@@ -1417,6 +1417,20 @@ async function sync() {
         orderBy: { timestamp: 'desc' },
         skip,
         take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
+        // Production may still be on the previous schema during a deploy.
+        // Selecting only the shared columns lets the seed run before the
+        // googleAccountEmail migration has been applied there.
+        select: {
+          id: true,
+          personId: true,
+          channel: true,
+          from: true,
+          to: true,
+          timestamp: true,
+          message: true,
+          externalId: true,
+          createdAt: true,
+        },
       });
       if (page.length === 0) break;
       // The local benchmark DB runs beside the entire agent stack. Launching 500

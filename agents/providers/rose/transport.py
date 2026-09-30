@@ -318,7 +318,6 @@ async def post_cerebras_stream(
                     call_site=call_site,
                     status=response.status_code,
                     error_body_len=len(error_body),
-                    error_body_preview=error_body[:1000],
                 )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
             yield response
@@ -359,7 +358,6 @@ async def post_codex_stream(
                     call_site=call_site,
                     status=response.status_code,
                     error_body_len=len(error_body),
-                    error_body_preview=error_body[:1000],
                 )
                 response._rose_error_body = error_body  # type: ignore[attr-defined]
             yield response

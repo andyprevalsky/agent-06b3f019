@@ -41,7 +41,6 @@ export function identifyNeededMessageIds(
         userEmailSet.add(topAddr);
         foundNew = true;
         log.info('Detected imported account', {
-          address: topAddr,
           from_count: topCount,
           next_count: secondCount,
         });
@@ -150,7 +149,6 @@ export function transformEmailsToContacts(
         userEmailSet.add(topAddr);
         foundNew = true;
         log.info('Detected imported account', {
-          address: topAddr,
           from_count: topCount,
           to_count: toCounts.get(topAddr) || 0,
           next_count: secondCount,
@@ -161,7 +159,7 @@ export function transformEmailsToContacts(
 
   log.info('transformEmailsToContacts', {
     email_count: emails.length,
-    user_email_set: [...userEmailSet],
+    user_email_count: userEmailSet.size,
   });
   const fromMeCount = emails.filter(
     (e) => e.isSent || userEmailSet.has(e.from.toLowerCase())

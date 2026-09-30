@@ -160,11 +160,9 @@ def test_oss_pool_is_open_weights_only():
     # Gating only OAuth left the funded ANTHROPIC_API_KEY / OPENAI_API_KEY
     # routes reachable, so a pinned run could still be served by a proprietary
     # model while the pool claimed otherwise.
-    client_src = (
-        Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py"
-    ).read_text()
+    client_src = (Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py").read_text()
     for marker in (
-        "openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else \"\"",
+        'openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else ""',
         "pool_spec.direct_auth_enabled",
     ):
         assert marker in client_src, f"missing direct_auth_enabled gate: {marker}"
@@ -337,10 +335,7 @@ def test_every_waterfall_model_is_vision_capable():
     from providers.rose.transforms import VISION_MODELS
 
     missing = [
-        (name, model)
-        for name, spec in POOL_REGISTRY.items()
-        for model in spec.waterfall
-        if model not in VISION_MODELS
+        (name, model) for name, spec in POOL_REGISTRY.items() for model in spec.waterfall if model not in VISION_MODELS
     ]
     assert missing == [], f"waterfall models absent from VISION_MODELS: {missing}"
 
@@ -1109,9 +1104,7 @@ def test_transform_messages_for_openai_marks_explicit_cache_conversation_prefix(
 
     out = transform_messages_for_openai(msgs, cache_opening_user=True)
 
-    assert out[1]["content"] == [
-        {"type": "text", "text": "stable task goal", "cache_control": {"type": "ephemeral"}}
-    ]
+    assert out[1]["content"] == [{"type": "text", "text": "stable task goal", "cache_control": {"type": "ephemeral"}}]
     assert out[-1] == {"role": "tool", "content": "dynamic result"}
     assert msgs[1]["content"] == "stable task goal", "callers' messages must not be mutated"
 
@@ -3481,6 +3474,7 @@ def test_openrouter_body_with_tools_preserves_tool_history():
     assert "tool" in roles, "native tool history must be preserved when tools are declared"
     assert any("tool_calls" in m for m in body["messages"]), "assistant tool_calls must survive"
 
+
 def test_named_tool_choice_degrades_only_for_google_routes():
     """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
 
@@ -3503,9 +3497,7 @@ def test_named_tool_choice_degrades_only_for_google_routes():
     }
 
     google = build_openrouter_body(model="google/gemini-3.1-pro-preview", tool_choice=forced, **common)
-    assert google["tool_choice"] == "required", (
-        "Google routes must not receive the named tool_choice form they reject"
-    )
+    assert google["tool_choice"] == "required", "Google routes must not receive the named tool_choice form they reject"
 
     for model in ("openai/gpt-5.6-terra", "moonshotai/kimi-k2.5", "zai-glm-4.7"):
         other = build_openrouter_body(model=model, tool_choice=forced, **common)
@@ -3804,6 +3796,7 @@ def test_all_rose_llm_call_sites_rely_on_builder_effort_default():
                     f"helpers/llm.py must not pass empty effort at line {node.lineno}"
                 )
 
+
 async def test_waterfall_falls_through_then_succeeds():
     """First model returns 500 → second model streams clean response."""
     call_log: list[str] = []
@@ -3985,9 +3978,7 @@ async def test_ultra_structured_output_falls_through_second_layer_invalid_reques
     model was dropped from the waterfall for 400ing, at which point the test kept passing
     against a model the pool no longer tries. Derive the models from the registry instead.
     """
-    ultra_waterfall = [
-        model for model in get_pool("rose-1-ultra").waterfall if not model.startswith("anthropic/")
-    ]
+    ultra_waterfall = [model for model in get_pool("rose-1-ultra").waterfall if not model.startswith("anthropic/")]
     second_layer, third_layer = ultra_waterfall[0], ultra_waterfall[1]
     sse_ok = "\n".join(
         _openai_sse(
