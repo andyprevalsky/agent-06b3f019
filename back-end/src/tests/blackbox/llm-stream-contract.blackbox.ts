@@ -126,6 +126,7 @@ function testAmbiguousFinalItemsFailTyped(): void {
     '',
     'currentText() is the degrade path and must not throw on ambiguous items'
   );
+  assert.equal(accumulator.isAmbiguous(), true, 'two final_answer items are ambiguous');
 }
 
 async function testCompletionClientPreservesItemProvenance(): Promise<void> {

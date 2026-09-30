@@ -104,6 +104,7 @@ def test_ambiguous_final_items_fail_typed() -> None:
         assert accumulator.current_text() == "", (
             "current_text() is the degrade path and must not throw on ambiguous items"
         )
+        assert accumulator.is_ambiguous() is True, "two final_answer items are ambiguous"
         return
     raise AssertionError("multiple final_answer items must raise StructuredOutputCardinalityError")
 

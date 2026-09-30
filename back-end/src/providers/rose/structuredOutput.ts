@@ -62,6 +62,15 @@ export class StructuredOutputAccumulator {
     return this.select(false);
   }
 
+  isAmbiguous(): boolean {
+    const allItems = [...this.items.values()];
+    const finalItems = allItems.filter((item) => item.phase === 'final_answer');
+    if (finalItems.length > 1) return true;
+    if (finalItems.length === 1) return false;
+    const eligibleItems = allItems.filter((item) => !IGNORED_PHASES.has(item.phase));
+    return eligibleItems.length > 1;
+  }
+
   finalText(): string {
     return this.select(true);
   }

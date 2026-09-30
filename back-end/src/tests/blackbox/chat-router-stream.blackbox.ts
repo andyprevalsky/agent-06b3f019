@@ -255,6 +255,38 @@ function testPerAttemptBoundUnchanged(): void {
   assert.equal(MAX_CHAT_STRUCTURED_ATTEMPTS, 2, 'one regenerate, not an unbounded loop');
 }
 
+function testRetryResetsPerAttemptStreamState(): void {
+  const router = readFileSync(join(here, '../../providers/chat/routerLlm.ts'), 'utf8');
+  const generator = readFileSync(join(here, '../../providers/chat/generatorLlm.ts'), 'utf8');
+  const routerAttempt = router.indexOf('attempt: async');
+  assert.ok(routerAttempt >= 0, 'router must wrap the stream in regenerateOnChatStructuredMiss');
+  assert.ok(
+    router.indexOf("lastStreamedText = ''", routerAttempt) > routerAttempt,
+    'router must clear lastStreamedText at the start of every attempt'
+  );
+  assert.ok(
+    router.indexOf('createClosedRouterActionDetector', routerAttempt) > routerAttempt,
+    'router must create a fresh closed-action detector per attempt'
+  );
+  assert.ok(
+    router.indexOf("'ERROR'", routerAttempt) > routerAttempt,
+    'router must close a stale IN_PROGRESS web_search before retrying'
+  );
+  const generatorAttempt = generator.indexOf('attempt: async');
+  assert.ok(
+    generatorAttempt >= 0,
+    'generator must wrap the stream in regenerateOnChatStructuredMiss'
+  );
+  assert.ok(
+    generator.indexOf("lastStreamedText = ''", generatorAttempt) > generatorAttempt,
+    'generator must clear lastStreamedText at the start of every attempt'
+  );
+  assert.ok(
+    generator.indexOf('createGeneratorAttentionLifecycle', generatorAttempt) > generatorAttempt,
+    'generator must start a fresh attention lifecycle on regenerate'
+  );
+}
+
 function testCallSitesUseSharedRegenerate(): void {
   const router = readFileSync(join(here, '../../providers/chat/routerLlm.ts'), 'utf8');
   const generator = readFileSync(join(here, '../../providers/chat/generatorLlm.ts'), 'utf8');
@@ -301,7 +333,8 @@ async function main(): Promise<void> {
   await testNonTransientErrorsDoNotRetry();
   testPerAttemptBoundUnchanged();
   testCallSitesUseSharedRegenerate();
-  process.stdout.write('PASS chat-router-stream (11 cases)\n');
+  testRetryResetsPerAttemptStreamState();
+  process.stdout.write('PASS chat-router-stream (12 cases)\n');
 }
 
 void main().catch((error: unknown) => {

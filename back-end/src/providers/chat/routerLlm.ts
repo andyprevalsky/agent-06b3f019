@@ -252,7 +252,6 @@ export async function callRouterLlm(params: {
   let lastStreamedText = '';
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
-  const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
   const usage: ChatLlmUsage = {
     prompt_tokens: 0,
     completion_tokens: 0,
@@ -267,6 +266,24 @@ export async function callRouterLlm(params: {
     callSite: 'chat_router',
     agentId: params.agentId,
     attempt: async () => {
+      lastStreamedText = '';
+      if (webSearchToolCallId) {
+        await broadcastToolEvent(
+          params.agentId,
+          streamId,
+          webSearchToolCallId,
+          'web_search',
+          'ERROR',
+          'Search interrupted',
+          0,
+          isClaude,
+          isGpt,
+          startTime
+        );
+        webSearchToolCallId = undefined;
+        webSearchDetected = false;
+      }
+      const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
       const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
       const createLiveStream = (abortSignal?: AbortSignal) =>
         createStreamingCompletion(

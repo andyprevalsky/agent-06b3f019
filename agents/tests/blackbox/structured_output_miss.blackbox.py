@@ -39,6 +39,7 @@ def test_degrade_paths_never_throw_current_text() -> None:
     }
     for name, acc in cases.items():
         assert acc.current_text() == "", name
+        assert acc.is_ambiguous() is (name == "ambiguous"), name
         raised = False
         try:
             acc.final_text()
@@ -67,6 +68,8 @@ def test_production_callers_use_current_text() -> None:
         source = path.read_text()
         assert "final_text()" not in source, f"{path} must not call final_text()"
         assert "current_text()" in source, f"{path} must use current_text()"
+        if path.name == "llm.py":
+            assert "is_ambiguous()" in source, "agent/verifier finalize must not salvage ambiguous streams"
 
 
 async def run_all_tests() -> dict[str, int]:

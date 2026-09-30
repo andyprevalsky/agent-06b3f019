@@ -62,6 +62,16 @@ class StructuredOutputAccumulator:
     def current_text(self) -> str:
         return self._select(require_exactly_one=False)
 
+    def is_ambiguous(self) -> bool:
+        items = list(self._items.values())
+        final_items = [item for item in items if item.phase == "final_answer"]
+        if len(final_items) > 1:
+            return True
+        if len(final_items) == 1:
+            return False
+        eligible_items = [item for item in items if item.phase not in IGNORED_PHASES]
+        return len(eligible_items) > 1
+
     def has_content(self) -> bool:
         return bool(self._items)
 

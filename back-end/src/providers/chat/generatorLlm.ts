@@ -182,21 +182,20 @@ type GeneratorLlmParams = {
 };
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
-  const attention = createGeneratorAttentionLifecycle({
-    agentId: params.agentId,
-    streamGate: params.streamGate,
-  });
+  let attention: GeneratorAttentionLifecycle | undefined;
   try {
-    return await callGeneratorLlmCore(params, attention);
+    return await callGeneratorLlmCore(params, (current) => {
+      attention = current;
+    });
   } catch (error) {
-    await attention.cancel();
+    await attention?.cancel();
     throw error;
   }
 }
 
 async function callGeneratorLlmCore(
   params: GeneratorLlmParams,
-  attention: GeneratorAttentionLifecycle
+  setAttention: (attention: GeneratorAttentionLifecycle) => void
 ): Promise<GeneratorResponse> {
   const streamId = generateStreamId();
 
@@ -299,6 +298,11 @@ async function callGeneratorLlmCore(
   };
 
   await emitAssistantStream('', false, 0, false, false);
+  let attention = createGeneratorAttentionLifecycle({
+    agentId: params.agentId,
+    streamGate: params.streamGate,
+  });
+  setAttention(attention);
   await attention.start();
 
   // Fast Mode: the chat path runs in-process (not through the Python Rose notch),
@@ -368,7 +372,17 @@ async function callGeneratorLlmCore(
   const attempted = await regenerateOnChatStructuredMiss({
     callSite: 'chat_generator',
     agentId: params.agentId,
-    attempt: async () => {
+    attempt: async (attempt) => {
+      lastStreamedText = '';
+      if (attempt > 1) {
+        await attention.cancel();
+        attention = createGeneratorAttentionLifecycle({
+          agentId: params.agentId,
+          streamGate: params.streamGate,
+        });
+        setAttention(attention);
+        await attention.start();
+      }
       // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
       let stream: AsyncIterable<CompletionChunk>;
       if (fcKey && fastModeRead) {
