@@ -1,7 +1,7 @@
 """Blackbox tests for run_agent assistant/tool persistence invariants."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
@@ -38,8 +38,6 @@ async def _run_single_iteration(
     verifier_structured_response=None,
     verifier_usage=None,
     winddown_window=0,
-    completion_deadline=None,
-    available_tools=None,
     response_schema=None,
     llm_tool_calls_sequence=None,
     llm_tool_calls_factory=None,
@@ -55,7 +53,6 @@ async def _run_single_iteration(
     on_tokens_override=None,
     check_paused_override=None,
     check_aborted_override=None,
-    check_generation_handoff_override=None,
     gpt_token=None,
     gpt_account_id=None,
     iteration_offset=0,
@@ -170,11 +167,7 @@ async def _run_single_iteration(
             system_prompt=mock_system_prompt,
             verifier_prompt_generator=mock_verifier_prompt,
             model="rose-labs/rose-1-flash",
-            tools=(
-                available_tools
-                if available_tools is not None
-                else ["web_search", "web_fetch", "attempt_completion", "set_plan"]
-            ),
+            tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
             initial_context=ctx,
             is_inside_temporal_activity=is_inside_temporal_activity,
             post_message=mock_post_message,
@@ -184,7 +177,6 @@ async def _run_single_iteration(
             max_iterations=max_iterations,
             iteration_offset=iteration_offset,
             winddown_window=winddown_window,
-            completion_deadline=completion_deadline,
             skip_verification=skip_verification,
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
@@ -195,7 +187,6 @@ async def _run_single_iteration(
             on_tokens=on_tokens_override,
             check_paused=check_paused_override,
             check_aborted=check_aborted_override,
-            check_generation_handoff=check_generation_handoff_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
         )
@@ -2209,28 +2200,18 @@ async def test_winddown_injects_one_message_near_cap():
     tool_calls = [{"tool": "web_search", "query": "x"}]  # never completes -> loops to cap
     detected_tools = [("web_search", "tc-1", 1.0)]
 
-    for available_tools in (
-        ["web_search", "web_fetch", "attempt_completion_with_result"],
-        ["web_search", "web_fetch", "attempt_completion", "attempt_completion_with_result"],
-    ):
-        result, _, _ = await _run_single_iteration(
-            tool_calls,
-            detected_tools,
-            skip_verification=True,  # explore-like
-            max_iterations=3,
-            winddown_window=1,
-            available_tools=available_tools,
-        )
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,  # explore-like
+        max_iterations=3,
+        winddown_window=1,
+    )
 
-        assert result["status"] == "max_iterations"
-        assert _count_winddown_msgs(result["context"]) == 1, "wind-down must inject exactly once"
-        winddown_text = next(m["text"] for m in result["context"] if "final turn" in (m.get("text") or ""))
-        assert winddown_text == (
-            "You are on your final turn. Do not search further — synthesize the grounded evidence you already have "
-            "and call attempt_completion_with_result now with your best answer, explicitly noting any gaps you could not fill."
-        )
-        assert "best_effort_response" in result
-        assert "final_response" in result
+    assert result["status"] == "max_iterations"
+    assert _count_winddown_msgs(result["context"]) == 1, "wind-down must inject exactly once"
+    assert "best_effort_response" in result
+    assert "final_response" in result
 
 
 async def test_winddown_disabled_by_default():
@@ -2248,88 +2229,6 @@ async def test_winddown_disabled_by_default():
 
     assert result["status"] == "max_iterations"
     assert _count_winddown_msgs(result["context"]) == 0
-
-
-async def test_expired_child_deadline_requires_verified_completion():
-    """A research child gets one final turn without executing more searches."""
-    evidence = [
-        {"role": "USER", "text": "Find Tokyo population", "timestamp": "2026-09-30T00:00:00Z"},
-        {
-            "role": "TOOL",
-            "text": "Official estimate: 14303513",
-            "timestamp": "2026-09-30T00:00:01Z",
-            "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
-        },
-    ]
-    result, _, executed = await _run_single_iteration(
-        [{"tool": "attempt_completion"}],
-        [("attempt_completion", "tc-complete", 1.0)],
-        initial_context=evidence,
-        max_iterations=25,
-        completion_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
-        skip_verification=False,
-        verifier_structured_response={"population_value": "14303513"},
-    )
-
-    assert result["status"] == "completed"
-    assert result["structured_response"] == {"population_value": "14303513"}
-    assert _count_winddown_msgs(result["context"]) == 1
-    winddown_text = next(m["text"] for m in result["context"] if "final turn" in (m.get("text") or ""))
-    assert winddown_text == (
-        "You are on your final turn. Do not search further — synthesize the grounded evidence you already have "
-        "and call attempt_completion now with your best answer, explicitly noting any gaps you could not fill."
-    )
-    assert all(tool["tool_name"] != "web_search" for tool in executed)
-
-
-async def test_expired_child_deadline_rejects_research_tool_before_execution():
-    """A model that ignores wind-down cannot start another slow explore call."""
-    calls = [
-        [{"tool": "web_search", "query": "newer Tokyo estimate"}],
-        [{"tool": "attempt_completion"}],
-    ]
-    result, _, executed = await _run_single_iteration(
-        [],
-        [("attempt_completion", "tc-complete", 1.0)],
-        max_iterations=25,
-        completion_deadline=datetime.now(timezone.utc) - timedelta(seconds=1),
-        skip_verification=False,
-        llm_tool_calls_sequence=calls,
-    )
-
-    assert result["status"] == "completed"
-    assert calls == []
-    assert all(tool["tool_name"] != "web_search" for tool in executed)
-
-
-async def test_expired_child_deadline_preserves_orphan_and_handoff():
-    """An orphan exits before the final LLM; a generation handoff stays resumable."""
-    async def orphaned():
-        return True
-
-    async def handoff():
-        return "next-generation-queue"
-
-    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
-    orphan_result, _, orphan_tools = await _run_single_iteration(
-        [{"tool": "attempt_completion"}],
-        [("attempt_completion", "tc-complete", 1.0)],
-        max_iterations=25,
-        completion_deadline=expired,
-        check_aborted_override=orphaned,
-    )
-    handoff_result, _, handoff_tools = await _run_single_iteration(
-        [{"tool": "attempt_completion"}],
-        [("attempt_completion", "tc-complete", 1.0)],
-        max_iterations=25,
-        completion_deadline=expired,
-        check_generation_handoff_override=handoff,
-    )
-
-    assert orphan_result["status"] == "aborted"
-    assert handoff_result["status"] == "generation_handoff"
-    assert handoff_result["handoff_task_queue"] == "next-generation-queue"
-    assert orphan_tools == handoff_tools == []
 
 
 async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
@@ -2619,18 +2518,6 @@ async def run_all_tests():
     )
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
-    await r.record_async(
-        "expired_child_deadline_requires_verified_completion",
-        test_expired_child_deadline_requires_verified_completion,
-    )
-    await r.record_async(
-        "expired_child_deadline_rejects_research_tool_before_execution",
-        test_expired_child_deadline_rejects_research_tool_before_execution,
-    )
-    await r.record_async(
-        "expired_child_deadline_preserves_orphan_and_handoff",
-        test_expired_child_deadline_preserves_orphan_and_handoff,
-    )
     await r.record_async(
         "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
         test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,

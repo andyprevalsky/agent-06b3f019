@@ -206,7 +206,6 @@ async def run_agent(
     build_messages: Optional[Callable[[List[Dict], str], List[Dict]]] = None,
     # Limits
     max_iterations: int = 200,
-    completion_deadline: Optional[datetime] = None,
     # Graceful wind-down: when > 0, inject ONE "synthesize & complete now" message
     # into the conversation tail this many turns before the cap, giving the model a
     # clean final turn instead of a hard cut. 0 = disabled (default). Explore opts in.
@@ -621,7 +620,6 @@ async def run_agent(
 
     # Graceful wind-down state: ensures the "final turn" nudge is injected once.
     winddown_injected = False
-    deadline_final_turn = False
 
     # Count of consecutive iterations spent paused. Reset the moment we run real
     # work. Bounds the paused-wait loop (see PAUSED_WAIT_FLOOR_SECONDS /
@@ -725,17 +723,6 @@ async def run_agent(
         # Reached only when not paused — reset the paused-iteration counter.
         consecutive_paused = 0
 
-        # General-purpose children may have a total research budget in addition
-        # to the per-explore wait. Give them one verified completion turn after
-        # that budget, then use the existing max-iterations verifier/failure
-        # path if they still cannot finish. Pauses and orphan checks above must
-        # win, and the deadline is absolute across workflow continuations.
-        if completion_deadline is not None and _safe_now() >= completion_deadline and not deadline_final_turn:
-            deadline_final_turn = True
-            max_iterations = min(max_iterations, iteration + 1)
-            winddown_window = max(winddown_window, 1)
-            logger.info("run_agent.completion_deadline_reached", agent_id=agent_id, iteration=iteration)
-
         # Only increment iteration when we're actually going to do work
         iteration += 1
         fast_cache_step = fast_cache_llm_position + 1
@@ -746,17 +733,13 @@ async def run_agent(
         # Mirrors Hermes' single grace call — no earlier pressure warnings (they make
         # models give up prematurely), injected exactly once.
         if winddown_window > 0 and not winddown_injected and iteration >= max_iterations - winddown_window:
-            completion_tool = next(
-                (tool for tool in ("attempt_completion_with_result", "attempt_completion") if tool in tools), None
-            )
-            completion_action = f"call {completion_tool} now" if completion_tool else "finish now"
             context.append(
                 {
                     "role": "SYSTEM",
                     "text": (
                         "You are on your final turn. Do not search further — synthesize the "
-                        f"grounded evidence you already have and {completion_action} with your "
-                        "best answer, explicitly noting any gaps you could not fill."
+                        "grounded evidence you already have and call attempt_completion_with_result "
+                        "now with your best answer, explicitly noting any gaps you could not fill."
                     ),
                     "timestamp": _safe_now().isoformat(),
                 }
@@ -826,7 +809,7 @@ async def run_agent(
         # the native tool/schema block at the front of the provider prompt and
         # invalidate the growing-conversation cache prefix.
         turn_tools = tools
-        required_turn_tool = "attempt_completion" if deadline_final_turn else None
+        required_turn_tool = None
         if completed_child_output is not None:
             required_turn_tool = "attempt_completion"
             completion_instruction = (

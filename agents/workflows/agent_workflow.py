@@ -139,16 +139,6 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
 RESPONSE_SCHEMA_UPDATE_PREFIX = "Output schema revised from user feedback."
-GENERAL_PURPOSE_CHILD_COMPLETION_BUDGET = timedelta(seconds=240)
-
-
-def _general_purpose_child_completion_deadline(
-    start_time: Optional[datetime], parent_workflow_id: Optional[str], depth: int
-) -> Optional[datetime]:
-    """Reserve time for a parent to use a child's final verified result."""
-    if start_time is None or not parent_workflow_id or depth <= 0:
-        return None
-    return start_time + GENERAL_PURPOSE_CHILD_COMPLETION_BUDGET
 
 
 def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
@@ -2266,9 +2256,6 @@ class AgentWorkflow:
             compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.fast_cache_goal,
-            completion_deadline=_general_purpose_child_completion_deadline(
-                self.start_time, self.parent_workflow_id, self.depth
-            ),
             **self._iteration_resume_kwargs(),
         )
 
