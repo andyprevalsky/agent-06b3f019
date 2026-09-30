@@ -3496,3 +3496,5 @@
 {"task": "agent-payment-abandonment", "duration_seconds": 275.8, "cost_cents": 2.0, "timestamp": "2026-09-30T17:21:36.118467+00:00", "agent_id": "f75242c3-5664-4ed1-8568-aa4359f2c95f"}
 {"task": "plaid-transactions-monthly-spend", "duration_seconds": 98.0, "cost_cents": 4.0, "timestamp": "2026-09-30T17:21:36.118467+00:00", "agent_id": "4219f8d8-2b03-43a4-99bc-1879948df221"}
 {"task": "chat-mode", "duration_seconds": 136.1, "cost_cents": 0.0, "timestamp": "2026-09-30T17:21:36.118467+00:00", "agent_id": "8b1b06ff-d2fe-4833-8783-c61f327fedc6"}
+{"task": "browser-smoke", "duration_seconds": 100.0, "cost_cents": 2.0, "timestamp": "2026-09-30T18:08:13.799226+00:00", "agent_id": "71f22632-6552-4f5c-a668-1a5f00a43edd"}
+{"task": "claude-code-agent", "duration_seconds": 71.1, "cost_cents": 0.0, "timestamp": "2026-09-30T18:08:13.799226+00:00", "agent_id": "9f8aafa6-b962-496e-955b-fc73b1479f3c"}
