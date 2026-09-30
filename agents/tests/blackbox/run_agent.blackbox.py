@@ -887,9 +887,7 @@ async def test_verifier_infra_soft_fail_accepts_attempt_completion():
         max_iterations=3,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
         verifier_structured_response=structured,
         response_schema=schema,
     )
@@ -897,9 +895,7 @@ async def test_verifier_infra_soft_fail_accepts_attempt_completion():
     assert result["status"] == "completed"
     assert result["score"] == 1.0
     assert "infrastructure failed" in (result.get("message") or "").lower()
-    assert completion_calls == [
-        ("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")
-    ]
+    assert completion_calls == [("attempt_completion", {"_verification_pending": True}, "tc-ac-infra-1")]
 
 
 async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
@@ -923,12 +919,8 @@ async def test_verifier_infra_soft_fail_rejects_malformed_structured_response():
         max_iterations=1,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
-        verifier_structured_response={
-            "repos": "- [cupy/cupy](https://github.com/cupy/cupy): NumPy for GPU\n..."
-        },
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
+        verifier_structured_response={"repos": "- [cupy/cupy](https://github.com/cupy/cupy): NumPy for GPU\n..."},
         response_schema=schema,
     )
 
@@ -958,17 +950,13 @@ async def test_verifier_infra_soft_fail_trips_circuit_breaker_without_schema():
         max_iterations=5,
         execute_tool_override=mock_execute_tool,
         verifier_score=0.5,
-        verifier_reasoning=(
-            "Progress check failed: Verifier exceeded 420s total deadline"
-        ),
+        verifier_reasoning=("Progress check failed: Verifier exceeded 420s total deadline"),
         verifier_structured_response={"repos": ""},
         response_schema=schema,
     )
 
     assert result["status"] == "error"
-    assert "verifier unavailable after 3 consecutive failures" in (
-        result.get("message") or ""
-    ).lower()
+    assert "verifier unavailable after 3 consecutive failures" in (result.get("message") or "").lower()
 
 
 async def test_estimate_tokens():
@@ -1443,10 +1431,48 @@ async def test_activity_tool_results_are_hard_capped_before_context_append():
     assert tool_msgs, "expected the grep tool result in context"
     text = tool_msgs[-1].get("text") or ""
     assert len(text) <= TOOL_RESULT_HARD_CAP_CHARS + 80, (
-        f"uncapped tool result entered context ({len(text)} chars); "
-        f"hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
+        f"uncapped tool result entered context ({len(text)} chars); hard cap is {TOOL_RESULT_HARD_CAP_CHARS}"
     )
     assert "truncated, original_len=" in text
+
+
+async def test_activity_tool_result_cap_prevents_protected_tail_overflow():
+    """A batch of grep results must not trip the explore compaction check.
+
+    Prod a890a362 appended four grep results, then head/tail compaction
+    retained 182858 tokens against the 167k trigger. Model that protected
+    head and four-result tail at the loop boundary. The check still rejects
+    genuine overflows in the test below.
+    """
+    import loop.run_agent as run_mod
+
+    huge = "AMAZON_ORDER_CONFIRMATION " * 4_000
+    initial = [{"role": "USER", "text": "U" * 100_000, "timestamp": "2024-01-01T00:00:00Z"}]
+    initial.extend({"role": "ASSISTANT", "text": "M" * 400, "timestamp": "2024-01-01T00:00:00Z"} for _ in range(4))
+    tool_calls = [{"tool": "grep", "pattern": f"amazon-{i}"} for i in range(4)]
+    detected_tools = [("grep", f"tc-huge-grep-{i}", 1.0) for i in range(4)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {"success": True, "message": huge}
+
+    async def protected_head_tail(**kwargs):
+        context = kwargs["context"]
+        return [context[0], *context[-4:]], True
+
+    with patch.object(run_mod, "_compress_context", side_effect=protected_head_tail) as compressor:
+        result, _, _ = await _run_single_iteration(
+            tool_calls,
+            detected_tools,
+            initial_context=initial,
+            skip_verification=True,
+            execute_tool_override=mock_execute_tool,
+            max_iterations=2,
+            is_inside_temporal_activity=True,
+            poll_messages_override=None,
+        )
+
+    assert result["status"] == "max_iterations", result.get("message")
+    compressor.assert_not_called()
 
 
 async def test_run_agent_errors_when_compaction_still_over_trigger():
@@ -2313,9 +2339,7 @@ async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
     )
 
     duplicate_chips = [
-        p
-        for p in posted
-        if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
+        p for p in posted if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
     ]
     assert not duplicate_chips, (
         "run_agent posted a duplicate ERROR chip for a failed tool; it collides "
@@ -2439,6 +2463,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_tool_results_are_hard_capped_before_context_append",
         test_activity_tool_results_are_hard_capped_before_context_append,
+    )
+    await r.record_async(
+        "activity_tool_result_cap_prevents_protected_tail_overflow",
+        test_activity_tool_result_cap_prevents_protected_tail_overflow,
     )
     await r.record_async(
         "run_agent_errors_when_compaction_still_over_trigger",
