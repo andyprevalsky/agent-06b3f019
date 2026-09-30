@@ -69,8 +69,8 @@ def main() -> int:
 
     exact: dict[str, dict] = {}
     md_lines = ["# Exact Column Prompts (Static)", ""]
-    tsv_lines = ["our_tool\tclaude\thermes\topenclaw"]
-    gold: dict[str, set[str]] = {"claude": set(), "hermes": set(), "openclaw": set()}
+    tsv_lines = ["our_tool\tclaude\thermes\topenclaw\tcodex"]
+    gold: dict[str, set[str]] = {"claude": set(), "hermes": set(), "openclaw": set(), "codex": set()}
 
     for row_id in PAIRING_IDS:
         row = rows_by_id[row_id]
@@ -81,6 +81,7 @@ def main() -> int:
             ("claude", "claude"),
             ("hermes", "hermes"),
             ("openclaw", "openclaw"),
+            ("codex", "codex"),
         ]:
             matched_id, formatted = cell(row, key)
             ids[label] = matched_id or "none"
@@ -88,7 +89,7 @@ def main() -> int:
             if label in gold and matched_id:
                 gold[label].add(matched_id)
 
-        tsv_lines.append(f"{row_id}\t{ids['claude']}\t{ids['hermes']}\t{ids['openclaw']}")
+        tsv_lines.append(f"{row_id}\t{ids['claude']}\t{ids['hermes']}\t{ids['openclaw']}\t{ids['codex']}")
         exact[row_id] = {"ids": ids, "columns": texts}
 
         md_lines.extend(
@@ -97,6 +98,7 @@ def main() -> int:
                 f"- claude: `{ids['claude']}`",
                 f"- hermes: `{ids['hermes']}`",
                 f"- openclaw: `{ids['openclaw']}`",
+                f"- codex: `{ids['codex']}`",
                 "",
                 "### Our Tool",
                 texts["our"],
@@ -110,6 +112,9 @@ def main() -> int:
                 "### OpenClaw",
                 texts["openclaw"],
                 "",
+                "### Codex",
+                texts["codex"],
+                "",
             ]
         )
 
@@ -118,7 +123,7 @@ def main() -> int:
     EXACT_JSON.write_text(json.dumps(exact, indent=2) + "\n")
 
     gold_lines = ["# Gold Repo Tool Lists", ""]
-    for repo in ["claude", "hermes", "openclaw"]:
+    for repo in ["claude", "hermes", "openclaw", "codex"]:
         gold_lines.extend([f"## {repo}", *[f"- {x}" for x in sorted(gold[repo])], ""])
     GOLD_LISTS.write_text("\n".join(gold_lines).rstrip() + "\n")
 
