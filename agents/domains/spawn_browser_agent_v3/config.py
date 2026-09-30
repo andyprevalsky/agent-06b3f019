@@ -81,6 +81,9 @@ HEARTBEAT_KEEPALIVE_SECONDS = 15
 # attempt within the full timeout.
 MAX_ACTIVITY_ATTEMPTS = 1
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
+# Terminal disconnect before payment/write-lock return must not block the
+# workflow forever when CDP/session.stop() hangs after a dead Kernel session.
+BROWSER_DISCONNECT_TIMEOUT_SECONDS = int(os.getenv("BROWSER_DISCONNECT_TIMEOUT_SECONDS", "20"))
 
 # browser-use per-event timeouts. browser-use fetches DOM+screenshot before every
 # LLM step via BrowserStateRequestEvent (library default TIMEOUT_BrowserStateRequestEvent
