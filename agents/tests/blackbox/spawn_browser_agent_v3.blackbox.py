@@ -13400,6 +13400,46 @@ async def test_disconnect_browser_captures_passkey_usage_before_disconnect():
     assert events == ["credential_ref_saved", "disconnected"]
     dom_service.disconnect.assert_awaited_once()
 
+
+async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
+    """Payment/write-lock return must not hang forever on wedged CDP disconnect."""
+    import asyncio
+
+    from domains.spawn_browser_agent_v3 import config as browser_config
+    from domains.spawn_browser_agent_v3.handler import disconnect_browser_after_passkey_capture
+
+    events = []
+
+    async def hung_capture():
+        events.append("capture_started")
+        await asyncio.sleep(3600)
+
+    async def hung_disconnect():
+        events.append("disconnect_started")
+        await asyncio.sleep(3600)
+
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=hung_disconnect))
+    original_timeout = browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS
+    browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = 0.05
+    try:
+        # Patch the imported constant used by the helper too.
+        import domains.spawn_browser_agent_v3.handler as handler_mod
+
+        original_handler_timeout = handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS
+        handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS = 0.05
+        try:
+            started = asyncio.get_event_loop().time()
+            await disconnect_browser_after_passkey_capture(dom_service, hung_capture)
+            elapsed = asyncio.get_event_loop().time() - started
+        finally:
+            handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS = original_handler_timeout
+    finally:
+        browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = original_timeout
+
+    assert events == ["capture_started", "disconnect_started"]
+    assert elapsed < 2.0
+    dom_service.disconnect.assert_awaited_once()
+
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
     import inspect
@@ -20866,6 +20906,10 @@ async def run_all_tests():
     await r.record_async(
         "passkey_usage_captured_before_disconnect",
         test_disconnect_browser_captures_passkey_usage_before_disconnect,
+    )
+    await r.record_async(
+        "disconnect_times_out_hung_cdp_and_still_returns",
+        test_disconnect_browser_times_out_hung_cdp_and_still_returns,
     )
     r.record(
         "passkey_usage_sampled_before_terminal_disconnects",

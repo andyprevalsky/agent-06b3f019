@@ -82,6 +82,7 @@ from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
+    BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -350,11 +351,46 @@ async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
 ) -> None:
-    """Capture credential evidence before a terminal browser disconnect."""
+    """Capture credential evidence before a terminal browser disconnect.
+
+    Both the passkey readback and BrowserSession.stop() talk to CDP. When the
+    remote session is already gone (or CDP is wedged), either await can hang
+    indefinitely — which strands payment/write-lock returns before the workflow
+    can create the attention request (local repro: agent-payment-idempotent-
+    abandonment hung for 7+ minutes after write_lock_notification dump with
+    only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
+    Bound both steps so approval/handoff paths always resume.
+    """
     try:
-        await capture_passkey_usage()
-    finally:
-        await dom_service.disconnect()
+        await asyncio.wait_for(
+            capture_passkey_usage(),
+            timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Passkey usage capture timed out before disconnect",
+            timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Passkey usage capture failed before disconnect",
+            error=extract_error_message(exc),
+        )
+    try:
+        await asyncio.wait_for(
+            dom_service.disconnect(),
+            timeout=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Browser disconnect timed out; continuing terminal return",
+            timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Browser disconnect failed; continuing terminal return",
+            error=extract_error_message(exc),
+        )
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
