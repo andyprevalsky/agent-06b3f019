@@ -88,7 +88,9 @@ async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
  * AgentCard may reclaim the mint transfer directly on close without ever exposing cardholder
  * residual for `recover_funds`.
  */
-async function readCardTransfer(cardId: string): Promise<MintTransferObservation | undefined> {
+async function readCardTransfer(
+  cardId: string
+): Promise<(MintTransferObservation & { transferredCents: number }) | undefined> {
   const transfers =
     (
       (await callOrgTool('list_transfers', { limit: 100 })) as {
@@ -100,6 +102,7 @@ async function readCardTransfer(cardId: string): Promise<MintTransferObservation
   return {
     status: String(mine.status ?? 'unknown'),
     releasedCents: Number(mine.released_cents ?? 0),
+    transferredCents: Number(mine.transferred_cents ?? 0),
   };
 }
 
@@ -297,9 +300,6 @@ async function main(): Promise<void> {
     record('pre-mint residual sweep found nothing idle');
   }
 
-  const poolBefore = extractAgentCardOrgWallet(
-    await callOrgTool('get_company_wallet', {})
-  ).availableCents;
   const mintCents = 1_300;
 
   const minted = (await callOrgTool('create_card', {
@@ -311,21 +311,6 @@ async function main(): Promise<void> {
   const cardId = minted.structuredContent?.cardId;
   assert.ok(cardId !== undefined, 'create_card returned no cardId');
   record(`minted ${usd(mintCents)} card ${cardId}`);
-
-  const poolAfterMint = extractAgentCardOrgWallet(
-    await callOrgTool('get_company_wallet', {})
-  ).availableCents;
-  const drawn = poolBefore - poolAfterMint;
-  // After the residual sweep, this mint must draw from the pool. A netted mint (drawn === 0)
-  // leaves no reclaimable company-wallet transfer for THIS card — which is exactly the failure
-  // mode this blackbox is here to catch on the close → release path.
-  assert.equal(
-    drawn,
-    mintCents,
-    `pool moved ${usd(drawn)} for a ${usd(mintCents)} mint after residual sweep — expected a ` +
-      `full pool draw so close/reclaim is observable on this card's transfer`
-  );
-  record('mint drew from the pool');
 
   // Close it unused, then prove recovery returns the value to the POOL (not the cardholder).
   const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
@@ -342,6 +327,16 @@ async function main(): Promise<void> {
   // `ended in "consumed"`). The race-free invariant is THIS card's funding transfer reaching a
   // terminal release with the full unused amount; recover_funds runs each poll only as accelerator.
   const settled = await waitForUnusedMintSettled(cardId, mintCents);
+  const transfer = await readCardTransfer(cardId);
+  // The sandbox org is shared with other benchmarks, so its aggregate pool balance can move
+  // between two reads. THIS card's transfer proves whether its mint drew the full amount.
+  assert.equal(
+    transfer?.transferredCents,
+    mintCents,
+    `transfer for ${cardId} drew ${usd(transfer?.transferredCents ?? 0)} from the pool for a ` +
+      `${usd(mintCents)} mint`
+  );
+  record('mint drew from the pool');
   assert.ok(
     settled.status === 'reclaimed' || settled.status === 'released',
     `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
