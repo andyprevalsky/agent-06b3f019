@@ -20,10 +20,7 @@
  */
 
 import { useRef, Suspense, type ComponentType } from 'react';
-import { Link } from 'react-router-dom';
 import * as analytics from '@/lib/analytics';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -46,6 +43,7 @@ import { ChatScrollArea } from './ChatScrollArea';
 import { SubAgentBreadcrumb } from './SubAgentBreadcrumb';
 import { SystemMessagesPanel } from './SystemMessagesPanel';
 import { PopularGoalsCarousel } from './PopularGoalsCarousel';
+import { TerminalLegalFooter } from './TerminalLegalFooter';
 
 interface AgentChatAreaProps {
   agents: AgentSlice;
@@ -129,47 +127,6 @@ export function AgentChatArea({
 
       <TerminalLegalFooter />
     </>
-  );
-}
-
-function TerminalLegalFooter() {
-  return (
-    <footer
-      data-testid="terminal-legal-links"
-      className="relative z-10 w-full shrink-0 px-2 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] text-center text-[11px] leading-[1.25] text-foreground/60 md:pb-1 md:pl-20"
-    >
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Link
-            to="/about"
-            className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
-          >
-            About
-          </Link>
-        </TooltipTrigger>
-        <TooltipContent
-          side="top"
-          align="center"
-          className="max-w-[min(20rem,calc(100vw-2rem))] p-3 text-left text-xs leading-relaxed"
-        >
-          {ROSE_APP_DESCRIPTION}
-        </TooltipContent>
-      </Tooltip>{' '}
-      &middot;{' '}
-      <Link
-        to="/privacy"
-        className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
-      >
-        Privacy
-      </Link>{' '}
-      &middot;{' '}
-      <Link
-        to="/terms"
-        className="text-foreground/75 underline underline-offset-2 hover:text-foreground"
-      >
-        Terms
-      </Link>
-    </footer>
   );
 }
 

@@ -6,6 +6,7 @@ import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Terminal from '@/pages/Terminal';
+import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -214,6 +215,7 @@ describe('Terminal page', () => {
 
     it('keeps legal links in the visible mobile layout', async () => {
       setViewport(390, 844);
+      const user = userEvent.setup();
 
       renderWithProviders(<Terminal />);
 
@@ -221,6 +223,12 @@ describe('Terminal page', () => {
       expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toBeInTheDocument();
       expect(legalLinks).not.toHaveClass('absolute');
       expect(legalLinks).toHaveClass('shrink-0');
+      await user.click(within(legalLinks).getByRole('button', { name: 'About' }));
+      expect(await screen.findByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Full About page' })).toHaveAttribute(
+        'href',
+        '/about',
+      );
     });
 
     it('reserves a two-line-safe opening caption box on mobile', async () => {
