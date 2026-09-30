@@ -72,6 +72,43 @@ export interface ChatLlmUsage {
   from_fast_cache: boolean;
 }
 
+export function emptyChatLlmUsage(): ChatLlmUsage {
+  return {
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    model: '',
+    from_fast_cache: false,
+  };
+}
+
+export function applyChunkUsage(
+  target: ChatLlmUsage,
+  chunkUsage: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  }
+): void {
+  target.prompt_tokens = chunkUsage.prompt_tokens ?? 0;
+  target.completion_tokens = chunkUsage.completion_tokens ?? 0;
+  target.total_tokens = chunkUsage.total_tokens ?? 0;
+  target.cache_creation_input_tokens = chunkUsage.cache_creation_input_tokens ?? 0;
+  target.cache_read_input_tokens = chunkUsage.cache_read_input_tokens ?? 0;
+}
+
+export function accumulateChatLlmUsage(target: ChatLlmUsage, increment: ChatLlmUsage): void {
+  target.prompt_tokens += increment.prompt_tokens;
+  target.completion_tokens += increment.completion_tokens;
+  target.total_tokens += increment.total_tokens;
+  target.cache_creation_input_tokens += increment.cache_creation_input_tokens;
+  target.cache_read_input_tokens += increment.cache_read_input_tokens;
+}
+
 export interface RouterResponse {
   decision: RouterDecision;
   streamId: string;
@@ -252,15 +289,7 @@ export async function callRouterLlm(params: {
   let lastStreamedText = '';
   let webSearchToolCallId: string | undefined;
   let webSearchDetected = false;
-  const usage: ChatLlmUsage = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-    model: '',
-    from_fast_cache: false,
-  };
+  const usage = emptyChatLlmUsage();
 
   const attempted = await regenerateOnChatStructuredMiss({
     callSite: 'chat_router',
@@ -269,242 +298,270 @@ export async function callRouterLlm(params: {
       lastStreamedText = '';
       const skipFastCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
-      usage.prompt_tokens = 0;
-      usage.completion_tokens = 0;
-      usage.total_tokens = 0;
-      usage.cache_creation_input_tokens = 0;
-      usage.cache_read_input_tokens = 0;
-      if (webSearchToolCallId) {
-        await broadcastToolEvent(
-          params.agentId,
-          streamId,
-          webSearchToolCallId,
-          'web_search',
-          'ERROR',
-          'Search interrupted',
-          0,
-          isClaude,
-          isGpt,
-          startTime
-        );
-        webSearchToolCallId = undefined;
-        webSearchDetected = false;
-      }
-      const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
-      const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
-      const createLiveStream = (abortSignal?: AbortSignal) =>
-        createStreamingCompletion(
-          buildRouterCompletionOptions({
-            model: params.model,
-            messages: openaiMessages,
-            providerRoute: params.providerRoute,
-            providerFastMode,
-            abortSignal: abortSignal
-              ? AbortSignal.any([abortSignal, completionDeadline.signal])
-              : completionDeadline.signal,
-          })
-        );
-
-      let stream: AsyncIterable<CompletionChunk>;
-      if (fcKey && fastModeRead && !skipFastCache) {
-        const cacheKey = fcKey;
-        stream = delayedCacheStreamHedge({
-          readCache: async (): Promise<CacheLookupResult<string>> => {
-            const hit = await cacheGet(cacheKey);
-            const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
-            if (typeof json === 'string' && json.length > 0) {
-              if (!isValidRouterCacheJson(json)) {
-                log.warn('fast_cache.chat_router_invalid', {
-                  agentId: params.agentId,
-                  key: cacheKey,
-                });
-                return { hit: false };
-              }
-              log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: cacheKey });
-              return { hit: true, value: json };
-            }
-            log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: cacheKey });
-            return { hit: false };
-          },
-          createLive: (abortSignal) => createLiveStream(abortSignal),
-          createCached: syntheticChatStream,
-          isLiveCommitChunk: (chunk) => {
-            const delta = chunk.choices[0]?.delta;
-            return Boolean(delta?.content?.length || delta?.reasoning?.length);
-          },
-          awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
-          hangTimeoutMs: ROUTER_CACHE_HANG_MS,
-          onCacheError: (error) =>
-            log.warn('fast_cache.chat_router_read_failed', {
-              agentId: params.agentId,
-              key: cacheKey,
-              error: error instanceof Error ? error.message : String(error),
-            }),
-          onWinner: (winner) => {
-            fcCacheWon = winner === 'cache';
-          },
-        });
-      } else {
-        if (fcKey) {
-          log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
+      const attemptUsage = emptyChatLlmUsage();
+      try {
+        if (webSearchToolCallId) {
+          await broadcastToolEvent(
+            params.agentId,
+            streamId,
+            webSearchToolCallId,
+            'web_search',
+            'ERROR',
+            'Search interrupted',
+            0,
+            isClaude,
+            isGpt,
+            startTime
+          );
+          webSearchToolCallId = undefined;
+          webSearchDetected = false;
         }
-        stream = await createLiveStream().catch((error: unknown) => {
-          completionDeadline.dispose();
-          throw error;
-        });
-      }
+        const detectClosedAction = createClosedRouterActionDetector(params.onActionDetected);
+        const completionDeadline = createRouterCompletionDeadline(completionTimeoutMs);
+        const createLiveStream = (abortSignal?: AbortSignal) =>
+          createStreamingCompletion(
+            buildRouterCompletionOptions({
+              model: params.model,
+              messages: openaiMessages,
+              providerRoute: params.providerRoute,
+              providerFastMode,
+              abortSignal: abortSignal
+                ? AbortSignal.any([abortSignal, completionDeadline.signal])
+                : completionDeadline.signal,
+            })
+          );
 
-      // Track reasoning and JSON content separately (like agent worker)
-      let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
-      let accumulatedJson = ''; // From delta.content (JSON structure)
-      const structuredOutput = new StructuredOutputAccumulator();
-      let chunkCount = 0;
-      let actualModel = '';
-      let usageData:
-        | {
-            prompt_tokens: number;
-            completion_tokens: number;
-            cache_creation_input_tokens?: number;
-            cache_read_input_tokens?: number;
-            finish_reason?: string;
+        let stream: AsyncIterable<CompletionChunk>;
+        if (fcKey && fastModeRead && !skipFastCache) {
+          const cacheKey = fcKey;
+          stream = delayedCacheStreamHedge({
+            readCache: async (): Promise<CacheLookupResult<string>> => {
+              const hit = await cacheGet(cacheKey);
+              const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
+              if (typeof json === 'string' && json.length > 0) {
+                if (!isValidRouterCacheJson(json)) {
+                  log.warn('fast_cache.chat_router_invalid', {
+                    agentId: params.agentId,
+                    key: cacheKey,
+                  });
+                  return { hit: false };
+                }
+                log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: cacheKey });
+                return { hit: true, value: json };
+              }
+              log.info('fast_cache.chat_router_miss', { agentId: params.agentId, key: cacheKey });
+              return { hit: false };
+            },
+            createLive: (abortSignal) => createLiveStream(abortSignal),
+            createCached: syntheticChatStream,
+            isLiveCommitChunk: (chunk) => {
+              const delta = chunk.choices[0]?.delta;
+              return Boolean(delta?.content?.length || delta?.reasoning?.length);
+            },
+            awaitCacheFirst: isOaiDemoGoal(fastMode.goal),
+            hangTimeoutMs: ROUTER_CACHE_HANG_MS,
+            onCacheError: (error) =>
+              log.warn('fast_cache.chat_router_read_failed', {
+                agentId: params.agentId,
+                key: cacheKey,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            onWinner: (winner) => {
+              fcCacheWon = winner === 'cache';
+            },
+          });
+        } else {
+          if (fcKey) {
+            log.info('fast_cache.chat_router_write_only', { agentId: params.agentId, key: fcKey });
           }
-        | undefined;
-
-      // Process stream chunks - stream every delta immediately
-      for await (const chunk of streamBeforeRouterCompletionDeadline(stream, completionDeadline)) {
-        chunkCount++;
-
-        // Detect user's Claude token usage from "-claude" suffix in actual_model
-        // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = waterfall ($)
-        if (chunk.actual_model) actualModel = chunk.actual_model;
-        if (chunk.usage)
-          usageData = {
-            ...chunk.usage,
-            finish_reason: chunk.choices[0]?.finish_reason ?? undefined,
-          };
-        if (chunkCount === 1) {
-          log.info('[RouterLLM] First chunk', {
-            actualModel,
-            requestedModel: chunk.requested_model,
+          stream = await createLiveStream().catch((error: unknown) => {
+            completionDeadline.dispose();
+            throw error;
           });
         }
-        if (!isClaude && actualModel?.endsWith('-claude')) {
-          isClaude = true;
-          log.info('[RouterLLM] User Claude token detected', { actualModel });
-        }
-        if (!isGpt && actualModel?.endsWith('-gpt')) {
-          isGpt = true;
-          log.info('[RouterLLM] User GPT token detected', { actualModel });
-        }
 
-        const delta = chunk.choices[0]?.delta;
+        // Track reasoning and JSON content separately (like agent worker)
+        let accumulatedReasoning = ''; // From delta.reasoning (thinking models)
+        let accumulatedJson = ''; // From delta.content (JSON structure)
+        const structuredOutput = new StructuredOutputAccumulator();
+        let chunkCount = 0;
+        let actualModel = '';
+        let usageData:
+          | {
+              prompt_tokens: number;
+              completion_tokens: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+              finish_reason?: string;
+            }
+          | undefined;
 
-        // Handle reasoning from thinking models (delta.reasoning)
-        const reasoningDelta = delta?.reasoning || '';
-        if (reasoningDelta) {
-          accumulatedReasoning += reasoningDelta;
-        }
+        // Process stream chunks - stream every delta immediately
+        for await (const chunk of streamBeforeRouterCompletionDeadline(
+          stream,
+          completionDeadline
+        )) {
+          chunkCount++;
 
-        // Handle JSON content (delta.content)
-        const contentDelta = delta?.content || '';
-        if (contentDelta) {
-          structuredOutput.addCompletionChunk(chunk);
-          accumulatedJson = structuredOutput.currentText();
-          detectClosedAction(accumulatedJson);
-        }
+          // Detect user's Claude token usage from "-claude" suffix in actual_model
+          // e.g. "claude-sonnet-4-6-claude" = user token ($0), "anthropic/claude-sonnet-4.6" = waterfall ($)
+          if (chunk.actual_model) actualModel = chunk.actual_model;
+          if (chunk.usage)
+            usageData = {
+              ...chunk.usage,
+              finish_reason: chunk.choices[0]?.finish_reason ?? undefined,
+            };
+          if (chunkCount === 1) {
+            log.info('[RouterLLM] First chunk', {
+              actualModel,
+              requestedModel: chunk.requested_model,
+            });
+          }
+          if (!isClaude && actualModel?.endsWith('-claude')) {
+            isClaude = true;
+            log.info('[RouterLLM] User Claude token detected', { actualModel });
+          }
+          if (!isGpt && actualModel?.endsWith('-gpt')) {
+            isGpt = true;
+            log.info('[RouterLLM] User GPT token detected', { actualModel });
+          }
 
-        // Extract streamable reasoning text
-        const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
+          const delta = chunk.choices[0]?.delta;
 
-        if (streamableText && streamableText !== lastStreamedText) {
-          const newText = streamableText.slice(lastStreamedText.length);
-          lastStreamedText = streamableText;
+          // Handle reasoning from thinking models (delta.reasoning)
+          const reasoningDelta = delta?.reasoning || '';
+          if (reasoningDelta) {
+            accumulatedReasoning += reasoningDelta;
+          }
 
-          // Stream every delta immediately
-          if (newText) {
-            await broadcastAssistantStream(
-              params.agentId,
-              streamId,
-              newText,
-              false,
-              sequence++,
-              isClaude,
-              isGpt,
-              startTime
-            );
+          // Handle JSON content (delta.content)
+          const contentDelta = delta?.content || '';
+          if (contentDelta) {
+            structuredOutput.addCompletionChunk(chunk);
+            accumulatedJson = structuredOutput.currentText();
+            detectClosedAction(accumulatedJson);
+          }
+
+          // Extract streamable reasoning text
+          const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
+
+          if (streamableText && streamableText !== lastStreamedText) {
+            const newText = streamableText.slice(lastStreamedText.length);
+            lastStreamedText = streamableText;
+
+            // Stream every delta immediately
+            if (newText) {
+              await broadcastAssistantStream(
+                params.agentId,
+                streamId,
+                newText,
+                false,
+                sequence++,
+                isClaude,
+                isGpt,
+                startTime
+              );
+            }
+          }
+
+          // Detect web_search once the streamed JSON includes the complete query.
+          if (!webSearchDetected) {
+            const webSearchStreamTitle =
+              getWebSearchStreamTitleFromPartialRouterJson(accumulatedJson);
+            if (webSearchStreamTitle) {
+              webSearchDetected = true;
+              webSearchToolCallId = uuidv4();
+              log.info('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
+                toolCallId: webSearchToolCallId,
+              });
+              await broadcastToolEvent(
+                params.agentId,
+                streamId,
+                webSearchToolCallId,
+                'web_search',
+                'IN_PROGRESS',
+                webSearchStreamTitle,
+                accumulatedReasoning.length + accumulatedJson.length,
+                isClaude,
+                isGpt,
+                startTime
+              );
+            }
+          }
+
+          if (chunk.usage) {
+            applyChunkUsage(attemptUsage, chunk.usage);
+          }
+
+          // Log progress every 50 chunks
+          if (chunkCount % 50 === 0) {
+            log.info('[RouterLLM] Progress', {
+              chunk: chunkCount,
+              reasoning: accumulatedReasoning.length,
+              json: accumulatedJson.length,
+              streamed: sequence,
+            });
           }
         }
 
-        // Detect web_search once the streamed JSON includes the complete query.
-        if (!webSearchDetected) {
-          const webSearchStreamTitle =
-            getWebSearchStreamTitleFromPartialRouterJson(accumulatedJson);
-          if (webSearchStreamTitle) {
-            webSearchDetected = true;
-            webSearchToolCallId = uuidv4();
-            log.info('[RouterLLM] Detected web_search early, emitting IN_PROGRESS', {
-              toolCallId: webSearchToolCallId,
-            });
+        const deadlineExpired = completionDeadline.expired();
+        const finalized = finalizeRouterDecisionFromStream({
+          structuredOutput,
+          accumulatedJson,
+          deadlineExpired,
+        });
+        if (!finalized.decision && deadlineExpired) {
+          if (webSearchToolCallId) {
             await broadcastToolEvent(
               params.agentId,
               streamId,
               webSearchToolCallId,
               'web_search',
-              'IN_PROGRESS',
-              webSearchStreamTitle,
-              accumulatedReasoning.length + accumulatedJson.length,
+              'ERROR',
+              'Search interrupted',
+              0,
               isClaude,
               isGpt,
               startTime
             );
+            webSearchToolCallId = undefined;
+            webSearchDetected = false;
           }
+          await broadcastAssistantStream(
+            params.agentId,
+            streamId,
+            '',
+            true,
+            sequence,
+            isClaude,
+            isGpt,
+            startTime,
+            { clearOnDone: true }
+          );
         }
-
-        if (chunk.usage) {
-          usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
-          usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
-          usage.total_tokens = chunk.usage.total_tokens ?? 0;
-          usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
-          usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
-        }
-
-        // Log progress every 50 chunks
-        if (chunkCount % 50 === 0) {
-          log.info('[RouterLLM] Progress', {
-            chunk: chunkCount,
-            reasoning: accumulatedReasoning.length,
-            json: accumulatedJson.length,
-            streamed: sequence,
+        const decision = requireRouterDecision({ finalized, deadlineExpired });
+        if (deadlineExpired) {
+          log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
+            agentId: params.agentId,
+            action: decision.action,
+            timeoutMs: completionTimeoutMs,
+            chunksReceived: chunkCount,
+            jsonLength: accumulatedJson.length,
           });
         }
-      }
 
-      const deadlineExpired = completionDeadline.expired();
-      const finalized = finalizeRouterDecisionFromStream({
-        structuredOutput,
-        accumulatedJson,
-        deadlineExpired,
-      });
-      const decision = requireRouterDecision({ finalized, deadlineExpired });
-      if (deadlineExpired) {
-        log.warn('[RouterLLM] Completion deadline recovered a closed decision', {
-          agentId: params.agentId,
-          action: decision.action,
-          timeoutMs: completionTimeoutMs,
-          chunksReceived: chunkCount,
-          jsonLength: accumulatedJson.length,
-        });
+        return {
+          decision,
+          fullJson: finalized.fullJson,
+          deadlineRecovered: deadlineExpired,
+          usageData,
+          actualModel,
+          chunkCount,
+          reasoningLength: accumulatedReasoning.length,
+        };
+      } finally {
+        accumulateChatLlmUsage(usage, attemptUsage);
       }
-
-      return {
-        decision,
-        fullJson: finalized.fullJson,
-        deadlineRecovered: deadlineExpired,
-        usageData,
-        actualModel,
-        chunkCount,
-        reasoningLength: accumulatedReasoning.length,
-      };
     },
   });
 

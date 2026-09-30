@@ -116,6 +116,27 @@ function testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity(): void {
     'search deadline must not invent a query'
   );
   assert.equal(deadlineRouterFallback(direct, 'unused'), null);
+  assert.equal(
+    deadlineRouterFallback([{ role: 'USER', text: "What's the weather today?" }], 'unused'),
+    null,
+    'today/weather must not invent a Temporal workflow'
+  );
+  assert.equal(
+    deadlineRouterFallback(
+      [{ role: 'USER', text: 'Research the latest latency numbers' }],
+      'unused'
+    ),
+    null,
+    'research/latest must not invent a Temporal workflow'
+  );
+  assert.equal(
+    deadlineRouterFallback(
+      [{ role: 'USER', text: 'agent mode: inspect the files' }],
+      'inspect the files'
+    )?.action,
+    'start_superintelligence',
+    'explicit agent mode still escalates after a deadline miss'
+  );
 }
 
 async function testMismatchAbortsAndDiscardsWithoutSideEffects(): Promise<void> {

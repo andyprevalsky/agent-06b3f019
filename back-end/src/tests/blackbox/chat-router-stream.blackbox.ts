@@ -43,6 +43,11 @@ import {
 } from '../../providers/chat/chatStructuredRetry';
 import { requireGeneratorParsedJson } from '../../providers/chat/generatorLlm';
 import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import {
+  accumulateChatLlmUsage,
+  applyChunkUsage,
+  emptyChatLlmUsage,
+} from '../../providers/chat/routerLlm';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -264,6 +269,29 @@ async function testNonTransientErrorsDoNotRetry(): Promise<void> {
   assert.equal(attempts, 1, 'non-transient errors must not consume the regenerate budget');
 }
 
+function testUsageAccumulatesAcrossAttempts(): void {
+  const usage = emptyChatLlmUsage();
+  const first = emptyChatLlmUsage();
+  applyChunkUsage(first, {
+    prompt_tokens: 10,
+    completion_tokens: 4,
+    total_tokens: 14,
+    cache_read_input_tokens: 2,
+  });
+  accumulateChatLlmUsage(usage, first);
+  const second = emptyChatLlmUsage();
+  applyChunkUsage(second, {
+    prompt_tokens: 8,
+    completion_tokens: 3,
+    total_tokens: 11,
+  });
+  accumulateChatLlmUsage(usage, second);
+  assert.equal(usage.prompt_tokens, 18);
+  assert.equal(usage.completion_tokens, 7);
+  assert.equal(usage.total_tokens, 25);
+  assert.equal(usage.cache_read_input_tokens, 2);
+}
+
 function testPerAttemptBoundUnchanged(): void {
   assert.equal(
     DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
@@ -316,8 +344,12 @@ function testRetryResetsPerAttemptStreamState(): void {
     'router must still hedge Fast Mode cache after a live timeout'
   );
   assert.ok(
-    router.indexOf('usage.prompt_tokens = 0', routerAttempt) > routerAttempt,
-    'router must reset usage so a silent retry cannot keep the failed attempt'
+    router.indexOf('const attemptUsage = emptyChatLlmUsage()', routerAttempt) > routerAttempt,
+    'router must snapshot usage per attempt instead of zeroing the shared totals'
+  );
+  assert.ok(
+    router.indexOf('accumulateChatLlmUsage(usage, attemptUsage)', routerAttempt) > routerAttempt,
+    'router must keep failed-attempt tokens in the billed total'
   );
   assert.ok(
     generator.indexOf('fcCacheWon = false', generatorAttempt) > generatorAttempt,
@@ -334,8 +366,14 @@ function testRetryResetsPerAttemptStreamState(): void {
     'generator must still hedge Fast Mode cache after a live timeout'
   );
   assert.ok(
-    generator.indexOf('usage.prompt_tokens = 0', generatorAttempt) > generatorAttempt,
-    'generator must reset usage so a silent retry cannot keep the failed attempt'
+    generator.indexOf('const attemptUsage = emptyChatLlmUsage()', generatorAttempt) >
+      generatorAttempt,
+    'generator must snapshot usage per attempt instead of zeroing the shared totals'
+  );
+  assert.ok(
+    generator.indexOf('accumulateChatLlmUsage(usage, attemptUsage)', generatorAttempt) >
+      generatorAttempt,
+    'generator must keep failed-attempt tokens in the billed total'
   );
 }
 
@@ -383,6 +421,24 @@ function testCallSitesUseSharedRegenerate(): void {
     /miss\.kind === 'deadline'/,
     'deadline misses must not start a second 3s router bound'
   );
+  assert.match(
+    speculation,
+    /EXPLICIT_AGENT_INTENT/,
+    'deadline fallback must match only explicit agent/plan/execute wording'
+  );
+  const requireDecision = router.indexOf('requireRouterDecision({ finalized, deadlineExpired })');
+  const deadlineClose = router.indexOf('!finalized.decision && deadlineExpired');
+  assert.ok(
+    deadlineClose > 0 && deadlineClose < requireDecision,
+    'deadline miss must close open streams before throwing'
+  );
+  const closeWindow = router.slice(deadlineClose, requireDecision);
+  assert.match(closeWindow, /'ERROR'/, 'deadline miss must ERROR any IN_PROGRESS web_search');
+  assert.match(
+    closeWindow,
+    /clearOnDone: true/,
+    'deadline miss must close ASSISTANT_STREAM so the thinking bubble does not hang'
+  );
 }
 
 async function main(): Promise<void> {
@@ -398,7 +454,8 @@ async function main(): Promise<void> {
   testPerAttemptBoundUnchanged();
   testCallSitesUseSharedRegenerate();
   testRetryResetsPerAttemptStreamState();
-  process.stdout.write('PASS chat-router-stream (12 cases)\n');
+  testUsageAccumulatesAcrossAttempts();
+  process.stdout.write('PASS chat-router-stream (13 cases)\n');
 }
 
 void main().catch((error: unknown) => {

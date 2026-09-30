@@ -25,7 +25,12 @@ import {
   isValidFilePointer,
   type MultimodalContentBlock,
 } from './chatMultimodal';
-import type { ChatLlmUsage } from './routerLlm';
+import {
+  accumulateChatLlmUsage,
+  applyChunkUsage,
+  emptyChatLlmUsage,
+  type ChatLlmUsage,
+} from './routerLlm';
 import type { ChatProviderRoute } from './phaseModels';
 import { runAfterStreamCommit, type TransactionalStreamGate } from './earlyDirectGenerator';
 import {
@@ -359,15 +364,7 @@ async function callGeneratorLlmCore(
     isGpt = false;
   let sequence = 1;
   let lastStreamedText = '';
-  const usage: ChatLlmUsage = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-    model: '',
-    from_fast_cache: false,
-  };
+  const usage = emptyChatLlmUsage();
 
   const attempted = await regenerateOnChatStructuredMiss({
     callSite: 'chat_generator',
@@ -376,136 +373,135 @@ async function callGeneratorLlmCore(
       lastStreamedText = '';
       const skipFastCache = attempt > 1 && fcCacheWon;
       fcCacheWon = false;
-      usage.prompt_tokens = 0;
-      usage.completion_tokens = 0;
-      usage.total_tokens = 0;
-      usage.cache_creation_input_tokens = 0;
-      usage.cache_read_input_tokens = 0;
-      if (attempt > 1) {
-        await attention.cancel();
-        attention = createGeneratorAttentionLifecycle({
-          agentId: params.agentId,
-          streamGate: params.streamGate,
-        });
-        setAttention(attention);
-        await attention.start();
-      }
-      // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
-      // After a cache-won miss, skip cache so the same invalid JSON is not replayed.
-      // A live timeout still hedges cache on retry.
-      let stream: AsyncIterable<CompletionChunk>;
-      if (fcKey && fastModeRead && !skipFastCache) {
-        stream = createGeneratorCacheStream({
-          agentId: params.agentId,
-          cacheKey: fcKey,
-          createLive: (abortSignal) => createLiveStream(abortSignal),
-          createCached: syntheticChatStream,
-          goal: fastMode.goal,
-          onWinner: (winner) => {
-            fcCacheWon = winner === 'cache';
-          },
-        });
-      } else {
-        if (fcKey) {
-          log.info('fast_cache.chat_generator_write_only', { agentId: params.agentId, key: fcKey });
-        }
-        stream = await createLiveStream();
-      }
-
-      // Track reasoning and JSON content separately (like agent worker)
-      let accumulatedReasoning = '', // From delta.reasoning (thinking models)
-        accumulatedJson = ''; // From delta.content (JSON structure)
-      const structuredOutput = new StructuredOutputAccumulator();
-      let chunkCount = 0;
-      let actualModel = '';
-      let usageData:
-        | {
-            prompt_tokens: number;
-            completion_tokens: number;
-            cache_creation_input_tokens?: number;
-            cache_read_input_tokens?: number;
-            finish_reason?: string;
-          }
-        | undefined;
-
-      // Process stream chunks - stream every delta immediately
-      for await (const chunk of stream) {
-        chunkCount++;
-
-        // Detect user's Claude token usage from "-claude" suffix in actual_model
-        if (chunk.actual_model) actualModel = chunk.actual_model;
-        if (chunk.usage)
-          usageData = {
-            ...chunk.usage,
-            finish_reason: chunk.choices[0]?.finish_reason ?? undefined,
-          };
-        if (!isClaude && actualModel?.endsWith('-claude')) {
-          isClaude = true;
-        }
-        if (!isGpt && actualModel?.endsWith('-gpt')) {
-          isGpt = true;
-        }
-
-        // Get delta from chunk
-        const delta = chunk.choices[0]?.delta;
-
-        // Handle reasoning from thinking models (delta.reasoning)
-        const reasoningDelta = delta?.reasoning || '';
-        if (reasoningDelta) {
-          accumulatedReasoning += reasoningDelta;
-        }
-
-        // Handle JSON content (delta.content)
-        const contentDelta = delta?.content || '';
-        if (contentDelta) {
-          structuredOutput.addCompletionChunk(chunk);
-          accumulatedJson = structuredOutput.currentText();
-        }
-
-        const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
-
-        if (streamableText && streamableText !== lastStreamedText) {
-          const newText = streamableText.slice(lastStreamedText.length);
-          lastStreamedText = streamableText;
-
-          // Stream every delta immediately
-          if (newText) {
-            await emitAssistantStream(newText, false, sequence++, isClaude, isGpt);
-          }
-        }
-
-        const accumulatedResponse = extractPartialStringField(accumulatedJson, 'response');
-        if (accumulatedResponse) await attention.update(accumulatedResponse);
-
-        if (chunk.usage) {
-          usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
-          usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
-          usage.total_tokens = chunk.usage.total_tokens ?? 0;
-          usage.cache_creation_input_tokens = chunk.usage.cache_creation_input_tokens ?? 0;
-          usage.cache_read_input_tokens = chunk.usage.cache_read_input_tokens ?? 0;
-        }
-
-        // Log progress every 50 chunks
-        if (chunkCount % 50 === 0) {
-          log.info('[GeneratorLLM] Progress', {
-            chunk: chunkCount,
-            reasoning: accumulatedReasoning.length,
-            json: accumulatedJson.length,
-            streamed: sequence,
+      const attemptUsage = emptyChatLlmUsage();
+      try {
+        if (attempt > 1) {
+          await attention.cancel();
+          attention = createGeneratorAttentionLifecycle({
+            agentId: params.agentId,
+            streamGate: params.streamGate,
           });
+          setAttention(attention);
+          await attention.start();
         }
-      }
+        // Demo Fast Mode only: wait for cache before Cerebras so a remote hit cannot lose to live.
+        // After a cache-won miss, skip cache so the same invalid JSON is not replayed.
+        // A live timeout still hedges cache on retry.
+        let stream: AsyncIterable<CompletionChunk>;
+        if (fcKey && fastModeRead && !skipFastCache) {
+          stream = createGeneratorCacheStream({
+            agentId: params.agentId,
+            cacheKey: fcKey,
+            createLive: (abortSignal) => createLiveStream(abortSignal),
+            createCached: syntheticChatStream,
+            goal: fastMode.goal,
+            onWinner: (winner) => {
+              fcCacheWon = winner === 'cache';
+            },
+          });
+        } else {
+          if (fcKey) {
+            log.info('fast_cache.chat_generator_write_only', {
+              agentId: params.agentId,
+              key: fcKey,
+            });
+          }
+          stream = await createLiveStream();
+        }
 
-      const fullJson = structuredOutput.currentText();
-      const parsed = requireGeneratorParsedJson(fullJson);
-      return {
-        fullJson,
-        parsed,
-        usageData,
-        actualModel,
-        chunkCount,
-        reasoningLength: accumulatedReasoning.length,
-      };
+        // Track reasoning and JSON content separately (like agent worker)
+        let accumulatedReasoning = '', // From delta.reasoning (thinking models)
+          accumulatedJson = ''; // From delta.content (JSON structure)
+        const structuredOutput = new StructuredOutputAccumulator();
+        let chunkCount = 0;
+        let actualModel = '';
+        let usageData:
+          | {
+              prompt_tokens: number;
+              completion_tokens: number;
+              cache_creation_input_tokens?: number;
+              cache_read_input_tokens?: number;
+              finish_reason?: string;
+            }
+          | undefined;
+
+        // Process stream chunks - stream every delta immediately
+        for await (const chunk of stream) {
+          chunkCount++;
+
+          // Detect user's Claude token usage from "-claude" suffix in actual_model
+          if (chunk.actual_model) actualModel = chunk.actual_model;
+          if (chunk.usage)
+            usageData = {
+              ...chunk.usage,
+              finish_reason: chunk.choices[0]?.finish_reason ?? undefined,
+            };
+          if (!isClaude && actualModel?.endsWith('-claude')) {
+            isClaude = true;
+          }
+          if (!isGpt && actualModel?.endsWith('-gpt')) {
+            isGpt = true;
+          }
+
+          // Get delta from chunk
+          const delta = chunk.choices[0]?.delta;
+
+          // Handle reasoning from thinking models (delta.reasoning)
+          const reasoningDelta = delta?.reasoning || '';
+          if (reasoningDelta) {
+            accumulatedReasoning += reasoningDelta;
+          }
+
+          // Handle JSON content (delta.content)
+          const contentDelta = delta?.content || '';
+          if (contentDelta) {
+            structuredOutput.addCompletionChunk(chunk);
+            accumulatedJson = structuredOutput.currentText();
+          }
+
+          const streamableText = extractStreamableReasoning(accumulatedReasoning, accumulatedJson);
+
+          if (streamableText && streamableText !== lastStreamedText) {
+            const newText = streamableText.slice(lastStreamedText.length);
+            lastStreamedText = streamableText;
+
+            // Stream every delta immediately
+            if (newText) {
+              await emitAssistantStream(newText, false, sequence++, isClaude, isGpt);
+            }
+          }
+
+          const accumulatedResponse = extractPartialStringField(accumulatedJson, 'response');
+          if (accumulatedResponse) await attention.update(accumulatedResponse);
+
+          if (chunk.usage) {
+            applyChunkUsage(attemptUsage, chunk.usage);
+          }
+
+          // Log progress every 50 chunks
+          if (chunkCount % 50 === 0) {
+            log.info('[GeneratorLLM] Progress', {
+              chunk: chunkCount,
+              reasoning: accumulatedReasoning.length,
+              json: accumulatedJson.length,
+              streamed: sequence,
+            });
+          }
+        }
+
+        const fullJson = structuredOutput.currentText();
+        const parsed = requireGeneratorParsedJson(fullJson);
+        return {
+          fullJson,
+          parsed,
+          usageData,
+          actualModel,
+          chunkCount,
+          reasoningLength: accumulatedReasoning.length,
+        };
+      } finally {
+        accumulateChatLlmUsage(usage, attemptUsage);
+      }
     },
   });
 
