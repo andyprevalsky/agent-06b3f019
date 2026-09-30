@@ -3475,3 +3475,5 @@
 {"task": "claude-code-agent", "duration_seconds": 57.6, "cost_cents": 5.0, "timestamp": "2026-09-30T02:30:33.235473+00:00", "agent_id": "378586c4-c6fc-42c8-89dc-3301666c10c7"}
 {"task": "agent-payment-test-shop", "duration_seconds": 111.4, "cost_cents": 7.0, "timestamp": "2026-09-30T02:40:33.932756+00:00", "agent_id": "a814ae4a-8025-4b19-a299-253d27c3847c"}
 {"task": "agent-payment-abandonment", "duration_seconds": 224.2, "cost_cents": 0.0, "timestamp": "2026-09-30T02:40:33.932756+00:00", "agent_id": "8eb92fde-b47a-40ac-a77e-184b0fe209c3"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 102.1, "cost_cents": 4.0, "timestamp": "2026-09-30T02:56:53.583711+00:00", "agent_id": "ce4e834d-d066-477e-b06e-67b077ee4fba"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 166.4, "cost_cents": 9.0, "timestamp": "2026-09-30T02:56:53.583711+00:00", "agent_id": "2bb6afbe-4bae-44b8-acb1-e1f7ad67d317"}

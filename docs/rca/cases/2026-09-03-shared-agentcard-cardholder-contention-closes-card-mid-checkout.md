@@ -173,4 +173,18 @@ the idempotency path in that run; the shared cardholder still needs provider
 isolation to prevent unrelated workspaces from affecting future runs.
 
 The full four-task AgentCard gate then exposed two more browser-rendering
-variants (`20260930_025123_agent-payment-test-shop,agent-payment-setup-resume,agent-payment-idempotent-abandonment,agent-payment-abandonment.json`): setup/resume sent `http://placehold.co/...` for the three image URLs shown with `https://` in the checkout fixture, and the idempotency task's second browser appended `x1 (Rose Labs Test Payment)` to each product title. Its two fingerprints differed, giving two purchases. The payment payload now upgrades only the known placeholder image host to HTTPS; both fingerprint builders strip a quantity-plus-merchant suffix only when it matches the separate quantity and merchant fields. Replaying the archived requests now produces secure receipt image URLs and one fingerprint. A full four-task passing gate is still required before closing this case.
+variants (`20260930_025123_agent-payment-test-shop,agent-payment-setup-resume,agent-payment-idempotent-abandonment,agent-payment-abandonment.json`):
+setup/resume sent `http://placehold.co/...` for the three image URLs expected
+with `https://` in the checkout fixture, and the idempotency task's second
+browser appended `x1 (Rose Labs Test Payment)` to each product title. Its two
+fingerprints differed, giving two purchases. The payment payload now upgrades
+only the known placeholder image host to HTTPS; both fingerprint builders
+strip a quantity-plus-merchant suffix only when it matches the separate
+quantity and merchant fields. Replaying the archived requests now produces
+secure receipt image URLs and one fingerprint.
+
+The focused live rerun (`1c4ebfa8-63db-4e4a-a468-e4749d69e6dc`) passed both
+affected tasks. Setup/resume completed onboarding and checkout; idempotency's
+second browser returned `reusable: true` for fingerprint `9b7392f8…` and the
+same card ID `card_3f56552739e49626483f0248`. Its terminal lifecycle had one
+purchase, one funding, and one card. The four-task deploy gate remains pending.
