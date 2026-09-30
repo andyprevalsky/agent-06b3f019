@@ -524,7 +524,9 @@ def run_fake_driver(mdir):
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
-        deadline = time.time() + 30
+        # Worker cloning and staging precede this readiness marker. Allow the
+        # fixture to observe that work within the controller's 240s bound.
+        deadline = time.time() + 120
         held = False
         while time.time() < deadline:
             hold_files = glob.glob(
