@@ -404,6 +404,9 @@ export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# OAuth start tests only inspect the generated consent URL. Keep their client
+# separate from the verified production client, which local development rejects.
+export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # The isolated backend must not inherit a developer's workspace tunnel. E2B
 # cannot reach localhost, and stale ngrok URLs turn the direct Codex smoke into

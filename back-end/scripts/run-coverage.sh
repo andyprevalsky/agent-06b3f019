@@ -291,6 +291,9 @@ export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# The instrumented backend starts independently of run-blackbox-tests.sh.
+# OAuth URL cases need the same synthetic local client, never the production one.
+export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # Only the weekly admin-health case asserts real Amplitude counts. Keep that
 # strict live probe enabled while preventing non-asserting shape cases from

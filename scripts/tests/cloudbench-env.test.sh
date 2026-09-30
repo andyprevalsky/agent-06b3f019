@@ -1717,33 +1717,37 @@ require_text "$HELPER_SRC" \
   rc=0
   cloudbench_tcp_listener_present not-a-port || rc=$?
   [ "$rc" -eq 2 ] || fail "bad port arg must exit 2 (got $rc)"
-  # Occupy free_port briefly and assert exit 0.
-  python3 - "$free_port" <<'PY' &
+  # Bind an OS-assigned port and publish readiness. A fixed port and a two-second
+  # listener race with other workspaces and slow Python startup under coverage.
+  occupied_port_file="$TMP_ROOT/occupied-port"
+  python3 - "$occupied_port_file" <<'PY' &
 import socket, sys, time
-port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", port))
+s.bind(("127.0.0.1", 0))
 s.listen(1)
-time.sleep(2)
+with open(sys.argv[1], "w") as ready:
+    ready.write(str(s.getsockname()[1]))
+time.sleep(10)
 s.close()
 PY
   listener_pid=$!
   trap 'kill "$listener_pid" 2>/dev/null || true' RETURN
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if cloudbench_tcp_listener_present "$free_port"; then
-      break
-    fi
+  for _ in $(seq 1 100); do
+    [ -s "$occupied_port_file" ] && break
+    kill -0 "$listener_pid" 2>/dev/null || fail "occupied port listener exited before ready"
     sleep 0.05
   done
-  cloudbench_tcp_listener_present "$free_port" \
+  [ -s "$occupied_port_file" ] || fail "occupied port listener did not become ready"
+  occupied_port="$(cat "$occupied_port_file")"
+  cloudbench_tcp_listener_present "$occupied_port" \
     || fail "occupied port probe must exit 0"
   kill "$listener_pid" 2>/dev/null || true
   wait "$listener_pid" 2>/dev/null || true
 
   # `if probe; then` must not swallow exit 1: a free preferred port is allocatable.
-  selected="$(cloudbench_select_central_hub_port "$free_port" "/tmp/no-such-hub-root")"
-  [ "$selected" = "$free_port" ] || fail "free preferred port must be selected (got ${selected:-empty})"
+  selected="$(cloudbench_select_central_hub_port "$occupied_port" "/tmp/no-such-hub-root")"
+  [ "$selected" = "$occupied_port" ] || fail "free preferred port must be selected (got ${selected:-empty})"
 ) || fail "TCP listener probe exit-code contract broken"
 
 # Behavioral: select_central_hub_port must return a free preferred port.
