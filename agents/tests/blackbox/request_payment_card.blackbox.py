@@ -530,6 +530,31 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     )
 
 
+def test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo():
+    """Only the ASCII suffixes the backend recognizes may be removed."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    bare = _sample_tool_call()
+    bare["line_items"][0]["name"] = "Aurora Notebook"
+
+    for suffix in (" x١", " x١ (Example Shop)", " - ١ x $12.00"):
+        echoed = _sample_tool_call()
+        echoed["line_items"][0]["name"] = f"Aurora Notebook{suffix}"
+        assert (
+            normalize_payment_payload(echoed, "user-123")["fingerprint"]
+            != normalize_payment_payload(bare, "user-123")["fingerprint"]
+        )
+
+    bare["merchant"] = "Straße"
+    echoed = _sample_tool_call()
+    echoed["merchant"] = "Straße"
+    echoed["line_items"][0]["name"] = "Aurora Notebook x1 (STRASSE)"
+    assert (
+        normalize_payment_payload(echoed, "user-123")["fingerprint"]
+        != normalize_payment_payload(bare, "user-123")["fingerprint"]
+    )
+
+
 def test_fingerprint_keeps_material_receipt_changes_distinct():
     from domains.request_payment_card.service import normalize_payment_payload
 
@@ -969,6 +994,10 @@ async def run_all_tests():
     result.record(
         "fingerprint_quantity_echo_stability",
         test_fingerprint_ignores_trailing_quantity_echo_on_item_name,
+    )
+    result.record(
+        "fingerprint_non_ascii_suffix_distinct",
+        test_fingerprint_preserves_non_ascii_suffixes_and_distinct_merchant_echo,
     )
     result.record(
         "fingerprint_material_changes_distinct",

@@ -2248,6 +2248,14 @@ class AgentWorkflow:
             get_children_tokens=self._get_children_tokens,
             on_tokens=self._on_tokens,  # Real-time cost tracking and limit checking
             max_context_tokens=self.max_context_tokens,
+            grounded_child_winddown_at=(
+                # The first Explore can consume its full 150-second parent wait.
+                # Arm before that return so the child gets a synthesis turn
+                # instead of starting another 150-second search.
+                self.start_time + timedelta(seconds=120)
+                if self.parent_agent_id and self.start_time and not self.fast_mode_cache_enabled
+                else None
+            ),
             reasoning_max_tokens=reasoning_max_tokens,
             skip_blueprint_query=True,
             response_schema=response_schema,

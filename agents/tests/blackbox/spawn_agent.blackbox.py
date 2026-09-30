@@ -3052,6 +3052,44 @@ async def test_spawn_explore_turn_limit_returns_parallel_evidence():
         assert any(f"{city} population evidence" in item for item in payload["tool_call_results"])
 
 
+async def test_spawn_explore_turn_limit_uses_recent_successes_only():
+    """A failed final search cannot enter the grounded partial answer."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def search_result(**kwargs):
+        query = kwargs["tool_call"]["query"]
+        return {"error": "search provider unavailable"} if query == "failed" else {"result": query}
+
+    search = MagicMock()
+    search.execute_tool = AsyncMock(side_effect=search_result)
+
+    async def fake_run_agent(**kwargs):
+        for query in ("stale source", "older source", "recent source", "Tokyo 14,303,513", "failed"):
+            await kwargs["execute_tool"]("web_search", {"query": query}, f"tc-{query}")
+        return {"status": "max_iterations", "final_response": "Tokyo preliminary"}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=search),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="tokyo-recent-sources",
+            user_id="u-7",
+            goal="Research Tokyo",
+            model="rose-1-flash",
+        )
+
+    assert result["status"] == "completed"
+    assert "Tokyo 14,303,513" in result["result"]
+    assert "recent source" in result["result"]
+    assert "stale source" not in result["result"]
+    assert "search provider unavailable" not in result["result"]
+    assert any("search provider unavailable" in item for item in result["tool_call_results"])
+
+
 async def test_spawn_explore_does_not_preempt_normal_winddown():
     """A slow final turn can finish without an activity-side 135-second cutoff."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -4650,6 +4688,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_turn_limit_returns_parallel_evidence",
         test_spawn_explore_turn_limit_returns_parallel_evidence,
+    )
+    await r.record_async(
+        "explore_turn_limit_recent_successes_only",
+        test_spawn_explore_turn_limit_uses_recent_successes_only,
     )
     await r.record_async(
         "explore_does_not_preempt_normal_winddown",

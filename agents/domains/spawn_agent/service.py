@@ -433,15 +433,19 @@ async def spawn_explore_agent_activity(
     def _heartbeat_payload() -> Dict[str, Any]:
         # Keep the leaf's own interpretation and the newest successful sources.
         # The first 12 KB of raw search output often predates the decisive find.
-        recent = []
-        for entry in successful_tool_results[-2:]:
-            recent.append(entry if len(entry) <= 2500 else f"{entry[:2100]}\n...\n{entry[-400:]}")
+        recent = _recent_successful_evidence(2)
         compiled = "\n\n".join(filter(None, (latest_assistant_text[:2000], *recent)))
         return {
             "result": compiled[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
             "tool_call_results": recent,
             "has_usable_evidence": has_successful_tool_evidence,
         }
+
+    def _recent_successful_evidence(limit: int) -> List[str]:
+        return [
+            entry if len(entry) <= 2500 else f"{entry[:2100]}\n...\n{entry[-400:]}"
+            for entry in successful_tool_results[-limit:]
+        ]
 
     async def _send_checkpoint(checkpoint: Dict[str, Any]) -> None:
         if has_successful_tool_evidence and not _oai_demo:
@@ -893,12 +897,19 @@ async def spawn_explore_agent_activity(
     # but leaves result empty, the parent receives no evidence. Synthesize a
     # payload from accumulated tool results so the parent always has grounded data
     # to act on instead of hallucinating or re-spawning sub-agents.
-    final_response = compile_explore_wrap_up(
-        result.get("final_response", "") or "",
-        tool_call_results,
+    # At the turn cap, only successful recent tools can ground a partial answer.
+    # Raw results include failures and old searches that may precede the answer.
+    fallback_results = (
+        _recent_successful_evidence(3)
+        if result.get("status") == "max_iterations" and has_successful_tool_evidence
+        else tool_call_results
     )
+    response_text = result.get("final_response", "") or ""
     if result.get("status") == "max_iterations" and has_successful_tool_evidence:
-        gathered = compile_explore_wrap_up("", tool_call_results)
+        response_text = response_text[:2000]
+    final_response = compile_explore_wrap_up(response_text, fallback_results)
+    if result.get("status") == "max_iterations" and has_successful_tool_evidence:
+        gathered = compile_explore_wrap_up("", fallback_results)
         if gathered and gathered not in final_response:
             final_response = f"{final_response}\n\nCollected evidence:\n{gathered}".strip()
             final_response = final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET]

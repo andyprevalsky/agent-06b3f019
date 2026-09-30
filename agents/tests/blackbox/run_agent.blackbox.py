@@ -38,6 +38,8 @@ async def _run_single_iteration(
     verifier_structured_response=None,
     verifier_usage=None,
     winddown_window=0,
+    grounded_child_winddown_at=None,
+    llm_messages_seen=None,
     response_schema=None,
     llm_tool_calls_sequence=None,
     llm_tool_calls_factory=None,
@@ -105,6 +107,8 @@ async def _run_single_iteration(
         default_execute_tool = default_mock_execute_tool
 
     async def mock_call_llm_structured_streaming(**kwargs):
+        if llm_messages_seen is not None:
+            llm_messages_seen.append(list(kwargs.get("messages") or []))
         if llm_response_models is not None:
             llm_response_models.append(kwargs["response_model"])
         if llm_auth_calls is not None:
@@ -177,6 +181,7 @@ async def _run_single_iteration(
             max_iterations=max_iterations,
             iteration_offset=iteration_offset,
             winddown_window=winddown_window,
+            grounded_child_winddown_at=grounded_child_winddown_at,
             skip_verification=skip_verification,
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
@@ -2231,6 +2236,115 @@ async def test_winddown_disabled_by_default():
     assert _count_winddown_msgs(result["context"]) == 0
 
 
+async def test_child_research_winddown_waits_for_returned_evidence():
+    """A slow Explore call finishes before the child is asked to complete."""
+    pending_messages = []
+    tool_events = []
+    llm_messages = []
+
+    async def execute_tool(tool_name, tool_args, tool_call_id):
+        tool_events.append(f"{tool_name}:start")
+        if tool_name == "spawn_agent":
+            await asyncio.sleep(0.01)
+            pending_messages.append(
+                {
+                    "role": "TOOL",
+                    "text": "Official Tokyo population: 14296683",
+                    "timestamp": "2026-09-30T18:40:54Z",
+                    "metadata": {
+                        "toolName": "spawn_agent",
+                        "agentType": "explore",
+                        "toolStatus": "FINISHED",
+                        "fullGoal": "Tokyo population",
+                        "toolCallId": tool_call_id,
+                    },
+                }
+            )
+        tool_events.append(f"{tool_name}:finish")
+        return {"message": "done"}
+
+    async def poll_messages(_last_checked):
+        messages = list(pending_messages)
+        pending_messages.clear()
+        return messages
+
+    result, _, _ = await _run_single_iteration(
+        [],
+        [],
+        initial_context=[{"role": "USER", "text": "Find Tokyo's population", "timestamp": "2026-09-30T18:34:46Z"}],
+        max_iterations=3,
+        skip_verification=True,
+        grounded_child_winddown_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        llm_tool_calls_sequence=[
+            [{"tool": "spawn_agent", "type": "explore", "goal": "Tokyo population"}],
+            [{"tool": "attempt_completion"}],
+        ],
+        llm_messages_seen=llm_messages,
+        execute_tool_override=execute_tool,
+        poll_messages_override=poll_messages,
+    )
+
+    assert result["status"] == "completed"
+    assert tool_events == ["spawn_agent:start", "spawn_agent:finish", "attempt_completion:start", "attempt_completion:finish"]
+    assert not any("Do not search further" in str(msg) for msg in llm_messages[0])
+    assert any("Do not search further" in str(msg) for msg in llm_messages[1])
+    assert sum("already received grounded Explore research" in (msg.get("text") or "") for msg in result["context"]) == 1
+
+
+async def test_child_research_winddown_requires_successful_evidence():
+    """An error or empty Explore chip cannot be mistaken for grounded research."""
+    llm_messages = []
+    context = [
+        {"role": "USER", "text": "Find Tokyo's population", "timestamp": "2026-09-30T18:34:46Z"},
+        {
+            "role": "TOOL",
+            "text": "Explore timed out before usable evidence was collected.",
+            "timestamp": "2026-09-30T18:40:54Z",
+            "metadata": {"toolName": "spawn_agent", "agentType": "explore", "toolStatus": "ERROR"},
+        },
+    ]
+    result, _, executed = await _run_single_iteration(
+        [{"tool": "web_search", "query": "Tokyo population"}],
+        [("web_search", "tc-1", 1.0)],
+        initial_context=context,
+        max_iterations=1,
+        skip_verification=True,
+        grounded_child_winddown_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        llm_messages_seen=llm_messages,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert [tool["tool_name"] for tool in executed] == ["web_search"]
+    assert not any("Do not search further" in str(msg) for msg in llm_messages[0])
+
+
+async def test_child_research_winddown_ignores_intermediate_explore_posts():
+    """Explore thinking chips do not signal that research has returned."""
+    llm_messages = []
+    context = [
+        {"role": "USER", "text": "Find Tokyo's population", "timestamp": "2026-09-30T18:34:46Z"},
+        {
+            "role": "TOOL",
+            "text": "A search found promising pages; checking the source now.",
+            "timestamp": "2026-09-30T18:40:54Z",
+            "metadata": {"toolName": "spawn_agent", "agentType": "explore", "toolStatus": "FINISHED"},
+        },
+    ]
+    result, _, executed = await _run_single_iteration(
+        [{"tool": "web_search", "query": "Tokyo population"}],
+        [("web_search", "tc-1", 1.0)],
+        initial_context=context,
+        max_iterations=1,
+        skip_verification=True,
+        grounded_child_winddown_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        llm_messages_seen=llm_messages,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert [tool["tool_name"] for tool in executed] == ["web_search"]
+    assert not any("Do not search further" in str(msg) for msg in llm_messages[0])
+
+
 async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
     """Regression for the 2026-07-05 prod worker-starvation incident.
 
@@ -2292,7 +2406,15 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
                 verifier_prompt_generator=mock_system_prompt,
                 model="rose-labs/rose-1-flash",
                 tools=["attempt_completion"],
-                initial_context=[{"role": "USER", "text": "hi", "timestamp": "2024-01-01T00:00:00Z"}],
+                initial_context=[
+                    {"role": "USER", "text": "hi", "timestamp": "2024-01-01T00:00:00Z"},
+                    {
+                        "role": "TOOL",
+                        "text": "Official Tokyo population: 14296683",
+                        "timestamp": "2024-01-01T00:00:01Z",
+                        "metadata": {"toolName": "spawn_agent", "agentType": "explore", "toolStatus": "FINISHED"},
+                    },
+                ],
                 is_inside_temporal_activity=True,
                 check_paused=always_paused,
                 wait_for_messages=instant_wait,
@@ -2300,6 +2422,7 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
                 execute_tool=mock_execute_tool,
                 build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
                 max_iterations=10_000,
+                grounded_child_winddown_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
                 skip_verification=True,
                 skip_status_updates=True,
             ),
@@ -2518,6 +2641,18 @@ async def run_all_tests():
     )
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
+    await r.record_async(
+        "child_research_winddown_waits_for_returned_evidence",
+        test_child_research_winddown_waits_for_returned_evidence,
+    )
+    await r.record_async(
+        "child_research_winddown_requires_successful_evidence",
+        test_child_research_winddown_requires_successful_evidence,
+    )
+    await r.record_async(
+        "child_research_winddown_ignores_intermediate_posts",
+        test_child_research_winddown_ignores_intermediate_explore_posts,
+    )
     await r.record_async(
         "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
         test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,

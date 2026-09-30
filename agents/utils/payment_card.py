@@ -114,12 +114,12 @@ def _canonicalize_review_count(value: str) -> str:
     return re.sub(r"(?<=\d),(?=\d)", "", value)
 
 
-_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+(?:-\s*)?x(\d+)\s*$", re.IGNORECASE)
+_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+(?:-\s*)?x([0-9]+)\s*$", re.IGNORECASE)
 _LINE_ITEM_QTY_MERCHANT_SUFFIX_RE = re.compile(
-    r"\s+(?:-\s*)?x(\d+)\s+\(([^()]*)\)\s*$", re.IGNORECASE
+    r"\s+(?:-\s*)?x([0-9]+)\s+\(([^()]*)\)\s*$", re.IGNORECASE
 )
 _LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
-    r"\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$", re.IGNORECASE
+    r"\s+-\s+([0-9]+)\s+x\s+\$([0-9]+)\.([0-9]{2})\s*$", re.IGNORECASE
 )
 
 
@@ -141,7 +141,7 @@ def _canonicalize_line_item_name(
     if (
         merchant_echo is not None
         and int(merchant_echo.group(1)) == qty
-        and merchant_echo.group(2).strip().casefold() == str(merchant or "").strip().casefold()
+        and merchant_echo.group(2).strip().lower() == str(merchant or "").strip().lower()
     ):
         return name[: merchant_echo.start()].rstrip()
     priced = _LINE_ITEM_PRICED_SUFFIX_RE.search(name)
