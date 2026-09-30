@@ -14671,9 +14671,13 @@ def test_write_lock_email_send_excludes_resend_controls():
     assert is_email_send_button("Send hotpot photos")
     assert is_email_send_button("Send adoption papers")
 
-    # The resend exemption stays positional: retry wording welded into another
-    # token is not a resend action.
-    assert is_email_send_button("alt-action-resend")
+    # The resend exemption stays positional: a label that sends and only later
+    # mentions resending is still a send. An id like ``alt-action-resend`` has
+    # no send word at all (agent f1ef359f: Target ``showResendMessageLink``),
+    # so it is not a send; an id with its own send word still is.
+    assert is_email_send_button("Send reply or resend later")
+    assert not is_email_send_button("alt-action-resend")
+    assert is_email_send_button("alt-action-send")
     assert is_email_send_button("Send invoice to billing@corp.com")
 
     # Each newline-delimited signal is judged on its own, so a resend label can

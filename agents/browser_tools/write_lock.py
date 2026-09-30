@@ -142,13 +142,6 @@ SUBMIT_BUTTON_EXCLUSION_PATTERNS = [
     "create account",
 ]
 
-EMAIL_SEND_BUTTON_PATTERNS = [
-    "send",
-    "send message",
-    "send email",
-    "send mail",
-]
-
 # A resend action re-issues something the site already sent; it never composes a
 # new outbound message, so it is not a write the user needs to approve. The test
 # is purely positional — the label must START with one of these — so ordinary
@@ -177,25 +170,48 @@ ONE_TIME_CODE_PATTERNS = (
     "passcode",
 )
 
-# Marketing / newsletter opt-in checkboxes ask the site to send info TO the
-# shopper. That is not an outbound message the agent composed, so it must not
-# trip the email_send write lock. Eventim checkout labels like
-# "Send me info about other shows by this organizer" previously parked the
-# agent on write_lock approval and blocked request_payment_card.
-MARKETING_OPT_IN_PATTERNS = (
-    "send me info",
-    "send me update",
-    "send me news",
-    "send me email",
-    "send me offer",
-    "send me deal",
-    "send me promo",
-    "email me about",
-    "email me info",
-    "keep me informed",
-    "subscribe to",
-    "sign me up for",
+# Bare "code" requests ("Send code", "Text me a code", "Get a new code", "Send
+# code to •••-7432") are the same one-time-code action. The trailing clause is
+# bounded so sharing content ("Send code snippet", "Send discount code to a
+# friend") still locks.
+_ONE_TIME_CODE_REQUEST_RE = re.compile(
+    r"\b(?:send|resend|get|request|email|text|sms)"
+    r"(?:\s+(?:me|us|a|an|the|new|another|my|your))*"
+    r"\s+codes?"
+    r"(?:\s+(?:again|instead|now|to|via|by)\b.*)?$"
 )
+
+# Sign-in links, password resets, and verification messages are delivered TO
+# the account being signed into, exactly like a one-time code. Matched against
+# the word-split form, so "sign-in" is written "sign in".
+ACCOUNT_SELF_DELIVERY_PATTERNS = (
+    "magic link",
+    "sign in link",
+    "login link",
+    "log in link",
+    "reset link",
+    "password reset",
+    "reset password",
+    "reset my password",
+    "verification email",
+    "verification text",
+    "verification link",
+    "verification sms",
+)
+
+# "Send me …" asks the site to send something to the shopper (receipts, order
+# texts, reminders, marketing opt-ins such as Eventim's "Send me info about
+# other shows by this organizer", which once blocked request_payment_card). The
+# phrase is removed before the leftover-send test so a co-located real send
+# ("Send me a copy and send") still locks. Opt-ins without "send" ("Subscribe
+# to", "Keep me informed") never contain a send word in the first place.
+_SEND_TO_SELF_RE = re.compile(r"\bsend me\b")
+
+# A send action is a word that STARTS with "send" (send, sendBtn → "send btn",
+# sendmsg). "send" inside another word — resend, godsend, and camelCase ids like
+# showResendMessageLink — is not a send.
+_SEND_WORD_RE = re.compile(r"\bsend")
+_SPECIFIC_EMAIL_SEND_RE = re.compile(r"\bsend (?:e ?)?mail\b")
 
 # In-product AI composers submit a prompt to the current product. That is not
 # an outbound message to a third party, so it must not trip email_send.
@@ -497,16 +513,37 @@ def is_submit_button(element_text: str) -> bool:
 ONE_TIME_CODE_TOKEN_RE = re.compile(r"\botps?\b")
 
 
-def _is_one_time_code_action(normalized: str) -> bool:
-    """Return True when the label asks the site for a one-time code.
+def _action_words(text: str) -> str:
+    """Split a click signal into lowercase words, including DOM identifiers.
 
-    Content test, anywhere in the label. A code is issued to the account being
-    signed into, never composed for a third party, so the phrasing and the word
-    order carry no risk signal worth gating on.
+    Click signals mix visible labels with id/name attributes
+    (``showResendMessageLink``, ``resend_sms_code``, ``auth-resend-cta``).
+    Splitting camelCase and separators lets word-level tests see ``resend`` as
+    its own word instead of matching ``send`` inside it.
     """
-    if ONE_TIME_CODE_TOKEN_RE.search(normalized) is not None:
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text or "")
+    spaced = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", spaced)
+    words = re.sub(r"[^a-z0-9]+", " ", spaced.lower())
+    words = re.sub(r"\bre\s+send", "resend", words)
+    return " ".join(words.split())
+
+
+def _is_one_time_code_action(normalized: str, words: str = "") -> bool:
+    """Return True when the label asks the site for a one-time code or sign-in message.
+
+    Content test, anywhere in the label. A code, sign-in link, reset, or
+    verification message is issued to the account being signed into, never
+    composed for a third party, so the phrasing and the word order carry no
+    risk signal worth gating on.
+    """
+    words = words or _action_words(normalized)
+    if ONE_TIME_CODE_TOKEN_RE.search(words) is not None:
         return True
-    return any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS)
+    if any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS):
+        return True
+    if _ONE_TIME_CODE_REQUEST_RE.search(words) is not None:
+        return True
+    return any(re.search(rf"\b{pattern}\b", words) for pattern in ACCOUNT_SELF_DELIVERY_PATTERNS)
 
 
 def _is_email_otp_retry(normalized: str) -> bool:
@@ -522,15 +559,6 @@ def _is_email_otp_retry(normalized: str) -> bool:
         normalized == prefix or normalized.startswith(f"{prefix} ")
         for prefix in EMAIL_OTP_RETRY_PREFIXES
     )
-
-
-def _is_marketing_opt_in_action(normalized: str) -> bool:
-    """Return True when the label opts into receiving marketing/info from the site.
-
-    Content test, anywhere in the label. Opting in asks the merchant to email the
-    shopper later; it is not composing and sending an outbound message now.
-    """
-    return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
 
 
 def is_ai_assistant_composer_host(url: str) -> bool:
@@ -559,56 +587,39 @@ def _is_ai_composer_submit(normalized: str, url: str = "") -> bool:
     return bool(url) and is_ai_assistant_composer_host(url) and normalized in AI_COMPOSER_SUBMIT_EXACT
 
 
-def _matches_specific_email_send(normalized: str) -> bool:
-    """True for exact ``send`` or multi-word outbound-send phrases.
-
-    Bare substring ``send`` is handled separately so marketing opt-in labels
-    ("Send me info…") are not locked solely because they contain ``send``.
-    """
-    for pattern in EMAIL_SEND_BUTTON_PATTERNS:
-        if pattern == "send":
-            if normalized == "send":
-                return True
-            continue
-        if pattern == normalized or pattern in normalized:
-            return True
-    return False
-
-
 def is_email_send_button(element_text: str, url: str = "") -> bool:
     """Check whether any local action signal is an outbound send.
 
-    Exemptions: one-time code (content, anywhere), resend (positional prefix),
-    marketing/newsletter opt-in (content), and in-product AI composer submits
-    (``send prompt`` anywhere; generic send/submit only on AI-assistant hosts)
-    — but none of those suppress a specific outbound-send phrase (e.g.
-    ``send email`` in a composite label). Each newline-delimited signal is
-    classified on its own so an exempt label can never unlock a neighbouring
-    send control or action-bearing attribute.
+    A send is a word starting with ``send`` in the word-split signal, so
+    ``resend`` / ``godsend`` / ``showResendMessageLink`` are not sends while
+    ``Send``, ``sendBtn``, and ``compose-send`` are. Exemptions: one-time code
+    or sign-in delivery to the account (content, anywhere), resend (positional
+    prefix), ``send me …`` (removed before the leftover-send test), and
+    in-product AI composer submits (``send prompt`` anywhere; generic
+    send/submit only on AI-assistant hosts). ``send email`` / ``send mail``
+    beats the composer exemption. Each newline-delimited signal is classified
+    on its own so an exempt label can never unlock a neighbouring send control
+    or action-bearing attribute.
     """
     if not element_text:
         return False
 
     for candidate in element_text.splitlines():
         normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
-        if not normalized:
+        words = _action_words(candidate)
+        if not words:
             continue
-        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+        if _is_one_time_code_action(normalized, words) or _is_email_otp_retry(normalized):
             continue
         # Email-only phrases win over the AI composer exemption so a composite
         # label like "Send prompt and send email" cannot skip write-lock.
         # Do not hoist ``send message`` here — that is a composer submit on
         # ChatGPT/Claude/Gemini.
-        if "send email" in normalized or "send mail" in normalized:
+        if _SPECIFIC_EMAIL_SEND_RE.search(words):
             return True
-        if _is_ai_composer_submit(normalized, url):
+        if _is_ai_composer_submit(words, url):
             continue
-        # Specific outbound phrases win over marketing opt-in (composite labels).
-        if _matches_specific_email_send(normalized):
-            return True
-        if _is_marketing_opt_in_action(normalized):
-            continue
-        if "send" in normalized:
+        if _SEND_WORD_RE.search(_SEND_TO_SELF_RE.sub(" ", words)):
             return True
     return False
 
