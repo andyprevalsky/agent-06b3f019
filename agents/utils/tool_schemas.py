@@ -731,8 +731,11 @@ class SpawnAgentTool(BaseModel):
     general_purpose: DO NOT use this agent type or assign it a goal unless that goal is
     sufficiently distinct from the goal you are tasked with. Each general_purpose
     sub-agent's task complexity must be strictly less than half of your issued task
-    complexity; otherwise do the work yourself. Exception: after type='browser' fails, wrap
-    next attempt in type='general_purpose' for error handling; do not re-spawn type='browser'.
+    complexity; otherwise do the work yourself. Be wary of infinite recursion:
+    general_purpose sub-agents can also spawn sub-agents. When using one as an
+    intelligent retry for a faulty tool, instruct it not to spawn more
+    general_purpose sub-agents; otherwise it will likely spawn another
+    general_purpose to retry the same faulty tool after the first error.
     """
 
     tool: Literal["spawn_agent"]
@@ -741,7 +744,7 @@ class SpawnAgentTool(BaseModel):
             "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
             "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
-            "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Exception: after type='browser' fails, wrap next attempt in type='general_purpose' for error handling; do not re-spawn type='browser'. 'explore' performs read-only research for web or user-data facts; "
+            "cross-domain multi-step work - DO NOT use it or assign it a goal unless that goal is sufficiently distinct from the goal you are tasked with, and the sub-agent's task complexity is strictly less than half of your issued task complexity (otherwise do the work yourself); Be wary of infinite recursion: general_purpose sub-agents can also spawn sub-agents. When using one as an intelligent retry for a faulty tool, instruct it not to spawn more general_purpose sub-agents; otherwise it will likely spawn another general_purpose to retry the same faulty tool after the first error. 'explore' performs read-only research for web or user-data facts; "
             "'for_each' starts one general-purpose agent per item for repeated fan-out. "
             "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
             "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
