@@ -11,6 +11,7 @@
  */
 
 import { isChatLlmTransientMiss } from './chatStructuredRetry';
+import type { RouterDecision } from './routerDecision';
 
 type BufferedDelivery = () => Promise<void>;
 
@@ -44,6 +45,12 @@ interface SpeculativeChatMessage {
 const NON_DIRECT_INTENT =
   /\b(?:search\s+(?:the\s+)?web|browse\s+(?:the\s+)?web|look\s+up|latest|today(?:'s)?|current\s+(?:news|events?|prices?)|research|autonomous\s+agent|agent\s+mode|plan\s+mode|execute\s+mode)\b/i;
 
+const DEADLINE_REASONING = 'Route selected before the provider stream finished.';
+
+function latestUserText(messages: readonly SpeculativeChatMessage[]): string {
+  return [...messages].reverse().find((message) => message.role === 'USER')?.text ?? '';
+}
+
 export interface EarlyDirectGeneratorCoordinator<T> {
   start(): void;
   commitDirectAnswer(): Promise<T | null>;
@@ -61,9 +68,34 @@ export interface EarlyDirectGeneratorCoordinator<T> {
 export function shouldStartEarlyDirectGenerator(
   messages: readonly SpeculativeChatMessage[]
 ): boolean {
-  const latestUserMessage = [...messages].reverse().find((message) => message.role === 'USER');
-  if (!latestUserMessage?.text.trim()) return false;
-  return !NON_DIRECT_INTENT.test(latestUserMessage.text);
+  const text = latestUserText(messages);
+  if (!text.trim()) return false;
+  return !NON_DIRECT_INTENT.test(text);
+}
+
+/**
+ * After the 3s router deadline aborts with no recoverable decision, reuse the
+ * existing non-direct intent vocabulary so an execute/plan turn still
+ * escalates instead of sitting ACTIVE with a null workflow.
+ * Search stays null — a query must not be invented.
+ */
+export function deadlineRouterFallback(
+  messages: readonly SpeculativeChatMessage[],
+  fallbackGoal: string
+): RouterDecision | null {
+  const text = latestUserText(messages);
+  if (!text.trim() || !NON_DIRECT_INTENT.test(text)) return null;
+  if (/\b(?:search\s+(?:the\s+)?web|browse\s+(?:the\s+)?web|look\s+up)\b/i.test(text)) {
+    return null;
+  }
+  const goal = fallbackGoal.trim() || text;
+  const mode = /\bexecute\s+mode\b/i.test(text) ? 'execute' : 'plan';
+  return {
+    action: 'start_superintelligence',
+    reasoning: DEADLINE_REASONING,
+    goal,
+    mode,
+  };
 }
 
 export function createTransactionalStreamGate(): TransactionalStreamGate {

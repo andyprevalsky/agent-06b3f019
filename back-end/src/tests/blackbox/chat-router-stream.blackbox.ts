@@ -191,19 +191,37 @@ async function testFirstMissRegeneratesInsteadOfApologizing(): Promise<void> {
 }
 
 async function testExhaustedMissesStayTypedAndDoNotFailAgent(): Promise<void> {
-  let attempts = 0;
+  let emptyAttempts = 0;
   await assert.rejects(
     regenerateOnChatStructuredMiss({
       callSite: 'chat_generator',
       agentId: '6e645c29-4b6f-4d87-9478-22ecb28ebba5',
       attempt: async () => {
-        attempts += 1;
+        emptyAttempts += 1;
+        throw new ChatLlmTransientMissError('empty', 'Router LLM returned no content');
+      },
+    }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'empty'
+  );
+  assert.equal(
+    emptyAttempts,
+    MAX_CHAT_STRUCTURED_ATTEMPTS,
+    'empty/parse retry budget must be bounded'
+  );
+
+  let deadlineAttempts = 0;
+  await assert.rejects(
+    regenerateOnChatStructuredMiss({
+      callSite: 'chat_router',
+      agentId: '6e645c29-4b6f-4d87-9478-22ecb28ebba5',
+      attempt: async () => {
+        deadlineAttempts += 1;
         throw new ChatLlmTransientMissError('deadline', 'Chat router completion expired');
       },
     }),
     (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'deadline'
   );
-  assert.equal(attempts, MAX_CHAT_STRUCTURED_ATTEMPTS, 'retry budget must be bounded');
+  assert.equal(deadlineAttempts, 1, 'deadline misses must not consume a second 3s bound');
 
   const events: string[] = [];
   await recoverChatHandlerFailure({
@@ -352,6 +370,18 @@ function testCallSitesUseSharedRegenerate(): void {
     speculation,
     /isChatLlmTransientMiss/,
     'speculative commit must not kill the turn on a typed miss'
+  );
+  const handler = readFileSync(join(here, '../../providers/chat/chatHandler.ts'), 'utf8');
+  assert.match(
+    handler,
+    /deadlineRouterFallback/,
+    'router deadline must escalate execute/plan turns instead of leaving a null workflow'
+  );
+  const retry = readFileSync(join(here, '../../providers/chat/chatStructuredRetry.ts'), 'utf8');
+  assert.match(
+    retry,
+    /miss\.kind === 'deadline'/,
+    'deadline misses must not start a second 3s router bound'
   );
 }
 

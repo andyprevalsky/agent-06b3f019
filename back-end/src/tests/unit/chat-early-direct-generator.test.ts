@@ -5,6 +5,7 @@ import {
   createEarlyDirectGeneratorCoordinator,
   createTransactionalStreamGate,
   runAfterStreamCommit,
+  deadlineRouterFallback,
   shouldStartEarlyDirectGenerator,
 } from '../../providers/chat/earlyDirectGenerator';
 import { createGeneratorAttentionLifecycle } from '../../providers/chat/generatorAttentionStream';
@@ -95,6 +96,26 @@ function testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity(): void {
     shouldStartEarlyDirectGenerator([{ role: 'ASSISTANT', text: 'No user turn yet.' }]),
     false
   );
+
+  const execute = deadlineRouterFallback(autonomousAgent, autonomousAgent[0].text);
+  assert.deepStrictEqual(execute, {
+    action: 'start_superintelligence',
+    reasoning: 'Route selected before the provider stream finished.',
+    goal: autonomousAgent[0].text,
+    mode: 'execute',
+  });
+  const plan = deadlineRouterFallback(
+    [{ role: 'USER', text: 'Start an autonomous agent in plan mode to compare three providers.' }],
+    'compare three providers'
+  );
+  assert.equal(plan?.action, 'start_superintelligence');
+  assert.equal(plan && plan.action === 'start_superintelligence' ? plan.mode : undefined, 'plan');
+  assert.equal(
+    deadlineRouterFallback(webSearch, 'unused'),
+    null,
+    'search deadline must not invent a query'
+  );
+  assert.equal(deadlineRouterFallback(direct, 'unused'), null);
 }
 
 async function testMismatchAbortsAndDiscardsWithoutSideEffects(): Promise<void> {

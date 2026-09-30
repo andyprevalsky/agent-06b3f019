@@ -10,6 +10,12 @@
  * Each attempt keeps its own 3s router completion bound. This is not a
  * bound relaxation: a miss starts a new attempt, it does not stretch the
  * first one.
+ *
+ * Deadline misses do not regenerate. The 3s bound already aborted the
+ * provider; a second identical bound cannot recover a slow model and
+ * doubles past the 5s chat-lifecycle SLA (observed: two
+ * `Chat router completion expired` attempts → chat_handler_failure,
+ * Temporal never starts).
  */
 
 import { createLogger } from '../logger';
@@ -57,6 +63,16 @@ export async function regenerateOnChatStructuredMiss<T>(params: {
       const miss = asChatStructuredMiss(error);
       if (!miss) throw error;
       lastMiss = miss;
+      if (miss.kind === 'deadline') {
+        log.warn('[ChatStructuredRetry] Deadline miss is not regenerated', {
+          callSite: params.callSite,
+          agentId: params.agentId,
+          kind: miss.kind,
+          attempt,
+          error: miss.message,
+        });
+        throw miss;
+      }
       log.warn('[ChatStructuredRetry] Transient structured-output miss; regenerating', {
         callSite: params.callSite,
         agentId: params.agentId,
