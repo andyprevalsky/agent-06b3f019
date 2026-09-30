@@ -81,10 +81,10 @@ def main() -> int:
         if not d.exists():
             continue
         for f in sorted(d.glob("*.txt")):
-            original = f.read_text()
+            original = f.read_text(encoding="utf-8")
             cleaned = cleanup(original)
             if cleaned != original:
-                f.write_text(cleaned)
+                f.write_text(cleaned, encoding="utf-8")
                 print(f"  cleaned {repo}/{f.name} ({len(original)} -> {len(cleaned)} chars)")
                 total += 1
     print(f"[cleanup] modified {total} files across {len(REPOS)} repos")

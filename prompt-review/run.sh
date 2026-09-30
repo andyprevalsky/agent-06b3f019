@@ -22,7 +22,9 @@ echo "[run] rendering runtime prompt values..."
 python3 prompt-review/render/render_ours_python.py || echo "[run] (skipped ours-python renderer — non-fatal)"
 bash   prompt-review/render/render_ours_ts.sh   || echo "[run] (skipped ours-ts renderer — non-fatal)"
 python3 prompt-review/render/render_hermes.py  || echo "[run] (skipped hermes renderer — non-fatal)"
-python3 prompt-review/render/render_codex.py   || echo "[run] (skipped codex renderer — non-fatal)"
+# Codex is a first-class golden column — a renderer failure must not leave
+# stale rendered/codex/*.txt in the catalog (build.py prefers rendered files).
+python3 prompt-review/render/render_codex.py
 python3 prompt-review/render/capture_claude_system_prompt.py || echo "[run] (skipped claude system prompt capture — non-fatal)"
 ( cd prompt-review/render && bun intercept_claude.ts ) || echo "[run] (skipped claude runtime interceptor — non-fatal)"
 python3 prompt-review/render/render_claude_remaining.py || echo "[run] (skipped claude renderer — non-fatal)"
@@ -36,8 +38,8 @@ python3 prompt-review/render/render_openclaw_sessions.py || echo "[run] (skipped
 echo "[run] cleaning up rendered files (strip annotations)..."
 python3 prompt-review/render/cleanup_rendered.py
 
-# Apply hand-picked semantic mappings (catalog.matches.{claude,openclaw,hermes}).
-# Edit prompt-review/render/apply_explicit_mappings.py to refine pairings.
+# Apply hand-picked semantic mappings (catalog.matches.{claude,openclaw,hermes,codex}).
+# Edit approved_mappings in prompt-review/render/apply_explicit_mappings.py to refine.
 echo "[run] applying explicit prompt-pair mappings..."
 python3 prompt-review/render/apply_explicit_mappings.py
 

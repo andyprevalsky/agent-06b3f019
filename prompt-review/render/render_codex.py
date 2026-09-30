@@ -76,7 +76,29 @@ def extract_rust_raw_string(src: str, const_name: str) -> str:
         src,
     )
     if m:
-        return bytes(m.group(1), "utf-8").decode("unicode_escape")
+        # Decode Rust escapes without UTF-8→unicode_escape mojibake on
+        # literal Unicode (em dashes, accents, etc.).
+        def decode_escape(match: re.Match[str]) -> str:
+            escape = match.group(1)
+            if escape.startswith("u{"):
+                return chr(int(escape[2:-1], 16))
+            if escape.startswith("x"):
+                return chr(int(escape[1:], 16))
+            return {
+                "n": "\n",
+                "r": "\r",
+                "t": "\t",
+                "\\": "\\",
+                '"': '"',
+                "'": "'",
+                "0": "\0",
+            }[escape]
+
+        return re.sub(
+            r"""\\(u\{[0-9A-Fa-f]+\}|x[0-9A-Fa-f]{2}|["']|\\|n|r|t|0)""",
+            decode_escape,
+            m.group(1),
+        )
     raise ValueError(f"const {const_name} not found")
 
 

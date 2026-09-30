@@ -186,6 +186,11 @@ require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPA
 require_text "$DEPLOY_ENV" 'export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB volume must use normalized identity"
 require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/deploy DB preflight must use the validated run.sh database port"
 require_text "$DEPLOY_ENV" 'if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then' "/deploy must point LOCAL_DB_PORT at system Postgres 5432 when ROSE_USE_SYSTEM_PG=true"
+DDL_APPLY="$(git rev-parse --show-toplevel)/back-end/scripts/apply-local-workflow-ddl.sh"
+require_text "$DDL_APPLY" 'ROSE_USE_SYSTEM_PG' "apply-local-workflow-ddl must honor ROSE_USE_SYSTEM_PG so a leftover empty Docker DB cannot steal DDL"
+require_text "$DDL_APPLY" 'if [[ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ]] &&' "apply-local-workflow-ddl must skip docker exec when ROSE_USE_SYSTEM_PG=true"
+require_text "$RUN_SH" 'if $USE_SYSTEM_PG; then' "run.sh must apply workflow DDL via host psql under system Postgres"
+
 require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=5432' "/deploy system-Postgres path must advertise localhost:5432 to semantic seeders"
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
