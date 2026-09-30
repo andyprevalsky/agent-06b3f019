@@ -827,6 +827,29 @@ _TERMINAL_ACTIONS = {
 }
 
 
+_PAYMENT_APPROVAL_WAIT_MARKERS = (
+    "approval",
+    "approve",
+    "request_payment_card",
+    "payment card",
+    "payment_card",
+    "awaiting_payment",
+)
+
+
+def _is_redundant_payment_approval_wait(thinking: Any, params: Any) -> bool:
+    """True when a wait is asking for payment approval that already completed."""
+    parts: List[str] = []
+    if thinking is not None:
+        parts.append(str(thinking))
+    if isinstance(params, dict):
+        for value in params.values():
+            if isinstance(value, str):
+                parts.append(value)
+    haystack = " ".join(parts).lower()
+    return any(marker in haystack for marker in _PAYMENT_APPROVAL_WAIT_MARKERS)
+
+
 async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[str, Any]:
     if has_payment_card_secret_refs(context.secret_refs):
         return {
@@ -1257,9 +1280,12 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         return {"success": True, "message": ""}
     if context.action_name == "wait":
         # After payment approval+mint, secret refs are already available. Waiting
-        # for "approval" burns the one-time card's live window (AgentCard closes
-        # unused cards) and breaks same-last4 reuse on the next browser task.
-        if has_payment_card_secret_refs(context.secret_refs):
+        # specifically for another approval burns the one-time card's live window
+        # (AgentCard closes unused cards) and breaks same-last4 reuse. Ordinary
+        # waits (OTP / payment-widget settle) must still honor WaitEvent.
+        if has_payment_card_secret_refs(
+            context.secret_refs
+        ) and _is_redundant_payment_approval_wait(context.thinking, context.params):
             ready_message = (
                 "Payment approval is already complete. Do not wait for another approval. "
                 "Type the existing secret refs card_number, card_name, card_expiry, and "

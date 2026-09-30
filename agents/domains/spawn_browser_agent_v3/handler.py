@@ -372,6 +372,17 @@ async def _await_bounded_browser_cleanup(
             logger.warning(failure_message, error=extract_error_message(exc))
         return
     task.cancel()
+    # Keep a strong reference + retrieve the eventual result so a late
+    # non-CancelledError from session.stop() is not logged as "Task exception
+    # was never retrieved" after we abandon the deadline.
+    _background_browser_cleanup_tasks.add(task)
+
+    def _discard(done_task: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done_task)
+        with contextlib.suppress(BaseException):
+            done_task.result()
+
+    task.add_done_callback(_discard)
     logger.warning(timeout_message, timeout_s=timeout_s)
 
 

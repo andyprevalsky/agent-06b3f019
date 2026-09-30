@@ -11566,7 +11566,11 @@ async def test_execute_action_wait_short_circuits_when_payment_card_refs_ready()
     out = await execute_action(
         dom,
         ah,
-        {"action": "wait", "params": {"time_ms": 60_000}},
+        {
+            "action": "wait",
+            "thinking": "Waiting for user payment card approval before filling fields",
+            "params": {"time_ms": 60_000},
+        },
         secret_refs=secret_refs,
     )
 
@@ -11574,6 +11578,46 @@ async def test_execute_action_wait_short_circuits_when_payment_card_refs_ready()
     assert "already complete" in out["message"]
     assert captured == []
     ah.record_action.assert_awaited_once()
+
+
+async def test_execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready():
+    """OTP / widget settle waits must still dispatch WaitEvent after mint."""
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    secret_refs = {
+        "card_number": "enc-n",
+        "card_name": "enc-name",
+        "card_expiry": "enc-exp",
+        "card_cvv": "enc-cvv",
+    }
+
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "wait",
+            "thinking": "Waiting for the OTP input to appear after submitting payment",
+            "params": {"time_ms": 5_000},
+        },
+        secret_refs=secret_refs,
+    )
+
+    assert out == {"success": True, "message": ""}
+    assert len(captured) == 1
+    assert isinstance(captured[0], WaitEvent)
+    assert captured[0].seconds == 5.0
 
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
@@ -13570,6 +13614,45 @@ async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
     assert "disconnect_post_cancel_hang" not in events
     assert elapsed < 2.0
     dom_service.disconnect.assert_awaited_once()
+
+
+async def test_bounded_browser_cleanup_retains_abandoned_tasks():
+    """Timed-out cleanup tasks stay referenced so late exceptions are retrieved."""
+    import asyncio
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _await_bounded_browser_cleanup,
+        _background_browser_cleanup_tasks,
+    )
+
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def abandonable():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            finished.set()
+            raise
+
+    before = set(_background_browser_cleanup_tasks)
+    await _await_bounded_browser_cleanup(
+        abandonable(),
+        timeout_s=0.05,
+        timeout_message="cleanup timed out",
+        failure_message="cleanup failed",
+    )
+    retained = _background_browser_cleanup_tasks - before
+    assert len(retained) == 1
+    task = next(iter(retained))
+    assert not task.done()
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    assert task not in _background_browser_cleanup_tasks
+
 
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
@@ -21068,6 +21151,10 @@ async def run_all_tests():
         "disconnect_times_out_hung_cdp_and_still_returns",
         test_disconnect_browser_times_out_hung_cdp_and_still_returns,
     )
+    await r.record_async(
+        "bounded_browser_cleanup_retains_abandoned_tasks",
+        test_bounded_browser_cleanup_retains_abandoned_tasks,
+    )
     r.record(
         "passkey_usage_sampled_before_terminal_disconnects",
         test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect,
@@ -22037,6 +22124,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_wait_short_circuits_when_payment_card_refs_ready",
         test_execute_action_wait_short_circuits_when_payment_card_refs_ready,
+    )
+    await r.record_async(
+        "execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready",
+        test_execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready,
     )
     await r.record_async(
         "execute_action_dropdown_options_with_el",
