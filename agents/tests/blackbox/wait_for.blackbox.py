@@ -253,7 +253,16 @@ def _patch_handler_workflow(fake):
 
 
 class _WFInstance:
-    def __init__(self, *, paused=False, cost_limit_reached=False, fast_mode_cache_enabled=False, goal=""):
+    def __init__(
+        self,
+        *,
+        paused=False,
+        cost_limit_reached=False,
+        fast_mode_cache_enabled=False,
+        goal="",
+        root_goal=None,
+        context=None,
+    ):
         self.user_id = "user-1"
         self.agent_id = "agent-1"
         self.model = "rose-1-flash"
@@ -263,6 +272,8 @@ class _WFInstance:
         self.fast_mode_cache_enabled = fast_mode_cache_enabled
         self.goal = goal
         self.fast_cache_goal = None
+        self.root_goal = root_goal
+        self.context = list(context or [])
         self.handled = []
 
     async def _handle_tool_event(self, event, tcid, tname):
@@ -409,8 +420,8 @@ async def test_handler_timestamp_happy_path():
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
     assert MessageStatus.FINISHED in statuses
-    # Slept ~5 minutes (300 seconds)
-    assert 300 in fake.sleep_records
+    # Slept ~5 minutes (300 seconds), possibly sliced into 30s handoff polls
+    assert sum(fake.sleep_records) == 300
 
 
 async def test_handler_condition_paused_yields_error():
@@ -957,7 +968,7 @@ async def test_handler_timestamp_live_fast_mode_still_sleeps_until_target():
 
     statuses = [e.status for e in events]
     assert MessageStatus.FINISHED in statuses
-    assert 300 in fake.sleep_records, (
+    assert sum(fake.sleep_records) == 300, (
         f"live Fast Mode skipped timestamp sleep; sleep_records={fake.sleep_records!r}"
     )
 
@@ -1100,7 +1111,7 @@ async def test_handler_condition_live_fast_mode_honors_check_interval_sleep():
         restore()
 
     assert evals["n"] == 2
-    assert 600 in fake.sleep_records, (
+    assert sum(fake.sleep_records) == 600, (
         f"live Fast Mode skipped inter-check sleep; sleep_records={fake.sleep_records!r}"
     )
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
@@ -1165,6 +1176,150 @@ async def test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep():
                     "max_checks": 3,
                 },
                 tool_call_id="tc-oai-skip-sleep",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert evals["n"] == 2
+    assert fake.sleep_records == []
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert (finished[-1].data or {}).get("condition_met") is True
+
+
+_LEFTOVER_MASS_AGENT_CHILD_GOAL = (
+    "Produce fresh tool-grounded evidence for the remaining strategic "
+    "deliverables for Andy Prevalsky's brand task."
+)
+
+
+async def test_handler_condition_leftover_child_without_root_goal_honors_sleep():
+    """A leftover GP goal is not the catalog prefix, so live waits still sleep."""
+    from domains.spawn_agent.config import is_oai_demo_goal
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    assert not is_oai_demo_goal(_LEFTOVER_MASS_AGENT_CHILD_GOAL)
+    evals = {"n": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        if capture_tool_results is not None:
+            capture_tool_results.append("[web_search] partial then enough")
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="evidence",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    def _eval(*_a, **_k):
+        evals["n"] += 1
+        if evals["n"] == 1:
+            return {"satisfied": False, "reasoning": "not yet"}
+        return {"satisfied": True, "reasoning": "enough"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=True,
+                    goal=_LEFTOVER_MASS_AGENT_CHILD_GOAL,
+                ),
+                tool_call={
+                    "description": "the research to finish",
+                    "condition": "enough evidence gathered",
+                    "check_interval_seconds": 600,
+                    "max_checks": 3,
+                },
+                tool_call_id="tc-leftover-sleeps",
+            )
+        )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert evals["n"] == 2
+    assert sum(fake.sleep_records) == 600, (
+        f"leftover child skipped inter-check sleep; sleep_records={fake.sleep_records!r}"
+    )
+    finished = [e for e in events if e.status == MessageStatus.FINISHED]
+    assert finished
+    assert (finished[-1].data or {}).get("condition_met") is True
+
+
+async def test_handler_condition_leftover_child_inherits_root_goal_skip_sleep():
+    """Mass-agent leftover GPs inherit DEMO wait_for skips from the tree root."""
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    evals = {"n": 0}
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        if capture_tool_results is not None:
+            capture_tool_results.append("[web_search] partial then enough")
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="evidence",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"usage": {"llm": [], "service": []}},
+        )
+
+    def _eval(*_a, **_k):
+        evals["n"] += 1
+        if evals["n"] == 1:
+            return {"satisfied": False, "reasoning": "not yet"}
+        return {"satisfied": True, "reasoning": "enough"}
+
+    fake = _FakeWFModule(activity_results={"evaluate_condition_activity": _eval})
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(
+                    fast_mode_cache_enabled=False,
+                    goal=_LEFTOVER_MASS_AGENT_CHILD_GOAL,
+                    root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+                ),
+                tool_call={
+                    "description": "the research to finish",
+                    "condition": "enough evidence gathered",
+                    "check_interval_seconds": 600,
+                    "max_checks": 3,
+                },
+                tool_call_id="tc-leftover-root-skip",
             )
         )
     finally:
@@ -1332,6 +1487,14 @@ async def run_all_tests():
     await r.record_async(
         "handler_cond_oai_demo_fm_skips_interval",
         test_handler_condition_oai_demo_fast_mode_skips_inter_check_sleep,
+    )
+    await r.record_async(
+        "handler_cond_leftover_child_honors_interval",
+        test_handler_condition_leftover_child_without_root_goal_honors_sleep,
+    )
+    await r.record_async(
+        "handler_cond_leftover_child_inherits_root",
+        test_handler_condition_leftover_child_inherits_root_goal_skip_sleep,
     )
     teardown_mock()
     return r.all_passed

@@ -28,6 +28,7 @@ import {
   type GeneratorAttentionLifecycle,
 } from './generatorAttentionStream';
 import { ensureVerbatimIncludes } from './ensureVerbatimIncludes';
+import { extractPartialStringField } from './routerJsonStream';
 import { isCloudAgentLifecycleTool } from './cloudAgentLifecycleTool';
 import { userFacingTextDescription } from '../userFacingWritingPrompt';
 import { createGeneratorCacheStream } from './generatorCacheStream';
@@ -188,72 +189,6 @@ export const GENERATOR_JSON_SCHEMA = {
   required: ['reasoning', 'response'],
   additionalProperties: false,
 };
-
-// ============================================
-// Extract partial string content from JSON stream
-// Unlike the old regex approach, this can extract content BEFORE the closing quote
-// ============================================
-function extractPartialStringField(json: string, fieldName: string): string | null {
-  // Find the field pattern: "fieldName": "
-  const fieldPattern = `"${fieldName}"\\s*:\\s*"`;
-  const fieldRegex = new RegExp(fieldPattern);
-  const match = json.match(fieldRegex);
-
-  if (!match || match.index === undefined) {
-    return null;
-  }
-
-  // Start position is right after the opening quote
-  const startPos = match.index + match[0].length;
-
-  // Extract everything after the opening quote, handling escape sequences
-  let result = '';
-  let i = startPos;
-
-  while (i < json.length) {
-    const char = json[i];
-
-    if (char === '\\' && i + 1 < json.length) {
-      // Handle escape sequences
-      const nextChar = json[i + 1];
-      switch (nextChar) {
-        case '"':
-          result += '"';
-          break;
-        case '\\':
-          result += '\\';
-          break;
-        case 'n':
-          result += '\n';
-          break;
-        case 'r':
-          result += '\r';
-          break;
-        case 't':
-          result += '\t';
-          break;
-        case 'b':
-          result += '\b';
-          break;
-        case 'f':
-          result += '\f';
-          break;
-        default:
-          result += nextChar;
-          break;
-      }
-      i += 2;
-    } else if (char === '"') {
-      // End of string - we got the complete field
-      break;
-    } else {
-      result += char;
-      i++;
-    }
-  }
-
-  return result || null;
-}
 
 // ============================================
 // Extract reasoning only. Final-answer response text streams through the keyed

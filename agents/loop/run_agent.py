@@ -1802,6 +1802,7 @@ async def run_agent(
             tool_results = await asyncio.gather(*tasks)
 
             # Process results in order (for determinism)
+            in_tool_handoff_queue: Optional[str] = None
             async with span(
                 "run_loop.process_tool_results",
                 agent_id=agent_id,
@@ -1925,10 +1926,31 @@ async def run_agent(
                     # When no poll_messages, locally append so agent sees tool results
                     if not poll_messages:
                         context.append(new_msg)
+                    elif isinstance(result, dict) and result.get("generation_handoff"):
+                        # Cut over this turn; poll will not run again before continue_as_new.
+                        context.append(new_msg)
+
+                    if isinstance(result, dict) and result.get("generation_handoff"):
+                        handoff_queue = result.get("handoff_task_queue")
+                        if isinstance(handoff_queue, str) and handoff_queue.strip():
+                            in_tool_handoff_queue = handoff_queue.strip()
 
                     # Track set_plan success (only if no error)
                     if tool_name == "set_plan" and not is_error:
                         set_plan_succeeded = True
+            if in_tool_handoff_queue:
+                _pending_llm_context.pop(agent_id, None)
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": in_tool_handoff_queue,
+                    "context": context,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "token_count": token_count,
+                    "context_size": context_size,
+                    "cache_read_input_tokens": cache_read_total,
+                    "cache_creation_input_tokens": cache_write_total,
+                }
         # Repetition detection: if the agent keeps calling the same tools with identical
         # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
         if processed_tools:

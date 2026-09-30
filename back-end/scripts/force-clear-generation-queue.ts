@@ -1,26 +1,20 @@
 #!/usr/bin/env tsx
 /**
- * Break-glass: terminate running workflows still on a superseded generation queue.
+ * Break-glass after cooperative cutover's 45-minute drain SLO.
  *
- * Cooperative cutover waits up to 45 minutes for continue_as_new handoff. Stragglers
- * that never hand off (old-gen worker code, paused agents, verifier-less roots) are
- * cleared here instead of `migrate-open-agent-workflows.ts`, which requires a
- * verifier and targets deployment replacement rather than generation drain.
+ * Workflows still on the superseded generation queue cannot continue_as_new
+ * (typically parked on user approval or another in-tool wait with an in-flight
+ * activity). Replace those agents onto the live generation. Do not mark them
+ * FAILED — that is how an approval-blocked browser purchase died in prod
+ * (agent 3eb6da5a-280a-4456-a410-6b1799b06349).
  *
  * Usage:
  *   force-clear-generation-queue.ts --queue navi-agent-tasks@<oldHash> --execute
  */
 import { config } from 'dotenv';
-import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma } from '../src/providers/database';
-import { getTemporalClient, resolveTemporalWorkflowExecutionRef } from '../src/providers/temporal';
-import {
-  captureInProgressWorkflowTools,
-  finalizeInterruptedWorkflowTools,
-} from '../src/providers/staleWorkflowTools';
-import { terminateStaleTemporalWorkflow } from '../src/providers/workflowReplacement';
-import { lockAgentWorkflowGeneration } from '../src/providers/workflowGeneration';
-import { runTransactionWithRetry } from '../src/providers/database';
+import { getTemporalClient } from '../src/providers/temporal';
+import { clearSupersededGenerationWorkflow } from '../src/providers/generationQueueCutover';
 
 config();
 
@@ -46,57 +40,6 @@ async function listRunningWorkflowIds(queue: string): Promise<string[]> {
     ids.push(execution.workflowId);
   }
   return ids;
-}
-
-async function clearOne(
-  queue: string,
-  workflowId: string
-): Promise<'cleared' | 'skipped' | 'failed'> {
-  const agent = await prisma.agent.findFirst({
-    where: { deletedAt: null, temporalWorkflowId: workflowId },
-    select: { id: true, status: true, temporalWorkflowId: true },
-  });
-
-  try {
-    if (agent !== null && agent.temporalWorkflowId === workflowId) {
-      const execution = await resolveTemporalWorkflowExecutionRef(workflowId);
-      const snapshot = await captureInProgressWorkflowTools(agent.id, workflowId);
-      await terminateStaleTemporalWorkflow(execution, agent.id);
-      await finalizeInterruptedWorkflowTools(agent.id, workflowId, snapshot);
-      await runTransactionWithRetry(async (tx) => {
-        await lockAgentWorkflowGeneration(tx, agent.id);
-        await tx.agent.update({
-          where: { id: agent.id },
-          data: {
-            status: 'FAILED',
-            statusMessage: `Generation cutover: terminated workflow still on superseded queue ${queue}`,
-            toolsInUse: [],
-          },
-        });
-      });
-      process.stdout.write(`CLEARED ${agent.id} ${workflowId}\n`);
-      return 'cleared';
-    }
-
-    const client = await getTemporalClient();
-    try {
-      await client.workflow.getHandle(workflowId).terminate(
-        `Generation cutover: orphan workflow on superseded queue ${queue}`
-      );
-      process.stdout.write(`CLEARED orphan ${workflowId}\n`);
-      return 'cleared';
-    } catch (error) {
-      if (error instanceof WorkflowNotFoundError) {
-        process.stdout.write(`SKIP not-found ${workflowId}\n`);
-        return 'skipped';
-      }
-      throw error;
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`FAILED ${workflowId}: ${message}\n`);
-    return 'failed';
-  }
 }
 
 async function mapConcurrently<T>(
@@ -136,8 +79,9 @@ async function main(): Promise<void> {
 
   const summary = { cleared: 0, skipped: 0, failed: 0 };
   await mapConcurrently(workflowIds, concurrency, async (workflowId) => {
-    const outcome = await clearOne(queue, workflowId);
+    const outcome = await clearSupersededGenerationWorkflow(queue, workflowId);
     summary[outcome] += 1;
+    process.stdout.write(`${outcome.toUpperCase()} ${workflowId}\n`);
   });
 
   const remaining = await listRunningWorkflowIds(queue);

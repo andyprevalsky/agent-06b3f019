@@ -704,6 +704,37 @@ async def test_status_needs_user_help_returned_from_tool():
     assert result["message"] == "Please log in"
 
 
+async def test_generation_handoff_from_tool_result_returns_immediately():
+    """An in-tool cutover must yield generation_handoff this turn, not wait for 1.6."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    tool_calls = [{"tool": "web_fetch", "url": "x"}]
+    detected_tools = [("web_fetch", "tc-handoff-1", 1.0)]
+
+    async def mock_execute_tool(tool_name, tool_args, tool_call_id):
+        return {
+            "success": True,
+            "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+            "generation_handoff": True,
+            "handoff_task_queue": "navi-agent-tasks@new",
+        }
+
+    result, _, _ = await _run_single_iteration(
+        tool_calls,
+        detected_tools,
+        skip_verification=True,
+        execute_tool_override=mock_execute_tool,
+        max_iterations=3,
+    )
+
+    assert result["status"] == "generation_handoff"
+    assert result["handoff_task_queue"] == "navi-agent-tasks@new"
+    assert any(
+        row.get("role") == "TOOL" and DEPLOY_INTERRUPTED_TOOL_MESSAGE in str(row.get("text", ""))
+        for row in result.get("context", [])
+    )
+
+
 async def test_failed_llm_call_does_not_consume_iteration_budget():
     """A failed LLM call is a retry of the turn, not a turn.
 
@@ -2413,6 +2444,10 @@ async def run_all_tests():
         test_failed_llm_call_does_not_consume_iteration_budget,
     )
     await r.record_async("status_needs_user_help_returned_from_tool", test_status_needs_user_help_returned_from_tool)
+    await r.record_async(
+        "generation_handoff_from_tool_result",
+        test_generation_handoff_from_tool_result_returns_immediately,
+    )
     await r.record_async("status_completed_from_tool", test_status_completed_from_tool)
     await r.record_async(
         "verifier_below_threshold_adds_feedback_and_loops", test_verifier_below_threshold_adds_feedback_and_loops

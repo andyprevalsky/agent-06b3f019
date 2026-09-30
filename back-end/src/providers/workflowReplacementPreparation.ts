@@ -20,9 +20,14 @@ export async function claimReplacementGeneration(
   expectedWorkflowId: string | null,
   deploymentAttempt: string | undefined
 ) {
-  if (expectedWorkflowId === null) return claimWorkflowReplacement(agentId, launchConfig);
+  // Snapshot / migrate claims pass an explicit expectedWorkflowId so a
+  // FAILED/COMPLETED race after the snapshot is skipped. Ordinary user
+  // restarts pass null so a late approval can revive a sealed generation.
+  if (expectedWorkflowId === null) {
+    return claimWorkflowReplacement(agentId, launchConfig);
+  }
   return claimWorkflowReplacement(agentId, launchConfig, {
     expectedWorkflowId,
-    ...(deploymentAttempt === undefined ? {} : { deploymentAttempt }),
+    deploymentAttempt,
   });
 }

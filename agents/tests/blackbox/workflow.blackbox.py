@@ -534,15 +534,29 @@ async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: i
 # Captures the Fast Mode cache args the workflow threads into LLM activities,
 # keyed by agent_id. Tests clear their agent's entry before starting.
 FAST_MODE_GOAL_CAPTURE: Dict[str, List[Optional[str]]] = {}
+FAST_MODE_ENABLED_CAPTURE: Dict[str, List[bool]] = {}
+RESOLVE_FAST_CACHE_GOAL_CALLS: List[str] = []
+LEFTOVER_CHILD_AGENT_ID = "agent-test-leftover-child"
+LEFTOVER_CHILD_GOAL = (
+    "Produce fresh tool-grounded evidence for Andy Prevalsky's brand task."
+)
 
 
 @activity.defn(name="resolve_fast_cache_goal_activity")
-async def mock_resolve_fast_cache_goal_activity(agent_id: str) -> Optional[str]:
+async def mock_resolve_fast_cache_goal_activity(
+    agent_id: str,
+) -> Optional[dict[str, Optional[str]]]:
+    RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
+    if agent_id == LEFTOVER_CHILD_AGENT_ID:
+        from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+
+        return {"goal": LEFTOVER_CHILD_GOAL, "root_goal": OAI_DEMO_ROOT_GOAL_PREFIX}
     # DEMO-tagged mass-agent root prompt (stable cache namespace).
-    return (
+    persisted = (
         "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"  # pragma: allowlist secret
         " — persisted DB goal"
     )
+    return {"goal": persisted, "root_goal": persisted}
 
 
 @activity.defn(name="call_llm_activity")
@@ -587,6 +601,7 @@ async def mock_call_llm_activity(
     _record_workflow_env_activity(activity_agent_id, "call_llm_activity")
     if agent_id:
         FAST_MODE_GOAL_CAPTURE.setdefault(agent_id, []).append(fast_mode_goal)
+        FAST_MODE_ENABLED_CAPTURE.setdefault(agent_id, []).append(fast_mode_cache_enabled)
     if extra_user_message and required_tool:
         return {
             "response": "",
@@ -1167,6 +1182,61 @@ async def _run_all_workflow_tests() -> List[tuple]:
             except Exception as e:
                 results.append((name, e))
 
+            # Leftover GP children keep a non-DEMO input goal. If the Fast Mode
+            # button is off, root-goal resolution must still run so they inherit
+            # DEMO wait_for / cache from the tree root.
+            name = "wf_leftover_child_resolves_root_goal_when_fast_mode_off"
+            try:
+                leftover_id = LEFTOVER_CHILD_AGENT_ID
+                FAST_MODE_GOAL_CAPTURE.pop(leftover_id, None)
+                FAST_MODE_ENABLED_CAPTURE.pop(leftover_id, None)
+                while leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                    RESOLVE_FAST_CACHE_GOAL_CALLS.remove(leftover_id)
+                handle = await env.client.start_workflow(
+                    AgentWorkflow.run,
+                    args=[
+                        leftover_id,
+                        "user-test-1",
+                        LEFTOVER_CHILD_GOAL,
+                        "rose-labs/rose-1-flash",
+                        256,
+                        {"type": "FLOAT_LLM_JUDGE"},
+                        None,  # context
+                        "parent-wf-leftover",  # parent_workflow_id
+                        "parent-agent-leftover",  # parent_agent_id
+                        1,  # depth
+                        None,  # bus_id
+                        "execute",  # start_phase
+                        None,  # max_iterations
+                        100,  # price_limit_cents
+                        None,  # context_gates
+                        False,  # fast_mode_cache_enabled (button off)
+                    ],
+                    id=_next_wf_id("leftover-child-root-goal"),
+                    task_queue=TASK_QUEUE,
+                )
+                for _ in range(60):
+                    if leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS:
+                        break
+                    await asyncio.sleep(0.5)
+                assert leftover_id in RESOLVE_FAST_CACHE_GOAL_CALLS, (
+                    "leftover child must resolve tree root_goal even when Fast Mode is off"
+                )
+                for _ in range(60):
+                    if FAST_MODE_ENABLED_CAPTURE.get(leftover_id):
+                        break
+                    await asyncio.sleep(0.5)
+                enabled = FAST_MODE_ENABLED_CAPTURE.get(leftover_id)
+                assert enabled, "leftover child never reached an LLM call"
+                assert enabled[0] is True, (
+                    "leftover child must inherit DEMO cache from root_goal, "
+                    f"got fast_mode_cache_enabled={enabled[0]!r}"
+                )
+                await _cancel_workflow(handle)
+                results.append((name, None))
+            except Exception as e:
+                results.append((name, e))
+
     return results
 
 
@@ -1702,6 +1772,40 @@ def test_workflow_coalesce_structured_response_fills_outputs_from_headings():
     assert outputs[0]["value"] == "Aman as the founder-operator."
 
 
+def test_workflow_coalesce_for_each_items_fills_top_creators_analysis():
+    wf = _bare_workflow_instance()
+    wf.output_schema = {
+        "fields": [
+            {"name": "top_creators_analysis"},
+            {"name": "positioning_statement"},
+        ]
+    }
+    context = [
+        {
+            "role": "TOOL",
+            "text": "Completed for_each delegation for 50 items.",
+            "metadata": {
+                "toolName": "spawn_general_purpose_agent_for_each",
+                "structured_response": {
+                    "items": [
+                        {
+                            "status": "completed",
+                            "structured_response": {
+                                "creator_name": "Andrew Huberman",
+                                "hook_formulas": ["mechanism first"],
+                            },
+                        }
+                    ]
+                },
+            },
+        }
+    ]
+    merged = wf._coalesce_structured_response(context, None)
+    outputs = wf._format_outputs(merged)
+    by_key = {row["key"]: row["value"] for row in outputs}
+    assert by_key["top_creators_analysis"][0]["creator_name"] == "Andrew Huberman"
+
+
 def test_workflow_coalesce_structured_response_from_metadata_payload():
     wf = _bare_workflow_instance()
     wf.output_schema = {
@@ -1890,6 +1994,9 @@ def test_card_summary_from_evidence_rejects_long_cached_search_envelope():
     ]
 
     assert is_ablated_completion_summary(cached_search)
+    assert not is_ablated_completion_summary(
+        "Fast Mode cache trajectory ended; prior tool evidence is sufficient."
+    )
     summary = card_summary_from_evidence(context, {"creator_name": "Brett Adcock"})
     assert not is_ablated_completion_summary(summary)
     assert "Brett Adcock" in summary
@@ -3819,6 +3926,51 @@ async def test_workflow_generation_handoff_continue_as_new_onto_live_queue():
         args, task_queue = continued[0]
         assert task_queue == "navi-agent-tasks@newgen"
         assert args[6] == context
+        assert args[11] == "execute_continued"
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_generation_handoff_plan_phase_resumes_plan():
+    """PLAN-phase cutover must continue_as_new with start_phase=plan, not execute."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-plan-handoff"
+    wf.user_id = "user-1"
+    wf.goal = "finish planning after cutover"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    fake = _FakeWorkflowModule()
+    continued: List[tuple] = []
+
+    def fake_continue_as_new(*, args, task_queue=None, _continued=continued):
+        _continued.append((args, task_queue))
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        context = [{"role": "USER", "text": "still planning"}]
+        result = await wf._handle_incomplete(
+            {
+                "status": "generation_handoff",
+                "handoff_task_queue": "navi-agent-tasks@newgen",
+                "context": context,
+            },
+            phase="PLAN",
+        )
+        assert result["status"] == "generation_handoff"
+        assert len(continued) == 1
+        args, task_queue = continued[0]
+        assert task_queue == "navi-agent-tasks@newgen"
+        assert args[6] == context
+        assert args[11] == "plan"
     finally:
         _restore_workflow(original)
 
@@ -5445,6 +5597,55 @@ async def test_workflow_mark_complete_happy_path():
         _restore_workflow(original)
 
 
+async def test_workflow_mark_complete_does_not_forward_full_context():
+    """Huge Fast Mode context must not ride the mark_finished Temporal payload.
+
+    ed9a3b6e scheduled mark_finished with a 638092-byte payload (TMPRL1103
+    limit 524288). The activity sat 17 minutes, timed out, and the verified
+    root stayed ACTIVE until the 900s smoke cap. mark_finished only reads the
+    first USER text as the goal; message_count still records the real length.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-slim-finished"
+    wf.user_id = "u-slim"
+    wf.goal = "Analyze the top 50 creators"
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.root_agent_id = "root-slim-finished"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 100
+    wf.tokens_in = 70
+    wf.tokens_out = 30
+    wf.context_size = 500
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": []}
+
+    huge_context = [{"role": "USER", "text": wf.goal}] + [{"role": "ASSISTANT", "text": "x" * 2000} for _ in range(400)]
+    assert len(json.dumps(huge_context)) > 512 * 1024
+
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "All done",
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=huge_context, structured_response={"ok": True})
+        mark_finished_args = next(args for name, args in fake.activity_calls if name == "mark_finished")
+        steps = mark_finished_args[1]
+        payload = json.dumps(steps)
+        assert steps == [{"role": "USER", "text": wf.goal}]
+        assert len(payload) < 4096, (
+            f"mark_finished steps_taken is {len(payload)} bytes; "
+            "full conversation must not be forwarded (ed9a3b6e leftover-ACTIVE)"
+        )
+        assert mark_finished_args[4] == len(huge_context)
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_mark_complete_no_parent_no_signal():
     """A WEB-source root sends one completion SMS with verified outputs."""
     wf = _bare_workflow_instance()
@@ -5568,6 +5769,28 @@ async def test_workflow_mark_complete_survives_summary_generation_failure():
         _restore_workflow(original)
 
 
+def test_strip_fast_mode_card_narration_keeps_extracted_output():
+    """T7 3452c32c: Fast Mode prefix + extracted report must publish the report only."""
+    from workflows.agent_workflow import (
+        completion_card_has_fast_mode_markers,
+        strip_fast_mode_card_narration,
+    )
+
+    published = (
+        "Fast Mode cache trajectory ended; prior tool evidence is sufficient to "
+        "treat the goal as complete. **Extracted Output:** - **Audience Persona:** "
+        "Ambitious self-improvement audience: entrepreneurs, operators, creators "
+        "and professionals seeking high-agency life/career advice, health "
+        "optimization, business lessons, and mainstream celebrity interviews."
+    )
+    assert completion_card_has_fast_mode_markers(published)
+    stripped = strip_fast_mode_card_narration(published)
+    assert "Fast Mode" not in stripped
+    assert "cached trajectory" not in stripped.lower()
+    assert "Audience Persona" in stripped
+    assert len(stripped) >= 200
+
+
 async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary():
     """Fast Mode traj-end completion_summary must not land on the Task Complete card."""
     wf = _bare_workflow_instance()
@@ -5645,6 +5868,94 @@ async def test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summ
         assert outputs, "Task Complete must show schema outputs"
         keys = {item.get("key") for item in outputs}
         assert "creator_name" in keys
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_strips_fast_mode_prefix_from_long_extracted_output():
+    """A 200+ char Fast Mode-prefixed Extracted Output must not fail T7."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "gp-steven-bartlett-summary"
+    wf.user_id = "u-mc"
+    wf.goal = (
+        "You are analyzing ONE creator for Andy Prevalsky, a technology founder "
+        "building a brand at the intersection of health, longevity, technology, "
+        "and founder journey. Last 90 days are 2026-04-04 through 2026-07-03."
+    )
+    wf.root_goal = (
+        "I'm building a [REDACTED] brand for health, longevity, technology, founder journey"
+    )
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = "root-demo"
+    wf.agent_source = "WEB"
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.child_tool_counts = {}
+    wf.output_schema = {
+        "fields": [
+            {"name": "creator_name", "type": "str"},
+            {"name": "audience_persona", "type": "str"},
+        ]
+    }
+
+    extracted = (
+        "**Extracted Output:** - **Audience Persona:** Ambitious self-improvement "
+        "audience: entrepreneurs, operators, creators and professionals seeking "
+        "high-agency life/career advice, health optimization, business lessons, "
+        "and mainstream celebrity/political/business interviews. Official "
+        "positioning emphasizes diary-style interviews with operators."
+    )
+    fake = _FakeWorkflowModule()
+    fake.now_value = datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": (
+            "Fast Mode cache trajectory ended; prior tool evidence is sufficient "
+            f"to treat the goal as complete. {extracted}"
+        ),
+        "tool_counts": {"web_search": 4},
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "from_fast_cache": True,
+            "actual_model": "fast-mode-soft-complete",
+        },
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(
+            context=[
+                {"role": "USER", "text": "analyze Steven Bartlett"},
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Fast Mode cache trajectory ended; prior tool evidence is "
+                        f"sufficient to treat the goal as complete.\n\n{extracted}"
+                    ),
+                    "metadata": {
+                        "toolName": "attempt_completion",
+                        "toolStatus": "FINISHED",
+                    },
+                },
+            ],
+            structured_response={"creator_name": "Steven Bartlett", "audience_persona": extracted},
+        )
+        finished = next(
+            args[3]
+            for name, args in fake.activity_calls
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        card = (finished or {}).get("completionSummary") or {}
+        summary = str(card.get("summary") or "")
+        assert "Fast Mode" not in summary
+        assert "cached trajectory" not in summary.lower()
+        assert "based on prior tool evidence" not in summary.lower()
+        assert "Audience Persona" in summary or "Steven Bartlett" in summary
+        assert len(summary) >= 200
+        outputs = card.get("outputs") or []
+        assert outputs, "Task Complete must keep schema outputs after Fast Mode strip"
     finally:
         _restore_workflow(original)
 
@@ -6499,6 +6810,40 @@ async def test_workflow_execute_tool_legacy_spawn_agent_receives_phase():
         assert result.get("error") is True
         assert captured["tool_call"]["_phase"] == "PLAN"
         assert captured["tool_call_id"] == "tc-spawn"
+    finally:
+        workflow_module.TOOL_EXECUTORS["spawn_agent"] = original_executor
+        _restore_workflow(original)
+
+
+async def test_workflow_execute_tool_handoff_includes_task_queue():
+    """_execute_tool must pass the live queue through so run_agent can CAN now."""
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE, GenerationHandoffRequested
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a-handoff"
+    wf.user_id = "u1"
+    wf.current_phase = "EXECUTE"
+
+    import workflows.agent_workflow as workflow_module
+
+    async def fake_spawn_agent(workflow_instance, tool_call, tool_call_id):
+        raise GenerationHandoffRequested("navi-agent-tasks@new")
+
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    original_executor = workflow_module.TOOL_EXECUTORS["spawn_agent"]
+    workflow_module.TOOL_EXECUTORS["spawn_agent"] = fake_spawn_agent
+    try:
+        result = await wf._execute_tool(
+            "spawn_agent",
+            {"type": "explore", "goal": "parked child"},
+            "tc-handoff",
+        )
+        assert result.get("success") is True
+        assert result.get("generation_handoff") is True
+        assert result.get("handoff_task_queue") == "navi-agent-tasks@new"
+        assert result.get("message") == DEPLOY_INTERRUPTED_TOOL_MESSAGE
+        assert result.get("error") is not True
     finally:
         workflow_module.TOOL_EXECUTORS["spawn_agent"] = original_executor
         _restore_workflow(original)
@@ -7362,6 +7707,10 @@ async def run_all_tests():
         test_workflow_coalesce_structured_response_fills_outputs_from_headings,
     )
     r.record(
+        "wf_coalesce_for_each_items_fills_top_creators_analysis",
+        test_workflow_coalesce_for_each_items_fills_top_creators_analysis,
+    )
+    r.record(
         "wf_coalesce_structured_response_from_metadata_payload",
         test_workflow_coalesce_structured_response_from_metadata_payload,
     )
@@ -7533,6 +7882,10 @@ async def run_all_tests():
         test_workflow_generation_handoff_continue_as_new_onto_live_queue,
     )
     await r.record_async(
+        "wf_generation_handoff_plan_resumes_plan",
+        test_workflow_generation_handoff_plan_phase_resumes_plan,
+    )
+    await r.record_async(
         "wf_paused_handoff_continue_as_new",
         test_workflow_paused_handoff_continue_as_new_onto_live_queue,
     )
@@ -7629,6 +7982,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async(
+        "wf_mark_complete_does_not_forward_full_context",
+        test_workflow_mark_complete_does_not_forward_full_context,
+    )
+    await r.record_async(
         "wf_mark_complete_materializes_oai_demo_report_files",
         test_workflow_mark_complete_materializes_oai_demo_root_report_files,
     )
@@ -7641,9 +7998,17 @@ async def run_all_tests():
         "wf_mark_complete_survives_summary_failure",
         test_workflow_mark_complete_survives_summary_generation_failure,
     )
+    r.record(
+        "wf_strip_fast_mode_card_narration_keeps_extracted_output",
+        test_strip_fast_mode_card_narration_keeps_extracted_output,
+    )
     await r.record_async(
         "wf_mark_complete_replaces_fast_mode_ablation",
         test_workflow_mark_complete_replaces_fast_mode_ablation_with_real_summary,
+    )
+    await r.record_async(
+        "wf_mark_complete_strips_fast_mode_prefix_from_long_extracted_output",
+        test_workflow_mark_complete_strips_fast_mode_prefix_from_long_extracted_output,
     )
     await r.record_async(
         "wf_mark_complete_rejects_raw_tool_envelope_globally",
@@ -7692,6 +8057,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_execute_tool_legacy_spawn_agent_phase",
         test_workflow_execute_tool_legacy_spawn_agent_receives_phase,
+    )
+    await r.record_async(
+        "wf_execute_tool_handoff_includes_task_queue",
+        test_workflow_execute_tool_handoff_includes_task_queue,
     )
     await r.record_async(
         "wf_execute_tool_web_fetch_fast_mode_kwargs",
