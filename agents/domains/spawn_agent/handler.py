@@ -7,7 +7,6 @@ workflow sandbox where lazy imports trigger threading.Lock errors.
 from __future__ import annotations
 
 import asyncio
-import uuid as uuid_module
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -510,7 +509,7 @@ class SpawnAgentManager(ToolManager):
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
-        task_id = task_id or str(uuid_module.uuid4())
+        task_id = task_id or str(workflow.uuid4())
         # One classification for depth and the activity's cache identity.
         # Re-resolving inside the activity from the child goal or Fast Mode
         # root disagrees (truncated explore goals, resolver failures).

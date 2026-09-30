@@ -1233,6 +1233,47 @@ async def test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool
     assert any(call["name"] == "fetch_explore_tool_evidence" for call in fake.activity_calls)
 
 
+async def test_handler_explore_replay_keeps_evidence_task_id():
+    """A replayed logical tool call must query the task that wrote its evidence."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    async def run_once(explicit_task_id=None):
+        fake = _FakeSpawnWF(
+            activity_results={
+                "fetch_full_network_metadata": "",
+                "fetch_local_data_summary": "",
+                "fetch_explore_tool_evidence": ["[web_fetch] Source: official.example; value: 14,303,513"],
+            },
+            start_activity_result=_Activity(cancel_on_await=True),
+        )
+        restore = _patch_spawn_workflow(fake)
+        try:
+            events = await _collect(
+                SpawnAgentManager()._spawn_explore(
+                    workflow_instance=_FakeWFInstance(),
+                    tool_call={"type": "explore", "goal": "find latest published population"},
+                    tool_call_id="same-logical-tool-call",
+                    task_id=explicit_task_id,
+                )
+            )
+        finally:
+            restore()
+        posted_id = events[0].metadata["taskId"]
+        started_id = fake.start_activity_calls[0]["args"][4]
+        recovered_id = next(
+            call["args"][2]
+            for call in fake.activity_calls
+            if call["name"] == "fetch_explore_tool_evidence"
+        )
+        assert posted_id == started_id == recovered_id
+        return posted_id
+
+    first = await run_once()
+    replayed = await run_once()
+    assert first == replayed, "Temporal replay must retain the saved evidence task ID"
+    assert await run_once("caller-provided-task") == "caller-provided-task"
+
+
 async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     """Hung explore after parent wait + cancel grace ERRORS without unbounded await.
 
@@ -4403,6 +4444,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence",
         test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence,
+    )
+    await r.record_async(
+        "handler_explore_replay_keeps_evidence_task_id",
+        test_handler_explore_replay_keeps_evidence_task_id,
     )
     await r.record_async(
         "handler_explore_cancel_grace_wraps_up_without_awaiting_handle",
