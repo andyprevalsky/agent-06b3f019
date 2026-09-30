@@ -905,6 +905,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
         await entered.wait()
         assert bench._current_benchmark_user_id() == ambient
         assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient
+
         observed.set()
 
     async def snapshot(*_args, **_kwargs):
@@ -935,3 +936,73 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
             await asyncio.gather(observer, return_exceptions=True)
         assert bench._current_benchmark_user_id() == ambient
         assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient
+
+
+@async_case
+async def test_disconnected_delete_waits_for_exact_tree_seal_before_provider_release():
+    """A timed-out DELETE can still be recursively sealing its fifty-child tree."""
+    import httpx
+    before = {
+        "root_exists": True, "root_user_id": ROOT, "root_deleted": False,
+        "tree_agent_ids": [ROOT, CHILD], "unsealed_tree_agent_ids": [ROOT, CHILD],
+        "browser_sessions": [], "purchase_cleanup": [],
+    }
+    delete_started, seal_reads, sealed = False, 0, False
+
+    def query(_url, aid, *, require_deleted=False):
+        nonlocal seal_reads, sealed
+        assert aid == ROOT
+        if not delete_started:
+            return copy.deepcopy(before)
+        if not require_deleted:
+            seal_reads += 1
+            sealed = seal_reads >= 3
+        if require_deleted and not sealed:
+            raise RuntimeError("exact root database evidence is incomplete")
+        return {**before, "root_deleted": True, "unsealed_tree_agent_ids": [] if sealed else [CHILD]}
+
+    async def delete(*_args):
+        nonlocal delete_started
+        delete_started = True
+        raise httpx.ReadTimeout("DELETE accepted, response not received")
+
+    def release(_url, aid, _before, *, evidence):
+        assert sealed, "provider authority cannot precede the exact deletion fence"
+        assert aid == ROOT
+        return {"root_agent_id": ROOT, "tree_sealed": True, "root_deleted": True, "provider_receipts": []}
+
+    row = result(ROOT)
+    with (
+        patch.object(cleanup, "exact_root_sessions", query),
+        patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+        patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={"messages": []})),
+        patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("archive", None))),
+        patch.object(bench, "delete_agent", delete),
+        patch.object(cleanup, "close_exact_root_sessions", release),
+        patch.object(bench.asyncio, "sleep", AsyncMock()),
+    ):
+        await bench._finalize_owned_cloud_batch("http://localhost:1", [row], {})
+    assert seal_reads == 3
+    assert row.benchmark_status == "FAILED", "an ordinary task verdict must survive successful cleanup"
+    assert row.logs["cloud_provider_cleanup"]["tree_sealed"] is True
+    assert row.logs["cloud_cleanup_evidence"]["delete_transport_error"]
+
+
+@async_case
+async def test_disconnected_delete_seal_wait_rejects_owner_drift_and_has_a_deadline():
+    before = {"root_user_id": ROOT, "tree_agent_ids": [ROOT, CHILD]}
+    pending = {**before, "root_deleted": True, "unsealed_tree_agent_ids": [CHILD]}
+    for snapshot in (
+        {**pending, "root_user_id": CHILD},
+        {**pending, "tree_agent_ids": [ROOT]},
+        {**pending, "unsealed_tree_agent_ids": None},
+    ):
+        with patch.object(cleanup, "exact_root_sessions", return_value=snapshot):
+            with pytest.raises(RuntimeError, match="identity or sealing evidence changed"):
+                await bench._wait_for_owned_root_seal("http://localhost:1", ROOT, before, {}, timeout_seconds=1)
+    evidence = {}
+    with patch.object(cleanup, "exact_root_sessions", return_value=pending) as read:
+        with pytest.raises(RuntimeError, match="cleanup deadline"):
+            await bench._wait_for_owned_root_seal("http://localhost:1", ROOT, before, evidence, timeout_seconds=0.02)
+    assert all(not call.kwargs.get("require_deleted") for call in read.call_args_list)
+    assert evidence["delete_seal_observation"]["snapshot"]["unsealed_tree_agent_ids"] == [CHILD]

@@ -245,6 +245,95 @@ def verify_prestart_evidence(
             "archive_sha256": manifest["archive_sha256"], "proof_credit": 0}
 
 
+def verify_pool_worker_evidence(
+    registry: Path, run: Path, meta: dict, audit: Path, tasks: list, rows: list,
+    machines_path: Path, volumes_path: Path, *, allow_unallocated: bool = False,
+):
+    """Apply the same exact worker capture contract to sealed and interrupted primaries."""
+    owner = meta["fleet_owner_token"]
+    worker_contract = __import__("runpy").run_path(
+        str(Path(__file__).with_name("cloudbench-worker-evidence.py")))
+    worker_hashes = []
+    expected_fresh = audit / "expected-fresh"
+    fresh = audit / "fresh"
+    by_machine = audit / "by-machine-id"
+    clones = registry / "clones"
+    for directory in (expected_fresh, fresh, by_machine, clones):
+        assert directory.is_dir() and not directory.is_symlink()
+    names = {path.name for path in fresh.iterdir()}
+    assert names == {path.name for path in expected_fresh.iterdir()}
+    clone_names = {path.name for path in clones.iterdir()}
+    assert clone_names <= names
+    machines = object_file(machines_path, 128 * 1024 * 1024)
+    volumes = object_file(volumes_path, 128 * 1024 * 1024)
+    assert isinstance(machines, list) and isinstance(volumes, list)
+    native_machines = {row["id"]: row for row in machines}
+    native_volumes = {row["id"]: row for row in volumes}
+    assert len(native_machines) == len(machines)
+    assert len(native_volumes) == len(volumes)
+    fresh_records = {}
+    unallocated = 0
+    for name in names:
+        original = fields(fresh / name)
+        expected = fields(expected_fresh / name)
+        machine = original["machine_id"]
+        volume = original["volume_id"]
+        if original.get("disposition") == "not-allocated-verified":
+            assert allow_unallocated and not machine and not volume
+            assert name not in clone_names
+            assert original["version"] == "1" and original["fleet_owner_token"] == meta["fleet_owner_token"]
+            assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
+            assert original["clone_name"] == name and original["source"] == "fresh-clone"
+            assert expected == {"clone_name": name, "source_machine_id": original["source_machine_id"]}
+            assert original["source_machine_id"] in {row["machine_id"] for row in rows}
+            assert not any(value["name"] == name for value in machines + volumes)
+            unallocated += 1
+            continue
+        assert re.fullmatch(r"cloudbench-[A-Za-z0-9_-]+", name)
+        assert re.fullmatch(r"[0-9a-f]+", machine)
+        assert re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
+        assert original["version"] == "1" and original["fleet_owner_token"] == owner
+        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
+        assert original["clone_name"] == name and original["source"] == "fresh-clone"
+        assert original["disposition"] in (
+            "owned", "destroyed-verified-absent", "destroyed-provider-retained")
+        assert expected == {"clone_name": name,
+                            "source_machine_id": original["source_machine_id"]}
+        if original["disposition"] == "owned":
+            assert name in clone_names
+            assert fields(clones / name) == {
+                "name": name, "id": machine, "volume_id": volume}
+        else:
+            assert name not in clone_names
+        assert regular_bytes(by_machine / machine, 256).decode().strip() == name
+        fresh_records[machine] = original
+    assert {path.name for path in by_machine.iterdir()} == set(fresh_records)
+    for machine, original in fresh_records.items():
+        assert original["source_machine_id"] in {row["machine_id"] for row in rows}
+        if original["disposition"] == "owned":
+            assert original["volume_id"] in native_volumes
+        else:
+            assert original["volume_id"] not in native_volumes
+            assert machine not in native_machines
+        if machine in native_machines:
+            assert native_machines[machine]["name"] == original["clone_name"]
+        ordinal = next(i for i, row in enumerate(rows)
+                       if row["machine_id"] == original["source_machine_id"])
+        task = tasks[ordinal]["name"]
+        base = run / task / "worker-runtime-evidence" / machine
+        worker_owner = object_file(base / "owner.json")
+        assert all(worker_owner.get(key) == value for key, value in {
+            "version": 1, "machine_id": machine,
+            "primary_machine_id": original["source_machine_id"],
+            "run_token": f"{owner}-{ordinal}"}.items())
+        capture = base / "capture"
+        worker_contract["verify_directory"](
+            capture, worker_contract["authority"](f"{owner}-{ordinal}", machine))
+        worker_hashes.append(hashlib.sha256(regular_bytes(
+            capture / "manifest.json", 1048576)).hexdigest())
+    return fresh_records, worker_hashes, native_machines, native_volumes, unallocated
+
+
 def verify_started_pool_evidence(
     registry: Path, run: Path, manifest_path: Path, archive_path: Path,
     machines_path: Path, volumes_path: Path,
@@ -282,78 +371,9 @@ def verify_started_pool_evidence(
     assert 1 <= len(tasks) == len(rows) <= 4096
     assert len({row["machine_id"] for row in rows}) == len(rows)
     assert len({row["volume_id"] for row in rows}) == len(rows)
-    # Autoscaled workers are separate exact-owned fresh clones of the claimed
-    # pool primaries. Their verified original captures stay in the run output;
-    # the provider reaper consumes their durable clone ledger after this latch
-    # is released. Do not require an empty fresh ledger here.
-    worker_contract = __import__("runpy").run_path(
-        str(Path(__file__).with_name("cloudbench-worker-evidence.py")))
-    worker_hashes = []
-    expected_fresh = audit / "expected-fresh"
-    fresh = audit / "fresh"
-    by_machine = audit / "by-machine-id"
-    clones = registry / "clones"
-    for directory in (expected_fresh, fresh, by_machine, clones):
-        assert directory.is_dir() and not directory.is_symlink()
-    names = {path.name for path in fresh.iterdir()}
-    assert names == {path.name for path in expected_fresh.iterdir()}
-    clone_names = {path.name for path in clones.iterdir()}
-    assert clone_names <= names
-    fresh_records = {}
-    for name in names:
-        original = fields(fresh / name)
-        expected = fields(expected_fresh / name)
-        machine = original["machine_id"]
-        volume = original["volume_id"]
-        assert re.fullmatch(r"cloudbench-[A-Za-z0-9_-]+", name)
-        assert re.fullmatch(r"[0-9a-f]+", machine)
-        assert re.fullmatch(r"vol_[A-Za-z0-9]+", volume)
-        assert original["version"] == "1" and original["fleet_owner_token"] == owner
-        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
-        assert original["clone_name"] == name and original["source"] == "fresh-clone"
-        assert original["disposition"] in (
-            "owned", "destroyed-verified-absent", "destroyed-provider-retained")
-        assert expected == {"clone_name": name,
-                            "source_machine_id": original["source_machine_id"]}
-        if original["disposition"] == "owned":
-            assert name in clone_names
-            assert fields(clones / name) == {
-                "name": name, "id": machine, "volume_id": volume}
-        else:
-            assert name not in clone_names
-        assert regular_bytes(by_machine / machine, 256).decode().strip() == name
-        fresh_records[machine] = original
-    assert {path.name for path in by_machine.iterdir()} == set(fresh_records)
-    machines = object_file(machines_path, 128 * 1024 * 1024)
-    volumes = object_file(volumes_path, 128 * 1024 * 1024)
-    assert isinstance(machines, list) and isinstance(volumes, list)
-    native_machines = {row["id"]: row for row in machines}
-    native_volumes = {row["id"]: row for row in volumes}
-    assert len(native_machines) == len(machines)
-    assert len(native_volumes) == len(volumes)
-    for machine, original in fresh_records.items():
-        assert original["source_machine_id"] in {row["machine_id"] for row in rows}
-        if original["disposition"] == "owned":
-            assert original["volume_id"] in native_volumes
-        else:
-            assert original["volume_id"] not in native_volumes
-            assert machine not in native_machines
-        if machine in native_machines:
-            assert native_machines[machine]["name"] == original["clone_name"]
-        ordinal = next(i for i, row in enumerate(rows)
-                       if row["machine_id"] == original["source_machine_id"])
-        task = tasks[ordinal]["name"]
-        base = run / task / "worker-runtime-evidence" / machine
-        worker_owner = object_file(base / "owner.json")
-        assert all(worker_owner.get(key) == value for key, value in {
-            "version": 1, "machine_id": machine,
-            "primary_machine_id": original["source_machine_id"],
-            "run_token": f"{owner}-{ordinal}"}.items())
-        capture = base / "capture"
-        worker_contract["verify_directory"](
-            capture, worker_contract["authority"](f"{owner}-{ordinal}", machine))
-        worker_hashes.append(hashlib.sha256(regular_bytes(
-            capture / "manifest.json", 1048576)).hexdigest())
+    fresh_records, worker_hashes, native_machines, native_volumes, _ = verify_pool_worker_evidence(
+        registry, run, meta, audit, tasks, rows, machines_path, volumes_path,
+    )
     assert archive_path.stat().st_size == manifest["archive_bytes"] <= 512 * 1024 * 1024
     assert hashlib.sha256(regular_bytes(archive_path, 512 * 1024 * 1024)).hexdigest() == manifest["archive_sha256"]
     pool = audit / "pool"
@@ -458,10 +478,11 @@ def verify_interrupted_pool_evidence(
 ) -> dict[str, object]:
     """Retire a failed pool owner after preserving sealed and crash originals.
 
-    This path cannot yield benchmark credit. It admits absent worker clones only
-    when the durable audit says they were never allocated and native inventory
-    independently confirms absence. Interrupted guest files remain explicitly
-    incomplete; no run result or driver exit is inferred from a stopped VM.
+    This path cannot yield benchmark credit. Allocated workers retain the same
+    exact terminal capture and provider-inventory checks as sealed primaries.
+    Never-allocated attempts require their durable audit and native absence.
+    Interrupted guest files remain explicitly incomplete; no result or driver
+    exit is inferred from a stopped VM.
     """
     owner = registry.name
     assert re.fullmatch(r"[0-9a-f]{32}", owner)
@@ -501,26 +522,9 @@ def verify_interrupted_pool_evidence(
     assert len(native_machines) == len(machines)
     assert len(native_volumes) == len(volumes)
 
-    # Every worker attempt in this particular failure was a name-only phantom.
-    # An actual worker must use the stricter started-worker capture verifier.
-    assert not list((registry / "clones").iterdir())
-    assert not list((audit / "by-machine-id").iterdir())
-    fresh = audit / "fresh"
-    expected = audit / "expected-fresh"
-    assert {p.name for p in fresh.iterdir()} == {p.name for p in expected.iterdir()}
-    for path in fresh.iterdir():
-        original = fields(path)
-        attempt = fields(expected / path.name)
-        assert original["fleet_owner_token"] == owner
-        assert original["run_id"] == meta["run_id"] and original["app"] == meta["app"]
-        assert original["source"] == "fresh-clone"
-        assert original["disposition"] == "not-allocated-verified"
-        assert not original["machine_id"] and not original["volume_id"]
-        assert attempt == {"clone_name": path.name,
-                           "source_machine_id": original["source_machine_id"]}
-        assert original["source_machine_id"] in {row["machine_id"] for row in rows}
-        assert not any(value["name"] == path.name for value in machines + volumes)
-
+    fresh_records, worker_hashes, _, _, unallocated = verify_pool_worker_evidence(
+        registry, run, meta, audit, tasks, rows, machines_path, volumes_path, allow_unallocated=True,
+    )
     pool = audit / "pool"
     assert pool.is_dir() and not pool.is_symlink()
     assert {path.name for path in pool.iterdir()} == {
@@ -749,7 +753,10 @@ def verify_interrupted_pool_evidence(
             assert results[0]["name"] == row["task"]
     return {"schema": "cloudbench-interrupted-pool-evidence-verified-v1",
             "owner": owner, "run_id": meta["run_id"], "tasks": len(rows),
-            "incomplete_tasks": incomplete, "unallocated_workers": len(list(fresh.iterdir())),
+            "incomplete_tasks": incomplete, "unallocated_workers": unallocated,
+            "verified_workers": len(fresh_records),
+            "worker_manifests_sha256": hashlib.sha256(
+                "".join(sorted(worker_hashes)).encode()).hexdigest(),
             "files": len(seen), "archive_sha256": manifest["archive_sha256"],
             "proof_credit": 0}
 

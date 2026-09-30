@@ -5631,6 +5631,34 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
                 await asyncio.sleep(2)
 
 
+async def _wait_for_owned_root_seal(
+    base_url: str, root_id: str, before: dict, evidence: dict, *, timeout_seconds: float = 180.0,
+) -> dict:
+    """A disconnected DELETE may still be sealing descendants in the backend."""
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            while True:
+                snapshot = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, root_id)
+                unsealed = snapshot.get("unsealed_tree_agent_ids")
+                if (
+                    snapshot.get("root_user_id") != before["root_user_id"]
+                    or not set(before["tree_agent_ids"]).issubset(snapshot["tree_agent_ids"])
+                    or not isinstance(unsealed, list)
+                    or any(aid not in snapshot["tree_agent_ids"] for aid in unsealed)
+                ):
+                    raise RuntimeError("owned root identity or sealing evidence changed after DELETE")
+                evidence["delete_seal_observation"] = {
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "snapshot": snapshot,
+                }
+                if snapshot.get("root_deleted") is True and unsealed == []:
+                    return await asyncio.to_thread(
+                        cloud_batch_cleanup.exact_root_sessions, base_url, root_id, require_deleted=True,
+                    )
+                await asyncio.sleep(2)
+    except TimeoutError as error:
+        raise RuntimeError("exact owned tree did not seal before the cleanup deadline") from error
+
+
 async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: dict[str, list[str]]) -> None:
     """Finalize each owned root after all tasks, while workers can still persist cleanup."""
     # A missing create response cannot prove that no root was allocated.
@@ -5781,13 +5809,11 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     try:
                         await delete_agent(base_url, aid)
                     except httpx.TransportError as error:
-                        # A disconnected DELETE can already have sealed the
-                        # exact tree. Require that proof before reconciling its
-                        # provider/payment effects under their existing bounds.
-                        await asyncio.to_thread(
-                            cloud_batch_cleanup.exact_root_sessions, base_url, aid, require_deleted=True,
-                        )
                         evidence["delete_transport_error"] = str(error) or type(error).__name__
+                        # The request can outlive its HTTP connection while
+                        # recursively sealing a large tree. No provider/payment
+                        # authority is granted until the exact DB fence completes.
+                        await _wait_for_owned_root_seal(base_url, aid, before, evidence)
                     receipt = await asyncio.to_thread(
                         cloud_batch_cleanup.close_exact_root_sessions, base_url, aid, before, evidence=evidence,
                     )

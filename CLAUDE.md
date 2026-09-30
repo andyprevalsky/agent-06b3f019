@@ -275,7 +275,17 @@ task-bound `browser_zero_allocation_receipt` plus zero sessions in the exact
 before/archive/after/final ownership reads and a clean provider receipt can
 establish that exception. Any allocated session still owes a playable recording.
 The durable publisher checks this proof; never synthesize a recording or waive
-its check to grant a slice credit. Publish durable evidence with
+its check to grant a slice credit. If the provider replay exists but the FINISHED
+recording message is missing, inspect `Failed to save browser action message` in
+the worker log. Required recording attachments retry pre-request connection/pool
+failures at most three times with the same payload and generation; ambiguous
+read/write failures and HTTP rejections remain fail-closed. More archive wait
+cannot repair an attachment that was discarded after a connection failure.
+A disconnected DELETE may still be sealing a large descendant tree. The runner
+waits at most 180 seconds for that exact root/owner's database deletion fence,
+preserving the last `delete_seal_observation`; provider/payment reconciliation
+is authorized only once the entire tree is sealed. Missing/changed ownership
+and a tree that does not seal remain INFRA. Publish durable evidence with
 `python3 scripts/publish_evidence_links.py --run-json
 <run.json> --agent-id <id>` before citing an FE link. Composite benchmarks
 can carry multiple root UUIDs in a comma-joined
@@ -407,6 +417,11 @@ that allocated no browser session may carry a `provider-zero-manifest` plus
 its exact zero-allocation query receipt; the forensic verifier checks those
 against the original run/backend bytes before releasing the owner. Such an
 archive is always zero proof credit, even when the benchmark itself evaluated.
+An interrupted primary may have an autoscaled worker. Preserve its
+`worker-runtime-evidence/<machine-id>/capture` and owner record as well: recovery
+uses the same exact terminal/log-hash/provider-inventory verification as a sealed
+primary. A destroyed worker's missing or mismatched capture cannot be replaced
+by an empty worker ledger or by clearing audit records.
 For a verified smaller donor, set `CLOUDBENCH_WARM_MACHINE_NAME` and
 `CLOUDBENCH_WARM_VOLUME_NAME` for the fleet and its maintenance commands. A
 nondefault machine uses its own git-common dependency/snapshot proof file, so

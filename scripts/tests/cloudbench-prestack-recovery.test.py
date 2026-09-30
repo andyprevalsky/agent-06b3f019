@@ -254,11 +254,70 @@ class FailedStackRecoveryTest(unittest.TestCase):
             "--registry", str(self.registry), "--capture-dir", str(self.captures),
         ], capture_output=True, text=True)
         self.assertEqual(build.returncode, 0, build.stderr)
+        return self.verify_existing_archive()
+
+    def verify_existing_archive(self):
         forensic = self.run / "_forensic"
         return retirement.verify_interrupted_pool_evidence(
             self.registry, self.run, forensic / "manifest.json",
             forensic / "originals.tar.gz", self.machines, self.volumes,
         )
+
+    def add_retired_worker(self):
+        worker, volume, name = "c" * 14, "vol_retiredworker123", "cloudbench-retired-worker"
+        pairs(self.audit / "fresh" / name, {
+            "version": "1", "fleet_owner_token": OWNER, "run_id": RUN_ID, "app": APP,
+            "clone_name": name, "source": "fresh-clone", "source_machine_id": MACHINE,
+            "machine_id": worker, "volume_id": volume, "disposition": "destroyed-provider-retained",
+        })
+        pairs(self.audit / "expected-fresh" / name, {"clone_name": name, "source_machine_id": MACHINE})
+        write(self.audit / "by-machine-id" / worker, name + "\n")
+        base = self.out / "worker-runtime-evidence" / worker
+        identity = {"version": 1, "machine_id": worker, "run_token": TOKEN}
+        write(base / "owner.json", json.dumps({**identity, "primary_machine_id": MACHINE}))
+        process = {"pid": 123, "birth": "linux:00000000-0000-4000-8000-000000000001:456"}
+        owner = {**identity, "supervisor": process, "expected_worker_logs": ["worker.txt"]}
+        terminal = {**identity, "supervisor": process, "child": process,
+                    "quiescent": True, "children_reaped": True, "streams_closed": True,
+                    "worker_started": True, "exit_code": 0}
+        files = {"receipts/owner.json": json.dumps(owner).encode(),
+                 "receipts/terminal.json": json.dumps(terminal).encode(),
+                 "logs/worker.log": b"supervisor closed\n", "logs/agents/worker.txt": b"original worker closed\n"}
+        capture = base / "capture"
+        for relative, data in files.items():
+            write(capture / relative, data)
+        write(capture / "manifest.json", json.dumps({
+            **identity, "quiescent": True, "terminal": terminal, "worker_logs": ["worker.txt"],
+            "files": {relative: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                      for relative, data in files.items()},
+        }))
+        return worker, volume, capture
+
+    def test_interrupted_pool_accepts_verified_retired_worker_and_rejects_missing_or_live_evidence(self):
+        worker, volume, capture = self.add_retired_worker()
+        receipt = self.verify_archive()
+        self.assertEqual(receipt["proof_credit"], 0)
+        self.assertEqual(receipt["verified_workers"], 1)
+        for inventory, extra in ((self.machines, {"id": worker, "state": "started"}),
+                                 (self.volumes, {"id": volume})):
+            original = inventory.read_text()
+            write(inventory, json.dumps(json.loads(original) + [extra]))
+            with self.assertRaises(AssertionError):
+                self.verify_existing_archive()
+            write(inventory, original)
+        log = capture / "logs/worker.log"
+        original = log.read_bytes()
+        log.write_bytes(original + b"unverified tail")
+        with self.assertRaises(ValueError):
+            self.verify_existing_archive()
+        log.write_bytes(original)
+        owner = capture.parent / "owner.json"
+        original = owner.read_text()
+        changed = json.loads(original)
+        changed["primary_machine_id"] = worker
+        write(owner, json.dumps(changed))
+        with self.assertRaises(AssertionError):
+            self.verify_existing_archive()
 
     def test_stale_running_manifest_after_backend_sigkill_retires_zero_credit(self) -> None:
         result = self.verify_archive()

@@ -6296,6 +6296,57 @@ async def test_save_browser_action_message_rejects_redirect():
 
     assert accepted is False
 
+async def test_finished_recording_retries_connection_failure_without_changing_payload():
+    import httpx
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    post = AsyncMock(side_effect=[httpx.ConnectTimeout("connection unavailable"), httpx.Response(201)])
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=SimpleNamespace(post=post))
+    client.__aexit__ = AsyncMock(return_value=False)
+    with (
+        patch("config.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.repo.httpx.AsyncClient", return_value=client),
+        patch("asyncio.sleep", AsyncMock()),
+    ):
+        accepted = await save_browser_action_message(
+            agent_id="ag1", title="Browser recording saved", message="Provider replay",
+            status=MessageStatus.FINISHED, task_id="browser-one", action_type="recording",
+            extra_metadata={"recording_view_url": "https://recording.example/view"},
+        )
+    assert accepted is True, "a pre-request connection failure must not discard a real recording"
+    assert post.await_count == 2
+    assert post.await_args_list[0] == post.await_args_list[1], "the exact recording identity must survive retry"
+
+
+async def test_finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed():
+    import httpx
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    cases = [
+        ("recording", httpx.ConnectTimeout("unavailable"), 3),
+        ("recording", httpx.ReadTimeout("ambiguous acknowledgement"), 1),
+        ("click", httpx.ConnectTimeout("unavailable"), 1),
+    ]
+    for action_type, error, attempts in cases:
+        post = AsyncMock(side_effect=error)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=SimpleNamespace(post=post))
+        client.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch("config.load_config", return_value=_fake_config()),
+            patch("domains.spawn_browser_agent_v3.repo.httpx.AsyncClient", return_value=client),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            accepted = await save_browser_action_message(
+                agent_id="ag1", title="recording", message="Provider replay",
+                status=MessageStatus.FINISHED, task_id="browser-one", action_type=action_type,
+            )
+        assert accepted is False
+        assert post.await_count == attempts
+
 async def test_save_browser_action_message_tool_name_override():
     """Verifier feedback flows back as `attempt_completion` TOOL result (C5)."""
     from tools.base import MessageStatus
@@ -21655,6 +21706,14 @@ async def run_all_tests():
     await r.record_async(
         "save_browser_action_message_rejects_redirect",
         test_save_browser_action_message_rejects_redirect,
+    )
+    await r.record_async(
+        "finished_recording_retries_connection_failure_without_changing_payload",
+        test_finished_recording_retries_connection_failure_without_changing_payload,
+    )
+    await r.record_async(
+        "finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed",
+        test_finished_recording_connection_retry_is_bounded_and_other_failures_are_not_replayed,
     )
     await r.record_async("save_browser_assistant_message", test_save_browser_assistant_message)
     await r.record_async(
