@@ -37,6 +37,7 @@ import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
 import { planFloatReplenish } from '../../providers/brex/replenish';
+import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
 
 loadDotenvWithCallerOverrides();
 
@@ -310,6 +311,7 @@ async function main(): Promise<void> {
   })) as { structuredContent?: { cardId?: string } };
   const cardId = minted.structuredContent?.cardId;
   assert.ok(cardId !== undefined, 'create_card returned no cardId');
+  const createdCardIds = new Set([cardId]);
   record(`minted ${usd(mintCents)} card ${cardId}`);
 
   const poolAfterMint = extractAgentCardOrgWallet(
@@ -357,15 +359,8 @@ async function main(): Promise<void> {
   );
 
   // ── Cleanup: never leave open cards behind ───────────────────────────────────────────────────
-  const cards =
-    (
-      (await callOrgTool('list_cards', { cardholder_id: cardholderId, limit: 25 })) as {
-        structuredContent?: { cards?: Array<{ id: string; status: string }> };
-      }
-    ).structuredContent?.cards ?? [];
-  const stillOpen = cards.filter((card) => card.status === 'OPEN');
-  for (const card of stillOpen) await callOrgTool('close_card', { card_id: card.id });
-  if (stillOpen.length > 0) record(`cleanup: closed ${stillOpen.length} lingering open card(s)`);
+  const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
+  if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
 
   console.log('\ntreasury-rails blackbox: all checks passed');
 }
