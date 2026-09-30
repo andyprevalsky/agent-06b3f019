@@ -14,7 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import time
 
 from _test_utils import BlackboxResult
@@ -1760,6 +1760,41 @@ async def test_payment_abandonment_seals_browser_before_hub_archive():
     seal_index = source.index("_seal_payment_abandonment_browser_for_archive", cleanup_index)
     archive_index = source.index("finalize_archive_and_score_world_model", cleanup_index)
     assert cleanup_index < seal_index < archive_index
+
+
+async def test_paused_browser_before_session_allocation_archives_with_exact_zero_proof():
+    """Captured proof68 shape: pause cancels the tool before a session exists."""
+    import benchmarks.run_benchmark as bench
+
+    root = "ca9d72bd-9e5d-4e08-ab4b-94c913c7116b"
+    task = "2540a323-185d-5166-b8ed-3186fb579029"
+    messages = [
+        {"role": "TOOL", "message": "", "metadata": {
+            "toolName": "spawn_browser_agent", "action_type": "session_starting",
+            "toolStatus": "IN_PROGRESS",
+        }},
+        {"role": "TOOL", "message": "User paused the browser agent", "metadata": {
+            "toolName": "spawn_browser_agent", "action_type": "task_complete",
+            "task_id": task, "toolStatus": "ERROR",
+        }},
+    ]
+    zero = {"root_exists": True, "tree_agent_ids": [root], "browser_sessions": []}
+    logs = {}
+    with (
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
+        patch.object(bench, "get_agent", AsyncMock(return_value={"messages": messages})),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", return_value=zero),
+    ):
+        await bench._refresh_browser_archive_snapshot(
+            "http://localhost:1", root, {}, logs,
+            expected_agent_ids={root}, ownership_before=zero, timeout_seconds=0.1,
+        )
+    assert logs["browser_zero_allocation_receipt"] == {
+        "root_agent_id": root, "task_ids": [task], "tree_agent_ids": [root],
+        "task_ids_by_agent": {root: [task]},
+        "before_browser_sessions": [], "archive_browser_sessions": [],
+    }
+    assert logs["tree"][root]["messages"][-1]["metadata"]["task_id"] == task
 
 
 def test_agent_messages_have_browser_terminal_requires_explicit_close():
@@ -19695,6 +19730,10 @@ async def run_all_tests():
     await r.record_async(
         "payment_abandonment_seals_browser_before_hub_archive",
         test_payment_abandonment_seals_browser_before_hub_archive,
+    )
+    await r.record_async(
+        "paused_browser_before_session_allocation_archives_with_exact_zero_proof",
+        test_paused_browser_before_session_allocation_archives_with_exact_zero_proof,
     )
     r.record(
         "agent_messages_have_browser_terminal_requires_explicit_close",

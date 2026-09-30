@@ -259,8 +259,17 @@ zero benchmark proof credit and refuses any observed external ownership.
 still satisfy an infrastructure proof; a missing result, missing successful
 model responses, stale/foreign evidence, or unverified teardown cannot. Stop
 only the exact controller PID/owner recorded for your run and let its traps
-recover resources; use its exact stale-owner recovery path if needed. Publish
-durable evidence with `python3 scripts/publish_evidence_links.py --run-json
+recover resources; use its exact stale-owner recovery path if needed.
+If archive finalization reports `TimeoutError`, inspect the last
+`browser_archive_observation`, exact `cloud_cleanup_evidence` session snapshots,
+and worker cancellation timestamps before blaming recording upload. A browser
+tool canceled before allocating a session has no recording to attach; only a
+task-bound `browser_zero_allocation_receipt` plus zero sessions in the exact
+before/archive/after/final ownership reads and a clean provider receipt can
+establish that exception. Any allocated session still owes a playable recording.
+The durable publisher checks this proof; never synthesize a recording or waive
+its check to grant a slice credit. Publish durable evidence with
+`python3 scripts/publish_evidence_links.py --run-json
 <run.json> --agent-id <id>` before citing an FE link. Composite benchmarks
 can carry multiple root UUIDs in a comma-joined
 `agent_id`; publish each real root UUID separately with the same run JSON.

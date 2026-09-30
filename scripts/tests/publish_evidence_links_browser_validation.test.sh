@@ -66,6 +66,59 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 )
 assert any("no correctly attached recording" in f for f in failures), failures
 
+# A cloud-owned browser call cancelled before session allocation has no video
+# to attach. The exact root's three database reads and terminal provider
+# receipt must all prove zero sessions before this narrow exception applies.
+zero_messages = [
+    msg(toolName="spawn_browser_agent", action_type="session_starting", toolStatus="IN_PROGRESS"),
+    {"role": "TOOL", "message": "User paused the browser agent", "metadata": {
+        "toolName": "spawn_browser_agent", "action_type": "task_complete",
+        "toolStatus": "ERROR", "task_id": "zero-task",
+    }},
+]
+zero_snapshot = {"root_exists": True, "tree_agent_ids": [agent], "browser_sessions": []}
+bundle = {"run_id": "zero-owned", "tasks": [{"agent_id": agent, "logs": {
+    "messages": zero_messages,
+    "browser_zero_allocation_receipt": {
+        "root_agent_id": agent, "task_ids": ["zero-task"], "tree_agent_ids": [agent],
+        "task_ids_by_agent": {agent: ["zero-task"]},
+        "before_browser_sessions": [], "archive_browser_sessions": [],
+    },
+    "cloud_cleanup_evidence": {
+        "before": zero_snapshot, "after": zero_snapshot, "final": zero_snapshot,
+        "errors": [], "provider_receipts": [],
+    },
+    "cloud_provider_cleanup": {
+        "tree_sealed": True, "root_deleted": True, "provider_receipts": [],
+    },
+}}]}
+allowed = mod.verified_zero_session_tasks(bundle, agent)
+assert allowed == {"zero-task"}, allowed
+assert mod.validate_browser_agents_terminated_with_recording(
+    agent, zero_messages, zero_session_task_ids=allowed,
+) == []
+assert any("no correctly attached recording" in f for f in
+    mod.validate_browser_agents_terminated_with_recording(agent, zero_messages))
+assert any("no correctly attached recording" in f for f in
+    mod.validate_browser_agents_terminated_with_recording(
+        agent, zero_messages + [msg(toolName="spawn_browser_agent",
+                                    action_type="session_init", task_id="zero-task",
+                                    toolStatus="FINISHED")],
+        zero_session_task_ids=allowed,
+    ))
+import copy
+for changed in ("before", "after", "final"):
+    poisoned = copy.deepcopy(bundle)
+    poisoned["tasks"][0]["logs"]["cloud_cleanup_evidence"][changed]["browser_sessions"] = [
+        {"provider": "kernel", "session_id": "session-present"}
+    ]
+    try:
+        mod.verified_zero_session_tasks(poisoned, agent)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError(f"{changed} session allocation was accepted")
+
 # Explicit browser identity cannot bypass checks when action names evolve.
 for identity in ({"agentType": "browser", "toolName": "spawn_agent"},
                  {"toolName": "spawn_browser_agent"}):

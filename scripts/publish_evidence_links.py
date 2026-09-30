@@ -143,6 +143,61 @@ def evidence_bundle_for_agent(bundle: dict, agent_id: str) -> dict:
     }
 
 
+def verified_zero_session_tasks(bundle: dict, agent_id: str) -> set[str]:
+    """Bind pre-session cancellation to exact owned DB and cleanup receipts."""
+    projected = evidence_bundle_for_agent(bundle, agent_id)
+    matches = [
+        task for task in projected.get("tasks", [])
+        if task.get("agent_id") == agent_id
+        or agent_id in ((task.get("logs") or {}).get("tree") or {})
+    ]
+    if len(matches) != 1:
+        return set()
+    logs = matches[0].get("logs") or {}
+    receipt = logs.get("browser_zero_allocation_receipt")
+    if receipt is None:
+        return set()
+    cleanup = logs.get("cloud_cleanup_evidence") or {}
+    provider = logs.get("cloud_provider_cleanup") or {}
+    ids = receipt.get("task_ids") if isinstance(receipt, dict) else None
+    tree = receipt.get("tree_agent_ids") if isinstance(receipt, dict) else None
+    task_map = receipt.get("task_ids_by_agent") if isinstance(receipt, dict) else None
+    owner = receipt.get("root_agent_id") if isinstance(receipt, dict) else None
+    valid = (
+        isinstance(ids, list) and bool(ids)
+        and all(isinstance(value, str) and value for value in ids)
+        and len(ids) == len(set(ids))
+        and isinstance(tree, list) and all(isinstance(value, str) for value in tree)
+        and agent_id in tree
+        and isinstance(task_map, dict)
+        and set(task_map).issubset(set(tree))
+        and all(isinstance(values, list) and all(isinstance(value, str) and value for value in values)
+                for values in task_map.values())
+        and sorted(value for values in task_map.values() for value in values) == sorted(ids)
+        and isinstance(owner, str) and owner in tree
+        and receipt.get("before_browser_sessions") == []
+        and receipt.get("archive_browser_sessions") == []
+        and cleanup.get("errors") == []
+        and cleanup.get("provider_receipts") == []
+        and provider.get("tree_sealed") is True
+        and provider.get("root_deleted") is True
+        and provider.get("provider_receipts") == []
+    )
+    for phase in ("before", "after", "final"):
+        snapshot = cleanup.get(phase) if isinstance(cleanup, dict) else None
+        valid = valid and (
+            isinstance(snapshot, dict)
+            and snapshot.get("root_exists") is True
+            and isinstance(snapshot.get("tree_agent_ids"), list)
+            and all(isinstance(value, str) for value in snapshot["tree_agent_ids"])
+            and sorted(snapshot["tree_agent_ids"]) == sorted(tree)
+            and snapshot.get("browser_sessions") == []
+        )
+    if not valid:
+        raise SystemExit("invalid exact zero-browser-allocation ownership receipt")
+    return set(task_map.get(agent_id, []))
+
+
 def upload_run_json(run_json: Path, agent_id: str) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
     from benchmarks.hub_upload import upload_run_bundle  # type: ignore
@@ -227,7 +282,7 @@ def _probe_recording_file_pointer(
 
 
 def validate_browser_agents_terminated_with_recording(
-    agent_id: str, messages: list
+    agent_id: str, messages: list, *, zero_session_task_ids: set[str] | None = None,
 ) -> list[str]:
     """Return failure reasons when any browser task is still live or missing recording.
 
@@ -236,11 +291,17 @@ def validate_browser_agents_terminated_with_recording(
       * ``action_type=task_complete`` (terminated for FE panels)
       * a FINISHED recording message with a reachable ``recording_view_url`` or a
         fetchable ``recording_file_pointer``
+    An exact owned zero-session receipt permits a task cancelled before its
+    session was allocated; an allocated browser still requires a recording.
     Agents with no browser tasks pass.
     Code agents share lifecycle action names with browsers. Explicit code
     identity exempts those tasks unless the same task also has browser evidence;
     lifecycle events with unknown identity retain the fail-closed checks.
     """
+    sys.path.insert(0, str(REPO_ROOT / "agents"))
+    from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
+
+    verified_zero = (zero_session_task_ids or set()) & cancelled_before_session_task_ids(messages)
     tasks: dict[str, dict[str, bool]] = {}
     recording_candidates: dict[str, list[dict]] = {}
     for message in messages:
@@ -311,7 +372,7 @@ def validate_browser_agents_terminated_with_recording(
             ):
                 recording_ok = True
                 break
-        if not recording_ok:
+        if not recording_ok and task_id not in verified_zero:
             failures.append(
                 f"browser task {task_id} has no correctly attached recording "
                 "(need reachable recording_view_url or fetchable recording_file_pointer)"
@@ -321,7 +382,9 @@ def validate_browser_agents_terminated_with_recording(
     return failures
 
 
-def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str, int]:
+def verify_agent_reachable(
+    agent_id: str, *, timeout: float = 60.0, zero_session_task_ids: set[str] | None = None,
+) -> tuple[str, int]:
     """Probe archive-backed agent detail; return (status_label, message_count).
 
     Fails closed when any browser agent on the FE link is still live or missing
@@ -344,7 +407,7 @@ def verify_agent_reachable(agent_id: str, *, timeout: float = 60.0) -> tuple[str
             f"agent {agent_id} returned no messages — Hub archive not readable yet"
         )
     browser_failures = validate_browser_agents_terminated_with_recording(
-        agent_id, messages
+        agent_id, messages, zero_session_task_ids=zero_session_task_ids,
     )
     if browser_failures:
         raise SystemExit(
@@ -429,6 +492,11 @@ def main() -> int:
     args = parse_args()
     agent_id = _normalize_agent_id(args.agent_id)
     run_id = ""
+    zero_session_task_ids: set[str] = set()
+    if args.run_json:
+        zero_session_task_ids = verified_zero_session_tasks(
+            json.loads(args.run_json.read_text(encoding="utf-8")), agent_id,
+        )
     if args.run_json and not args.skip_hub_upload:
         run_path = args.run_json.resolve()
         run_id = upload_run_json(run_path, agent_id)
@@ -438,7 +506,9 @@ def main() -> int:
     if args.skip_fe_verify:
         fe_status, message_count = "skipped", 0
     else:
-        fe_status, message_count = verify_agent_reachable(agent_id)
+        fe_status, message_count = verify_agent_reachable(
+            agent_id, zero_session_task_ids=zero_session_task_ids,
+        )
     manifest = write_manifest(
         agent_id=agent_id,
         run_id=run_id,

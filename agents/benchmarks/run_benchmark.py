@@ -5467,7 +5467,9 @@ def _agent_messages_ready_for_browser_hub_archive(
     return _agent_messages_have_browser_terminal(messages) and _agent_messages_have_browser_recording_ready(messages)
 
 
-def _agent_messages_ready_for_durable_browser_evidence(messages: Optional[List[dict]]) -> bool:
+def _agent_messages_ready_for_durable_browser_evidence(
+    messages: Optional[List[dict]], *, zero_session_task_ids: set[str] | None = None,
+) -> bool:
     """Require terminal and attached recording for every browser, including no-row failures."""
     states: dict[str, dict[str, bool]] = {}
     lifecycle = {"browser", "session_init", "session_started", "task_started", "recording", "network_recording", "task_complete"}
@@ -5487,8 +5489,9 @@ def _agent_messages_ready_for_durable_browser_evidence(messages: Optional[List[d
         # The durable publisher accepts this singular URL or an attached file.
         state["recording"] |= _recording_attachment_ready({**meta, "recording_view_urls": []})
     return all(
-        (state["code"] and not state["browser"]) or (state["complete"] and state["recording"])
-        for state in states.values()
+        (state["code"] and not state["browser"])
+        or (state["complete"] and (state["recording"] or task_id in (zero_session_task_ids or set())))
+        for task_id, state in states.items()
     )
 
 
@@ -5530,6 +5533,7 @@ async def _refresh_agent_after_pause_for_browser_terminal(
 async def _refresh_browser_archive_snapshot(
     base_url: str, agent_id: str, data: dict, logs: dict,
     *, expected_agent_ids: set[str] | None = None, timeout_seconds: float = 60.0,
+    ownership_before: dict | None = None,
 ) -> dict:
     """Refresh the entire tree at the final archive boundary; incomplete evidence fails closed."""
     async with asyncio.timeout(timeout_seconds):
@@ -5549,7 +5553,27 @@ async def _refresh_browser_archive_snapshot(
             latest = snapshots[agent_id]
             if time.monotonic() >= deadline:
                 raise TimeoutError("browser archive refresh exceeded its readiness bound")
-            if all(_agent_messages_ready_for_durable_browser_evidence(value.get("messages")) for value in snapshots.values()):
+            zero_tasks_by_agent: dict[str, set[str]] = {}
+            if (
+                ownership_before is not None
+                and ownership_before.get("browser_sessions") == []
+                and set(ownership_before.get("tree_agent_ids") or []) == ids
+            ):
+                from benchmarks.browser_zero_allocation import cancelled_before_session_task_ids
+
+                candidates_by_agent = {
+                    aid: cancelled_before_session_task_ids(value.get("messages"))
+                    for aid, value in snapshots.items()
+                }
+                if any(candidates_by_agent.values()):
+                    current = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, agent_id)
+                    if current["browser_sessions"] == [] and set(current["tree_agent_ids"]) == ids:
+                        zero_tasks_by_agent = candidates_by_agent
+            if all(
+                _agent_messages_ready_for_durable_browser_evidence(
+                    value.get("messages"), zero_session_task_ids=zero_tasks_by_agent.get(aid),
+                ) for aid, value in snapshots.items()
+            ):
                 async def cached_get(aid):
                     return snapshots[aid]
                 tree = canonicalize_agent_tree(await collect_tree_messages(agent_id, tree_agents, cached_get))
@@ -5558,6 +5582,15 @@ async def _refresh_browser_archive_snapshot(
                 latest["_benchmark"] = {**latest.get("_benchmark", {}), **data.get("_benchmark", {})}
                 logs["messages"] = extract_message_transcript(latest)
                 logs["tree"] = tree
+                if any(zero_tasks_by_agent.values()):
+                    logs["browser_zero_allocation_receipt"] = {
+                        "root_agent_id": agent_id,
+                        "task_ids": sorted({task_id for tasks in zero_tasks_by_agent.values() for task_id in tasks}),
+                        "task_ids_by_agent": {aid: sorted(tasks) for aid, tasks in zero_tasks_by_agent.items() if tasks},
+                        "tree_agent_ids": sorted(ids),
+                        "before_browser_sessions": [],
+                        "archive_browser_sessions": [],
+                    }
                 logs.pop("browser_archive_observation", None)
                 return latest
             if time.monotonic() >= deadline:
@@ -5714,6 +5747,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                     base_url, aid, {}, logs,
                     expected_agent_ids=set(before["tree_agent_ids"]),
                     timeout_seconds=archive_timeout_seconds,
+                    ownership_before=before,
                 )
                 if result is None:
                     raise RuntimeError("owned cloud root did not produce a task result")
