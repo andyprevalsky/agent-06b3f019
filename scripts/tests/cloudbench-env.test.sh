@@ -1724,12 +1724,12 @@ port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", port))
-s.listen(1)
+s.listen(16)
 time.sleep(2)
 s.close()
 PY
   listener_pid=$!
-  trap 'kill "$listener_pid" 2>/dev/null || true' RETURN
+  trap 'kill "$listener_pid" 2>/dev/null || true' EXIT
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     if cloudbench_tcp_listener_present "$free_port"; then
       break
