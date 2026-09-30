@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline exact-owner regression for a Mac-only task stopped before stack startup."""
 
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -33,6 +34,7 @@ def load(name: str, path: Path):
 
 recovery = load("prestack_recovery", ROOT / "cloudbench-prestack-recovery.py")
 retirement = load("forensic_retirement_prestack", ROOT / "cloudbench-forensic-retirement.py")
+cleanup = load("exact_cleanup_failed_stack", ROOT / "cloudbench-exact-session-cleanup.py")
 
 
 def write(path: Path, value: str | bytes) -> None:
@@ -176,6 +178,114 @@ class PrestackRecoveryTest(unittest.TestCase):
         write(self.out / "fleet-child.log", "other failure\nOriginal exit code: 70\n")
         with self.assertRaisesRegex(ValueError, "unsupported platform"):
             self.verify()
+
+
+class FailedStackRecoveryTest(unittest.TestCase):
+    """A required service can die before run.sh updates services.json."""
+
+    make_capture = PrestackRecoveryTest.make_capture
+
+    def setUp(self) -> None:
+        PrestackRecoveryTest.setUp(self)
+        self.bench = "polar-odysseys-dd2eedbc88cb"
+        renamed = self.run / self.bench
+        self.out.rename(renamed)
+        self.out = renamed
+        write(self.run / "_batch/benches.json", json.dumps([{"name": self.bench}]))
+        write(self.out / "benchmark-child.finished", "125\n")
+        backend = (
+            "[Server] Server started\n"
+            "[HTTP] POST /api/agents -> 201\n"
+            "model=Agent operation=read path=/api/agents/694913ff-2954-4d9a-b206-53c0c2dea488\n"
+            "Created Kernel browser session sessionId=kernel_failed_stack123\n"
+        ).encode()
+        self.original = {
+            "bench.log": b"owned benchmark interrupted after backend death\n",
+            "cloudbench-driver.state": b"exited\n",
+            "repo/.context/cloudbench/services.json": json.dumps({
+                "status": "running", "services": [{"name": "back-end", "pid": 1510}],
+            }).encode(),
+            "repo/.context/cloudbench/stack.log": (
+                "Environment ready\n"
+                "back-end (PID 1510) exited with code 137 — shutting down all services.\n"
+                "Stopping all services...\n"
+            ).encode(),
+            "repo/.context/cloudbench/logs/backend.log": backend,
+            "repo/.context/cloudbench/logs/worker.log": b"worker stopped\n",
+            "repo/.context/cloudbench/run.json": json.dumps({
+                "tasks": [{"name": self.bench, "status": "ERROR"}],
+            }).encode(),
+        }
+        write(self.out / "guest-cleanup.backend.log", backend)
+        write(self.out / "fleet-child.log", "backend lost during evidence finalization\nOriginal exit code: 125\n")
+        clone_name = "exact-failed-stack"
+        status = (
+            f"Machine ID: {MACHINE}\nState: stopped\nVM\n"
+            f" ID │ {MACHINE}\n State │ stopped\n Name │ {clone_name}\n"
+        )
+        write(self.out / "guest-cleanup.machine-status.txt", status)
+        args = argparse.Namespace(
+            owner=OWNER, fleet_run_id=RUN_ID, bench=self.bench, machine_id=MACHINE,
+            output_dir=str(self.out), guest_run_token=TOKEN,
+            backend_log=str(self.out / "guest-cleanup.backend.log"),
+            clone_name=clone_name,
+            machine_status=str(self.out / "guest-cleanup.machine-status.txt"),
+            manifest=str(self.out / "guest-cleanup.provider-manifest.json"),
+            stopped_proof=str(self.out / "guest-cleanup.machine-stopped.json"),
+        )
+        manifest = cleanup.active_provider_manifest(args)
+        write(Path(args.manifest), json.dumps(manifest))
+        stopped = cleanup.stopped_machine_proof(args)
+        write(Path(args.stopped_proof), json.dumps(stopped))
+        write(self.out / "guest-cleanup.recovery-receipt.json", json.dumps({
+            "schema_version": cleanup.SCHEMA, "version": 1,
+            "kind": "provider-exact-cleanup", **cleanup.identity(args),
+            "root_agent_id": manifest["root_agent_id"],
+            "manifest_sha256": cleanup.canonical_digest(manifest),
+            "stopped_machine_proof_sha256": cleanup.canonical_digest(stopped),
+            "results": [{"provider": "kernel", "session_id": "kernel_failed_stack123",
+                         "http_status": 204, "response_sha256": "0" * 64}],
+        }))
+        self.make_capture()
+
+    def verify_archive(self):
+        build = subprocess.run([
+            sys.executable, str(ROOT / "cloudbench-build-interrupted-pool-archive.py"),
+            "--registry", str(self.registry), "--capture-dir", str(self.captures),
+        ], capture_output=True, text=True)
+        self.assertEqual(build.returncode, 0, build.stderr)
+        forensic = self.run / "_forensic"
+        return retirement.verify_interrupted_pool_evidence(
+            self.registry, self.run, forensic / "manifest.json",
+            forensic / "originals.tar.gz", self.machines, self.volumes,
+        )
+
+    def test_stale_running_manifest_after_backend_sigkill_retires_zero_credit(self) -> None:
+        result = self.verify_archive()
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertEqual(result["incomplete_tasks"], 1)
+
+    def test_running_manifest_without_matching_supervisor_exit_is_rejected(self) -> None:
+        self.original["repo/.context/cloudbench/stack.log"] = b"Environment ready\n"
+        self.make_capture()
+        with self.assertRaises(AssertionError):
+            self.verify_archive()
+
+    def test_running_manifest_with_wrong_backend_pid_is_rejected(self) -> None:
+        stack = self.original["repo/.context/cloudbench/stack.log"]
+        self.original["repo/.context/cloudbench/stack.log"] = stack.replace(
+            b"back-end (PID 1510)", b"back-end (PID 9999)")
+        self.make_capture()
+        with self.assertRaises(AssertionError):
+            self.verify_archive()
+
+    def test_running_manifest_with_incomplete_provider_receipt_is_rejected(self) -> None:
+        receipt_path = self.out / "guest-cleanup.recovery-receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["results"] = []
+        write(receipt_path, json.dumps(receipt))
+        with self.assertRaises(AssertionError):
+            self.verify_archive()
 
 
 if __name__ == "__main__":

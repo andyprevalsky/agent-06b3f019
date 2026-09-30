@@ -83,6 +83,53 @@ def verify_quiesced_provider_archive(
     return provider
 
 
+def verify_failed_stack_provider_archive(
+    out: Path, row: dict[str, object], owner: str, run_id: str,
+    originals: dict[str, bytes],
+) -> None:
+    """Retire a stopped Machine whose required backend died before status flush.
+
+    The stale running services.json is retained as original evidence. Only an
+    exact supervisor exit, stopped-Machine proof, and provider cleanup receipt
+    permit zero-credit retirement.
+    """
+    services = json.loads(originals["repo/.context/cloudbench/services.json"])
+    assert services["status"] == "running"
+    backends = [service for service in services["services"]
+                if service.get("name") == "back-end"]
+    assert len(backends) == 1 and type(backends[0].get("pid")) is int
+    stack = originals["repo/.context/cloudbench/stack.log"].decode("utf-8")
+    fatal = (f"back-end (PID {backends[0]['pid']}) exited with code 137 "
+             "— shutting down all services.")
+    assert fatal in stack and stack.find("Stopping all services...") > stack.find(fatal)
+    assert "original/repo/.context/cloudbench/run.json" in row["files"]
+    run = json.loads(originals["repo/.context/cloudbench/run.json"])
+    assert len(run["tasks"]) == 1
+    assert run["tasks"][0]["name"] == row["task"]
+    assert run["tasks"][0]["status"] == "ERROR"
+
+    helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
+    provider = object_file(out / "guest-cleanup.provider-manifest.json")
+    stopped = object_file(out / "guest-cleanup.machine-stopped.json")
+    receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
+    assert provider["kind"] == "provider-active-exact-manifest"
+    assert regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024) == (
+        originals["repo/.context/cloudbench/logs/backend.log"])
+    args = argparse.Namespace(
+        owner=owner, fleet_run_id=run_id, bench=row["task"],
+        machine_id=row["machine_id"], output_dir=str(out),
+        guest_run_token=row["run_token"],
+        backend_log=str(out / "guest-cleanup.backend.log"),
+        clone_name=stopped["clone_name"],
+        machine_status=str(out / "guest-cleanup.machine-status.txt"),
+        manifest=str(out / "guest-cleanup.provider-manifest.json"),
+        stopped_proof=str(out / "guest-cleanup.machine-stopped.json"),
+    )
+    assert provider == helper["active_provider_manifest"](args)
+    stopped_sha = helper["validate_stopped_machine_proof"](args, provider)
+    assert helper["validate_provider_receipt"](receipt, provider, stopped_sha)
+
+
 def safe_name(name: str) -> bool:
     path = PurePosixPath(name)
     return bool(name) and not name.startswith("/") and path.as_posix() == name \
@@ -607,7 +654,13 @@ def verify_interrupted_pool_evidence(
     assert incomplete > 0
     seen = set()
     archived = {}
-    rejected_originals = {name: {} for name in rejected_names | prestack_names}
+    failed_stack_names = {
+        row["task"] for row in rows if row["kind"] == "interrupted"
+        and (run / row["task"] / "guest-cleanup.machine-stopped.json").is_file()
+        and object_file(run / row["task"] / "guest-cleanup.provider-manifest.json")
+            .get("kind") == "provider-active-exact-manifest"
+    }
+    captured_originals = {name: {} for name in rejected_names | prestack_names | failed_stack_names}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_files
@@ -620,8 +673,8 @@ def verify_interrupted_pool_evidence(
             assert len(data) == member.size
             assert hashlib.sha256(data).hexdigest() == info["sha256"]
             task_name, _, original_relative = member.name.partition("/original/")
-            if task_name in rejected_originals and original_relative:
-                rejected_originals[task_name][original_relative] = data
+            if task_name in captured_originals and original_relative:
+                captured_originals[task_name][original_relative] = data
             if member.name.endswith("/sealed/run.json") or member.name.endswith(
                     "/original/repo/.context/cloudbench/run.json"):
                 archived[member.name] = json.loads(data)
@@ -650,12 +703,12 @@ def verify_interrupted_pool_evidence(
                 if row["task"] in prestack_names:
                     verify_prestack_archive(
                         run / row["task"], row, owner, meta["run_id"],
-                        rejected_originals[row["task"]],
+                        captured_originals[row["task"]],
                     )
                 elif row["task"] in rejected_names:
                     verify_rejected_start_archive(
                         run / row["task"], row, owner, meta["run_id"],
-                        rejected_originals[row["task"]],
+                        captured_originals[row["task"]],
                     )
                 elif (run / row["task"] / "guest-cleanup.recovery-receipt.json").is_file():
                     out = run / row["task"]
@@ -675,7 +728,13 @@ def verify_interrupted_pool_evidence(
                         verify_quiesced_provider_archive(
                             out, row, owner, meta["run_id"])
                     else:
-                        assert services["status"] == "failed"
+                        if services["status"] == "running":
+                            verify_failed_stack_provider_archive(
+                                out, row, owner, meta["run_id"],
+                                captured_originals[row["task"]],
+                            )
+                        else:
+                            assert services["status"] == "failed"
                 else:
                     assert services["status"] == "stopped"
                     token = row["run_token"]
