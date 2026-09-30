@@ -73,6 +73,17 @@ async function testQuantityEchoNameParity(): Promise<void> {
     'backend quantity-echo canonicalization must match the agents-side Python fingerprint'
   );
 
+  const hyphenEcho = fixtureReceipt('Aurora Notebook - x1', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: hyphenEcho,
+      totalCents: 1200,
+    }) === bareFp,
+    'matching hyphenated quantity echo must reuse the bare-title card'
+  );
+
   const pricedEcho = fixtureReceipt('Aurora Notebook - 1 x $12.00', '1,284 reviews');
   assert(
     canonicalStoredPurchaseFingerprint({
@@ -106,6 +117,17 @@ async function testQuantityEchoNameParity(): Promise<void> {
       totalCents: 1200,
     }) !== bareFp,
     'x{n} that does not match quantity must remain a distinct cart'
+  );
+
+  const mismatchedHyphenQty = fixtureReceipt('Aurora Notebook - x2', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: mismatchedHyphenQty,
+      totalCents: 1200,
+    }) !== bareFp,
+    'a hyphenated quantity echo with a different quantity must remain distinct'
   );
 }
 

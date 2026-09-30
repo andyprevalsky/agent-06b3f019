@@ -444,11 +444,27 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
     assert echoed_payload["lineItems"][0]["name"] == "Aurora Notebook x1"
     assert bare_payload["fingerprint"] == echoed_payload["fingerprint"]
 
+    hyphen_echo = _sample_tool_call()
+    hyphen_echo["line_items"][0]["name"] = "Aurora Notebook - x1"
+    hyphen_echo["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(hyphen_echo, "user-123")["fingerprint"]
+        == bare_payload["fingerprint"]
+    )
+
     mismatched = _sample_tool_call()
     mismatched["line_items"][0]["name"] = "Aurora Notebook x2"
     mismatched["line_items"][0]["quantity"] = 1
     assert (
         normalize_payment_payload(mismatched, "user-123")["fingerprint"]
+        != bare_payload["fingerprint"]
+    )
+
+    mismatched_hyphen = _sample_tool_call()
+    mismatched_hyphen["line_items"][0]["name"] = "Aurora Notebook - x2"
+    mismatched_hyphen["line_items"][0]["quantity"] = 1
+    assert (
+        normalize_payment_payload(mismatched_hyphen, "user-123")["fingerprint"]
         != bare_payload["fingerprint"]
     )
 

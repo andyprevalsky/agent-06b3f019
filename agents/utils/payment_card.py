@@ -107,14 +107,14 @@ def _canonicalize_review_count(value: str) -> str:
     return re.sub(r"(?<=\d),(?=\d)", "", value)
 
 
-_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+x(\d+)\s*$", re.IGNORECASE)
+_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+(?:-\s*)?x(\d+)\s*$", re.IGNORECASE)
 _LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
     r"\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$", re.IGNORECASE
 )
 
 
 def _canonicalize_line_item_name(name: Any, quantity: Any, unit_price_cents: Any) -> Any:
-    """Strip a trailing ` x{quantity}` echo of the quantity field.
+    """Strip a trailing ` x{quantity}` or ` - x{quantity}` quantity echo.
 
     Browser agents often copy order-summary prose ("Aurora Notebook x1") into
     `name` while also setting `quantity: 1`. That display-only suffix must not

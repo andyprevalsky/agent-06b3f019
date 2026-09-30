@@ -154,3 +154,14 @@ because its expected lifecycle did not assert those counts. The task contract
 now requires exactly one of each, and a regression test confirms that this
 archived run fails validation. That earlier green result does not close this
 case; the stricter exact benchmark needs a new pass.
+
+The next strict rerun (`88706c44-eb1a-4258-8714-6ad8a930facc`) failed for a
+separate, fully attributed fingerprint difference. Its first browser sent the
+three bare product titles; its second browser sent the same titles with a
+redundant ` - x1` suffix while also setting `quantity: 1`. All other receipt
+fields matched. The two purchase fingerprints differed, so the backend minted
+another card. Both the agents-side fingerprint builder and the backend's
+stored-receipt backfill now ignore that exact matching quantity echo. A replay
+of the two archived request payloads produces one canonical fingerprint, and
+the tests keep a mismatched quantity distinct. Another exact live run is still
+required to prove settlement and reuse together.

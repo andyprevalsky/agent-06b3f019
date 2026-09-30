@@ -29,8 +29,8 @@ function asPositiveInt(value: unknown): number {
 }
 
 /**
- * Strip a trailing ` x{quantity}` echo of the quantity field so order-summary
- * prose ("Aurora Notebook x1") fingerprints the same as the product title.
+ * Strip a trailing ` x{quantity}` or ` - x{quantity}` echo of the quantity field
+ * so order-summary prose fingerprints the same as the product title.
  */
 function canonicalizeLineItemName(
   name: unknown,
@@ -47,7 +47,7 @@ function canonicalizeLineItemName(
   ) {
     return name.slice(0, priced.index).trimEnd();
   }
-  const match = /\s+x(\d+)\s*$/i.exec(name);
+  const match = /\s+(?:-\s*)?x(\d+)\s*$/i.exec(name);
   if (match === null) return name;
   if (Number.parseInt(match[1], 10) !== qty) return name;
   return name.slice(0, match.index).trimEnd();
