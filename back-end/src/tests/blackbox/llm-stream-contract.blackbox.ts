@@ -121,6 +121,11 @@ function testAmbiguousFinalItemsFailTyped(): void {
   });
 
   assert.throws(() => accumulator.finalText(), StructuredOutputCardinalityError);
+  assert.equal(
+    accumulator.currentText(),
+    '',
+    'currentText() is the degrade path and must not throw on ambiguous items'
+  );
 }
 
 async function testCompletionClientPreservesItemProvenance(): Promise<void> {

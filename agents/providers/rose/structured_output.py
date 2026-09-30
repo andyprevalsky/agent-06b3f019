@@ -74,6 +74,8 @@ class StructuredOutputAccumulator:
         if len(final_items) == 1:
             return "".join(final_items[0].parts)
         if len(final_items) > 1:
+            if not require_exactly_one:
+                return ""
             raise StructuredOutputCardinalityError(f"Expected one final_answer item, received {len(final_items)}")
 
         eligible_items = [item for item in items if item.phase not in IGNORED_PHASES]

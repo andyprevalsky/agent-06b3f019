@@ -101,6 +101,9 @@ def test_ambiguous_final_items_fail_typed() -> None:
     try:
         accumulator.final_text()
     except StructuredOutputCardinalityError:
+        assert accumulator.current_text() == "", (
+            "current_text() is the degrade path and must not throw on ambiguous items"
+        )
         return
     raise AssertionError("multiple final_answer items must raise StructuredOutputCardinalityError")
 
