@@ -36,6 +36,10 @@ DDL_SQL="$(
   ' "$MIGRATION_SQL"
 )"
 
+# When ROSE_USE_SYSTEM_PG=true, always apply via host psql + DATABASE_URL. A
+# leftover empty Docker container with the workspace name must not steal DDL
+# (observed on Cloud: prisma syncs system PG, then this script docker-execs an
+# empty container → "relation Agent does not exist" and run.sh aborts).
 if [[ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ]] &&
   [[ -n "${DB_CONTAINER:-}" ]] &&
   command -v docker >/dev/null 2>&1 &&
