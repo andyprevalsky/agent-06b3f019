@@ -2779,10 +2779,12 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     'purge should delete records attributed to the disconnected account'
   );
   assert(
-    (await prisma.messageRecord.count({
-      where: { id: { in: [keptMessageId, legacyCrossAccountId] } },
-    })) === 2,
-    'purge must preserve the connected account and ambiguous legacy records'
+    (await prisma.messageRecord.findUnique({ where: { id: keptMessageId } })) !== null,
+    'purge must preserve records attributed to the connected account'
+  );
+  assert(
+    (await prisma.messageRecord.findUnique({ where: { id: legacyCrossAccountId } })) === null,
+    'purge must remove ambiguous legacy records that could belong to the disconnected account'
   );
   const remainingDocuments = await prisma.userDataDocument.findMany({
     where: { userId, source: 'gmail' },
@@ -2794,10 +2796,8 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
   });
   for (const remaining of [remainingDocuments, remainingRevisions]) {
     assert(
-      remaining.length === 2 &&
-        remaining.some((row) => row.googleAccountEmail === 'secondary@gmail.com') &&
-        remaining.some((row) => row.googleAccountEmail === null),
-      'purge must retain other-account and ambiguous Gmail documents and revisions'
+      remaining.length === 1 && remaining[0].googleAccountEmail === 'secondary@gmail.com',
+      'purge must retain attributed other-account rows and remove ambiguous Gmail rows'
     );
   }
 
@@ -2814,6 +2814,15 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
       config.connectedEmails.length === 1 &&
       config.connectedEmails[0] === 'secondary@gmail.com',
     'connectedEmails config should be recomputed'
+  );
+
+  const unknownAccountJob = await prisma.googleDataPurge.create({ data: { userId } });
+  await processGoogleDataPurge(unknownAccountJob.id);
+  assert(
+    (await prisma.messageRecord.count({ where: { person: { userId }, channel: 'EMAIL' } })) === 0 &&
+      (await prisma.userDataDocument.count({ where: { userId, source: 'gmail' } })) === 0 &&
+      (await prisma.userSnapshotRevision.count({ where: { userId, source: 'gmail' } })) === 0,
+    'a legacy credential with no account email must purge every potentially associated Gmail cache row'
   );
 }
 

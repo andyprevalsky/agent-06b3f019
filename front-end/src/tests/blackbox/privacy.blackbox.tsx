@@ -13,7 +13,7 @@ describe('Privacy page', () => {
 
   it('renders the last updated date', () => {
     renderWithProviders(<Privacy />);
-    expect(screen.getByText(/last updated: september 29, 2026/i)).toBeInTheDocument();
+    expect(screen.getByText(/last updated: september 30, 2026/i)).toBeInTheDocument();
   });
 
   it('renders all 11 section headings', () => {
@@ -53,8 +53,9 @@ describe('Privacy page', () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/we revoke our oauth token immediately and delete cached google user data/i),
+      screen.getByText(/we remove the stored credential, request revocation of its oauth token/i),
     ).toBeInTheDocument();
+    expect(screen.getByText(/openai may retain content.*up to 30 days/i)).toBeInTheDocument();
     expect(
       screen.getByRole('link', { name: /google api services user data policy/i }),
     ).toHaveAttribute('href', 'https://developers.google.com/terms/api-services-user-data-policy');

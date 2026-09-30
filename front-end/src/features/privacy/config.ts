@@ -5,7 +5,7 @@ export const PRIVACY_TITLE = 'Privacy Policy';
 export const PRIVACY_DESCRIPTION =
   'Rose Labs Privacy Policy — how we collect, use, share, and retain your data.';
 
-export const PRIVACY_LAST_UPDATED = 'September 29, 2026';
+export const PRIVACY_LAST_UPDATED = 'September 30, 2026';
 
 export const PRIVACY_CONTACT_EMAIL = 'security@roselabs.ai';
 
@@ -89,11 +89,11 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
     title: 'Google User Data',
     paragraphs: [
       GOOGLE_ACCESS_DESCRIPTION,
-      'How we use it. Google user data is used only to provide or improve the user-facing features you use in Rose, such as answering questions about your email, calendar, and files, drafting and sending messages you approve, scheduling events, and editing documents you ask about. To do this, the relevant content may be sent to our AI model providers (listed in Section 4) to process your request. These providers are contractually prohibited from training models on that data.',
+      'How we use it. Google user data is used only to provide or improve the user-facing features you use in Rose, such as answering questions about your email, calendar, and files, drafting and sending messages you approve, scheduling events, and editing documents you ask about. To do this, the relevant content may be sent to our AI model providers (listed in Section 4) to process your request. OpenAI may retain content sent through its standard API for up to 30 days for abuse monitoring. We do not use Google user data to train generalized AI models.',
       "What we don't do. We do not sell Google user data. We do not use it for advertising, retargeting, or interest-based ads. We do not transfer it to data brokers or information resellers. We do not use it to determine creditworthiness or for lending. We do not use Google user data to develop, improve, or train generalized AI or machine-learning models.",
       'Human access. Rose Labs personnel do not read your Google user data unless you give us explicit permission for specific messages (for example, for a support request), it is necessary for security purposes such as investigating abuse, it is required to comply with applicable law, or the data has been aggregated and anonymized for internal operations.',
       'Storage and security. Google OAuth tokens are encrypted at the application layer before storage. Content retrieved to answer a request is stored with your conversation history under your account and protected by the controls in the Security section.',
-      'Retention and deletion. You can disconnect Google at any time in Rose or at https://myaccount.google.com/permissions. When you disconnect, we revoke our OAuth token immediately and delete cached Google user data from active systems within 7 days. Account deletion removes all Google user data within 30 days, and encrypted backups roll off within 90 days.',
+      'Retention and deletion. You can disconnect Google at any time in Rose or at https://myaccount.google.com/permissions. When you disconnect in Rose, we remove the stored credential, request revocation of its OAuth token, and delete cached Google user data from active systems within 7 days. If you revoke access through Google, Rose detects it when it next tries to use the token. Account deletion removes all Google user data within 30 days, and encrypted backups roll off within 90 days.',
       "Limited Use. Rose Labs' use and transfer to any other app of information received from Google APIs will adhere to the Google API Services User Data Policy, including the Limited Use requirements.",
     ],
   },
@@ -111,7 +111,7 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
         text: 'Financial data: Plaid (financial account aggregation).',
       },
       {
-        text: 'LLM and AI processing: Anthropic, OpenAI, Google (Gemini), Perplexity, and OpenRouter (which routes to additional sub-providers including xAI, Moonshot, and Z.ai). Each provider operates under its published no-training-on-API-traffic policy.',
+        text: 'LLM and AI processing: Anthropic, OpenAI, Google (Gemini), Perplexity, and OpenRouter (which routes to additional sub-providers including xAI, Moonshot, and Z.ai).',
       },
       {
         text: 'Search and enrichment: Exa.',

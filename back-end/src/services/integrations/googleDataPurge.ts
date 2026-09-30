@@ -1,4 +1,4 @@
-import { EmailProvider, MessageChannel, type GoogleDataPurge, type Prisma } from '@prisma/client';
+import { MessageChannel, type GoogleDataPurge, type Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { revokeGoogleGrant } from '../../providers/googleRevoke';
 import { createLogger } from '../../providers/logger';
@@ -6,37 +6,19 @@ import { createLogger } from '../../providers/logger';
 const log = createLogger('GoogleDataPurge');
 const BATCH_SIZE = 1_000;
 
-async function hasOtherConnectedGmailAccount(job: GoogleDataPurge): Promise<boolean> {
-  if (job.email === null) return false;
-  const count = await prisma.emailIntegrationCredential.count({
-    where: {
-      userId: job.userId,
-      provider: EmailProvider.GMAIL,
-      email: { not: job.email },
-      accessToken: { not: null },
-    },
-  });
-  return count > 0;
-}
-
-async function deleteMessageBatch(job: GoogleDataPurge, includeLegacy: boolean): Promise<boolean> {
-  if (job.email === null) return true;
-  const accountFilters: Prisma.MessageRecordWhereInput[] = [{ googleAccountEmail: job.email }];
-  if (includeLegacy) {
-    accountFilters.push({
-      googleAccountEmail: null,
-      OR: [
-        { from: { equals: job.email, mode: 'insensitive' } },
-        { to: { equals: job.email, mode: 'insensitive' } },
-      ],
-    });
-  }
+async function deleteMessageBatch(job: GoogleDataPurge): Promise<boolean> {
+  // Legacy Gmail imports did not record their source account. Every ambiguous
+  // row must be purged because headers cannot reliably identify the receiving
+  // account (for example, BCC and mailing lists). Remaining accounts can sync
+  // their messages again; attributed rows from those accounts are preserved.
+  const accountFilters: Prisma.MessageRecordWhereInput[] =
+    job.email === null ? [] : [{ googleAccountEmail: job.email }, { googleAccountEmail: null }];
   const rows = await prisma.messageRecord.findMany({
     where: {
       person: { userId: job.userId },
       channel: MessageChannel.EMAIL,
       createdAt: { lte: job.requestedAt },
-      OR: accountFilters,
+      ...(accountFilters.length > 0 ? { OR: accountFilters } : {}),
     },
     select: { id: true },
     take: BATCH_SIZE,
@@ -47,32 +29,30 @@ async function deleteMessageBatch(job: GoogleDataPurge, includeLegacy: boolean):
   return rows.length < BATCH_SIZE;
 }
 
-async function deleteAccountDocuments(job: GoogleDataPurge, includeLegacy: boolean): Promise<void> {
-  if (job.email === null) return;
-  const accountFilters = [
-    { googleAccountEmail: job.email },
-    ...(includeLegacy ? [{ googleAccountEmail: null as null }] : []),
-  ];
+async function deleteAccountDocuments(job: GoogleDataPurge): Promise<void> {
+  const accountFilters =
+    job.email === null
+      ? []
+      : [{ googleAccountEmail: job.email }, { googleAccountEmail: null as null }];
   const where = {
     userId: job.userId,
     source: 'gmail',
     createdAt: { lte: job.requestedAt },
-    OR: accountFilters,
+    ...(accountFilters.length > 0 ? { OR: accountFilters } : {}),
   };
   await prisma.userSnapshotRevision.deleteMany({ where });
   await prisma.userDataDocument.deleteMany({ where });
 }
 
 async function processClaimedJob(job: GoogleDataPurge, fetcher: typeof fetch): Promise<void> {
-  const includeLegacy = !(await hasOtherConnectedGmailAccount(job));
-  if (!(await deleteMessageBatch(job, includeLegacy))) {
+  if (!(await deleteMessageBatch(job))) {
     await prisma.googleDataPurge.update({
       where: { id: job.id },
       data: { claimedUntil: null },
     });
     return;
   }
-  await deleteAccountDocuments(job, includeLegacy);
+  await deleteAccountDocuments(job);
   if (job.revocationToken !== null) await revokeGoogleGrant(job.revocationToken, null, fetcher);
   await prisma.googleDataPurge.update({
     where: { id: job.id },

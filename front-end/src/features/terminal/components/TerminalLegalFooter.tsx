@@ -42,7 +42,7 @@ export function TerminalLegalFooter() {
           <PopoverContent
             side="top"
             align="center"
-            className="w-[min(20rem,calc(100vw-2rem))] p-3 text-left text-xs leading-relaxed"
+            className="!animate-none z-[100] w-[min(20rem,calc(100vw-2rem))] bg-background p-3 text-left text-xs leading-relaxed text-foreground shadow-lg dark:bg-navi-black"
           >
             <p>{ROSE_APP_DESCRIPTION}</p>
             <Link to="/about" className="mt-2 inline-block underline underline-offset-2">
