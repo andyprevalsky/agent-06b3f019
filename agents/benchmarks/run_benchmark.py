@@ -3151,11 +3151,17 @@ async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, 
 
 
 def _grep_message_uses_documents_source(text: str) -> bool:
-    normalized = text.lower()
+    normalized = text.lower().split("**result:**", 1)[0]
     return (
         "- **source**: documents" in normalized
         or '"source": "documents"' in normalized
         or "'source': 'documents'" in normalized
+        or bool(
+            re.search(
+                r"(?:\*\*sources\*\*|[\"']sources[\"'])\s*:\s*\[\s*[\"']documents[\"']\s*\]",
+                normalized,
+            )
+        )
     )
 
 

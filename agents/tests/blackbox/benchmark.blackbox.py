@@ -14601,12 +14601,13 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     """Prod user-data benchmark cannot pass with generic document grep calls."""
     from benchmarks.run_benchmark import _validate_user_data_prod_grep_messages
 
-    def grep_msg(provider: str, *, body_field: str = "text") -> dict:
+    def grep_msg(provider: str, *, body_field: str = "text", plural_source: bool = False) -> dict:
+        source_line = '- **sources**: [\n  "documents"\n ]\n' if plural_source else '- **source**: documents\n'
         return {
             body_field: (
                 "**Params Passed:**\n\n"
                 "- **pattern**: project\n"
-                "- **source**: documents\n"
+                f"{source_line}"
                 "- **filters**: {\n"
                 f'  "document_source": "{provider}"\n'
                 "}\n\n"
@@ -14699,7 +14700,7 @@ def test_user_data_prod_grep_requires_all_provider_filters():
                 grep_msg("chatgpt", body_field="message"),
                 grep_msg("claude", body_field="message"),
                 grep_msg("apple_notes", body_field="message"),
-                grep_msg("obsidian", body_field="message"),
+                grep_msg("obsidian", body_field="message", plural_source=True),
                 final_summary_msg(
                     checklist_key="provider_verification_checklist",
                     verified_key="verified_from_prod_data",

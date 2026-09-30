@@ -21,6 +21,53 @@ const apiKey = process.env.BACKEND_API_KEY || '';
 const ownerId = `trajectory-owner-${randomUUID()}`;
 const otherId = `trajectory-other-${randomUUID()}`;
 
+async function proveArchiveCannotTakeOverForeignRow(): Promise<void> {
+  const messageId = randomUUID();
+  const rootAgentId = randomUUID();
+  const foreignRootAgentId = randomUUID();
+  const capturedAt = new Date();
+  await prisma.agentTrajectorySearch.create({
+    data: {
+      messageId,
+      userId: otherId,
+      rootAgentId: foreignRootAgentId,
+      agentId: foreignRootAgentId,
+      surface: 'WEB',
+      role: 'ASSISTANT',
+      createdAt: capturedAt,
+      searchText: 'Foreign private row',
+      agentGoal: 'Private',
+      traceKind: 'message',
+    },
+  });
+  try {
+    await indexArchivedTrace(
+      rootAgentId,
+      {
+        root_agent_id: rootAgentId,
+        user_id: ownerId,
+        agent_ids: [rootAgentId],
+        captured_at: capturedAt.toISOString(),
+        rows: {
+          Agent: [{ id: rootAgentId, goal: 'Colliding archive', source: 'SMS' }],
+          Message: [{ id: messageId, agentId: rootAgentId, role: 'TOOL', text: 'Collision' }],
+        },
+      } as ScopedDbFixture,
+      []
+    );
+    const row = await prisma.agentTrajectorySearch.findUniqueOrThrow({ where: { messageId } });
+    if (
+      row.userId !== otherId ||
+      row.rootAgentId !== foreignRootAgentId ||
+      row.searchText !== 'Foreign private row'
+    ) {
+      throw new Error('Archive indexing overwrote another user’s trajectory row');
+    }
+  } finally {
+    await prisma.agentTrajectorySearch.deleteMany({ where: { messageId } });
+  }
+}
+
 async function proveR2OnlyHistory(): Promise<void> {
   const rootAgentId = randomUUID();
   const archivedMessageId = randomUUID();
@@ -388,6 +435,7 @@ async function run(): Promise<void> {
     await prisma.message.delete({ where: { id: toolMessage.id } });
     requireResult(await grep(ownerId, { source: 'agent_trajectories', pattern: 'banner_mode' }), 0);
     await proveR2OnlyHistory();
+    await proveArchiveCannotTakeOverForeignRow();
     await provePartialArchiveHistory();
     process.stdout.write('✅ agent_trajectories blackbox passed\n');
   } finally {

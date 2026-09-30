@@ -58,6 +58,10 @@ BEGIN
   INTO owner_id, root_id, agent_surface, agent_goal, agent_title
   FROM lineage ORDER BY depth DESC LIMIT 1;
 
+  IF owner_id IS NULL OR root_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
   INSERT INTO "AgentTrajectorySearch" (
     "messageId", "userId", "rootAgentId", "agentId", "surface", "role", "createdAt", "searchText",
     "agentGoal", "agentTitle"
@@ -124,5 +128,5 @@ SELECT m.id, a."userId", roots.root_id, a.id, a.source::text,
 FROM "Message" m
 JOIN "Agent" a ON a.id = m."agentId"
 JOIN roots ON roots.id = a.id
-WHERE m.role::text <> 'SYSTEM' AND btrim(m.text) <> ''
+WHERE m.role::text <> 'SYSTEM' AND btrim(m.text) <> '' AND a."userId" IS NOT NULL
 ON CONFLICT ("messageId") DO NOTHING;

@@ -212,6 +212,8 @@ async function replaceArchivedRows(
         "agentTitle" = EXCLUDED."agentTitle",
         "archivePath" = EXCLUDED."archivePath",
         "traceKind" = EXCLUDED."traceKind"
+      WHERE "AgentTrajectorySearch"."userId" = EXCLUDED."userId"
+        AND "AgentTrajectorySearch"."rootAgentId" = EXCLUDED."rootAgentId"
       `);
       }
     },

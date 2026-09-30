@@ -8,7 +8,34 @@ import {
   ArchivedTraceNotFoundError,
   indexArchivedTraceFromR2,
 } from '../../providers/traceArchiveSearchIndex';
+import { createLogger } from '../../providers/logger';
 import type { GrepMatch, ValidatedGrepInput } from './types';
+
+const log = createLogger('TrajectorySearch');
+const negativeArchiveRoots = new Map<string, number>();
+const lastArchiveRepairByUser = new Map<string, number>();
+const NEGATIVE_CACHE_MS = 5 * 60_000;
+const REPAIR_INTERVAL_MS = 60_000;
+const CACHE_LIMIT = 1024;
+
+function remember(cache: Map<string, number>, key: string, value: number): void {
+  cache.delete(key);
+  if (cache.size >= CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, value);
+}
+
+function allowArchiveRepair(userId: string, rootAgentId: string): boolean {
+  const now = Date.now();
+  const key = `${userId}:${rootAgentId}`;
+  if ((negativeArchiveRoots.get(key) ?? 0) > now) return false;
+  if (now - (lastArchiveRepairByUser.get(userId) ?? 0) < REPAIR_INTERVAL_MS) return false;
+  // One explicit-path R2 repair per user per minute bounds uncached probes.
+  remember(lastArchiveRepairByUser, userId, now);
+  return true;
+}
 
 export async function searchTrajectorySource(
   userId: string,
@@ -25,12 +52,21 @@ export async function searchTrajectorySource(
   if (
     pathRoot !== undefined &&
     /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(pathRoot) &&
-    !(await trajectoryRepo.hasArchivedTrajectoryRoot(userId, pathRoot))
+    !(await trajectoryRepo.hasTrajectoryRoot(userId, pathRoot)) &&
+    allowArchiveRepair(userId, pathRoot)
   ) {
+    const cacheKey = `${userId}:${pathRoot}`;
     try {
-      await indexArchivedTraceFromR2(pathRoot, userId);
+      const count = await indexArchivedTraceFromR2(pathRoot, userId);
+      if (count === 0) remember(negativeArchiveRoots, cacheKey, Date.now() + NEGATIVE_CACHE_MS);
     } catch (error) {
-      if (!(error instanceof ArchivedTraceNotFoundError)) throw error;
+      remember(negativeArchiveRoots, cacheKey, Date.now() + NEGATIVE_CACHE_MS);
+      if (!(error instanceof ArchivedTraceNotFoundError)) {
+        log.warn('Explicit-path archive repair failed; searching indexed rows', {
+          root_agent_id: pathRoot,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
   const query = {

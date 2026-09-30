@@ -485,7 +485,33 @@ def run_fake_driver(mdir):
                 break
             time.sleep(0.1)
         if exit_code == 0:
-            time.sleep(8)
+            # The autoscaler polls metrics every ten seconds. A fixed eight
+            # second grace period can end the child before the lower target is
+            # durably observed, especially after a slow staging cleanup.
+            controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
+            oscillating = os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
+            expected_workers = "0" if oscillating else "1"
+            desired_pattern = os.path.join(
+                controller_ws, ".context", "fleet", "runs", "*",
+                bench, "desired-worker-count",
+            )
+            deadline = time.time() + 30
+            observed = False
+            while time.time() < deadline:
+                for desired_path in glob.glob(desired_pattern):
+                    try:
+                        with open(desired_path) as desired_file:
+                            observed = desired_file.read().strip() == expected_workers
+                    except OSError:
+                        observed = False
+                    if observed:
+                        break
+                if observed:
+                    break
+                time.sleep(0.1)
+            if not observed:
+                log("FATAL: autoscaler never persisted its lower worker target")
+                exit_code = 1
     if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once")):
         deadline = time.time() + 30
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]

@@ -9,6 +9,8 @@ import {
 import { GENERATOR_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
+import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
+import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 const GENERATOR_SSE = [
@@ -349,12 +351,9 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
   }
 }
 
-// Cerebras Qwen is rate-capped hard at the org level (5 req/min across all
-// models), so a burst of concurrent chats trips a 402 `quota` before any
-// caller-visible content. That must NOT sink the chat AND must NOT drop to a
-// generic model: the request falls over to the SAME model (qwen/qwen3.8-27b) via
-// OpenRouter with the provider unpinned — OpenRouter still prefers Cerebras but
-// may spill to another Qwen host past the cap.
+// A direct Cerebras quota response must leave a live OpenRouter fallback. Race
+// same-model Qwen against a fast alternate so a silent Qwen host cannot consume
+// the chat deadline. The Qwen branch must remain unpinned to Cerebras.
 async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
@@ -370,7 +369,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const calls: string[] = [];
-  let openRouterBody: Record<string, unknown> = {};
+  const openRouterBodies: Record<string, unknown>[] = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
@@ -386,7 +385,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       );
     }
     if (url === OPENROUTER_API_URL) {
-      openRouterBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      openRouterBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return sseResponse(GENERATOR_SSE);
     }
     throw new Error(`Fallover left Gemma-via-OpenRouter and hit a generic provider: ${url}`);
@@ -398,10 +397,18 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       calls.includes(OPENROUTER_API_URL),
       'a Cerebras 402 quota must fall over to OpenRouter'
     );
-    // Same model — never a generic one.
-    assert.equal(openRouterBody.model, 'qwen/qwen3.8-27b', 'fallover must stay on rose-fast Qwen');
+    assert.ok(
+      openRouterBodies.some((body) => body.model === OPENROUTER_CEREBRAS_MODEL),
+      'fallover must attempt same-model Qwen'
+    );
+    assert.ok(
+      openRouterBodies.some((body) => body.model === OPENROUTER_FAST_CHAT_MODEL),
+      'fallover must race a fast alternate model'
+    );
+    const qwenBody = openRouterBodies.find((body) => body.model === OPENROUTER_CEREBRAS_MODEL);
+    assert.ok(qwenBody);
     // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
-    const provider = openRouterBody.provider as {
+    const provider = qwenBody.provider as {
       order?: string[];
       allow_fallbacks?: boolean;
       only?: string[];

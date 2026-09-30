@@ -76,15 +76,11 @@ export async function countAgentTrajectories(query: Query): Promise<number> {
   return Number(rows[0]?.count ?? 0);
 }
 
-export async function hasArchivedTrajectoryRoot(
-  userId: string,
-  rootAgentId: string
-): Promise<boolean> {
+export async function hasTrajectoryRoot(userId: string, rootAgentId: string): Promise<boolean> {
   const rows = await prisma.$queryRaw<Array<{ found: boolean }>>`
     SELECT EXISTS (
       SELECT 1 FROM "AgentTrajectorySearch"
       WHERE "userId" = ${userId} AND "rootAgentId" = ${rootAgentId}
-        AND "archivePath" IS NOT NULL
     ) AS found
   `;
   return rows[0]?.found === true;
