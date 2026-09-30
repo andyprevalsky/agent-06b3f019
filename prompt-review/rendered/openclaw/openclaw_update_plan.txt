@@ -16,7 +16,7 @@
           "properties": {
             "step": {
               "type": "string",
-              "description": "Short plan step."
+              "description": "Short step description."
             },
             "status": {
               "type": "string",
@@ -25,7 +25,7 @@
                 "in_progress",
                 "completed"
               ],
-              "description": "One of pending, in_progress, or completed."
+              "description": "Current status for this step."
             }
           },
           "required": [
