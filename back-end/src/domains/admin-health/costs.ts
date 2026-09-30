@@ -129,8 +129,8 @@ const MODEL_RATES: Record<string, ModelRates> = {
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates
   // (kept in sync with POOL_REGISTRY + agents/providers/rose/pricing.py).
-  // mini waterfall mean: haiku ($1/$5) + glm-5.3-flash ($0.045/$0.14)
-  'rose-labs/rose-1-mini': openRouter(0.5225, 2.57),
+  // mini waterfall: gemini-3.5-flash-lite ($0.30/$2.50)
+  'rose-labs/rose-1-mini': openRouter(0.3, 2.5),
   // flash/browser mean: qwen3.8-27b ($0.15/$0.80) + gemini-3.8-flash ($0.75/$3.75)
   'rose-labs/rose-1-flash': openRouter(0.45, 2.275),
   // Historical lite pool id (renamed to flash). Keep the pre-bench rate for ledger rows.

@@ -23,9 +23,8 @@ fallback is qwen/qwen3.8-27b then google/gemini-3.8-flash. Planner stays
 on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
     rose-1-mini:
-        claudeAuth = claude-haiku-4-5
-        gptAuth    = gpt-5.6-luna
-        waterfall  = anthropic/claude-haiku-4.5 -> z-ai/glm-5.3-flash
+        direct_auth_enabled = False
+        waterfall  = google/gemini-3.5-flash-lite
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
@@ -113,11 +112,13 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-mini",
         claude_auth_model="claude-haiku-4-5",
         gpt_auth_model="gpt-5.6-luna",
-        waterfall=(
-            "anthropic/claude-haiku-4.5",
-            "z-ai/glm-5.3-flash",
-        ),
+        # Gemini 3.5 Flash-Lite (vision; ~0.8s p50) won the planner-memory judge
+        # bench against gemini-3.8-flash and Cerebras qwen/gpt-oss. The endpoint
+        # rejects reasoning effort "none", so "low". Direct auth is skipped so the
+        # funded GPT key / claudeAuth never pre-empt it.
+        waterfall=("google/gemini-3.5-flash-lite",),
         waterfall_reasoning_effort="low",
+        direct_auth_enabled=False,
     ),
     "rose-1-flash": PoolSpec(
         name="rose-1-flash",

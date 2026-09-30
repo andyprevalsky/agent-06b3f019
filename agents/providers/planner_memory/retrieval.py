@@ -1,27 +1,33 @@
-"""Goal -> memory hits: backend lexical candidates, in-process scoring, absolute cutoff.
+"""Goal -> memory hits: semantic candidates, LLM judge, at most one memory.
 
-Hot path (10k agents): one indexed FTS query against the history table per
-planner call, scoring over at most 50 candidates in-process, and at most
-``RetrievalConfig.max_compressions`` compressor LLM calls when a hit has no
-cached critical path yet. A Postgres lease elects one compressor per bundle;
-concurrent planners skip the R2 read and LLM call.
+Retrieval (chosen by agents/benchmarks/memory_retrieval_bench.py):
 
-Scoring strategies are all computed from the same candidate features so the
-retrieval benchmark (agents/benchmarks/memory_retrieval_bench.py) can compare
-them on the frozen labeled set; ``DEFAULT_CONFIG`` holds the winner.
+1. The backend embeds the goal (voyage-4) and returns visible rows whose
+   cosine(query, stored goal vector) >= ``min_similarity``, highest first.
+2. The top ``top_n`` distinct goals go to one small judge LLM call that picks
+   the single past run whose plan would help plan this goal (the planner's
+   get_memories criteria: reusable entry points, tool choices, decomposition,
+   session handling, pitfalls), or none. A judge timeout or error injects
+   nothing. Cosine alone cannot separate "shares topic words" from "plan
+   carries over"; the judge makes that call.
+
+Hot path (10k agents): one backend search (one embedding call + one
+visibility-filtered vector query), at most one judge call, and at most
+``max_compressions`` compressor calls when the chosen hit has no cached
+critical path. A Postgres lease elects one compressor per bundle; concurrent
+planners skip the R2 read and LLM call.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 import time
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import Any, Optional
 
 import structlog
+from pydantic import BaseModel
 
 from providers.planner_memory import client as backend
 from providers.planner_memory.compressor import COMPRESSOR_VERSION, compress_transcript
@@ -29,53 +35,40 @@ from providers.planner_memory.records import CriticalPath, MemoryHit
 
 logger = structlog.get_logger(__name__)
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STOPWORDS = frozenset(
-    """
-    a an the and or but if then else of to in on at by for with from as is are was were be been being am
-    do does did done doing have has had having will would shall should can could may might must i me my we our
-    you your he she it its they them their this that these those there here what which who whom whose when where
-    why how all any each every some such no nor not only own same so than too very just also into over under
-    again further once about above below up down out off through during before after between both while until
-    use using used need needs needed please make sure want wants get got go going
-    """.split()
-)
-
-STRATEGIES = ("jaccard", "coverage", "trgm", "fts", "hybrid", "coverage_fts", "coverage_trgm")
 COMPRESSION_BATCH_TIMEOUT_SECONDS = 15.0
+JUDGE_CALL_SITE = "planner_memory_judge"
+JUDGE_QUERY_MAX_CHARS = 3000
+JUDGE_CANDIDATE_MAX_CHARS = 3000
+
+JUDGE_PROMPT = """An AI assistant is about to plan this goal:
+<goal>{request}</goal>
+
+Past runs the assistant completed (their goals):
+{candidates}
+
+A past run is a useful memory when its plan would help plan this goal: the planner reuses a memory's entry points and URLs, tool choices, task decomposition, session handling, and known pitfalls, but never copies names, prices, dates, quantities, or steps the goal does not call for. So a run is useful when it worked on the same site, service, integration, or data source, or used the same kind of task mechanics (e.g. a for-each over rows, explore-only local data lookup, exactly one phone call, a price trigger), even if the specific item, store, date, person, or wording differs. A run is NOT useful when it only shares topic or location words and none of its plan would carry over (e.g. booking a haircut near the Ferry Building vs. ordering coffee at the Ferry Building).
+Pick the single most useful past run, or none.
+Reply with JSON only: {{"match": <number or null>}}"""
 
 
-def tokenize(text: str) -> list[str]:
-    tokens: list[str] = []
-    for raw in _TOKEN_RE.findall(text.lower()):
-        if len(raw) < 2 or raw in _STOPWORDS:
-            continue
-        tokens.append(_stem(raw))
-    return tokens
-
-
-def _stem(token: str) -> str:
-    if len(token) <= 4 or token.isdigit():
-        return token
-    for suffix, replacement in (("ies", "y"), ("ing", ""), ("ed", ""), ("es", ""), ("s", "")):
-        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
-            return token[: -len(suffix)] + replacement
-    return token
+class JudgeVerdict(BaseModel):
+    match: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class RetrievalConfig:
     # Winner of agents/benchmarks/memory_retrieval_bench.py on the frozen labels
-    # (fit split: objective 0.615, recall@1 0.54, negative false-positive rate 0;
-    # held-out: objective 0.53, negative false-positive rate 0). Pinned by
+    # (voyage-4 goal vectors → rose-1-mini judge over the top 5). Pinned by
     # tests/blackbox/memory_retrieval_bench.blackbox.py.
-    strategy: str = "coverage"
-    min_score: float = 0.65
-    relative_floor: float = 0.0
-    k: int = 3
-    candidate_limit: int = 30
-    max_compressions: int = 2
+    min_similarity: float = 0.50
+    top_n: int = 5
+    # The judge picks at most one useful run, so at most one memory is rendered.
+    k: int = 1
+    candidate_limit: int = 20
+    max_compressions: int = 1
     passed_only: bool = True
+    judge_model: str = "rose-labs/rose-1-mini"
+    judge_timeout_s: float = 5.0
 
     def with_(self, **overrides: Any) -> "RetrievalConfig":
         return RetrievalConfig(**{**self.__dict__, **overrides})
@@ -84,88 +77,92 @@ class RetrievalConfig:
 DEFAULT_CONFIG = RetrievalConfig()
 
 
-def candidate_features(goal: str, candidate: dict[str, Any], *, max_fts_rank: float) -> dict[str, float]:
-    query = set(tokenize(goal))
-    doc = set(tokenize(str(candidate.get("goal") or "")))
-    inter = len(query & doc)
-    union = len(query | doc) or 1
-    backend_coverage = candidate.get("lexical_coverage")
-    coverage = float(backend_coverage) if isinstance(backend_coverage, (int, float)) else inter / (len(query) or 1)
-    reverse = inter / (len(doc) or 1)
-    trgm = float(candidate.get("trgm_similarity") or 0.0)
-    fts = float(candidate.get("fts_rank") or 0.0)
-    fts_norm = fts / max_fts_rank if max_fts_rank > 0 else 0.0
-    jaccard = inter / union
-    return {
-        "jaccard": jaccard,
-        "coverage": coverage,
-        "reverse_coverage": reverse,
-        "trgm": trgm,
-        "fts": fts_norm,
-        "hybrid": 0.5 * jaccard + 0.5 * trgm,
-        # Stored goals are often the prompt plus runner-appended constraints, so the
-        # query is contained in the memory goal (coverage 1.0) while symmetric
-        # measures stay low. These blend containment with a lexical signal.
-        "coverage_fts": 0.5 * coverage + 0.5 * fts_norm,
-        "coverage_trgm": 0.7 * coverage + 0.3 * trgm,
-    }
-
-
-def score_candidates(goal: str, candidates: list[dict[str, Any]], config: RetrievalConfig) -> list[MemoryHit]:
-    """Score, dedupe per unique goal text, apply the absolute cutoff + relative floor, keep top-k."""
-    if not candidates:
-        return []
-    max_fts = max(float(c.get("fts_rank") or 0.0) for c in candidates)
-    features = [candidate_features(goal, cand, max_fts_rank=max_fts) for cand in candidates]
-    return rank_hits(candidates, features, config)
-
-
-def rank_hits(
-    candidates: list[dict[str, Any]], features_per_candidate: list[dict[str, float]], config: RetrievalConfig
-) -> list[MemoryHit]:
-    """Ranking given precomputed features (the retrieval benchmark reuses this across configs)."""
-    scored: list[MemoryHit] = []
-    for cand, features in zip(candidates, features_per_candidate):
+def shortlist(candidates: list[dict[str, Any]], config: RetrievalConfig) -> list[MemoryHit]:
+    """Completed runs only, one hit per unique goal text (prefer compressed, then newest), top_n by similarity."""
+    best: dict[str, MemoryHit] = {}
+    for cand in candidates:
         if config.passed_only and not _is_success(cand):
             continue
-        score = features.get(config.strategy, features["hybrid"])
+        similarity = float(cand.get("similarity") or 0.0)
+        if similarity < config.min_similarity:
+            continue
         cp = (
             _parse_critical_path(cand.get("critical_path"))
             if cand.get("compressor_version") == COMPRESSOR_VERSION
             else None
         )
-        scored.append(
-            MemoryHit(
-                id=str(cand.get("id") or ""),
-                goal=str(cand.get("goal") or ""),
-                benchmark_task_name=cand.get("benchmark_task_name"),
-                passed=cand.get("passed"),
-                root_status=cand.get("root_status"),
-                created_at=cand.get("agent_created_at"),
-                similarity=float(score),
-                critical_path=cp,
-                features=features,
-            )
+        hit = MemoryHit(
+            id=str(cand.get("id") or ""),
+            goal=str(cand.get("goal") or ""),
+            benchmark_task_name=cand.get("benchmark_task_name"),
+            passed=cand.get("passed"),
+            root_status=cand.get("root_status"),
+            created_at=cand.get("agent_created_at"),
+            similarity=similarity,
+            critical_path=cp,
         )
-    # One hit per unique goal text: prefer an already-compressed row, then the newest.
-    best: dict[str, MemoryHit] = {}
-    for hit in scored:
         key = _goal_key(hit.goal)
         incumbent = best.get(key)
         if incumbent is None or _prefer(hit, incumbent):
             best[key] = hit
     hits = sorted(best.values(), key=lambda h: (-h.similarity, h.critical_path is None, h.created_at or ""))
-    hits = [h for h in hits if h.similarity >= config.min_score]
-    if not hits:
-        return []
-    top = hits[0].similarity
-    hits = [h for h in hits if h.similarity >= top * config.relative_floor]
-    return hits[: config.k]
+    return hits[: config.top_n]
 
 
-@lru_cache(maxsize=8192)
+def build_judge_messages(goal: str, hits: list[MemoryHit]) -> list[dict[str, Any]]:
+    listing = "\n\n".join(f"[{n}]\n{hit.goal[:JUDGE_CANDIDATE_MAX_CHARS]}" for n, hit in enumerate(hits, start=1))
+    prompt = JUDGE_PROMPT.format(request=goal[:JUDGE_QUERY_MAX_CHARS], candidates=listing)
+    return [{"role": "user", "content": prompt}]
+
+
+def apply_verdict(hits: list[MemoryHit], verdict: JudgeVerdict) -> Optional[MemoryHit]:
+    """Only an in-range match becomes a memory; null means no candidate is useful."""
+    if verdict.match is None:
+        return None
+    if not 1 <= verdict.match <= len(hits):
+        return None
+    return hits[verdict.match - 1]
+
+
+async def judge_candidates(
+    goal: str,
+    hits: list[MemoryHit],
+    *,
+    config: RetrievalConfig,
+    agent_id: Optional[str],
+    user_id: Optional[str],
+) -> JudgeVerdict:
+    """One LLM call over the shortlisted goals. Raises on timeout / invalid output."""
+    from helpers.llm import call_llm
+
+    result = await asyncio.wait_for(
+        call_llm(
+            build_judge_messages(goal, hits),
+            model=config.judge_model,
+            temperature=0.0,
+            # Reasoning tokens share this budget on the waterfall; 300 truncated the JSON.
+            max_tokens=1500,
+            # Plain JSON-by-prompt, parsed below: a response_format schema adds
+            # constrained-decoding latency and is skipped by some waterfall layers.
+            call_site=JUDGE_CALL_SITE,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token_user_id=user_id,
+            skip_cache_write=True,
+        ),
+        timeout=config.judge_timeout_s,
+    )
+    content = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("memory judge returned no content")
+    text = content.strip()
+    if "{" in text and "}" in text:
+        text = text[text.index("{") : text.rindex("}") + 1]
+    return JudgeVerdict.model_validate_json(text)
+
+
 def _goal_key(goal: str) -> str:
-    return " ".join(tokenize(goal))
+    return " ".join(goal.lower().split())
 
 
 def _prefer(candidate: MemoryHit, incumbent: MemoryHit) -> bool:
@@ -204,6 +201,8 @@ class MemoryRetrieval:
     query: str
     hits: list[MemoryHit] = field(default_factory=list)
     candidates: int = 0
+    shortlisted: int = 0
+    judge: Optional[dict[str, Any]] = None
     compressed: int = 0
     skipped_uncompressed: int = 0
     timing_ms: dict[str, float] = field(default_factory=dict)
@@ -213,6 +212,8 @@ class MemoryRetrieval:
         return {
             "hits": [hit.summary() for hit in self.hits],
             "candidates": self.candidates,
+            "shortlisted": self.shortlisted,
+            "judge": self.judge,
             "compressed": self.compressed,
             "skipped_uncompressed": self.skipped_uncompressed,
             "timing_ms": self.timing_ms,
@@ -273,9 +274,10 @@ async def retrieve_memories(
     user_id: Optional[str],
     exclude_root_agent_id: Optional[str],
     agent_id: Optional[str] = None,
-    config: RetrievalConfig = DEFAULT_CONFIG,
+    config: Optional[RetrievalConfig] = None,
 ) -> MemoryRetrieval:
     """Never raises: any failure yields an empty retrieval with ``error`` set."""
+    config = config or DEFAULT_CONFIG
     started = time.perf_counter()
     result = MemoryRetrieval(query=goal)
     timing = result.timing_ms
@@ -287,61 +289,62 @@ async def retrieve_memories(
             exclude_root_agent_id=exclude_root_agent_id,
             limit=config.candidate_limit,
             passed_only=config.passed_only,
+            min_similarity=config.min_similarity,
         )
         timing["search"] = round((time.perf_counter() - search_started) * 1000, 2)
         result.candidates = len(candidates)
-        hits = score_candidates(goal, candidates, config)
+        shortlisted = shortlist(candidates, config)
+        result.shortlisted = len(shortlisted)
+        if not shortlisted:
+            return result
+
+        judge_started = time.perf_counter()
+        try:
+            verdict = await judge_candidates(goal, shortlisted, config=config, agent_id=agent_id, user_id=user_id)
+        except (asyncio.TimeoutError, TimeoutError):
+            result.judge = {"error": "timeout"}
+            logger.warning("planner_memory.judge_timeout", timeout_s=config.judge_timeout_s)
+            return result
+        finally:
+            timing["judge"] = round((time.perf_counter() - judge_started) * 1000, 2)
+        result.judge = verdict.model_dump()
+        chosen = apply_verdict(shortlisted, verdict)
+        if chosen is None:
+            return result
 
         compress_started = time.perf_counter()
-        budget = config.max_compressions
-        ready: list[MemoryHit] = []
-        pending: list[MemoryHit] = []
-        for hit in hits:
-            if hit.critical_path is not None:
-                ready.append(hit)
-            elif len(pending) < budget:
-                pending.append(hit)
-            else:
-                result.skipped_uncompressed += 1
-        if pending:
-            tasks = [
-                asyncio.create_task(_ensure_critical_path(hit, agent_id=agent_id, user_id=user_id)) for hit in pending
-            ]
-            _done, unfinished = await asyncio.wait(
-                tasks,
-                timeout=COMPRESSION_BATCH_TIMEOUT_SECONDS,
-            )
+        if chosen.critical_path is not None:
+            result.hits = [chosen]
+        elif config.max_compressions < 1:
+            result.skipped_uncompressed += 1
+        else:
+            task = asyncio.create_task(_ensure_critical_path(chosen, agent_id=agent_id, user_id=user_id))
+            _done, unfinished = await asyncio.wait({task}, timeout=COMPRESSION_BATCH_TIMEOUT_SECONDS)
             if unfinished:
-                for task in unfinished:
-                    task.cancel()
-                # Let every cancelled compressor run its lease-release finally
-                # block before the planner continues.
-                await asyncio.gather(*unfinished, return_exceptions=True)
+                task.cancel()
+                # Let the cancelled compressor run its lease-release finally block.
+                await asyncio.gather(task, return_exceptions=True)
                 logger.warning(
                     "planner_memory.compress_timeout",
                     timeout_seconds=COMPRESSION_BATCH_TIMEOUT_SECONDS,
-                    unfinished=len(unfinished),
+                    unfinished=1,
                 )
-            outcomes: list[Any] = []
-            for task in tasks:
-                if task.cancelled():
-                    outcomes.append(asyncio.TimeoutError("planner memory compression timed out"))
-                    continue
-                error = task.exception()
-                outcomes.append(error if error is not None else task.result())
-            for hit, outcome in zip(pending, outcomes):
-                if outcome is True:
-                    ready.append(hit)
-                    result.compressed += 1
-                else:
-                    result.skipped_uncompressed += 1
-                    if isinstance(outcome, Exception):
-                        logger.warning("planner_memory.compress_failed", root_agent_id=hit.id, error=str(outcome)[:200])
+                result.skipped_uncompressed += 1
+            elif task.exception() is not None:
+                result.skipped_uncompressed += 1
+                logger.warning(
+                    "planner_memory.compress_failed", root_agent_id=chosen.id, error=str(task.exception())[:200]
+                )
+            elif task.result() is True:
+                result.hits = [chosen]
+                result.compressed += 1
+            else:
+                result.skipped_uncompressed += 1
         timing["compress"] = round((time.perf_counter() - compress_started) * 1000, 2)
-        result.hits = sorted(ready, key=lambda h: -h.similarity)[: config.k]
     except Exception as exc:
         result.error = str(exc)[:200]
         logger.warning("planner_memory.retrieval_failed", error=result.error)
-    timing["total"] = round((time.perf_counter() - started) * 1000, 2)
-    logger.info("planner_memory.retrieved", **result.summary())
+    finally:
+        timing["total"] = round((time.perf_counter() - started) * 1000, 2)
+        logger.info("planner_memory.retrieved", **result.summary())
     return result

@@ -3,7 +3,9 @@
 Pipeline (see docs in each module):
 
     R2 bundle ──extract──► transcript ──compress (once, cached)──► CriticalPath
-    Postgres PlannerMemory rows (written at archive finalize) ──search──► hits
+    Postgres PlannerMemory rows (written + embedded at archive finalize)
+    goal ──backend embed + pgvector cosine──► candidates (goal vectors)
+    candidates ──judge LLM (same task?)──► at most one hit
     hits ──render──► native get_memories fork (assistant tool_call + tool result)
 """
 
@@ -24,11 +26,13 @@ from providers.planner_memory.inject import (
 )
 from providers.planner_memory.records import CriticalPath, MemoryHit, Transcript, TranscriptRow
 from providers.planner_memory.retrieval import (
+    JudgeVerdict,
     MemoryRetrieval,
     RetrievalConfig,
+    apply_verdict,
     planner_memory_available,
     retrieve_memories,
-    score_candidates,
+    shortlist,
 )
 from providers.planner_memory.transcript import build_transcript, load_bundle_transcript, trim_rows
 
@@ -40,6 +44,7 @@ __all__ = [
     "GET_MEMORIES_TOOL",
     "GET_MEMORIES_TOOL_NAME",
     "MemoryFork",
+    "JudgeVerdict",
     "MemoryHit",
     "MemoryRetrieval",
     "RetrievalConfig",
@@ -52,8 +57,9 @@ __all__ = [
     "planner_context_tools",
     "load_bundle_transcript",
     "planner_memory_available",
+    "apply_verdict",
     "render_memories",
     "retrieve_memories",
-    "score_candidates",
+    "shortlist",
     "trim_rows",
 ]

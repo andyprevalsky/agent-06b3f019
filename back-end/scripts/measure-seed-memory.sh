@@ -32,7 +32,7 @@ fi
 # Cloud VMs often have a Docker daemon that cannot overlay-mount images.
 # Fall back to the same system Postgres path setup-db.sh / run.sh already use.
 if ! $USE_SYSTEM_PG; then
-    if ! docker run --rm --entrypoint true postgres:16-alpine >/dev/null 2>&1; then
+    if ! docker run --rm --entrypoint true pgvector/pgvector:pg16 >/dev/null 2>&1; then
         echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."
         USE_SYSTEM_PG=true
     fi
@@ -330,7 +330,7 @@ for i in $(seq 1 "$RUNS"); do
         fi
         docker run -d --name "$CONTAINER" \
             -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
-            -p "$PORT_MAPPING" postgres:16-alpine >/dev/null || {
+            -p "$PORT_MAPPING" pgvector/pgvector:pg16 >/dev/null || {
                 echo "❌ could not start throwaway postgres" | tee -a "$SUMMARY"; exit 1; }
         PORT="$(docker port "$CONTAINER" 5432/tcp | tail -1 | sed 's/.*://')"
         [ -n "$PORT" ] || {

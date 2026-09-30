@@ -136,7 +136,6 @@ class MemoryHit:
     similarity: float
     critical_path: Optional[CriticalPath]
     compressed_now: bool = False
-    features: dict[str, float] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -146,5 +145,4 @@ class MemoryHit:
             "similarity": round(self.similarity, 4),
             "has_critical_path": self.critical_path is not None,
             "compressed_now": self.compressed_now,
-            "features": {k: round(v, 4) for k, v in self.features.items()},
         }

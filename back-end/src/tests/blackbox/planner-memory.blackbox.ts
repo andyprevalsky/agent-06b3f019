@@ -2,8 +2,9 @@
 /* eslint-disable max-lines */
 /**
  * Planner memory blackbox: the history table is written by archive finalize
- * (never drifts from R2), searchable by goal with the visibility rules, and
- * caches the compressed critical path with no TTL.
+ * (never drifts from R2), embedded for semantic search (voyage-4 goal vector,
+ * pgvector cosine), searchable with the visibility rules, and caches
+ * the compressed critical path with no TTL.
  */
 
 import assert from 'node:assert';
@@ -11,7 +12,11 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
-import { tokenizePlannerMemoryGoal } from '../../providers/plannerMemoryStore';
+import {
+  PLANNER_MEMORY_INDEX_VERSION,
+  plannerMemoryGoalHash,
+} from '../../providers/plannerMemoryEmbedding';
+import { retryWithBackoff } from '../../providers/retry';
 import { readArchivedArtifact } from '../../providers/traceArchive';
 
 config();
@@ -183,12 +188,45 @@ async function search(
         id: string;
         goal: string;
         critical_path: unknown;
-        lexical_coverage: number;
-        fts_rank: number;
-        trgm_similarity: number;
+        similarity: number;
       }>;
     }
   ).candidates;
+}
+
+/** Finalize embeds detached; wait until the row's current-model embedding lands. */
+async function waitEmbedded(id: string, timeoutMs = 60_000): Promise<void> {
+  const attempts = Math.max(1, Math.ceil(timeoutMs / 500));
+  const model = await retryWithBackoff(
+    async () =>
+      (
+        await prisma.plannerMemoryEmbedding.findUnique({
+          where: { plannerMemoryId: id },
+          select: { model: true },
+        })
+      )?.model ?? null,
+    {
+      maxRetries: attempts,
+      fixedDelays: Array.from({ length: attempts }, () => 500),
+      shouldRetryResult: (value) => value !== PLANNER_MEMORY_INDEX_VERSION,
+      component: 'waitEmbedded',
+    }
+  );
+  assert.strictEqual(model, PLANNER_MEMORY_INDEX_VERSION, `planner memory ${id} was not embedded`);
+}
+
+async function putFixture(id: string, body: Record<string, unknown>) {
+  const put = await request(`${BASE_URL}/api/planner-memory/${id}`, {
+    method: 'PUT',
+    headers: internalHeaders,
+    body: JSON.stringify({
+      benchmark_task_name: TASK,
+      passed: true,
+      root_status: 'COMPLETED',
+      ...body,
+    }),
+  });
+  assert.strictEqual(put.status, 200, JSON.stringify(put.data).slice(0, 300));
 }
 
 export async function runTests(): Promise<boolean> {
@@ -218,6 +256,12 @@ export async function runTests(): Promise<boolean> {
           assert.strictEqual(row.rootStatus, 'COMPLETED');
           assert.strictEqual(row.userId, s.userId);
           assert.strictEqual(row.criticalPath, null);
+          await waitEmbedded(s.benchmarkRootId);
+          const embedding = await prisma.plannerMemoryEmbedding.findUnique({
+            where: { plannerMemoryId: s.benchmarkRootId },
+          });
+          assert(embedding, 'finalize must schedule the retrieval embedding');
+          assert.strictEqual(embedding.goalHash, plannerMemoryGoalHash(GOAL_BENCH));
         }
       )
     );
@@ -264,6 +308,8 @@ export async function runTests(): Promise<boolean> {
       await runTest('private runs are rows too, visible only to their own user', async () => {
         await finalize(s.privateRootId);
         await finalize(s.otherPrivateRootId);
+        await waitEmbedded(s.privateRootId);
+        await waitEmbedded(s.otherPrivateRootId);
         const own = await search({
           goal: `Book a table for two at Nopa on Friday ${RUN_ID}`,
           user_id: s.userId,
@@ -293,50 +339,31 @@ export async function runTests(): Promise<boolean> {
 
     results.push(
       await runTest(
-        'candidate generation preserves a coverage-perfect constrained goal ahead of 30 closer partials',
+        'a paraphrase with no shared distinctive words retrieves the run semantically',
         async () => {
-          const desiredId = randomUUID();
-          const distractorIds = Array.from({ length: 30 }, () => randomUUID());
-          const query = `Reserve an accessible lakeside cabin for two near Tahoe with a sauna ${RUN_ID}`;
+          const id = randomUUID();
+          const unrelatedId = randomUUID();
           try {
-            await prisma.plannerMemory.create({
-              data: {
-                id: desiredId,
-                goal: `${query}\n\nOperational constraints: keep one browser session, verify live availability, stop before payment, and return the cancellation terms.`,
-                goalTokens: tokenizePlannerMemoryGoal(
-                  `${query}\n\nOperational constraints: keep one browser session, verify live availability, stop before payment, and return the cancellation terms.`
-                ),
-                benchmarkTaskName: TASK,
-                rootStatus: 'COMPLETED',
-                passed: true,
-                worldModelMode: 'real',
-              },
+            await putFixture(id, {
+              goal: `Use one browser agent to reserve an accessible lakeside cabin for two near Lake Tahoe with a sauna for next weekend. Stop before payment. Run ${RUN_ID}`,
             });
-            await prisma.plannerMemory.createMany({
-              data: distractorIds.map((id, index) => {
-                const goal = `Reserve an accessible lakeside cabin for two near Tahoe with a spa ${RUN_ID} option ${index}`;
-                return {
-                  id,
-                  goal,
-                  goalTokens: tokenizePlannerMemoryGoal(goal),
-                  benchmarkTaskName: TASK,
-                  rootStatus: 'COMPLETED',
-                  passed: true,
-                  worldModelMode: 'real',
-                };
-              }),
+            await putFixture(unrelatedId, {
+              goal: `Translate my resume into Spanish and keep the formatting identical. Run ${RUN_ID}`,
             });
-            const hits = await search({ goal: query, user_id: s.userId, limit: 20 });
-            const desired = hits.find((candidate) => candidate.id === desiredId);
+            const hits = await search({
+              goal: 'find me a wheelchair friendly lodge by the water up in tahoe, 2 people, has a steam room',
+              user_id: s.userId,
+            });
+            const hit = hits.find((c) => c.id === id);
+            assert(hit, 'paraphrased request must retrieve the semantically matching run');
+            assert(hit.similarity >= 0.5 && hit.similarity <= 1, `similarity ${hit.similarity}`);
+            const unrelated = hits.find((c) => c.id === unrelatedId);
             assert(
-              desired,
-              'coverage-perfect stored goal must survive the bounded candidate query'
+              !unrelated || unrelated.similarity < hit.similarity,
+              'unrelated run must rank below the semantic match'
             );
-            assert.strictEqual(desired.lexical_coverage, 1);
           } finally {
-            await prisma.plannerMemory.deleteMany({
-              where: { id: { in: [desiredId, ...distractorIds] } },
-            });
+            await prisma.plannerMemory.deleteMany({ where: { id: { in: [id, unrelatedId] } } });
           }
         }
       )
@@ -344,75 +371,106 @@ export async function runTests(): Promise<boolean> {
 
     results.push(
       await runTest(
-        'search ranks the lexically closest goal first and excludes the current run',
+        'search ranks the exact goal first, excludes the current run, and applies the floor',
         async () => {
           const hits = await search({ goal: GOAL_BENCH, user_id: s.userId });
           assert(hits.length >= 1);
-          // The shared local DB may hold near-identical benchmark goals (memory
-          // fixtures); the seeded row is the exact goal text, so it must carry the
-          // maximum trigram similarity and sit in the top 3 by lexical rank.
-          const seeded = hits.find((c) => c.id === s.benchmarkRootId) as
-            ((typeof hits)[number] & { trgm_similarity: number }) | undefined;
-          assert(seeded, 'seeded goal must be retrieved');
-          const maxTrgm = Math.max(
-            ...hits.map((c) => (c as { trgm_similarity: number }).trgm_similarity)
-          );
-          assert(
-            seeded.trgm_similarity >= maxTrgm - 1e-9,
-            'exact goal text must have the top trigram similarity'
-          );
-          assert(seeded.fts_rank > 0, 'a normal full-text match must expose its real rank');
-          assert(
-            hits.slice(0, 3).some((c) => c.id === s.benchmarkRootId),
-            'seeded goal must rank in the top 3'
-          );
+          assert.strictEqual(hits[0].id, s.benchmarkRootId, 'exact goal must rank first');
+          assert(hits[0].similarity > 0.9, `exact goal similarity ${hits[0].similarity}`);
+          for (let i = 1; i < hits.length; i += 1) {
+            assert(hits[i - 1].similarity >= hits[i].similarity, 'hits must be similarity-ordered');
+          }
           const excluded = await search({
             goal: GOAL_BENCH,
             user_id: s.userId,
             exclude_root_agent_id: s.benchmarkRootId,
           });
           assert(!excluded.some((c) => c.id === s.benchmarkRootId));
-          const nothing = await search({ goal: `zqxjv wplmk ${randomUUID()}`, user_id: s.userId });
-          assert.strictEqual(nothing.filter((c) => c.id === s.benchmarkRootId).length, 0);
+          const strictFloor = await search({
+            goal: 'What is the capital of Mongolia and what is its population?',
+            user_id: s.userId,
+            min_similarity: 0.95,
+          });
+          assert(
+            !strictFloor.some((c) => c.id === s.benchmarkRootId),
+            'rows below min_similarity must not be returned'
+          );
         }
       )
     );
 
     results.push(
       await runTest(
-        'all-English-stopword FTS queries retain lexical-overlap candidates',
+        'embedding is idempotent, re-embeds on goal change, and cascades on delete',
         async () => {
           const id = randomUUID();
-          const unrelatedId = randomUUID();
           try {
-            await prisma.plannerMemory.createMany({
-              data: [
-                {
-                  id,
-                  goal: 'against',
-                  goalTokens: tokenizePlannerMemoryGoal('against'),
-                  benchmarkTaskName: TASK,
-                  rootStatus: 'COMPLETED',
-                  passed: true,
-                  worldModelMode: 'real',
-                },
-                {
-                  id: unrelatedId,
-                  goal: 'completely unrelated recent memory',
-                  goalTokens: tokenizePlannerMemoryGoal('completely unrelated recent memory'),
-                  benchmarkTaskName: TASK,
-                  rootStatus: 'COMPLETED',
-                  passed: true,
-                  worldModelMode: 'real',
-                  agentCreatedAt: new Date('2099-01-01T00:00:00.000Z'),
-                },
-              ],
+            await putFixture(id, { goal: `Order a USB-C cable on DoorDash ${RUN_ID}` });
+            const first = await prisma.plannerMemoryEmbedding.findUnique({
+              where: { plannerMemoryId: id },
             });
-            const hits = await search({ goal: 'against', user_id: s.userId });
-            assert(hits.some((candidate) => candidate.id === id));
-            assert(!hits.some((candidate) => candidate.id === unrelatedId));
+            assert(first, 'PUT must embed synchronously');
+            await putFixture(id, { goal: `Order a USB-C cable on DoorDash ${RUN_ID}` });
+            const same = await prisma.plannerMemoryEmbedding.findUnique({
+              where: { plannerMemoryId: id },
+            });
+            assert(same);
+            assert.strictEqual(
+              same.updatedAt.getTime(),
+              first.updatedAt.getTime(),
+              'unchanged goal must not re-embed'
+            );
+            await putFixture(id, { goal: `Book a haircut near the Ferry Building ${RUN_ID}` });
+            const changed = await prisma.plannerMemoryEmbedding.findUnique({
+              where: { plannerMemoryId: id },
+            });
+            assert(changed);
+            assert.notStrictEqual(changed.goalHash, first.goalHash, 'goal change must re-embed');
+            await prisma.plannerMemory.delete({ where: { id } });
+            const gone = await prisma.plannerMemoryEmbedding.findUnique({
+              where: { plannerMemoryId: id },
+            });
+            assert.strictEqual(gone, null, 'embedding must cascade with its memory row');
           } finally {
-            await prisma.plannerMemory.deleteMany({ where: { id: { in: [id, unrelatedId] } } });
+            await prisma.plannerMemory.deleteMany({ where: { id } });
+          }
+        }
+      )
+    );
+
+    results.push(
+      await runTest(
+        'embed-pending (internal) drains rows whose detached embed was lost',
+        async () => {
+          const id = randomUUID();
+          try {
+            await prisma.plannerMemory.create({
+              data: {
+                id,
+                goal: `Cancel my gym membership and confirm the date ${RUN_ID}`,
+                benchmarkTaskName: TASK,
+                rootStatus: 'COMPLETED',
+                passed: true,
+                worldModelMode: 'real',
+              },
+            });
+            const userCall = await request(`${BASE_URL}/api/planner-memory/embed-pending`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${userToken(s.userId)}` },
+              body: JSON.stringify({ limit: 1 }),
+            });
+            assert.strictEqual(userCall.status, 403);
+            const drain = await request(`${BASE_URL}/api/planner-memory/embed-pending`, {
+              method: 'POST',
+              headers: internalHeaders,
+              // Newest pending row first: limit 1 embeds exactly the row created above.
+              body: JSON.stringify({ limit: 1 }),
+            });
+            assert.strictEqual(drain.status, 200, JSON.stringify(drain.data).slice(0, 300));
+            assert((drain.data as { embedded: number }).embedded >= 1);
+            await waitEmbedded(id, 1_000);
+          } finally {
+            await prisma.plannerMemory.deleteMany({ where: { id } });
           }
         }
       )
@@ -558,18 +616,22 @@ export async function runTests(): Promise<boolean> {
     );
 
     results.push(
-      await runTest('stats count the corpus (rows, compressed, passed, tasks)', async () => {
-        const res = await request(`${BASE_URL}/api/planner-memory/stats`, {
-          headers: internalHeaders,
-        });
-        assert.strictEqual(res.status, 200);
-        const stats = res.data as Record<string, number>;
-        assert(stats.total >= 3);
-        assert(stats.compressed >= 1);
-        assert(stats.passed >= 1);
-        assert(stats.benchmark >= 1);
-        assert(stats.distinct_tasks >= 1);
-      })
+      await runTest(
+        'stats count the corpus (rows, embedded, compressed, passed, tasks)',
+        async () => {
+          const res = await request(`${BASE_URL}/api/planner-memory/stats`, {
+            headers: internalHeaders,
+          });
+          assert.strictEqual(res.status, 200);
+          const stats = res.data as Record<string, number>;
+          assert(stats.total >= 3);
+          assert(stats.embedded >= 3);
+          assert(stats.compressed >= 1);
+          assert(stats.passed >= 1);
+          assert(stats.benchmark >= 1);
+          assert(stats.distinct_tasks >= 1);
+        }
+      )
     );
 
     results.push(
