@@ -185,6 +185,7 @@ from .service_crypto import (
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
+    finalize_parked_payment_card_approval_history,
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
@@ -5687,6 +5688,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
+        # Belt-and-suspenders: older resume payloads may still carry awaiting tool
+        # rows if they were parked before finalize-on-mint shipped.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            finalize_parked_payment_card_approval_history(
+                write_lock_resume_state,
+                last4=payment_card_last4,
+            )
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -10910,6 +10920,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         current_url=result.get("current_url"),
                     )
 
+                    payment_card_last4 = _normalize_payment_card_last4(card.get("last4"))
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": current_approvals,
@@ -10920,11 +10931,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
-                        "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
+                        "payment_card_last4": payment_card_last4,
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    # Parked activity left request_payment_card as awaiting; mint finished —
+                    # complete that tool outcome before the resumed browser model reads history.
+                    finalize_parked_payment_card_approval_history(
+                        write_lock_resume_state,
+                        last4=payment_card_last4,
+                    )
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,

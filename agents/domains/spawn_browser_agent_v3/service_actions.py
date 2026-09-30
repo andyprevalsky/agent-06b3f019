@@ -1256,6 +1256,23 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "wait":
+        # After payment approval+mint, secret refs are already available. Waiting
+        # for "approval" burns the one-time card's live window (AgentCard closes
+        # unused cards) and breaks same-last4 reuse on the next browser task.
+        if has_payment_card_secret_refs(context.secret_refs):
+            ready_message = (
+                "Payment approval is already complete. Do not wait for another approval. "
+                "Type the existing secret refs card_number, card_name, card_expiry, and "
+                "card_cvv into the payment fields, then submit the checkout form."
+            )
+            await context.action_history.record_action(
+                dom_service=context.dom_service,
+                action="wait",
+                thinking=context.thinking,
+                params=dict(context.params or {}),
+                result={"success": True, "message": ready_message, "status": "payment_card_ready"},
+            )
+            return {"success": True, "message": ready_message, "status": "payment_card_ready"}
         try:
             time_ms = normalize_browser_wait_ms(context.params.get("time_ms"), default=1000)
         except ValueError as error:

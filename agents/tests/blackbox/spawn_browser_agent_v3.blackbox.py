@@ -5473,6 +5473,89 @@ def test_build_payment_card_resume_prompt_section_requires_all_refs():
 
     assert out == ""
 
+
+def test_finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows():
+    """REGRESSION (agent-payment-idempotent-abandonment): after mint, resume must not
+    leave request_payment_card stuck on awaiting_payment_card_approval — the model
+    waits for minutes and AgentCard closes the unused card before the second browser
+    can reuse the same last4.
+    """
+    import json
+
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        finalize_parked_payment_card_approval_history,
+        payment_card_ready_tool_result,
+    )
+
+    awaiting = {"success": True, "status": "awaiting_payment_card_approval"}
+    resume_state = {
+        "approval_type": "payment",
+        "payment_card_last4": "2274",
+        "action_history": [
+            {"step": 1, "action": "click", "result": {"success": True}},
+            {"step": 2, "action": "request_payment_card", "result": dict(awaiting)},
+        ],
+        "browser_turn_messages": [
+            {
+                "role": "assistant",
+                "content": "requesting card",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "request_payment_card", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "name": "request_payment_card",
+                "content": json.dumps(awaiting),
+            },
+        ],
+        "simulated_action_entries": [
+            {"step": 2, "action": "request_payment_card", "result": dict(awaiting)},
+        ],
+    }
+
+    finalize_parked_payment_card_approval_history(resume_state, last4="2274")
+    ready = payment_card_ready_tool_result("2274")
+
+    assert resume_state["action_history"][1]["result"] == ready
+    assert resume_state["simulated_action_entries"][0]["result"] == ready
+    tool_content = json.loads(resume_state["browser_turn_messages"][1]["content"])
+    assert tool_content == ready
+    assert "awaiting_payment_card_approval" not in json.dumps(resume_state)
+
+
+def test_finalize_parked_payment_card_approval_history_leaves_other_tools_alone():
+    import json
+
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        finalize_parked_payment_card_approval_history,
+    )
+
+    resume_state = {
+        "action_history": [
+            {"step": 1, "action": "wait", "result": {"success": True}},
+        ],
+        "browser_turn_messages": [
+            {
+                "role": "tool",
+                "name": "wait",
+                "content": json.dumps({"success": True, "message": "slept"}),
+            }
+        ],
+    }
+    finalize_parked_payment_card_approval_history(resume_state, last4="2274")
+    assert resume_state["action_history"][0]["result"] == {"success": True}
+    assert json.loads(resume_state["browser_turn_messages"][0]["content"]) == {
+        "success": True,
+        "message": "slept",
+    }
+
+
 def test_build_passwords_prompt_section_empty():
     from domains.spawn_browser_agent_v3.service_crypto import (
         build_passwords_prompt_section,
@@ -11453,6 +11536,44 @@ async def test_execute_action_wait_honors_schema_max_against_browser_use_cap():
     assert min(wait_event.seconds, wait_event.max_seconds) == 60.0
     assert wait_event.event_timeout is not None
     assert wait_event.event_timeout > wait_event.max_seconds
+
+
+async def test_execute_action_wait_short_circuits_when_payment_card_refs_ready():
+    """REGRESSION (agent-payment-idempotent-abandonment): after mint, wait-for-approval
+    loops must not burn the live card window.
+    """
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    secret_refs = {
+        "card_number": "enc-n",
+        "card_name": "enc-name",
+        "card_expiry": "enc-exp",
+        "card_cvv": "enc-cvv",
+    }
+
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "wait", "params": {"time_ms": 60_000}},
+        secret_refs=secret_refs,
+    )
+
+    assert out["status"] == "payment_card_ready"
+    assert "already complete" in out["message"]
+    assert captured == []
+    ah.record_action.assert_awaited_once()
 
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
@@ -19792,6 +19913,23 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
             "cdp_url": "wss://connect.steel.dev/session-1",
             "task_id": "task-1",
             "auth_realm": "dickblick.com",
+            # Parked awaiting rows must be rewritten to payment_card_ready on mint.
+            "action_history": [
+                {
+                    "step": 12,
+                    "action": "request_payment_card",
+                    "result": {"success": True, "status": "awaiting_payment_card_approval"},
+                }
+            ],
+            "browser_turn_messages": [
+                {
+                    "role": "tool",
+                    "name": "request_payment_card",
+                    "content": (
+                        '{"success":true,"status":"awaiting_payment_card_approval"}'
+                    ),
+                }
+            ],
         }
     )
     second = _FakeActivityHandle(
@@ -19902,6 +20040,15 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_cvv": "123",
     }
     assert resume_state["payment_card_last4"] == "4242"
+    # Parked awaiting rows must be finalized so the resumed browser model does not
+    # spin on wait-for-approval long enough for AgentCard to close the unused card.
+    history = resume_state.get("action_history") or []
+    payment_history = [e for e in history if e.get("action") == "request_payment_card"]
+    assert payment_history, "resume must carry the parked request_payment_card row"
+    assert payment_history[0].get("result", {}).get("status") == "payment_card_ready"
+    assert payment_history[0].get("result", {}).get("last4") == "4242"
+    assert "awaiting_payment_card_approval" not in str(resume_state.get("action_history"))
+    assert "awaiting_payment_card_approval" not in str(resume_state.get("browser_turn_messages"))
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
@@ -21216,6 +21363,14 @@ async def run_all_tests():
         "build_payment_card_resume_prompt_section_requires_all_refs",
         test_build_payment_card_resume_prompt_section_requires_all_refs,
     )
+    r.record(
+        "finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows",
+        test_finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows,
+    )
+    r.record(
+        "finalize_parked_payment_card_approval_history_leaves_other_tools_alone",
+        test_finalize_parked_payment_card_approval_history_leaves_other_tools_alone,
+    )
     r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
     r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
     r.record("build_passwords_prompt_section_duplicate", test_build_passwords_prompt_section_duplicate_usernames)
@@ -21878,6 +22033,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_wait_honors_schema_max_against_browser_use_cap",
         test_execute_action_wait_honors_schema_max_against_browser_use_cap,
+    )
+    await r.record_async(
+        "execute_action_wait_short_circuits_when_payment_card_refs_ready",
+        test_execute_action_wait_short_circuits_when_payment_card_refs_ready,
     )
     await r.record_async(
         "execute_action_dropdown_options_with_el",
