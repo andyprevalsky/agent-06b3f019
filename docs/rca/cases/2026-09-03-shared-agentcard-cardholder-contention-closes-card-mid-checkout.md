@@ -145,3 +145,12 @@ specific external caller in the failed run remains unattributed.
 
 The exact unchanged `agent-payment-idempotent-abandonment` benchmark still
 needs a passing local run after this fix before this RCA can be marked fixed.
+
+A second isolated run on September 30 (`3f47fcda-ca99-4313-91f6-e684a05cb333`)
+finished its checkout after the first card closed during the sequential reuse
+check. The agent minted a replacement, so the lifecycle contained two purchases,
+two wallet fundings, and two cards. The benchmark initially reported a pass
+because its expected lifecycle did not assert those counts. The task contract
+now requires exactly one of each, and a regression test confirms that this
+archived run fails validation. That earlier green result does not close this
+case; the stricter exact benchmark needs a new pass.
