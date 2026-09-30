@@ -26,13 +26,14 @@ async function syncGmailEmails(
   accessToken: string,
   userEmail: string,
   userId: string,
-  integrationId: string
+  integrationId: string,
+  credentialId: string
 ): Promise<void> {
   const jobId = `gmail-oauth-${userId}-${Date.now()}`;
   log.info('Starting Gmail email sync', { jobId, userId });
 
   const emails = await fetchGmailEmails(accessToken, userEmail);
-  const result = await parseGmailOAuthEmails(userId, userEmail, emails, jobId);
+  const result = await parseGmailOAuthEmails(userId, userEmail, emails, jobId, credentialId);
 
   const existingIntegration = await repo.findIntegrationById(integrationId);
   const existingConfig = (existingIntegration?.config as Record<string, unknown> | null) ?? {};
@@ -65,6 +66,7 @@ function maybeSyncGmailAfterOAuth(params: {
   userEmail: string | undefined;
   userId: string;
   integrationId: string;
+  credentialId: string;
 }): void {
   if (
     params.providerKey !== 'gmail' ||
@@ -79,7 +81,8 @@ function maybeSyncGmailAfterOAuth(params: {
     params.accessToken,
     params.userEmail,
     params.userId,
-    params.integrationId
+    params.integrationId,
+    params.credentialId
   ).catch(() => {
     log.error('Error syncing Gmail emails', { integrationId: params.integrationId });
     void repo.updateIntegrationStatus(params.integrationId, IntegrationStatus.SYNC_FAILED, {
@@ -213,6 +216,7 @@ async function finalizeNewCredential(
       userEmail: tokenResult.userEmail,
       userId: credential.userId,
       integrationId: credential.integrationId,
+      credentialId: credential.id,
     });
   }
 }

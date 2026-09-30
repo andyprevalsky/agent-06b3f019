@@ -61,6 +61,10 @@ export async function findExistingCredential(params: {
 
 export async function deleteEmailCredential(credentialId: string) {
   const { deleted, revocations } = await runTransactionWithRetry(async (tx) => {
+    // Gmail message inserts hold a share lock on this row. Take the exclusive
+    // lock before creating the purge job so requestedAt follows every insert
+    // that was already in flight.
+    await tx.$queryRaw`SELECT "id" FROM "EmailIntegrationCredential" WHERE "id" = ${credentialId} FOR UPDATE`;
     const credential = await tx.emailIntegrationCredential.findUnique({
       where: { id: credentialId },
       select: { provider: true, userId: true, email: true, accessToken: true, refreshToken: true },

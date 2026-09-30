@@ -573,7 +573,8 @@ export async function parseGmailOAuthEmails(
   userId: string,
   userEmail: string,
   emails: ParsedEmail[],
-  jobId: string
+  jobId: string,
+  credentialId: string
 ): Promise<{ contacts: number; messages: number }> {
   log.info('Processing Gmail emails', {
     job_id: jobId,
@@ -587,7 +588,13 @@ export async function parseGmailOAuthEmails(
     contact_count: contactsToUpsert.length,
   });
 
-  const result = await upsertPersonAndMessageRecords(userId, contactsToUpsert, jobId, userEmail);
+  const result = await upsertPersonAndMessageRecords(
+    userId,
+    contactsToUpsert,
+    jobId,
+    userEmail,
+    credentialId
+  );
 
   log.info('Gmail sync complete', {
     job_id: jobId,

@@ -76,6 +76,7 @@ import {
   runGoogleDataPurgeJob,
 } from '../../services/integrations/googleDataPurge';
 import { revokeQueuedGoogleGrants } from '../../services/integrations/googleDisconnect';
+import { upsertPersonAndMessageRecords } from '../../services/integrations/personMessageManager';
 import {
   classifyEmailAuthFailure,
   markCredentialFailure,
@@ -2690,6 +2691,38 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     ],
   });
 
+  const disconnectedCredential = await prisma.emailIntegrationCredential.findFirstOrThrow({
+    where: { userId, email: 'primary@gmail.com' },
+    select: { id: true },
+  });
+  const gmailContact = {
+    identifier: 'gmail-fence@example.com',
+    identifierType: 'email' as const,
+    email: 'gmail-fence@example.com',
+    messages: [
+      {
+        channel: 'EMAIL' as const,
+        from: 'gmail-fence@example.com',
+        to: 'primary@gmail.com',
+        timestamp: new Date(),
+        message: 'Gmail write fence test body',
+      },
+    ],
+  };
+  await upsertPersonAndMessageRecords(
+    userId,
+    [gmailContact],
+    'gmail-before-disconnect',
+    'primary@gmail.com',
+    disconnectedCredential.id
+  );
+  assert(
+    (await prisma.messageRecord.count({
+      where: { person: { userId }, message: 'Gmail write fence test body' },
+    })) === 1,
+    'an active Google credential must allow Gmail persistence'
+  );
+
   const person = await prisma.person.create({
     data: { userId, firstName: 'Google', lastName: 'Purge' },
   });
@@ -2777,6 +2810,25 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
     data: { revocationToken: null },
   });
   await processGoogleDataPurge(purge.id);
+  let staleSyncRejected = false;
+  try {
+    await upsertPersonAndMessageRecords(
+      userId,
+      [gmailContact],
+      'gmail-after-disconnect',
+      'primary@gmail.com',
+      disconnectedCredential.id
+    );
+  } catch {
+    staleSyncRejected = true;
+  }
+  assert(staleSyncRejected, 'an in-flight sync must stop writing after credential deletion');
+  assert(
+    (await prisma.messageRecord.count({
+      where: { person: { userId }, message: 'Gmail write fence test body' },
+    })) === 0,
+    'a stale sync must not recreate Gmail cache after the purge completes'
+  );
   assert(
     (await prisma.messageRecord.findUnique({ where: { id: purgedMessageId } })) === null,
     'purge should delete records attributed to the disconnected account'

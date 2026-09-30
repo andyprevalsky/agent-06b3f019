@@ -476,7 +476,8 @@ async function syncGmailForUser(
         userId,
         contactsToUpsert,
         `gmail-sync-${credential.id}-${Date.now()}`,
-        credentialEmail
+        credentialEmail,
+        credential.id
       );
       contactCount = result.contacts;
       messageCount = result.messages;
