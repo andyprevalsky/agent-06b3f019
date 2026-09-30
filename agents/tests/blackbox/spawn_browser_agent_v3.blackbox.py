@@ -13608,6 +13608,60 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
 
 # ── _execute_click ───────────────────────────────────────────────────
 
+async def test_execute_click_preserves_submit_target_after_rerender():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    element = SimpleNamespace(
+        tag_name="button",
+        attributes={},
+        get_all_children_text=lambda: "Submit (Protected by Invisible CAPTCHA)",
+    )
+    dom = MagicMock()
+    dom.selector_map = {1887: element}
+    dom.get_click_coordinates = AsyncMock(return_value=(448, 680))
+    session = MagicMock()
+    session.highlight_interaction_element = AsyncMock()
+    humanizer = MagicMock()
+
+    async def click_and_rerender(_x, _y):
+        dom.selector_map.clear()
+
+    humanizer.click_at_coords = AsyncMock(side_effect=click_and_rerender)
+    history = ActionHistory()
+    result = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=history,
+        element=element,
+        index=1887,
+        coords=None,
+        thinking="Submitting the form now.",
+        humanizer=humanizer,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url="https://example.com/demo",
+        system_name="Rose",
+    )
+
+    assert result["success"] is True
+    assert history.get_entries()[0]["element_description"] == (
+        '<button "Submit (Protected by Invisible"'
+    )
+    assert should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
+        action_entries=history.get_entries(),
+    )
+    assert not should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning='Risk Score: 0.07; Bot detected - form blocked.',
+        action_entries=[{**history.get_entries()[0], "element_description": '<button "Checkbox">'}],
+    )
+
 async def test_execute_click_with_element_humanizer():
     from domains.spawn_browser_agent_v3.service_actions import _execute_click
 
@@ -22185,6 +22239,7 @@ async def run_all_tests():
         "browser_activity_memory_cleanup_clears_buffers",
         test_browser_activity_memory_cleanup_clears_retained_buffers,
     )
+    await r.record_async("execute_click_preserves_submit_target_after_rerender", test_execute_click_preserves_submit_target_after_rerender)
     await r.record_async("execute_click_element_humanizer", test_execute_click_with_element_humanizer)
     await r.record_async(
         "execute_click_element_humanizer_missing_coords",
