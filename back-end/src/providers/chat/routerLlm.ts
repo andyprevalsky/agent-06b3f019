@@ -41,9 +41,8 @@ import {
   streamBeforeRouterCompletionDeadline,
 } from './routerCompletionDeadline';
 import {
+  finalizeRouterDecisionFromStream,
   isValidRouterCacheJson,
-  parseRouterDecisionAfterDeadline,
-  parseRouterDecisionJson,
   type RouterDecision,
 } from './routerDecision';
 
@@ -588,11 +587,13 @@ export async function callRouterLlm(params: {
     }
   }
 
+  const finalized = finalizeRouterDecisionFromStream({
+    structuredOutput,
+    accumulatedJson,
+    deadlineExpired: completionDeadline.expired(),
+  });
   if (completionDeadline.expired()) {
-    deadlineDecision = parseRouterDecisionAfterDeadline(
-      structuredOutput.finalText(),
-      accumulatedJson
-    );
+    deadlineDecision = finalized.decision;
     if (!deadlineDecision) {
       throw completionDeadline.signal.reason ?? new Error('Chat router completion expired');
     }
@@ -605,8 +606,7 @@ export async function callRouterLlm(params: {
     });
   }
 
-  // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = deadlineDecision ? accumulatedJson : structuredOutput.finalText();
+  const fullJson = deadlineDecision ? accumulatedJson : finalized.fullJson;
 
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
@@ -653,31 +653,19 @@ export async function callRouterLlm(params: {
     });
   }
 
-  // Parse the complete JSON
-  if (!fullJson) {
+  if (!finalized.decision) {
     log.error('[RouterLLM] No content received from LLM', {
       agentId: params.agentId,
       streamId,
+      jsonPreview: fullJson.substring(0, 200),
     });
-    throw new Error('Router LLM returned no content');
+    throw new Error(
+      fullJson
+        ? `Failed to parse router response as JSON: ${fullJson.substring(0, 200)}`
+        : 'Router LLM returned no content'
+    );
   }
-
-  let decision: RouterDecision;
-  if (deadlineDecision) {
-    decision = deadlineDecision;
-  } else {
-    try {
-      decision = parseRouterDecisionJson(fullJson);
-    } catch (error) {
-      log.error('[RouterLLM] Failed to parse JSON response', {
-        agentId: params.agentId,
-        streamId,
-        error: error instanceof Error ? error.message : String(error),
-        jsonPreview: fullJson.substring(0, 500),
-      });
-      throw new Error(`Failed to parse router response as JSON: ${fullJson.substring(0, 200)}`);
-    }
-  }
+  const decision = finalized.decision;
 
   const cacheGoal = fastMode.goal;
   if (fcKey && !fcCacheWon && !deadlineDecision && cacheGoal !== null && fastModeWrite) {

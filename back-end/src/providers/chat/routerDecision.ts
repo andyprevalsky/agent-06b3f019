@@ -121,6 +121,48 @@ export function parseRouterDecisionAfterDeadline(
   return parsePartialRouterDecisionJson(accumulatedJson);
 }
 
+export interface RouterStructuredText {
+  currentText(): string;
+  finalText(): string;
+}
+
+/**
+ * Shape a consumed router stream into a decision.
+ *
+ * Production 2026-09-30 (agent 6e645c29): Cerebras 429 → OpenRouter failover
+ * had not emitted an eligible structured item when the 3s completion deadline
+ * fired. The caller invoked `finalText()` (requireExactlyOne) and
+ * StructuredOutputCardinalityError killed the brand-new agent.
+ *
+ * This seam must never throw cardinality. Empty / reasoning-only / deadline
+ * streams return `decision: null` so the caller can use the existing
+ * "no content" / "completion expired" path — never a parse exception.
+ */
+export function finalizeRouterDecisionFromStream(params: {
+  structuredOutput: RouterStructuredText;
+  accumulatedJson: string;
+  deadlineExpired: boolean;
+}): { decision: RouterDecision | null; fullJson: string } {
+  // currentText() never throws cardinality. finalText() is the SMS/chat
+  // crash class — keep it off this seam.
+  const finalizedJson = params.structuredOutput.currentText();
+  const fullJson = finalizedJson || params.accumulatedJson;
+  if (params.deadlineExpired) {
+    return {
+      decision: parseRouterDecisionAfterDeadline(finalizedJson, params.accumulatedJson),
+      fullJson,
+    };
+  }
+  if (!fullJson) {
+    return { decision: null, fullJson: '' };
+  }
+  try {
+    return { decision: parseRouterDecisionJson(fullJson), fullJson };
+  } catch {
+    return { decision: parsePartialRouterDecisionJson(fullJson), fullJson };
+  }
+}
+
 export function isValidRouterCacheJson(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0) return false;
   try {

@@ -577,7 +577,7 @@ async function callGeneratorLlmCore(
   }
 
   // Combine for parsing - use accumulatedJson for JSON parsing
-  const fullJson = structuredOutput.finalText();
+  const fullJson = structuredOutput.currentText();
 
   // Fast Mode: record the generator response so an identical re-ask replays it.
   const cacheGoal = fastMode.goal;
