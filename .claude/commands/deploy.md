@@ -482,6 +482,7 @@ their assertions or test counts:
 `bash scripts/tests/benchmark-sms-transport-mock.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/cloudbench-rejected-start-recovery.test.py`,
+`python3 scripts/tests/cloudbench-prestack-recovery.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,

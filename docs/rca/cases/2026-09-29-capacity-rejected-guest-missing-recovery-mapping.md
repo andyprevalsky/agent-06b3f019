@@ -125,8 +125,14 @@ log. The forensic archive verifier independently checks those fields and the
 prior-run bytes before it can release resource ownership. The receipt never
 creates a benchmark result or changes evaluation.
 
-This recurrence remains open until the live exact-owner recovery and subsequent
-ten-slice no-INFRA streak are verified.
+The live exact-owner recovery completed after a 32,443,679-byte interrupted
+archive passed the forensic verifier: ten exact tasks, nine sealed bundles,
+one stopped prior-run volume, 93 hashed files, and zero proof credit. The
+guest-cleanup and runtime-evidence latches were discharged separately; all ten
+pool claims were returned. A later simultaneous inert preflight started all
+ten of those same 20 GB pool Machines at 8 GB, stopped them, and restored their
+benchmark boot command. This recurrence remains open until the subsequent
+ten-slice no-INFRA streak is verified.
 
 ## Human feedback
 

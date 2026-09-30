@@ -62,10 +62,20 @@ def eligible_pool(
         # The SMS supervisor is a rootless backend loop. Capability proof
         # requires a root-anchored archive and >=3 correlated live LLM calls;
         # reject it before provisioning rather than failing at teardown.
+        unified = load_unified_catalog(catalog_path(repo_root))
         rootless = {
             str(task["name"])
-            for task in load_unified_catalog(catalog_path(repo_root))
+            for task in unified
             if isinstance(task, dict) and task.get("runner") == "sms"
+        }
+        # The live iMessage bench explicitly needs an authenticated Mac app
+        # polling its backend. A Linux/cloud controller rejects it before the
+        # agent starts and cannot produce the required runtime/LLM evidence.
+        mac_relay = {
+            str(task["name"])
+            for task in unified
+            if isinstance(task, dict)
+            and "macOS Messages bridge" in (task.get("environment") or {}).get("services", [])
         }
         selected_rootless = set(names) & rootless
         if pool_file is not None and selected_rootless:
@@ -73,7 +83,13 @@ def eligible_pool(
                 "capability proof requires cloud-root tasks; rootless SMS tasks: "
                 f"{sorted(selected_rootless)}"
             )
-        names = [name for name in names if name not in rootless]
+        selected_mac_relay = set(names) & mac_relay
+        if pool_file is not None and selected_mac_relay:
+            raise ValueError(
+                "capability proof requires Linux/cloud runnable tasks; Mac Messages relay tasks: "
+                f"{sorted(selected_mac_relay)}"
+            )
+        names = [name for name in names if name not in rootless | mac_relay]
     if exclude_file is not None:
         excluded = json.loads(exclude_file.read_text())
         if not isinstance(excluded, list) or any(not isinstance(name, str) for name in excluded):
@@ -195,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--disjoint", action="store_true", help="never reuse a name across slices")
         sp.add_argument(
             "--require-cloud-root", action="store_true",
-            help="exclude rootless runners from capability proofs",
+            help="exclude rootless and Mac-only runners from cloud capability proofs",
         )
 
     sample = sub.add_parser("sample", help="print one newline-separated slice")

@@ -485,6 +485,11 @@ def verify_interrupted_pool_evidence(
         row["task"] for row in rows
         if (run / row["task"] / "guest-start-rejected.confirmed").is_file()
     }
+    prestack_names = {
+        row["task"] for row in rows
+        if (run / row["task"] / "guest-prestack.confirmed").is_file()
+    }
+    assert not rejected_names & prestack_names
     incomplete = 0
     for ordinal, (task, row) in enumerate(zip(tasks, rows, strict=True)):
         name = row["task"]
@@ -531,18 +536,34 @@ def verify_interrupted_pool_evidence(
             incomplete += 1
             assert object_file(out / "runtime-evidence.pending") == evidence_owner
             assert not (out / "remote-logs/runtime-evidence/run.json").exists()
-            assert {"original/bench.log", "original/cloudbench-driver.state",
+            required_original = {"original/bench.log", "original/cloudbench-driver.state"}
+            if name in prestack_names:
+                assert {
                     "original/repo/.context/cloudbench/services.json",
                     "original/repo/.context/cloudbench/stack.log",
                     "original/repo/.context/cloudbench/logs/backend.log",
-                    "original/repo/.context/cloudbench/logs/worker.log"} <= set(row["files"])
+                    "original/repo/.context/cloudbench/logs/worker.log",
+                } <= set(row["missing"])
+            else:
+                required_original |= {
+                    "original/repo/.context/cloudbench/services.json",
+                    "original/repo/.context/cloudbench/stack.log",
+                    "original/repo/.context/cloudbench/logs/backend.log",
+                    "original/repo/.context/cloudbench/logs/worker.log",
+                }
+            assert required_original <= set(row["files"])
             assert "original/cloudbench-driver.pid" in row["files"] or (
                 "original/cloudbench-driver.pid" in row["missing"])
             assert "original/repo/.context/cloudbench/run.json" in row["files"] or (
                 "original/repo/.context/cloudbench/run.json" in row["missing"])
             stopped_path = out / "guest-cleanup.machine-stopped.json"
             receipt_path = out / "guest-cleanup.recovery-receipt.json"
-            if (out / "guest-start-rejected.confirmed").is_file():
+            if name in prestack_names:
+                assert not stopped_path.exists() and not receipt_path.exists()
+                assert regular_bytes(out / "post-config-start.accepted", 256) == (machine + "\n").encode()
+                assert regular_bytes(out / "worker-clones.ids", 4096) == b""
+                assert not (out / "cloudbench-run.json").exists()
+            elif (out / "guest-start-rejected.confirmed").is_file():
                 assert not stopped_path.exists() and not receipt_path.exists()
                 assert not (out / "post-config-start.accepted").exists()
                 assert not (out / "status-proxy.port").exists()
@@ -586,7 +607,7 @@ def verify_interrupted_pool_evidence(
     assert incomplete > 0
     seen = set()
     archived = {}
-    rejected_originals = {name: {} for name in rejected_names}
+    rejected_originals = {name: {} for name in rejected_names | prestack_names}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_files
@@ -599,7 +620,7 @@ def verify_interrupted_pool_evidence(
             assert len(data) == member.size
             assert hashlib.sha256(data).hexdigest() == info["sha256"]
             task_name, _, original_relative = member.name.partition("/original/")
-            if task_name in rejected_names and original_relative:
+            if task_name in rejected_originals and original_relative:
                 rejected_originals[task_name][original_relative] = data
             if member.name.endswith("/sealed/run.json") or member.name.endswith(
                     "/original/repo/.context/cloudbench/run.json"):
@@ -623,10 +644,15 @@ def verify_interrupted_pool_evidence(
         if row["kind"] == "interrupted":
             prefix = f"{row['task']}/original/"
             state = archived[prefix + "cloudbench-driver.state"]
-            services = archived[prefix + "repo/.context/cloudbench/services.json"]
+            services = archived.get(prefix + "repo/.context/cloudbench/services.json")
             if "original/cloudbench-driver.pid" in row["missing"]:
                 assert state == b"exited"
-                if row["task"] in rejected_names:
+                if row["task"] in prestack_names:
+                    verify_prestack_archive(
+                        run / row["task"], row, owner, meta["run_id"],
+                        rejected_originals[row["task"]],
+                    )
+                elif row["task"] in rejected_names:
                     verify_rejected_start_archive(
                         run / row["task"], row, owner, meta["run_id"],
                         rejected_originals[row["task"]],
@@ -658,7 +684,7 @@ def verify_interrupted_pool_evidence(
                     verify_clean_stack_status(status, token)
             else:
                 assert state == b"running" and services["status"] == "running"
-        if path in archived and row["task"] not in rejected_names:
+        if path in archived and row["task"] not in rejected_names | prestack_names:
             results = archived[path].get("tasks")
             assert isinstance(results, list) and len(results) == 1
             assert results[0]["name"] == row["task"]
@@ -667,6 +693,54 @@ def verify_interrupted_pool_evidence(
             "incomplete_tasks": incomplete, "unallocated_workers": len(list(fresh.iterdir())),
             "files": len(seen), "archive_sha256": manifest["archive_sha256"],
             "proof_credit": 0}
+
+
+def verify_prestack_archive(
+    out: Path, row: dict[str, object], owner: str, run_id: str,
+    originals: dict[str, bytes],
+) -> None:
+    """A Mac-only task rejected before stack startup has no run to seal."""
+    receipt = object_file(out / "guest-prestack.confirmed")
+    machine, volume, token = row["machine_id"], row["volume_id"], row["run_token"]
+    assert row["task"] == "message-person"
+    assert receipt["version"] == 1 and receipt["kind"] == "unsupported-platform-prestack-zero"
+    assert receipt["fleet_owner_token"] == owner and receipt["run_id"] == run_id
+    assert receipt["bench"] == row["task"] and receipt["run_token"] == token
+    assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
+    assert receipt["provider_state"] == "stopped" and receipt["proof_credit"] == 0
+    provenance = receipt["capture_provenance"]
+    assert provenance["direct_original_volume"] is True
+    assert provenance["source_machine_id"] == machine
+    assert provenance["source_volume_id"] == volume
+    assert provenance["archive_sha256"] == receipt["capture_sha256"]
+    assert provenance["proof_credit"] == 0 and set(provenance["files"]) == set(originals)
+    assert receipt["original_file_sha256"] == {
+        name: hashlib.sha256(data).hexdigest() for name, data in sorted(originals.items())
+    }
+    missing_stack = {
+        "cloudbench-driver.pid", "repo/.context/cloudbench/services.json",
+        "repo/.context/cloudbench/stack.log",
+        "repo/.context/cloudbench/logs/backend.log",
+        "repo/.context/cloudbench/logs/worker.log",
+        "repo/.context/cloudbench/run.json",
+    }
+    clean_ack = f"cloudbench-driver-clean-{token}.ack"
+    assert not missing_stack & set(originals)
+    assert {"bench.log", "cloudbench-driver.state", clean_ack} <= set(originals)
+    assert originals["cloudbench-driver.state"].strip() == b"exited"
+    assert originals[clean_ack] == (token + "\n").encode()
+    bench_log = originals["bench.log"].decode()
+    assert owner in bench_log and "git-syncing + verifying" in bench_log
+    assert "guest shutdown requested" in bench_log and "driver exited rc=143" in bench_log
+    assert "stack healthy" not in bench_log and "running benchmark" not in bench_log
+    child = regular_bytes(out / "fleet-child.log", 1048576).decode()
+    assert "Live message-person benchmark requires a macOS controller for Apple Messages" in child
+    assert "Original exit code: 70" in child
+    assert regular_bytes(out / "guest-shutdown.confirmed", 256) == (run_id + "\n").encode()
+    assert regular_bytes(out / "post-config-start.accepted", 256) == (machine + "\n").encode()
+    assert regular_bytes(out / "worker-clones.ids", 4096) == b""
+    assert regular_bytes(out / "benchmark-child.finished", 256).strip() != b"0"
+    assert not (out / "cloudbench-run.json").exists()
 
 
 def verify_rejected_start_archive(

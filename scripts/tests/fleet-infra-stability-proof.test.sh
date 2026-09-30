@@ -143,7 +143,17 @@ from fleet_infra_sample import eligible_pool
 names = eligible_pool(root, None, require_cloud_root=True)
 assert "sms-supervisor-closed-no-spawn" not in names
 assert "sms-supervisor-open-spawns-agent" not in names
+assert "message-person" not in names
 PY
+mac_relay_pool="$(mktemp)"
+printf '["message-person"]\n' > "$mac_relay_pool"
+if "$PROOF" --capability --dry-sample --runs 1 --width 1 \
+  --pool-file "$mac_relay_pool" >/tmp/infra-proof-mac-relay.out 2>&1; then
+  fail "capability proof must reject a Mac Messages relay task before provisioning"
+fi
+grep -Fq 'Mac Messages relay tasks' /tmp/infra-proof-mac-relay.out \
+  || fail "Mac relay capability rejection must explain why"
+rm -f "$mac_relay_pool"
 rm -f "$rootless_pool"
 rm -f "$exclude_file" "$capability_sample" "$small_pool"
 

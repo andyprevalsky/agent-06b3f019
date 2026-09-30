@@ -112,6 +112,15 @@ def main() -> None:
                     driver_pid = "cloudbench-driver.pid"
                     if driver_pid not in seen:
                         entry["missing"].append("original/" + driver_pid)
+                    if (out / "guest-prestack.confirmed").is_file():
+                        for relative in (
+                            "repo/.context/cloudbench/services.json",
+                            "repo/.context/cloudbench/stack.log",
+                            "repo/.context/cloudbench/logs/backend.log",
+                            "repo/.context/cloudbench/logs/worker.log",
+                        ):
+                            if relative not in seen:
+                                entry["missing"].append("original/" + relative)
                 rows.append(entry)
         archive_bytes = archive_path.stat().st_size
         assert archive_bytes <= 512 * 1024 * 1024
