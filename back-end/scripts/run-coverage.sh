@@ -291,6 +291,9 @@ export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# The instrumented backend starts independently of run-blackbox-tests.sh.
+# OAuth URL cases need the same synthetic local client, never the production one.
+export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # Only the weekly admin-health case asserts real Amplitude counts. Keep that
 # strict live probe enabled while preventing non-asserting shape cases from
@@ -367,7 +370,26 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 ISOLATED_DB_RESOLVED=false
 
-if docker_info_quick; then
+if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
+  if ! node -e '
+    const url = new URL(process.env.BACKEND_COVERAGE_DATABASE_URL);
+    const expectedName = `victoria_${process.argv[1]}`;
+    if (!["postgres:", "postgresql:"].includes(url.protocol) ||
+        !["localhost", "127.0.0.1"].includes(url.hostname) ||
+        decodeURIComponent(url.pathname.slice(1)) !== expectedName ||
+        url.search !== "" || url.hash !== "") process.exit(1);
+  ' "$WORKSPACE_HINT"; then
+    echo "❌ BACKEND_COVERAGE_DATABASE_URL must name the local victoria_$WORKSPACE_HINT database." >&2
+    exit 1
+  fi
+  LOCAL_PSQL_URL="$BACKEND_COVERAGE_DATABASE_URL"
+  if ! psql "$LOCAL_PSQL_URL" -At -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+    echo "❌ Isolated coverage database is not reachable." >&2
+    exit 1
+  fi
+  DB_FOUND=true
+  echo "Using isolated system Postgres database victoria_$WORKSPACE_HINT"
+elif docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
     ISOLATED_DB_RESOLVED=true
@@ -412,7 +434,7 @@ if $DB_FOUND; then
     echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
     exit 1
   fi
-  LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  LOCAL_PSQL_URL="${LOCAL_PSQL_URL:-postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria}"
   # Docker Desktop can briefly stop accepting new TCP connections while the
   # parallel coverage lanes saturate the shared host. Prisma's five-second
   # default connect timeout made every first query fail even when Postgres
@@ -422,8 +444,12 @@ if $DB_FOUND; then
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   node "$SCRIPT_DIR/assert-prisma-client-current.mjs"
+  if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
+    export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"
+  fi
   if command -v psql >/dev/null 2>&1; then
     psql "$LOCAL_PSQL_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 DO $$
 BEGIN
   IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL

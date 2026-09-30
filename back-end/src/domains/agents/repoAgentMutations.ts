@@ -88,7 +88,7 @@ export async function findArchivedAgent(agentId: string, userId?: string) {
       deletedAt: { not: null },
       ...(userId === undefined ? {} : { userId }),
     },
-    select: { id: true },
+    select: { id: true, isBenchmark: true },
   });
 }
 

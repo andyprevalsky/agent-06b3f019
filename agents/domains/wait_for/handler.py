@@ -28,6 +28,11 @@ from domains.wait_for.config import (
     MIN_CHECKS,
 )
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
+from helpers.wait_condition_or_handoff import sleep_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.source_connect_gates import raise_source_connect_gates
 
@@ -199,7 +204,23 @@ class WaitForManager(ToolManager):
         # so on replay the wait is pure dead wall-clock — skip it. Live Fast
         # Mode still sleeps so until_timestamp remains a real wall-clock wait.
         if not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
-            await workflow.sleep(delta_seconds)
+            try:
+                await sleep_or_generation_handoff(
+                    workflow_instance, delta_seconds, workflow_mod=workflow
+                )
+            except GenerationHandoffRequested:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Waiting until {until_timestamp}",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "waitForMode": "timestamp",
+                        "untilTimestamp": until_timestamp,
+                        "durationSeconds": delta_seconds,
+                    },
+                )
+                raise
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -265,7 +286,25 @@ class WaitForManager(ToolManager):
             # must still sleep so external state (email/SMS) can change between
             # polls (agent 515c4894 burned max_checks in ~2m with FM skip-sleep).
             if check_num > 1 and not skip_wait_wall_clock_for_fast_mode_replay(workflow_instance):
-                await workflow.sleep(check_interval_seconds)
+                try:
+                    await sleep_or_generation_handoff(
+                        workflow_instance, check_interval_seconds, workflow_mod=workflow
+                    )
+                except GenerationHandoffRequested:
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=f"Waiting for {description}",
+                        message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                        status=MessageStatus.FINISHED,
+                        metadata={
+                            "waitForMode": "condition",
+                            "description": description,
+                            "condition": condition,
+                            "checkIntervalSeconds": check_interval_seconds,
+                            "maxChecks": max_checks_param,
+                        },
+                    )
+                    raise
 
             # Check pause / cost limit
             await workflow_instance._check_parent_state()

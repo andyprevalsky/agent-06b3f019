@@ -41,7 +41,8 @@ async def main():
 
     with patch.object(handler, "BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS", 0.05):
         try:
-            await handler.disconnect_browser_after_passkey_capture(StubbornCDP(), capture)
+            await capture()
+            await handler._bounded_browser_terminal_io(StubbornCDP().disconnect(), "cleanup CDP disconnect")
         except TimeoutError:
             print("terminal-timeout", flush=True)
     print("cleanup-complete", flush=True)
@@ -55,6 +56,56 @@ print("process-exited", flush=True)
     )
     assert result.returncode == 0, result.stderr[-500:]
     assert "terminal-timeout\ncleanup-complete\n" in result.stdout
+    assert result.stdout.rstrip().endswith("process-exited")
+
+
+def test_worker_optional_cdp_timeout_preserves_resource_drain_and_exits():
+    """Expired CDP children cannot delay recording cleanup or strand shutdown."""
+    script = r'''
+import asyncio
+from unittest.mock import patch
+from domains.spawn_browser_agent_v3 import handler
+from helpers.worker_event_loop import run_worker_event_loop
+
+async def main():
+    class StubbornCDP:
+        async def disconnect(self):
+            event = asyncio.Event()
+            while True:
+                try:
+                    await event.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    async def capture():
+        pass
+
+    async def recording_cleanup():
+        await asyncio.sleep(0.03)
+        print("recording-cleanup-complete", flush=True)
+
+    with patch.object(handler, "BROWSER_DISCONNECT_TIMEOUT_SECONDS", 0.02):
+        await handler.disconnect_browser_after_passkey_capture(StubbornCDP(), capture)
+    cleanup = asyncio.create_task(recording_cleanup())
+    handler._background_browser_cleanup_tasks.add(cleanup)
+    try:
+        started = asyncio.get_running_loop().time()
+        await handler.drain_background_browser_cleanups(timeout=0.4)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert cleanup.done(), "owned recording cleanup was not drained"
+        assert elapsed < 0.2, f"expired CDP cleanup consumed another drain: {elapsed}"
+    finally:
+        handler._background_browser_cleanup_tasks.discard(cleanup)
+
+run_worker_event_loop(main())
+print("process-exited", flush=True)
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=WORKER_PATH.parent,
+        capture_output=True, text=True, timeout=8,
+    )
+    assert result.returncode == 0, result.stderr[-500:]
+    assert "recording-cleanup-complete" in result.stdout
     assert result.stdout.rstrip().endswith("process-exited")
 
 
@@ -1051,6 +1102,7 @@ async def run_all_tests():
     r.record("dynamic_worker_health_bound_port", test_dynamic_worker_health_server_reports_the_bound_port)
     r.record("worker_shutdown_joins_native_observability_requests", test_worker_shutdown_joins_native_observability_requests)
     r.record("worker_terminal_browser_io_cannot_strand_cleanup", test_worker_event_loop_closes_after_terminal_browser_io_times_out)
+    r.record("worker_optional_cdp_timeout_preserves_resource_drain", test_worker_optional_cdp_timeout_preserves_resource_drain_and_exits)
     r.record("worker_loop_rejects_unrelated_pending_work", test_worker_event_loop_rejects_unrelated_pending_work)
     r.record("worker_loop_stops_browser_event_buses", test_worker_event_loop_stops_browser_event_buses_before_pending_check)
     r.record("worker_cancellation_heartbeat_cadence", test_worker_cancellation_uses_application_heartbeat_cadence)

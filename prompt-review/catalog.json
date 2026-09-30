@@ -1,5 +1,5 @@
 {
-  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
+  "_doc": "Catalog of every prompt to review. Each entry has: repo (ours|claude-code-src|openclaw|hermes-agent|codex), path (relative to repo root), id (stable name \u2014 variable name, function, or basename), category, summary, keywords. The build script extracts text using id (regex anchor) with line-range as fallback. To add a prompt, append to the relevant list \u2014 no schema changes needed.",
   "ours": [
     {
       "path": "agents/utils/user_facing_writing_prompt.py",
@@ -15,12 +15,13 @@
         "sms",
         "chat"
       ],
+      "agent": "shared",
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
-      },
-      "agent": "shared"
+        "hermes": null,
+        "codex": null
+      }
     },
     {
       "path": "back-end/src/providers/userFacingWritingPrompt.ts",
@@ -36,12 +37,13 @@
         "sms",
         "chat"
       ],
+      "agent": "shared",
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
-      },
-      "agent": "shared"
+        "hermes": null,
+        "codex": null
+      }
     },
     {
       "path": "agents/utils/prompts.py",
@@ -149,7 +151,8 @@
       "matches": {
         "claude": "claude_getSystemPrompt",
         "openclaw": "openclaw_buildAgentSystemPrompt",
-        "hermes": "hermes_default_agent_identity"
+        "hermes": "hermes_default_agent_identity",
+        "codex": "codex_base_instructions"
       },
       "agent": "main_shared"
     },
@@ -214,7 +217,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "verifier"
     },
@@ -248,7 +252,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "planner"
     },
@@ -269,7 +274,8 @@
       "matches": {
         "claude": "claude_builtin_explore_agent",
         "openclaw": "openclaw_subagent_system_prompt",
-        "hermes": "hermes_explore_reference"
+        "hermes": "hermes_explore_reference",
+        "codex": "codex_multi_agent_subagent"
       },
       "agent": "explore"
     },
@@ -289,7 +295,8 @@
       "matches": {
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_shared"
     },
@@ -309,7 +316,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -329,7 +337,8 @@
       "matches": {
         "claude": "claude_tool_grep",
         "openclaw": null,
-        "hermes": "hermes_search_files_tool"
+        "hermes": "hermes_search_files_tool",
+        "codex": null
       },
       "agent": "explore"
     },
@@ -350,7 +359,8 @@
       "matches": {
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
-        "hermes": "hermes_send_message_tool"
+        "hermes": "hermes_send_message_tool",
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -369,7 +379,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -390,7 +401,8 @@
       "matches": {
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
-        "hermes": "hermes_send_message_tool"
+        "hermes": "hermes_send_message_tool",
+        "codex": null
       },
       "agent": "main_plan"
     },
@@ -410,7 +422,8 @@
       "matches": {
         "claude": "claude_tool_brief",
         "openclaw": "openclaw_message_tool",
-        "hermes": "hermes_send_message_tool"
+        "hermes": "hermes_send_message_tool",
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -430,7 +443,8 @@
       "matches": {
         "claude": "claude_tool_enter_plan_mode",
         "openclaw": "openclaw_update_plan",
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_plan"
     },
@@ -451,7 +465,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_shared"
     },
@@ -472,7 +487,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_execute"
     },
@@ -493,7 +509,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_execute"
     },
@@ -514,7 +531,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_shared"
     },
@@ -534,7 +552,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_execute"
     },
@@ -555,7 +574,8 @@
       "matches": {
         "claude": "claude_tool_agent",
         "openclaw": "openclaw_sessions_spawn",
-        "hermes": "hermes_delegate_tool"
+        "hermes": "hermes_delegate_tool",
+        "codex": "codex_orchestrator"
       },
       "agent": "main_execute"
     },
@@ -575,7 +595,8 @@
       "matches": {
         "claude": "claude_tool_sleep",
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -596,7 +617,8 @@
       "matches": {
         "claude": "claude_tool_web_fetch",
         "openclaw": "openclaw_web_fetch",
-        "hermes": "hermes_web_extract_tool"
+        "hermes": "hermes_web_extract_tool",
+        "codex": null
       },
       "agent": "explore"
     },
@@ -617,7 +639,8 @@
       "matches": {
         "claude": "claude_tool_web_search",
         "openclaw": "openclaw_web_search",
-        "hermes": "hermes_web_search_tool"
+        "hermes": "hermes_web_search_tool",
+        "codex": null
       },
       "agent": "explore"
     },
@@ -637,7 +660,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -657,7 +681,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot",
-        "hermes": "hermes_browser_snapshot"
+        "hermes": "hermes_browser_snapshot",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -677,7 +702,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -698,7 +724,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_act_click",
-        "hermes": "hermes_browser_click"
+        "hermes": "hermes_browser_click",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -718,7 +745,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_act_fill",
-        "hermes": "hermes_browser_type"
+        "hermes": "hermes_browser_type",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -738,7 +766,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_act_type",
-        "hermes": "hermes_browser_type"
+        "hermes": "hermes_browser_type",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -758,7 +787,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_act_press",
-        "hermes": "hermes_browser_press"
+        "hermes": "hermes_browser_press",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -777,7 +807,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_navigate",
-        "hermes": "hermes_browser_navigate"
+        "hermes": "hermes_browser_navigate",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -795,7 +826,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": "hermes_browser_scroll"
+        "hermes": "hermes_browser_scroll",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -814,7 +846,8 @@
       "matches": {
         "claude": "claude_tool_sleep",
         "openclaw": "openclaw_browser_action_act_wait",
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -833,7 +866,8 @@
       "matches": {
         "claude": "claude_tool_exit_plan_mode",
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -852,7 +886,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_screenshot",
-        "hermes": "hermes_browser_vision"
+        "hermes": "hermes_browser_vision",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -872,7 +907,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_snapshot_aria",
-        "hermes": "hermes_browser_snapshot"
+        "hermes": "hermes_browser_snapshot",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -891,7 +927,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": "hermes_browser_back"
+        "hermes": "hermes_browser_back",
+        "codex": null
       },
       "agent": "browser"
     },
@@ -910,7 +947,8 @@
       "matches": {
         "claude": null,
         "openclaw": "openclaw_browser_action_act_clickCoords",
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -929,7 +967,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "main_execute"
     },
@@ -949,7 +988,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "browser"
     },
@@ -1041,7 +1081,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "planner"
     },
@@ -1075,7 +1116,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": "codex_compact_prompt"
       },
       "agent": "shared"
     },
@@ -1091,7 +1133,13 @@
         "summary",
         "learnings",
         "history"
-      ]
+      ],
+      "matches": {
+        "claude": null,
+        "openclaw": null,
+        "hermes": null,
+        "codex": "codex_compact_prompt"
+      }
     },
     {
       "path": "agents/helpers/summarize.py",
@@ -1123,7 +1171,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "chat"
     },
@@ -1143,7 +1192,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "chat"
     },
@@ -1162,7 +1212,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "chat"
     },
@@ -1182,7 +1233,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "voice"
     },
@@ -1202,7 +1254,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "sms"
     },
@@ -1251,7 +1304,8 @@
       "matches": {
         "claude": null,
         "openclaw": null,
-        "hermes": null
+        "hermes": null,
+        "codex": null
       },
       "agent": "shared"
     },
@@ -2414,6 +2468,252 @@
         "grep",
         "rg",
         "content"
+      ]
+    }
+  ],
+  "codex": [
+    {
+      "path": "codex/codex-rs/protocol/src/prompts/base_instructions/default.md",
+      "anchor": "You are a coding agent running in the Codex CLI",
+      "id": "codex_base_instructions",
+      "category": "system_prompt",
+      "summary": "Default Codex CLI base instructions \u2014 identity, AGENTS.md, sandbox, ********ity.",
+      "keywords": [
+        "system",
+        "base",
+        "instructions",
+        "codex",
+        "cli",
+        "identity"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/models-manager/prompt.md",
+      "anchor": "You are a coding agent running in the Codex CLI",
+      "id": "codex_models_manager_prompt",
+      "category": "system_prompt",
+      "summary": "Models-manager copy of base instructions (BASE_INSTRUCTIONS include_str).",
+      "keywords": [
+        "system",
+        "base",
+        "models-manager",
+        "codex"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/core/gpt-5.2-codex_prompt.md",
+      "anchor": "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CL",
+      "id": "codex_gpt52_codex_prompt",
+      "category": "system_prompt",
+      "summary": "GPT-5.2-Codex model-specific system prompt overlay.",
+      "keywords": [
+        "gpt-5.2",
+        "codex",
+        "model",
+        "system",
+        "prompt"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/core/templates/model_instructions/gpt-5.2-codex_instructions_template.md",
+      "anchor": "You are Codex, a coding agent based on GPT-5",
+      "id": "codex_gpt52_codex_instructions_template",
+      "category": "system_prompt",
+      "summary": "GPT-5.2-Codex instructions template with ********ity placeholder.",
+      "keywords": [
+        "gpt-5.2",
+        "template",
+        "instructions",
+        "********ity"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/core/gpt-5.1-codex-max_prompt.md",
+      "anchor": "You are Codex",
+      "id": "codex_gpt51_codex_max_prompt",
+      "category": "system_prompt",
+      "summary": "GPT-5.1-Codex-Max model-specific system prompt.",
+      "keywords": [
+        "gpt-5.1",
+        "codex-max",
+        "model",
+        "system"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/core/templates/agents/orchestrator.md",
+      "anchor": "Prefer multiple sub-agents",
+      "id": "codex_orchestrator",
+      "category": "system_prompt",
+      "summary": "Orchestrator agent template \u2014 parallel sub-agents, coordination role.",
+      "keywords": [
+        "orchestrator",
+        "subagent",
+        "spawn",
+        "parallel",
+        "coordinate"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/src/model_messages/multi_agent.rs",
+      "anchor": "DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT",
+      "id": "codex_multi_agent_root",
+      "category": "system_prompt",
+      "summary": "Multi-agent v2 root (/root) collaboration usage hint.",
+      "keywords": [
+        "multi-agent",
+        "root",
+        "spawn_agent",
+        "collaboration"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/src/model_messages/multi_agent.rs",
+      "anchor": "DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT",
+      "id": "codex_multi_agent_subagent",
+      "category": "system_prompt",
+      "summary": "Multi-agent v2 subagent usage hint \u2014 final channel returns to parent.",
+      "keywords": [
+        "multi-agent",
+        "subagent",
+        "spawn_agent",
+        "parent"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/src/multi_agent_instructions.rs",
+      "anchor": "DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT",
+      "id": "codex_multi_agent_shared_hint",
+      "category": "system_prompt",
+      "summary": "Shared multi-agent filesystem / tool-namespace constraints.",
+      "keywords": [
+        "multi-agent",
+        "shared",
+        "filesystem",
+        "collaboration"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/compact/prompt.md",
+      "anchor": "CONTEXT CHECKPOINT COMPACTION",
+      "id": "codex_compact_prompt",
+      "category": "system_prompt",
+      "summary": "Context compaction / handoff summary prompt for the next LLM.",
+      "keywords": [
+        "compact",
+        "compaction",
+        "summary",
+        "handoff",
+        "checkpoint"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/persistent_mode.md",
+      "anchor": "## Proactivity",
+      "id": "codex_persistent_mode",
+      "category": "system_prompt",
+      "summary": "Persistent-mode guidance for long-lived sessions.",
+      "keywords": [
+        "persistent",
+        "session",
+        "mode"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/core/templates/collab/experimental_prompt.md",
+      "anchor": "## Multi agents",
+      "id": "codex_collab_experimental",
+      "category": "system_prompt",
+      "summary": "Experimental collaboration prompt fragment.",
+      "keywords": [
+        "collab",
+        "experimental",
+        "collaboration"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/guardian/classifier_instructions.md",
+      "anchor": "You are",
+      "id": "codex_guardian_classifier",
+      "category": "system_prompt",
+      "summary": "Guardian policy classifier instructions.",
+      "keywords": [
+        "guardian",
+        "classifier",
+        "policy",
+        "safety"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/permissions/sandbox_mode/workspace_write.md",
+      "anchor": "workspace-write",
+      "id": "codex_sandbox_workspace_write",
+      "category": "system_prompt",
+      "summary": "Sandbox mode: workspace-write permission text.",
+      "keywords": [
+        "sandbox",
+        "permissions",
+        "workspace-write"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/permissions/sandbox_mode/read_only.md",
+      "anchor": "read-only",
+      "id": "codex_sandbox_read_only",
+      "category": "system_prompt",
+      "summary": "Sandbox mode: read-only permission text.",
+      "keywords": [
+        "sandbox",
+        "permissions",
+        "read-only"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/permissions/sandbox_mode/danger_full_access.md",
+      "anchor": "danger-full-access",
+      "id": "codex_sandbox_danger_full_access",
+      "category": "system_prompt",
+      "summary": "Sandbox mode: danger-full-access permission text.",
+      "keywords": [
+        "sandbox",
+        "permissions",
+        "full-access"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/permissions/approval_policy/on_request.md",
+      "anchor": "approval",
+      "id": "codex_approval_on_request",
+      "category": "system_prompt",
+      "summary": "Approval policy: on-request escalation text.",
+      "keywords": [
+        "approval",
+        "permissions",
+        "on-request"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/realtime/backend_prompt.md",
+      "anchor": "## Identity, tone, and role",
+      "id": "codex_realtime_backend",
+      "category": "system_prompt",
+      "summary": "Realtime backend prompt for voice/live sessions.",
+      "keywords": [
+        "realtime",
+        "backend",
+        "voice"
+      ]
+    },
+    {
+      "path": "codex/codex-rs/prompts/templates/review/rubric.md",
+      "anchor": "review",
+      "id": "codex_review_rubric",
+      "category": "system_prompt",
+      "summary": "Code-review rubric instructions.",
+      "keywords": [
+        "review",
+        "rubric",
+        "code-review"
       ]
     }
   ]

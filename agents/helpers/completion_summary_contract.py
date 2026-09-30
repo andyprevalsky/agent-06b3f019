@@ -12,17 +12,6 @@ import re
 from typing import Any
 
 
-FAST_MODE_SUMMARY_MARKERS = (
-    "fm_cold_namespace_passthrough",
-    "fm_trajectory_end_passthrough",
-    "fast mode",
-    "fast mode cache trajectory ended",
-    "cached trajectory",
-    "from_fast_cache",
-    "based on prior tool evidence",
-    "the task completed successfully; verified results are included below",
-)
-
 _FETCH_FILTER_PROMPT = "you are filtering a fetched web page for an autonomous agent"
 _TOOL_PARAMETER_NAMES = (
     "query",
@@ -87,15 +76,9 @@ def is_raw_tool_envelope(value: Any) -> bool:
     return _json_tool_envelope(text)
 
 
-def has_fast_mode_summary_marker(value: Any) -> bool:
-    """Return whether text contains an explicit Fast Mode summary sentinel."""
-    lowered = str(value or "").strip().lower()
-    return bool(lowered) and any(marker in lowered for marker in FAST_MODE_SUMMARY_MARKERS)
-
-
 def is_ablated_completion_summary(value: Any) -> bool:
-    """Reject empty/cache-stub/tool-envelope text at every completion boundary."""
+    """Reject empty or raw tool-envelope text at every completion boundary."""
     text = str(value or "").strip()
     if not text:
         return True
-    return has_fast_mode_summary_marker(text) or is_raw_tool_envelope(text)
+    return is_raw_tool_envelope(text)

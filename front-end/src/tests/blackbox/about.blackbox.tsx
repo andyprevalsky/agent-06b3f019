@@ -60,6 +60,26 @@ describe('About page', () => {
     });
   });
 
+  it('explains Google permissions and links to legal pages and support', () => {
+    renderWithProviders(<About />);
+    expect(screen.getByRole('heading', { name: /what rose does/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(/google calendar events \(to view, create, and update events/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: /privacy policy/i })[0]).toHaveAttribute(
+      'href',
+      '/privacy',
+    );
+    expect(screen.getAllByRole('link', { name: /terms of service/i })[0]).toHaveAttribute(
+      'href',
+      '/terms',
+    );
+    expect(screen.getByRole('link', { name: 'security@roselabs.ai' })).toHaveAttribute(
+      'href',
+      'mailto:security@roselabs.ai',
+    );
+  });
+
   // ─── Team Section ─────────────────────────────────────────────
 
   describe('Team section', () => {

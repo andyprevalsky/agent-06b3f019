@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         poll_new_messages,
         post_agent_message,
         resolve_fast_cache_goal_activity,
+        unpack_fast_cache_goal_resolution,
         update_agent_status,
     )
     from helpers.completion_summary_contract import (
@@ -56,7 +57,11 @@ with workflow.unsafe.imports_passed_through():
     from helpers.context_compaction import build_context_compaction_metadata
     from helpers.context_scope import filter_internal_subagent_messages
     from helpers.error_alert import report_failure_activity
-    from helpers.generation_handoff import should_handoff_to_generation
+    from helpers.generation_handoff import (
+        DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+        GenerationHandoffRequested,
+        should_handoff_to_generation,
+    )
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
@@ -70,6 +75,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.query_parent_state import query_parent_state_activity
     from helpers.save_tool_usage import save_tool_usage
     from helpers.sms_activities import get_agent_source, notify_sms_event_activity
+    from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
     from loop.dag_executor import TaskDAG, execute_dag, extract_plan_from_context
     from loop.run_agent import _run_verifier, run_agent
     from providers.rose.pricing import get_model_pricing as get_in_process_model_pricing
@@ -316,11 +322,6 @@ def last_real_completion_text(
             continue
         if _is_plumbing_tool_text(text):
             continue
-        if tool_name in {"attempt_completion", "attempt_completion_with_result"} and status in {
-            "FINISHED",
-            "",
-        }:
-            return text
         if tool_name in _EVIDENCE_TOOLS and status in {"FINISHED", ""} and len(text) >= 200:
             return text
         if (
@@ -343,6 +344,39 @@ def last_real_completion_text(
     return ""
 
 
+_FAST_MODE_CARD_MARKERS = (
+    "fast mode",
+    "cached trajectory",
+    "based on prior tool evidence",
+    "verified results are included below",
+)
+
+
+def completion_card_has_fast_mode_markers(text: str) -> bool:
+    """True when Task Complete text still carries Fast Mode ablation copy."""
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _FAST_MODE_CARD_MARKERS)
+
+
+def strip_fast_mode_card_narration(text: str) -> str:
+    """Drop Fast Mode lead-in sentences; keep extracted report text.
+
+    July Fast Mode sometimes prefixes a valid Extracted Output block with
+    ``Fast Mode cache trajectory ended...``. T7 forbids that substring even
+    when the rest of the card is a real 200+ character summary.
+    """
+    raw = str(text or "").strip()
+    if not raw or not completion_card_has_fast_mode_markers(raw):
+        return raw
+    parts = re.split(r"(?<=[.!?])\s+", raw)
+    kept = [
+        part.strip()
+        for part in parts
+        if part.strip() and not completion_card_has_fast_mode_markers(part)
+    ]
+    return " ".join(kept).strip()
+
+
 def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800) -> str:
     """Collapse a long replayed report into a Task Complete card body."""
     kept: List[str] = []
@@ -351,6 +385,8 @@ def brief_card_summary(text: str, *, min_chars: int = 200, max_chars: int = 800)
         if not line or line.startswith("#"):
             continue
         if is_ablated_completion_summary(line) or _is_plumbing_tool_text(line):
+            continue
+        if completion_card_has_fast_mode_markers(line) and len(line) < 200:
             continue
         kept.append(line)
     blob = " ".join(kept).strip()
@@ -406,7 +442,7 @@ def card_summary_from_evidence(
 ) -> str:
     """1-2 sentence Task Complete summary from replayed evidence, never Fast Mode copy."""
     candidate = last_real_completion_text(context, structured_response)
-    brief = brief_card_summary(candidate, min_chars=min_chars)
+    brief = strip_fast_mode_card_narration(brief_card_summary(candidate, min_chars=min_chars))
     if brief and not is_ablated_completion_summary(brief) and len(brief) >= min_chars:
         return brief
     if isinstance(structured_response, dict):
@@ -415,7 +451,9 @@ def card_summary_from_evidence(
             for value in structured_response.values()
             if isinstance(value, str) and value.strip() and not is_ablated_completion_summary(value)
         ]
-        brief = brief_card_summary(" ".join(parts), min_chars=min_chars)
+        brief = strip_fast_mode_card_narration(
+            brief_card_summary(" ".join(parts), min_chars=min_chars)
+        )
         if brief and len(brief) >= min_chars:
             return brief
     return ""
@@ -489,6 +527,21 @@ def _fill_from_row_and_sections(
             for name in names:
                 if name in obj and obj[name] not in empty and merged.get(name) in empty + (None,):
                     merged[name] = obj[name]
+            items = obj.get("items")
+            if (
+                isinstance(items, list)
+                and "top_creators_analysis" in names
+                and merged.get("top_creators_analysis") in empty + (None,)
+            ):
+                analyses = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    nested = item.get("structured_response") or item.get("structuredResponse") or item
+                    if isinstance(nested, dict) and nested:
+                        analyses.append(nested)
+                if analyses:
+                    merged["top_creators_analysis"] = analyses
         if not missing():
             return merged
 
@@ -600,7 +653,23 @@ def _structured_from_payload(payload: Any, names: List[str]) -> Dict[str, Any]:
     nested = obj.get("structured_response") or obj.get("structuredResponse") or obj
     if not isinstance(nested, dict):
         return {}
-    return {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
+    found = {name: nested[name] for name in names if name in nested and nested[name] not in (None, "", [], {})}
+    items = nested.get("items") if "items" in nested else obj.get("items")
+    if (
+        "top_creators_analysis" in names
+        and "top_creators_analysis" not in found
+        and isinstance(items, list)
+    ):
+        analyses = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            row = item.get("structured_response") or item.get("structuredResponse") or item
+            if isinstance(row, dict) and row:
+                analyses.append(row)
+        if analyses:
+            found["top_creators_analysis"] = analyses
+    return found
 
 
 @workflow.defn
@@ -621,6 +690,10 @@ class AgentWorkflow:
         # differ from the workflow-input goal (chat escalation passes an LLM-refined
         # goal that varies run to run). All cache keying threads this, never self.goal.
         self.fast_cache_goal: Optional[str] = None
+        # Tree-root goal for DEMO inheritance. Child cache keys stay on
+        # fast_cache_goal; wait_for / spawn gates read this when the child's
+        # own spawn goal is not the catalog prefix.
+        self.root_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
         self.memory_enabled: bool = False
         # Fast Mode button — LLM provider speed only (Anthropic speed / OpenAI priority).
@@ -946,6 +1019,7 @@ class AgentWorkflow:
             "agent_source",
             "user_context_section",
             "fast_cache_goal",
+            "root_goal",
         ):
             value = runtime.get(field_name)
             if isinstance(value, str):
@@ -1112,13 +1186,23 @@ class AgentWorkflow:
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
                 "fast_cache_goal": self.fast_cache_goal,
+                "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
             },
         }
 
-    def _continuation_args(self, context: Optional[List[Dict]]) -> List[Any]:
-        """Build the single canonical execute continuation argument contract."""
+    def _continuation_args(
+        self,
+        context: Optional[List[Dict]],
+        start_phase: str = "execute_continued",
+    ) -> List[Any]:
+        """Build the canonical continue_as_new argument contract.
+
+        Default ``execute_continued`` skips PLAN/DAG (paused + execute-phase
+        handoff). PLAN-phase generation handoff passes ``start_phase="plan"``
+        so the resumed workflow finishes planning instead of jumping to execute.
+        """
         args = [
             self.agent_id,
             self.user_id,
@@ -1131,7 +1215,7 @@ class AgentWorkflow:
             self.parent_agent_id,
             self.depth,
             self.bus_id,
-            "execute_continued",
+            start_phase,
             self.max_iterations,
             self.price_limit_cents,
             self.context_gates or None,
@@ -1662,26 +1746,35 @@ class AgentWorkflow:
         if (
             self.provider_fast_mode
             or self.fast_mode_cache_enabled
+            or self.parent_workflow_id
             or user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
         ):
             try:
-                persisted_goal = await workflow.execute_activity(
-                    resolve_fast_cache_goal_activity,
-                    args=[agent_id],
-                    start_to_close_timeout=timedelta(seconds=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                persisted_goal, resolved_root_goal = unpack_fast_cache_goal_resolution(
+                    await workflow.execute_activity(
+                        resolve_fast_cache_goal_activity,
+                        args=[agent_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
                 )
+                if resolved_root_goal:
+                    self.root_goal = resolved_root_goal
                 if persisted_goal and persisted_goal != self.fast_cache_goal:
                     workflow.logger.info(
                         "Fast Mode cache goal resolved from agent row (differs from workflow input goal)"
                     )
                     self.fast_cache_goal = persisted_goal
-                    # Recompute DEMO cache gate after the durable goal is known.
+                if persisted_goal or resolved_root_goal:
+                    # Recompute DEMO cache gate after durable child + root goals
+                    # are known. Leftover GPs inherit demo wait_for from root_goal.
                     self.fast_mode_cache_enabled = is_demo_cache_task(self)
-                    # Compute-token cache affinity pins by goal too — keep it on
-                    # the same stable namespace.
+                    # Compute-token cache affinity pins by the child's goal —
+                    # keep it on the same stable namespace, not the root's.
                     self.compute_token_fast_cache_affinity_key = (
-                        _fast_cache_compute_affinity_key(user_id, persisted_goal)
+                        _fast_cache_compute_affinity_key(
+                            user_id, self.fast_cache_goal or persisted_goal or self.goal
+                        )
                         if self.fast_mode_cache_enabled
                         else None
                     )
@@ -1924,6 +2017,7 @@ class AgentWorkflow:
             # boundary before the LLM loop. The deploy gate queries this flag,
             # inspects history for workflow-task failures, then terminates the
             # isolated synthetic execution.
+            # cutover-class: deploy-gate — isolated validation run, never a user agent
             await workflow.wait_condition(lambda: not self._deployment_validation)
 
         # =====================================================================
@@ -2526,6 +2620,7 @@ class AgentWorkflow:
     async def _wait_for_messages(self) -> bool:
         """Wait for new messages."""
         try:
+            # cutover-class: bounded — 30s slice; next run_agent iteration re-checks handoff
             await workflow.wait_condition(
                 lambda: self._has_new_messages or not self.is_paused, timeout=timedelta(seconds=30)
             )
@@ -2601,9 +2696,9 @@ class AgentWorkflow:
     async def _check_generation_handoff(self) -> Optional[str]:
         """Return live task queue when this execution should hand off generations.
 
-        Safe checkpoint: called only at the top of a run_agent iteration, after any
-        prior LLM/tool/browser activity completed. Returns None when we are already
-        on the live generation (or the pointer cannot be read).
+        Safe checkpoint: called at the top of a run_agent iteration and from
+        in-tool parks after any prior activity completed. Returns None when we
+        are already on the live generation (or the pointer cannot be read).
         """
         try:
             pointer = await workflow.execute_activity(
@@ -2629,17 +2724,16 @@ class AgentWorkflow:
         Returns the live task queue when cooperative cutover is required while
         paused; otherwise None once the agent is unpaused.
         """
-        while self.is_paused:
-            handoff_queue = await self._check_generation_handoff()
-            if handoff_queue:
-                return handoff_queue
-            try:
-                await workflow.wait_condition(
-                    lambda: not self.is_paused,
-                    timeout=timedelta(seconds=30),
-                )
-            except (asyncio.TimeoutError, TemporalTimeoutError):
-                pass
+        if not self.is_paused:
+            return None
+        try:
+            await wait_condition_or_generation_handoff(
+                lambda: not self.is_paused,
+                self,
+                workflow_mod=workflow,
+            )
+        except GenerationHandoffRequested as exc:
+            return exc.task_queue
         return None
 
     async def _check_credits(self) -> None:
@@ -3319,6 +3413,17 @@ class AgentWorkflow:
                 if failed:
                     return {"error": True, "message": result_text or f"{tool_name} failed"}
                 return {"success": True, "message": result_text or f"{tool_name} completed"}
+
+        except GenerationHandoffRequested as exc:
+            # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
+            # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
+            workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
+            return {
+                "success": True,
+                "message": DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                "generation_handoff": True,
+                "handoff_task_queue": exc.task_queue,
+            }
 
         except asyncio.CancelledError:
             # User paused the agent - don't show as error
@@ -4522,7 +4627,10 @@ class AgentWorkflow:
                 f"continue_as_new onto generation queue {handoff_queue} (cooperative cutover)"
             )
             workflow.continue_as_new(
-                args=self._continuation_args(result.get("context")),
+                args=self._continuation_args(
+                    result.get("context"),
+                    start_phase="plan" if phase == "PLAN" else "execute_continued",
+                ),
                 task_queue=handoff_queue.strip(),
             )
             return result
@@ -5014,7 +5122,7 @@ class AgentWorkflow:
                 summary_result = {}
                 workflow.logger.error(f"completion_summary generation failed, completing without it: {summary_error}")
 
-            summary = summary_result.get("summary", "")
+            summary = strip_fast_mode_card_narration(summary_result.get("summary", ""))
             transcript = await self._completion_transcript(context)
             structured_response = self._coalesce_structured_response(transcript, structured_response)
             summary_is_invalid = is_ablated_completion_summary(summary)
@@ -5022,7 +5130,9 @@ class AgentWorkflow:
                 str(summary or "").strip()
             ) < 200
             if summary_is_invalid or needs_demo_detail:
-                recovered = card_summary_from_evidence(transcript, structured_response)
+                recovered = strip_fast_mode_card_narration(
+                    card_summary_from_evidence(transcript, structured_response)
+                )
                 if (
                     recovered
                     and not is_ablated_completion_summary(recovered)
@@ -5032,6 +5142,7 @@ class AgentWorkflow:
             # This is the final, general publication boundary.  Never persist
             # tool I/O or a cache sentinel as the Task Complete narration, even
             # when no suitable report exists in the transcript.
+            summary = strip_fast_mode_card_narration(summary)
             if is_ablated_completion_summary(summary):
                 summary = f"Completed: {self.goal}" if self.goal else "Completed."
             if (
@@ -5126,12 +5237,18 @@ class AgentWorkflow:
                 update_tree=False,
             )
 
-            # Mark finished (includes structured_response for persistence)
+            # Mark finished (includes structured_response for persistence).
+            # mark_finished only reads the first USER text as the goal
+            # (extract_goal_from_context). Forwarding the full conversation
+            # put a 638092-byte payload on the activity command (TMPRL1103
+            # warn 512KB) and left ed9a3b6e ACTIVE until the 900s smoke cap.
+            # message_count still records the real transcript length.
+            finished_steps = [{"role": "USER", "text": self.goal or "No goal specified"}]
             await workflow.execute_activity(
                 mark_finished,
                 args=[
                     self.agent_id,
-                    context,
+                    finished_steps,
                     self.token_count,
                     self.context_size,
                     len(context),

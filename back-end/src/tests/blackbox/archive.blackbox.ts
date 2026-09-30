@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { GOOGLE_OAUTH_SCOPES } from '../../domains/integrations/googleScopes';
 import {
   collectFixture,
   collectFixtureSnapshot,
@@ -504,7 +505,7 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
         email: 'sender@example.com',
         accessToken: 'gmail-access-token',
         refreshToken: 'gmail-refresh-token',
-        scopes: ['https://www.googleapis.com/auth/gmail.send'],
+        scopes: [...GOOGLE_OAUTH_SCOPES],
       },
     });
     global.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -546,7 +547,7 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
     assert(stored, 'expected readable encrypted Gmail provider archive artifact');
     const payload = JSON.parse(decryptAndValidateArtifact(stored).toString('utf8')) as {
       provider: string;
-      request: { body: { raw?: unknown } };
+      request: { method?: string; url?: string; body?: unknown };
       response: { id?: string; threadId?: string };
       status_code: number;
       success: boolean;
@@ -563,12 +564,17 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
     assert.strictEqual(payload.status_code, 200);
     assert.strictEqual(payload.response.id, 'gmail-message-1');
     assert.strictEqual(payload.response.threadId, 'gmail-thread-1');
-    assert.strictEqual(typeof payload.request.body.raw, 'string');
+    assert.strictEqual(payload.request.method, 'POST');
+    assert.strictEqual(
+      payload.request.url,
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send'
+    );
+    assert.strictEqual(payload.request.body, undefined);
     assert.strictEqual(payload.context.agent_id, seed.rootAgentId);
     assert.strictEqual(payload.context.user_id, seed.userId);
-    assert.strictEqual(payload.context.from_email, 'sender@example.com');
-    assert.strictEqual(payload.context.to, 'recipient@example.com');
-    assert.strictEqual(payload.context.subject, 'Archive boundary');
+    assert.strictEqual(payload.context.from_email, undefined);
+    assert.strictEqual(payload.context.to, undefined);
+    assert.strictEqual(payload.context.subject, undefined);
   } finally {
     global.fetch = originalFetch;
     await prisma.integration.deleteMany({ where: { userId: seed.userId, name: 'gmail' } });

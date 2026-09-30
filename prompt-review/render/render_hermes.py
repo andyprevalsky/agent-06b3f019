@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path("/Users/andyprevalsky/conductor/workspaces/navi-whisper-lux-v2/istanbul")
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 HERMES_ROOT = REPO_ROOT / "hermes-agent"
 OUTPUT_DIR = REPO_ROOT / "prompt-review" / "rendered" / "hermes-agent"
 
@@ -80,7 +80,6 @@ def main() -> None:
         clarify_tool,
         delegate_tool,
         file_tools,
-        send_message_tool,
         terminal_tool,
         web_tools,
     )
@@ -113,15 +112,46 @@ def main() -> None:
         ("hermes_web_search_tool", web_tools, "WEB_SEARCH_SCHEMA"),
         ("hermes_web_extract_tool", web_tools, "WEB_EXTRACT_SCHEMA"),
         ("hermes_terminal_tool", terminal_tool, "TERMINAL_SCHEMA"),
-        ("hermes_delegate_tool", delegate_tool, "DELEGATE_TASK_SCHEMA"),
         ("hermes_clarify_tool", clarify_tool, "CLARIFY_SCHEMA"),
-        ("hermes_send_message_tool", send_message_tool, "SEND_MESSAGE_SCHEMA"),
         ("hermes_search_files_tool", file_tools, "SEARCH_FILES_SCHEMA"),
     ]
     for stem, mod, attr in schema_specs:
         text = render_schema_dict(mod, attr)
         size = write_output(stem, text)
         results.append((stem, size))
+
+    # delegate_task: the static DELEGATE_TASK_SCHEMA has placeholder descriptions.
+    # Render the runtime schema the model actually sees (limits filled in).
+    runtime_delegate = {
+        **delegate_tool.DELEGATE_TASK_SCHEMA,
+        **delegate_tool._build_dynamic_schema_overrides(),
+    }
+    results.append(
+        (
+            "hermes_delegate_tool",
+            write_output(
+                "hermes_delegate_tool",
+                json.dumps(runtime_delegate, indent=2, ensure_ascii=False),
+            ),
+        )
+    )
+
+    # send_message is intentionally NOT registered as an agent-callable model
+    # tool anymore (cron/CLI/kanban/MCP only). Keep a golden marker so the
+    # catalog column does not silently fall back to stale source extraction.
+    send_note = (
+        "# hermes_send_message_tool\n"
+        "# REMOVED as an agent-callable tool schema.\n"
+        "# Upstream note (tools/send_message_tool.py): send_message is\n"
+        "# intentionally NOT registered as an agent-callable model tool\n"
+        "# (the agent must not fire cross-platform messages on its own);\n"
+        "# cron delivery, the `hermes send` CLI, the kanban notifier and\n"
+        "# the opt-in MCP server import the helpers.\n"
+        "# No SEND_MESSAGE_SCHEMA is exported.\n"
+    )
+    results.append(
+        ("hermes_send_message_tool", write_output("hermes_send_message_tool", send_note))
+    )
 
     child_prompt = delegate_tool._build_child_system_prompt(
         "{{TASK_DESCRIPTION}}",

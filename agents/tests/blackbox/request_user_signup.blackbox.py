@@ -138,7 +138,7 @@ async def test_execute_tool_completed_outcome():
         _signup_dismissed = False
         agent_id = "agent-1"
 
-    async def fake_wait_condition(pred):
+    async def fake_wait_condition(pred, timeout=None):
         return None  # already satisfied
 
     manager = RequestUserSignupManager()
@@ -170,7 +170,7 @@ async def test_execute_tool_dismissed_outcome():
         _signup_dismissed = True
         agent_id = "agent-1"
 
-    async def fake_wait_condition(pred):
+    async def fake_wait_condition(pred, timeout=None):
         return None
 
     manager = RequestUserSignupManager()
@@ -199,7 +199,7 @@ async def test_execute_tool_wait_condition_raises():
         _signup_dismissed = False
         agent_id = "agent-1"
 
-    async def fake_wait_condition(pred):
+    async def fake_wait_condition(pred, timeout=None):
         raise RuntimeError("workflow cancelled")
 
     manager = RequestUserSignupManager()
@@ -233,7 +233,7 @@ async def test_request_user_signup_entry_point():
         async def _handle_tool_event(self, event, tool_call_id, tool_name):
             events_sent.append(event)
 
-    async def fake_wait_condition(pred):
+    async def fake_wait_condition(pred, timeout=None):
         return None
 
     with patch("temporalio.workflow.wait_condition", fake_wait_condition):

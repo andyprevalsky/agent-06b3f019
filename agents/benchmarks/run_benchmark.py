@@ -131,7 +131,6 @@ from domains.set_plan.config import (
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
 )
 from helpers.completion_summary_contract import (
-    has_fast_mode_summary_marker,
     is_ablated_completion_summary,
 )
 from tests.e2e.test_helpers import (
@@ -1594,6 +1593,17 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
                 if error:
                     return error
             return None
+        # Merchant labels are free-form ("Rose Labs Test Payment (ngrok test
+        # checkout)" vs catalog "Rose Labs Test Payment"). Reuse the payment
+        # identity matcher so parenthetical environment suffixes do not fail a
+        # successful purchase lifecycle.
+        if path.endswith(".merchant"):
+            identity_error = _validate_payment_merchant_identity(
+                expected_value, actual_value, {}, None
+            )
+            if identity_error is None:
+                return None
+            return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
         if expected_value != actual_value:
             return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
         return None
@@ -9741,15 +9751,12 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
     tool_counts: dict[str, int] = {}
     error_tool_count = 0
     research_tool_count = 0
-    has_traj_end_marker = False
     blob_parts = [str(node.get("goal") or ""), str(node.get("title") or "")]
     for message in messages:
         if not isinstance(message, dict):
             continue
         text_value = _message_text_for_judge(message)
         blob_parts.append(text_value[:400])
-        if has_fast_mode_summary_marker(text_value):
-            has_traj_end_marker = True
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
         tool_name = str(metadata.get("toolName") or "")
         tool_status = str(metadata.get("toolStatus") or "").upper()
@@ -9783,7 +9790,8 @@ def _compact_tree_node_for_judge(agent_id: str, node: dict) -> dict:
         "research_tool_count": research_tool_count,
         "explore_spawn_count": explore_spawn_count,
         "has_real_transcript": has_real_work,
-        "has_traj_end_stub": has_traj_end_marker and not has_real_work,
+        "has_traj_end_stub": is_ablated_completion_summary((completion_card or {}).get("summary"))
+        and not has_real_work,
         "mentions_andy": mentions_andy,
         "mentions_aman": mentions_aman,
         "response_schema": node.get("response_schema") or node.get("output_schema"),

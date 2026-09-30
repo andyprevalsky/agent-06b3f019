@@ -1438,7 +1438,7 @@ async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config
     BrowserSession._navigate_and_wait = upstream_like_navigate
 
     # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
-    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    asyncio.wait_for = recording_wait_for
     try:
         await upstream_like_navigate(MagicMock())
         assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
@@ -1446,10 +1446,10 @@ async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config
             f"got {seen_timeouts}"
         )
     finally:
-        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        asyncio.wait_for = true_wait_for
 
     seen_timeouts.clear()
-    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    asyncio.wait_for = recording_wait_for
     try:
         assert patches.apply_browser_use_navigate_timeout_patch() is True
         await BrowserSession._navigate_and_wait(MagicMock())
@@ -1459,7 +1459,7 @@ async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config
             f"got {seen_timeouts}"
         )
     finally:
-        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        asyncio.wait_for = true_wait_for
         BrowserSession._navigate_and_wait = previous_navigate
         setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
 
@@ -5529,6 +5529,89 @@ def test_build_payment_card_resume_prompt_section_requires_all_refs():
     out = build_payment_card_resume_prompt_section({"card_number": "4111111111111111"})
 
     assert out == ""
+
+
+def test_finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows():
+    """REGRESSION (agent-payment-idempotent-abandonment): after mint, resume must not
+    leave request_payment_card stuck on awaiting_payment_card_approval — the model
+    waits for minutes and AgentCard closes the unused card before the second browser
+    can reuse the same last4.
+    """
+    import json
+
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        finalize_parked_payment_card_approval_history,
+        payment_card_ready_tool_result,
+    )
+
+    awaiting = {"success": True, "status": "awaiting_payment_card_approval"}
+    resume_state = {
+        "approval_type": "payment",
+        "payment_card_last4": "2274",
+        "action_history": [
+            {"step": 1, "action": "click", "result": {"success": True}},
+            {"step": 2, "action": "request_payment_card", "result": dict(awaiting)},
+        ],
+        "browser_turn_messages": [
+            {
+                "role": "assistant",
+                "content": "requesting card",
+                "tool_calls": [
+                    {
+                        "id": "tc1",
+                        "type": "function",
+                        "function": {"name": "request_payment_card", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "name": "request_payment_card",
+                "content": json.dumps(awaiting),
+            },
+        ],
+        "simulated_action_entries": [
+            {"step": 2, "action": "request_payment_card", "result": dict(awaiting)},
+        ],
+    }
+
+    finalize_parked_payment_card_approval_history(resume_state, last4="2274")
+    ready = payment_card_ready_tool_result("2274")
+
+    assert resume_state["action_history"][1]["result"] == ready
+    assert resume_state["simulated_action_entries"][0]["result"] == ready
+    tool_content = json.loads(resume_state["browser_turn_messages"][1]["content"])
+    assert tool_content == ready
+    assert "awaiting_payment_card_approval" not in json.dumps(resume_state)
+
+
+def test_finalize_parked_payment_card_approval_history_leaves_other_tools_alone():
+    import json
+
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        finalize_parked_payment_card_approval_history,
+    )
+
+    resume_state = {
+        "action_history": [
+            {"step": 1, "action": "wait", "result": {"success": True}},
+        ],
+        "browser_turn_messages": [
+            {
+                "role": "tool",
+                "name": "wait",
+                "content": json.dumps({"success": True, "message": "slept"}),
+            }
+        ],
+    }
+    finalize_parked_payment_card_approval_history(resume_state, last4="2274")
+    assert resume_state["action_history"][0]["result"] == {"success": True}
+    assert json.loads(resume_state["browser_turn_messages"][0]["content"]) == {
+        "success": True,
+        "message": "slept",
+    }
+
 
 def test_build_passwords_prompt_section_empty():
     from domains.spawn_browser_agent_v3.service_crypto import (
@@ -11563,6 +11646,88 @@ async def test_execute_action_wait_honors_schema_max_against_browser_use_cap():
     assert wait_event.event_timeout is not None
     assert wait_event.event_timeout > wait_event.max_seconds
 
+
+async def test_execute_action_wait_short_circuits_when_payment_card_refs_ready():
+    """REGRESSION (agent-payment-idempotent-abandonment): after mint, wait-for-approval
+    loops must not burn the live card window.
+    """
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    secret_refs = {
+        "card_number": "enc-n",
+        "card_name": "enc-name",
+        "card_expiry": "enc-exp",
+        "card_cvv": "enc-cvv",
+    }
+
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "wait",
+            "thinking": "Waiting for user payment card approval before filling fields",
+            "params": {"time_ms": 60_000},
+        },
+        secret_refs=secret_refs,
+    )
+
+    assert out["status"] == "payment_card_ready"
+    assert "already complete" in out["message"]
+    assert captured == []
+    ah.record_action.assert_awaited_once()
+
+
+async def test_execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready():
+    """OTP / widget settle waits must still dispatch WaitEvent after mint."""
+    from browser_use.browser.events import WaitEvent
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    captured: list[WaitEvent] = []
+
+    def _capture(event):
+        captured.append(event)
+        return _make_awaitable_event(None)
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus(dispatch_side_effect=_capture)
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    secret_refs = {
+        "card_number": "enc-n",
+        "card_name": "enc-name",
+        "card_expiry": "enc-exp",
+        "card_cvv": "enc-cvv",
+    }
+
+    out = await execute_action(
+        dom,
+        ah,
+        {
+            "action": "wait",
+            "thinking": "Waiting for the OTP input to appear after submitting payment",
+            "params": {"time_ms": 5_000},
+        },
+        secret_refs=secret_refs,
+    )
+
+    assert out == {"success": True, "message": ""}
+    assert len(captured) == 1
+    assert isinstance(captured[0], WaitEvent)
+    assert captured[0].seconds == 5.0
+
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -13530,11 +13695,104 @@ async def test_terminal_disconnect_stall_does_not_block_recording_cleanup():
     started = time_module.monotonic()
     with patch.object(handler, "BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS", 0.01):
         with pytest.raises(TimeoutError):
-            await handler.disconnect_browser_after_passkey_capture(dom_service, capture_usage)
+            await capture_usage()
+            try:
+                await handler._bounded_browser_terminal_io(dom_service.disconnect(), "cleanup CDP disconnect")
+            finally:
+                events.append("recording_cleanup_resumed")
 
     assert time_module.monotonic() - started < 0.5
-    assert events == ["credential_ref_saved", "disconnect_started"]
+    assert events == ["credential_ref_saved", "disconnect_started", "recording_cleanup_resumed"]
     dom_service.disconnect.assert_awaited_once()
+
+
+async def test_disconnect_browser_times_out_hung_cdp_and_still_returns():
+    """Payment/write-lock return must not hang forever on wedged CDP disconnect.
+
+    Also covers DomService.disconnect swallowing CancelledError then hanging in
+    session.stop() — wait_for would still block; the hard-deadline helper must not.
+    """
+    import asyncio
+
+    from domains.spawn_browser_agent_v3 import config as browser_config
+    from domains.spawn_browser_agent_v3.handler import disconnect_browser_after_passkey_capture
+
+    events = []
+
+    async def hung_capture():
+        events.append("capture_started")
+        await asyncio.sleep(3600)
+
+    async def hung_disconnect_swallows_cancel():
+        events.append("disconnect_started")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            events.append("disconnect_cancelled")
+            await asyncio.sleep(3600)
+            events.append("disconnect_post_cancel_hang")
+
+    dom_service = SimpleNamespace(disconnect=AsyncMock(side_effect=hung_disconnect_swallows_cancel))
+    original_timeout = browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS
+    browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = 0.05
+    try:
+        # Patch the imported constant used by the helper too.
+        import domains.spawn_browser_agent_v3.handler as handler_mod
+
+        original_handler_timeout = handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS
+        handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS = 0.05
+        try:
+            started = asyncio.get_event_loop().time()
+            await disconnect_browser_after_passkey_capture(dom_service, hung_capture)
+            elapsed = asyncio.get_event_loop().time() - started
+        finally:
+            handler_mod.BROWSER_DISCONNECT_TIMEOUT_SECONDS = original_handler_timeout
+    finally:
+        browser_config.BROWSER_DISCONNECT_TIMEOUT_SECONDS = original_timeout
+
+    assert "capture_started" in events and "disconnect_started" in events
+    assert "disconnect_post_cancel_hang" not in events
+    assert elapsed < 2.0
+    dom_service.disconnect.assert_awaited_once()
+
+
+async def test_bounded_browser_cleanup_retains_abandoned_tasks():
+    """Timed-out cleanup tasks stay referenced so late exceptions are retrieved."""
+    import asyncio
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _await_bounded_browser_cleanup,
+        _background_browser_cleanup_tasks,
+    )
+
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def abandonable():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            finished.set()
+            raise
+
+    before = set(_background_browser_cleanup_tasks)
+    await _await_bounded_browser_cleanup(
+        abandonable(),
+        timeout_s=0.05,
+        timeout_message="cleanup timed out",
+        failure_message="cleanup failed",
+    )
+    retained = _background_browser_cleanup_tasks - before
+    assert len(retained) == 1
+    task = next(iter(retained))
+    assert not task.done()
+    release.set()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    assert task not in _background_browser_cleanup_tasks
+
 
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
@@ -16307,8 +16565,8 @@ def test_url_looks_like_api_surface_guard():
 
     ctx = _ActionContext(
         user_id="user-1",
-        dom_service=None,  # type: ignore[arg-type]
-        action_history=None,  # type: ignore[arg-type]
+        dom_service=None,
+        action_history=None,
         session=None,
         action_name="goto",
         index=None,
@@ -19889,6 +20147,23 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
             "cdp_url": "wss://connect.steel.dev/session-1",
             "task_id": "task-1",
             "auth_realm": "dickblick.com",
+            # Parked awaiting rows must be rewritten to payment_card_ready on mint.
+            "action_history": [
+                {
+                    "step": 12,
+                    "action": "request_payment_card",
+                    "result": {"success": True, "status": "awaiting_payment_card_approval"},
+                }
+            ],
+            "browser_turn_messages": [
+                {
+                    "role": "tool",
+                    "name": "request_payment_card",
+                    "content": (
+                        '{"success":true,"status":"awaiting_payment_card_approval"}'
+                    ),
+                }
+            ],
         }
     )
     second = _FakeActivityHandle(
@@ -19999,6 +20274,15 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_cvv": "123",
     }
     assert resume_state["payment_card_last4"] == "4242"
+    # Parked awaiting rows must be finalized so the resumed browser model does not
+    # spin on wait-for-approval long enough for AgentCard to close the unused card.
+    history = resume_state.get("action_history") or []
+    payment_history = [e for e in history if e.get("action") == "request_payment_card"]
+    assert payment_history, "resume must carry the parked request_payment_card row"
+    assert payment_history[0].get("result", {}).get("status") == "payment_card_ready"
+    assert payment_history[0].get("result", {}).get("last4") == "4242"
+    assert "awaiting_payment_card_approval" not in str(resume_state.get("action_history"))
+    assert "awaiting_payment_card_approval" not in str(resume_state.get("browser_turn_messages"))
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
@@ -20278,6 +20562,30 @@ async def test_manager_payment_gate_subscription_checkout_failure_still_raises_g
     assert "mint_subscription_checkout_activity" in activity_calls
     cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
     assert cancelled.metadata["action_type"] == "purchase_cancelled"
+
+async def test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate():
+    from tools.base import MessageStatus
+
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "purchase_above_max_limit",
+                "error": "Purchase is above max limit of 63288",
+                "code": "purchase_above_max_limit",
+                "maxPurchaseCents": 63288,
+            }
+        ],
+    )
+    assert gate_keys == []
+    assert "mint_subscription_checkout_activity" not in activity_calls
+    errored = next(e for e in events if getattr(e, "title", "") == "Purchase above max limit")
+    assert errored.status == MessageStatus.ERROR
+    # task_complete so computeActiveBrowserPanels closes the live chip
+    assert errored.metadata["action_type"] == "task_complete"
+    assert errored.metadata["code"] == "purchase_above_max_limit"
+    assert errored.metadata["maxPurchaseCents"] == 63288
+    assert "above max limit of 63288" in errored.message
+    assert activity_calls.count("mint_purchase_card_activity") == 1
 
 async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
     events, _, gate_keys, _ = await _drive_payment_card_gate(
@@ -21298,6 +21606,14 @@ async def run_all_tests():
         "terminal_disconnect_stall_does_not_block_recording_cleanup",
         test_terminal_disconnect_stall_does_not_block_recording_cleanup,
     )
+    await r.record_async(
+        "disconnect_times_out_hung_cdp_and_still_returns",
+        test_disconnect_browser_times_out_hung_cdp_and_still_returns,
+    )
+    await r.record_async(
+        "bounded_browser_cleanup_retains_abandoned_tasks",
+        test_bounded_browser_cleanup_retains_abandoned_tasks,
+    )
     r.record(
         "passkey_usage_sampled_before_terminal_disconnects",
         test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect,
@@ -21592,6 +21908,14 @@ async def run_all_tests():
     r.record(
         "build_payment_card_resume_prompt_section_requires_all_refs",
         test_build_payment_card_resume_prompt_section_requires_all_refs,
+    )
+    r.record(
+        "finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows",
+        test_finalize_parked_payment_card_approval_history_rewrites_awaiting_tool_rows,
+    )
+    r.record(
+        "finalize_parked_payment_card_approval_history_leaves_other_tools_alone",
+        test_finalize_parked_payment_card_approval_history_leaves_other_tools_alone,
     )
     r.record("build_passwords_prompt_section_empty", test_build_passwords_prompt_section_empty)
     r.record("build_passwords_prompt_section_unique", test_build_passwords_prompt_section_unique_usernames)
@@ -22271,6 +22595,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_wait_honors_schema_max_against_browser_use_cap",
         test_execute_action_wait_honors_schema_max_against_browser_use_cap,
+    )
+    await r.record_async(
+        "execute_action_wait_short_circuits_when_payment_card_refs_ready",
+        test_execute_action_wait_short_circuits_when_payment_card_refs_ready,
+    )
+    await r.record_async(
+        "execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready",
+        test_execute_action_wait_honors_ordinary_waits_when_payment_card_refs_ready,
     )
     await r.record_async(
         "execute_action_dropdown_options_with_el",
@@ -23176,6 +23508,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_abandoned_payment_resume_terminal",
         test_manager_abandoned_payment_resumes_close_exact_browser_task,
+    )
+    await r.record_async(
+        "manager_payment_gate_above_max_limit_errors_without_subscribe_gate",
+        test_manager_payment_gate_above_max_limit_errors_without_subscribe_gate,
     )
     await r.record_async(
         "manager_payment_gate_kyc_rejected",

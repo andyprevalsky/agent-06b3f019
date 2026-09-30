@@ -105,6 +105,12 @@ review blocker. Actual-SQL astral Unicode and cancellation cases now supplement
 the legacy-value tests. Final reverse-import lint and typecheck passed. Cloud
 source synchronization and the fresh ten-slice fleet outcome remain pending.
 
+The main integration structural gate requires the canonical transaction wrapper.
+The staging read uses `runTransactionWithRetry` with one attempt and the same
+15-second maxWait/timeout, preserving the cancellation fence and prohibiting
+replay of partially executed CDP mutations. The unchanged memory and functional
+blackboxes are rerun on this integrated source.
+
 ## Human feedback
 
 The user required completing the infrastructure repair and ten consecutive

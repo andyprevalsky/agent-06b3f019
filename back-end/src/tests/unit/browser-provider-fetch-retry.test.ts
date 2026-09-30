@@ -17,6 +17,18 @@ async function run(): Promise<void> {
     isTransientKernelConnectionError(new Error('rotate-proxy 400: invalid request')),
     false
   );
+  assert.equal(
+    isTransientKernelConnectionError(
+      new Error(
+        '/rotate-proxy 500: Timed out fetching a new connection from the connection pool (Current connection pool timeout: 30, connection limit: 4)'
+      )
+    ),
+    true
+  );
+  assert.equal(
+    isTransientKernelConnectionError(new Error('/rotate-proxy 500: {"error":"P2024"}')),
+    true
+  );
 
   const originalFetch = globalThis.fetch;
   let retryCalls = 0;

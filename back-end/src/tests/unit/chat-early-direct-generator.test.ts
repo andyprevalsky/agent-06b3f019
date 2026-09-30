@@ -5,6 +5,7 @@ import {
   createEarlyDirectGeneratorCoordinator,
   createTransactionalStreamGate,
   runAfterStreamCommit,
+  deadlineRouterFallback,
   shouldStartEarlyDirectGenerator,
 } from '../../providers/chat/earlyDirectGenerator';
 import { createGeneratorAttentionLifecycle } from '../../providers/chat/generatorAttentionStream';
@@ -95,6 +96,47 @@ function testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity(): void {
     shouldStartEarlyDirectGenerator([{ role: 'ASSISTANT', text: 'No user turn yet.' }]),
     false
   );
+
+  const execute = deadlineRouterFallback(autonomousAgent, autonomousAgent[0].text);
+  assert.deepStrictEqual(execute, {
+    action: 'start_superintelligence',
+    reasoning: 'Route selected before the provider stream finished.',
+    goal: autonomousAgent[0].text,
+    mode: 'execute',
+  });
+  const plan = deadlineRouterFallback(
+    [{ role: 'USER', text: 'Start an autonomous agent in plan mode to compare three providers.' }],
+    'compare three providers'
+  );
+  assert.equal(plan?.action, 'start_superintelligence');
+  assert.equal(plan && plan.action === 'start_superintelligence' ? plan.mode : undefined, 'plan');
+  assert.equal(
+    deadlineRouterFallback(webSearch, 'unused'),
+    null,
+    'search deadline must not invent a query'
+  );
+  assert.equal(deadlineRouterFallback(direct, 'unused'), null);
+  assert.equal(
+    deadlineRouterFallback([{ role: 'USER', text: "What's the weather today?" }], 'unused'),
+    null,
+    'today/weather must not invent a Temporal workflow'
+  );
+  assert.equal(
+    deadlineRouterFallback(
+      [{ role: 'USER', text: 'Research the latest latency numbers' }],
+      'unused'
+    ),
+    null,
+    'research/latest must not invent a Temporal workflow'
+  );
+  assert.equal(
+    deadlineRouterFallback(
+      [{ role: 'USER', text: 'agent mode: inspect the files' }],
+      'inspect the files'
+    )?.action,
+    'start_superintelligence',
+    'explicit agent mode still escalates after a deadline miss'
+  );
 }
 
 async function testMismatchAbortsAndDiscardsWithoutSideEffects(): Promise<void> {
@@ -165,6 +207,21 @@ async function testEarlyFailureOnlyPropagatesForCommittedDirect(): Promise<void>
     (error: unknown) => error === committedFailure
   );
   assert.strictEqual(leakedFrames, 0, 'failed speculative frames must be discarded');
+
+  const { ChatLlmTransientMissError } = await import('../../providers/chat/chatStructuredRetry');
+  const transient = new ChatLlmTransientMissError('empty', 'Generator LLM returned no content');
+  const recoverable = createEarlyDirectGeneratorCoordinator({
+    start: async () => {
+      throw transient;
+    },
+  });
+  recoverable.start();
+  await flushMicrotasks();
+  assert.strictEqual(
+    await recoverable.commitDirectAnswer(),
+    null,
+    'speculative structured-output miss must fall through to the canonical generator'
+  );
 }
 
 async function testDiscardDoesNotWaitForNonCooperativeProvider(): Promise<void> {

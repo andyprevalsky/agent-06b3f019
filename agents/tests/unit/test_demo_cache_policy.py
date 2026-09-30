@@ -100,6 +100,13 @@ def test_is_demo_cache_task_covers_fleet_and_mass_agent():
     assert is_oai_demo_mass_agent_task(fleet) is False
     assert is_demo_cache_task(mass) is True
     assert is_oai_demo_mass_agent_task(mass) is True
+    leftover = SimpleNamespace(
+        goal="Produce fresh tool-grounded evidence for Andy Prevalsky's brand task.",
+        fast_cache_goal="",
+        root_goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+    )
+    assert is_demo_cache_task(leftover) is True
+    assert is_oai_demo_mass_agent_task(leftover) is True
     assert is_demo_cache_task(live) is False
 
 
@@ -124,3 +131,8 @@ def test_is_demo_cache_task_reads_restored_fast_cache_goal():
         restore_idx,
     )
     assert recompute_idx > restore_idx
+    resolve_idx = workflow_src.index("unpack_fast_cache_goal_resolution(")
+    guard_block = workflow_src[workflow_src.rfind("if (", 0, resolve_idx) : resolve_idx]
+    assert "self.parent_workflow_id" in guard_block, (
+        "leftover children must resolve root_goal even when Fast Mode is off"
+    )

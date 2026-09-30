@@ -1,10 +1,11 @@
 import type { PrivacySection } from './types';
+import { GOOGLE_ACCESS_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 export const PRIVACY_TITLE = 'Privacy Policy';
 export const PRIVACY_DESCRIPTION =
   'Rose Labs Privacy Policy — how we collect, use, share, and retain your data.';
 
-export const PRIVACY_LAST_UPDATED = 'May 12, 2026';
+export const PRIVACY_LAST_UPDATED = 'September 30, 2026';
 
 export const PRIVACY_CONTACT_EMAIL = 'security@roselabs.ai';
 
@@ -23,7 +24,7 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
         text: 'Account information: phone number (used for sign-in via SMS one-time-passcode), and any profile information you choose to provide (name, email, address, time zone).',
       },
       {
-        text: "Conversation data: the messages you send to the agent, the agent's responses, attached files or images, and any actions the agent takes on your behalf. This data is stored in our database under your account and is used to provide the service, maintain context across sessions, and improve the product.",
+        text: "Conversation data: the messages you send to the agent, the agent's responses, attached files or images, and any actions the agent takes on your behalf. This data is stored in our database under your account and is used to provide the service, maintain context across sessions, and improve the product. Google user data is used only as described in the Google User Data section.",
       },
       {
         text: 'Connected-integration data: when you connect a third-party service to Rose Labs (for example, Plaid for bank and financial-account data, Google for Gmail, browser sessions for site automation), we receive and store the data those services return — for Plaid: account balances, transactions, identity, income, investments, liabilities, and bank statements as authorized by you; for Gmail: messages and metadata you authorize us to read; for browser sessions: the cookies, local storage, and credentials you upload to enable the agent to act on your behalf.',
@@ -85,6 +86,18 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
     ],
   },
   {
+    title: 'Google User Data',
+    paragraphs: [
+      GOOGLE_ACCESS_DESCRIPTION,
+      'How we use it. Google user data is used only to provide or improve the user-facing features you use in Rose, such as answering questions about your email, calendar, and files, drafting and sending messages you approve, scheduling events, and editing documents you ask about. To do this, the relevant content may be sent to our AI model providers (listed in Section 4) to process your request. OpenAI may retain content sent through its standard API for up to 30 days for abuse monitoring. We do not use Google user data to train generalized AI models.',
+      "What we don't do. We do not sell Google user data. We do not use it for advertising, retargeting, or interest-based ads. We do not transfer it to data brokers or information resellers. We do not use it to determine creditworthiness or for lending. We do not use Google user data to develop, improve, or train generalized AI or machine-learning models.",
+      'Human access. Rose Labs personnel do not read your Google user data unless you give us explicit permission for specific messages (for example, for a support request), it is necessary for security purposes such as investigating abuse, it is required to comply with applicable law, or the data has been aggregated and anonymized for internal operations.',
+      'Storage and security. Google OAuth tokens are encrypted at the application layer before storage. Content retrieved to answer a request is stored with your conversation history under your account and protected by the controls in the Security section.',
+      'Retention and deletion. You can disconnect Google at any time in Rose or at https://myaccount.google.com/permissions. When you disconnect in Rose, we remove the stored credential, request revocation of its OAuth token, and delete cached Google user data from active systems within 7 days. If you revoke access through Google, Rose detects it when it next tries to use the token. Account deletion removes all Google user data within 30 days, and encrypted backups roll off within 90 days.',
+      "Limited Use. Rose Labs' use and transfer to any other app of information received from Google APIs will adhere to the Google API Services User Data Policy, including the Limited Use requirements.",
+    ],
+  },
+  {
     number: 4,
     title: 'Third-Party Processors',
     bullets: [
@@ -98,7 +111,7 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
         text: 'Financial data: Plaid (financial account aggregation).',
       },
       {
-        text: 'LLM and AI processing: Anthropic, OpenAI, Google (Gemini), Perplexity, and OpenRouter (which routes to additional sub-providers including xAI, Moonshot, and Z.ai). Each provider operates under its published no-training-on-API-traffic policy.',
+        text: 'LLM and AI processing: Anthropic, OpenAI, Google (Gemini), Perplexity, and OpenRouter (which routes to additional sub-providers including xAI, Moonshot, and Z.ai).',
       },
       {
         text: 'Search and enrichment: Exa.',
@@ -155,7 +168,7 @@ export const PRIVACY_SECTIONS: readonly PrivacySection[] = [
         text: 'All data at rest is encrypted using AES-256 by our managed infrastructure providers.',
       },
       {
-        text: 'Sensitive credentials that grant ongoing access to consumer financial data (Plaid access tokens, Claude Code OAuth credentials, uploaded browser-password credentials) are additionally encrypted at the application layer prior to storage.',
+        text: 'Sensitive credentials that grant ongoing access to consumer financial data (Plaid access tokens, Google OAuth tokens, Claude Code OAuth credentials, uploaded browser-password credentials) are additionally encrypted at the application layer prior to storage.',
       },
       {
         text: 'Application-layer access to your data is enforced by row-level security: each user can only read and write their own data.',

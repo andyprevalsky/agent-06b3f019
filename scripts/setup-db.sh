@@ -163,6 +163,10 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     use_system_postgres
     start_system_postgres
 elif ! create_docker_postgres; then
+    if [ "$(uname -s)" != Linux ]; then
+        echo "❌ Owned Docker Postgres is unavailable; refusing automatic shared-system-Postgres setup on this platform." >&2
+        exit 1
+    fi
     # Cloud VMs often have a Docker daemon that cannot overlay-mount images.
     # Fall back to the same system Postgres path run.sh already uses.
     echo "⚠️  Docker Postgres unavailable — falling back to system Postgres (set ROSE_USE_SYSTEM_PG=true to skip Docker)."

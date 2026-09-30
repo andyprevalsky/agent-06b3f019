@@ -25,6 +25,15 @@ import {
   classifyEmailAuthFailure,
   type EmailCredentialState,
 } from '../../services/integrations/emailCredentialHealth';
+import { GOOGLE_OAUTH_SCOPES, missingGoogleScopes } from '../../domains/integrations/googleScopes';
+import { generateKeyPairSync } from 'crypto';
+import {
+  encryptGoogleToken,
+  readGoogleToken,
+  isGoogleTokenEncrypted,
+} from '../../providers/googleCredentials';
+import { revokeGoogleGrant } from '../../providers/googleRevoke';
+import { redactGmailArchive } from '../../providers/traceArchiveGmailRedaction';
 
 type TestFn = () => void | Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -62,6 +71,94 @@ const INVALID_CLIENT_400 =
   '{"error": "invalid_client", "error_description": "The OAuth client was not found."}';
 const UNAUTHORIZED_CLIENT_400 =
   '{"error": "unauthorized_client", "error_description": "Unauthorized"}';
+
+test('Google requests the approved scope set only', () => {
+  assert(
+    JSON.stringify(GOOGLE_OAUTH_SCOPES) ===
+      JSON.stringify([
+        'openid',
+        'https://www.googleapis.com/auth/userinfo.email',
+        'https://www.googleapis.com/auth/gmail.modify',
+        'https://www.googleapis.com/auth/calendar.events',
+        'https://www.googleapis.com/auth/drive',
+      ]),
+    'OAuth scope list drifted from the production verification set'
+  );
+});
+
+test('old Gmail grants require reconnect', () => {
+  const missing = missingGoogleScopes([
+    'openid',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send',
+  ]);
+  assert(missing.includes('https://www.googleapis.com/auth/gmail.modify'), 'modify is required');
+  assert(missing.includes('https://www.googleapis.com/auth/drive'), 'Drive is required');
+});
+
+test('Google tokens use authenticated application encryption', () => {
+  const previousKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = Buffer.from(
+    privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  ).toString('base64');
+  try {
+    const stored = encryptGoogleToken('test-access-token');
+    assert(isGoogleTokenEncrypted(stored), 'new tokens must carry the envelope marker');
+    assert(!stored.includes('test-access-token'), 'stored token must not contain plaintext');
+    assert(readGoogleToken(stored) === 'test-access-token', 'token must round-trip');
+    assert(encryptGoogleToken(stored) === stored, 'writes must not double encrypt');
+    assert(
+      readGoogleToken('legacy-token') === 'legacy-token',
+      'legacy rows remain readable for migration'
+    );
+  } finally {
+    if (previousKey === undefined) delete process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+    else process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = previousKey;
+  }
+});
+
+test('disconnect revokes the decrypted refresh grant before local deletion', async () => {
+  const previousKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = Buffer.from(
+    privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  ).toString('base64');
+  try {
+    let revokedToken: string | null = null;
+    const fakeFetch = (async (_url: string, init?: RequestInit) => {
+      revokedToken = new URLSearchParams(init?.body as string).get('token');
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    await revokeGoogleGrant(
+      encryptGoogleToken('refresh-test'),
+      encryptGoogleToken('access-test'),
+      fakeFetch
+    );
+    assert(revokedToken === 'refresh-test', 'the refresh grant must be revoked');
+  } finally {
+    if (previousKey === undefined) delete process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+    else process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = previousKey;
+  }
+});
+
+test('Gmail provider traces omit bodies and recipient details', () => {
+  const trace = redactGmailArchive({
+    request: {
+      method: 'POST',
+      url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      body: { raw: 'secret-email-body' },
+    },
+    context: { user_id: 'user-1', to: 'private@example.com', subject: 'private subject' },
+    status_code: 200,
+  });
+  const serialized = JSON.stringify(trace);
+  assert(!serialized.includes('secret-email-body'), 'the message body must be removed');
+  assert(!serialized.includes('private@example.com'), 'recipient must be removed');
+  assert(!serialized.includes('private subject'), 'subject must be removed');
+  assert(serialized.includes('200'), 'API status remains available for debugging');
+});
 
 // --- terminal: only re-consent can fix these --------------------------------
 

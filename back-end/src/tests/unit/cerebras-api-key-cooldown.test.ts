@@ -50,7 +50,9 @@ async function main(): Promise<void> {
     );
     await assert.rejects(getCerebrasApiKeyCooldown('actual-secret-value', model));
     await assert.rejects(getCerebrasApiKeyCooldown(credentialId, '../invalid-model'));
-    console.log('PASS Cerebras shared cooldown: concurrent maximum, expiry scope and validation');
+    process.stdout.write(
+      'PASS Cerebras shared cooldown: concurrent maximum, expiry scope and validation\n'
+    );
   } finally {
     await prisma.integration.deleteMany({ where: identity });
     await prisma.$disconnect();
@@ -58,6 +60,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error);
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exitCode = 1;
 });

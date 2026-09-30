@@ -957,6 +957,9 @@ async function testBoundary_adminPhoneNeverHitsTwilio() {
     `Expected 0 Twilio calls for admin wrong-OTP, got ${wrongTwilio.length}`
   );
 
+  // A fresh local test database may not have this phone yet. Seed the
+  // Supabase user creation response so this boundary test is self-contained.
+  await seedSupabaseAdminCreate(TEST_PHONE);
   const okToken = captureToken('admin-phone-no-twilio-ok');
   const okRes = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',

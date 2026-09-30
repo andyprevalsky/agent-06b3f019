@@ -68,8 +68,18 @@ function testBenchmarkProxyReuseRequiresSameLocationAndTier(): void {
   );
   assert.strictEqual(
     reusableKernelProxyId(candidate, [
-      { id: 'different-name', name: 'another-proxy', type: 'residential', config: candidate.config },
-      { id: 'extra-setting', name: candidate.name, type: 'residential', config: { ...candidate.config, zip: '94301' } },
+      {
+        id: 'different-name',
+        name: 'another-proxy',
+        type: 'residential',
+        config: candidate.config,
+      },
+      {
+        id: 'extra-setting',
+        name: candidate.name,
+        type: 'residential',
+        config: { ...candidate.config, zip: '94301' },
+      },
     ]),
     null
   );

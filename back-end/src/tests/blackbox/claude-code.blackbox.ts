@@ -62,7 +62,10 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
-import { syncAndyClaudeTokensFromProd } from '../../../scripts/sync-andy-claude-tokens-from-prod';
+import {
+  isEligibleAndyClaudeSmokeCredential,
+  syncAndyClaudeTokensFromProd,
+} from '../../../scripts/sync-andy-claude-tokens-from-prod';
 import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
@@ -398,9 +401,16 @@ async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
 
 async function syncAndyProdClaudeTokensForSmoke(reason: string): Promise<void> {
   console.log(`    [info] ${reason} — syncing Andy (+19729777432) claude_code keys from prod…`);
-  await syncAndyClaudeTokensFromProd({
-    localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
-  });
+  try {
+    await syncAndyClaudeTokensFromProd({
+      localDatabaseUrl: process.env.BLACKBOX_TEST_DATABASE_URL ?? process.env.DATABASE_URL,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.log(
+      `    [warn] Andy prod Claude sync failed (${detail}); trying remaining credential paths`
+    );
+  }
 }
 
 /**
@@ -619,6 +629,54 @@ function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
   assert(
     !detail.includes('is not set'),
     `cooldown throw must not claim the key is unset, got: ${detail}`
+  );
+}
+
+function smokeCredential(overrides: {
+  isActive?: boolean;
+  status?: string;
+  failureReason?: string | null;
+  config?: unknown;
+}) {
+  return {
+    isActive: overrides.isActive ?? true,
+    status: overrides.status ?? 'CONNECTED',
+    failureReason: overrides.failureReason ?? null,
+    config: overrides.config ?? { encryptedCredentials: 'envelope' },
+  };
+}
+
+function testEligibleAndyClaudeSmokeCredential_keepsConnectedAndRefreshableExpired() {
+  assert(
+    isEligibleAndyClaudeSmokeCredential(smokeCredential({})),
+    'CONNECTED + encrypted envelope must stay eligible'
+  );
+  assert(
+    isEligibleAndyClaudeSmokeCredential(
+      smokeCredential({
+        isActive: false,
+        status: 'EXPIRED',
+        failureReason: 'auth_error',
+      })
+    ),
+    'EXPIRED auth_error envelope must stay eligible so Claude Code can refresh'
+  );
+}
+
+function testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked() {
+  assert(
+    !isEligibleAndyClaudeSmokeCredential(smokeCredential({ config: {} })),
+    'CONNECTED without encrypted credentials must be ineligible'
+  );
+  assert(
+    !isEligibleAndyClaudeSmokeCredential(
+      smokeCredential({
+        isActive: false,
+        status: 'EXPIRED',
+        failureReason: 'revoked',
+      })
+    ),
+    'EXPIRED without auth_error must not be seeded into the local pool'
   );
 }
 
@@ -1589,6 +1647,14 @@ async function runAll() {
     {
       name: 'authEnvs -- throws when no creds + no key',
       fn: async () => testResolveAuthEnvs_noCredsNoKeyThrows(),
+    },
+    {
+      name: 'andy smoke sync -- keeps CONNECTED and refreshable EXPIRED envelopes',
+      fn: async () => testEligibleAndyClaudeSmokeCredential_keepsConnectedAndRefreshableExpired(),
+    },
+    {
+      name: 'andy smoke sync -- rejects empty or revoked envelopes',
+      fn: async () => testEligibleAndyClaudeSmokeCredential_rejectsEmptyOrRevoked(),
     },
     {
       name: 'sandbox retry -- transient transport errors retry, rejections do not',

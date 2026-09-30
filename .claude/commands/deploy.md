@@ -1121,11 +1121,18 @@ With the full stack from Step 5 still running (backend, worker, **and frontend o
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-SEMANTIC_WORKERS=4 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+# UI specs: four workers. Exclude the latency ratchet so Chromium renderer
+# contention cannot become part of the product latency measurement (same split
+# as chat-lifecycle-ratchet.yml).
+SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 \
+  BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
+# Latency ratchet: one worker, sequential samples across every chat path.
+SEMANTIC_WORKERS=1 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+  bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 ```
 
-The runner generates one authenticated session and shares it across all four Playwright workers. Every semantic spec runs. Inside the lifecycle spec, the `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` paths run concurrently; each path takes five independent samples and every sample must complete the full browser lifecycle in under five seconds.
+The runner generates one authenticated session per Playwright invocation. UI specs run on four workers with the latency ratchet excluded (`SEMANTIC_GREP_INVERT`). The latency ratchet then runs alone on one worker so renderer contention cannot become part of the product latency measurement — the same split as `chat-lifecycle-ratchet.yml`. Inside the lifecycle spec, `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` each take five independent samples; every sample must complete the full browser lifecycle in under five seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 

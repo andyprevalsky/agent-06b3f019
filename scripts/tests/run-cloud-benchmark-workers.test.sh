@@ -51,4 +51,26 @@ fi
     exit 1
 }
 
+# Isolated --benchmark stacks share system Postgres with the Step 5 stack.
+# A 50-conn Prisma pool is exactly the mass-agent for_each fan-out, so
+# concurrent post_agent_message interactive txs P2028 ("Unable to start a
+# transaction") and the tree stalls. Benchmark default must sit above 50
+# children + parent + overlapping status/tool-usage txs. Non-benchmark
+# (Step 5) keeps the smaller default so two stacks stay under max_connections.
+python3 - <<'PY' "$RUN_SH"
+import pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+if "LOCAL_DB_CONNECTION_LIMIT" not in text:
+    sys.exit("FAIL: run.sh must name LOCAL_DB_CONNECTION_LIMIT so bench/dev pools cannot silently drift")
+if 'export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"' not in text:
+    sys.exit("FAIL: --benchmark default LOCAL_DB_CONNECTION_LIMIT must be 80 (above 50-child mass-agent fan-out)")
+if 'export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"' not in text:
+    sys.exit("FAIL: non-benchmark LOCAL_DB_CONNECTION_LIMIT default must stay 50")
+if "if $BENCHMARK_MODE; then" not in text.split('LOCAL_DB_CONNECTION_LIMIT:-80')[0][-200:]:
+    sys.exit("FAIL: 80-conn default must be under BENCHMARK_MODE")
+if 'connection_limit=${LOCAL_DB_CONNECTION_LIMIT}' not in text:
+    sys.exit("FAIL: DATABASE_URL must use LOCAL_DB_CONNECTION_LIMIT")
+print("structural pool: OK")
+PY
+
 echo "run-cloud-benchmark-workers: OK"

@@ -61,7 +61,7 @@ EVENTS="$EVENTS"
 stamp() { printf '%s %s %s\n' "\$(date +%s%N)" "\${SETUP_DB_TEST_TAG:-?}" "\$1" >> "\$EVENTS"; }
 case "\$1" in
   ps)   exit 0 ;;                       # daemon reachable; no container listed
-  run)  stamp CREATE_CONTAINER; exit 0 ;;
+  run)  stamp CREATE_CONTAINER; [ "\${SETUP_DB_TEST_DOCKER_FAIL:-0}" != 1 ] ;;
   start|rm) exit 0 ;;
   port) exit 1 ;;
   exec)
@@ -117,6 +117,43 @@ mkdir -p "$TMP/fake-repo/back-end/prisma"
 touch "$TMP/fake-repo/back-end/prisma/schema.prisma"
 chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.sh" \
   "$TMP/fake-repo/scripts/benchmark-seed-cache"
+
+# A failed Mac container must never redirect a destructive setup to shared PG.
+cat > "$TMP/bin/uname" <<'STUB'
+#!/usr/bin/env bash
+echo Darwin
+STUB
+cat > "$TMP/bin/pg_isready" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+cat > "$TMP/bin/psql" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+cat > "$TMP/bin/createdb" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' SYSTEM_PG_TOUCHED >> "$EVENTS"
+exit 0
+STUB
+chmod +x "$TMP/bin/uname" "$TMP/bin/pg_isready" "$TMP/bin/psql" "$TMP/bin/createdb"
+set +e
+(
+  cd "$TMP/fake-repo"
+  PATH="$TMP/bin:$PATH" SETUP_DB_TEST_DOCKER_FAIL=1 \
+    CONDUCTOR_PORT=59000 CONDUCTOR_WORKSPACE_NAME=fake-repo \
+    CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" ROSE_USE_SYSTEM_PG=false \
+    ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    bash scripts/setup-db.sh > "$TMP/mac-fallback.out" 2>&1
+)
+mac_fallback_rc=$?
+set -e
+[ "$mac_fallback_rc" -ne 0 ] || fail "failed Mac Docker setup unexpectedly succeeded through shared Postgres"
+! grep -q SYSTEM_PG_TOUCHED "$EVENTS" || fail "failed Mac Docker setup touched shared Postgres"
+! grep -q 'PUSH\|SEED_START' "$EVENTS" || fail "failed Mac Docker setup reached destructive schema/seed work"
+rm "$TMP/bin/uname" "$TMP/bin/pg_isready" "$TMP/bin/psql" "$TMP/bin/createdb"
+: > "$EVENTS"
 
 run_setup_db() { # run_setup_db <tag> <workspace-name>
   local tag="$1" ws="$2"

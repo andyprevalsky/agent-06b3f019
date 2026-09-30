@@ -38,10 +38,18 @@ from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
     transform_schema_for_remote_session,
 )
+from helpers.generation_handoff import (
+    DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    GenerationHandoffRequested,
+)
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
+from helpers.wait_condition_or_handoff import (
+    sleep_or_generation_handoff,
+    wait_condition_or_generation_handoff,
+)
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
@@ -74,6 +82,7 @@ from .challenge_recovery import (
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
+    BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -149,10 +158,6 @@ from .service import (
     safe_time,
     select_auth_assistance_current_url,
 )
-from .verifier_reject_circuit import (
-    next_identical_reject_streak,
-    should_soft_accept_identical_verifier_reject,
-)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
@@ -174,12 +179,17 @@ from .service_crypto import (
     decrypt_payment_info,
     extract_rate_limited_until,
     fetch_recent_otps,
+    finalize_parked_payment_card_approval_history,
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
+from .verifier_reject_circuit import (
+    next_identical_reject_streak,
+    should_soft_accept_identical_verifier_reject,
+)
 from .visible_result_completion import (
     forced_visible_result_completion_action,
     should_force_visible_result_completion,
@@ -341,6 +351,7 @@ async def record_used_passkey_credentials(
 
 
 BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS = 10.0
+_EXPIRED_OPTIONAL_CDP_TASK_NAME = "browser-terminal-io:optional-cdp-cleanup"
 
 
 async def _bounded_browser_terminal_io(operation: Any, step: str) -> Any:
@@ -365,19 +376,70 @@ async def _bounded_browser_terminal_io(operation: Any, step: str) -> Any:
         raise
 
 
+async def _await_bounded_browser_cleanup(
+    coro: Any,
+    *,
+    timeout_s: float,
+    timeout_message: str,
+    failure_message: str,
+) -> None:
+    """Run cleanup under a hard deadline that does not await cancellation.
+
+    ``asyncio.wait_for`` cancels the inner awaitable and then waits for that
+    cancellation to finish. ``DomService.disconnect`` catches CancelledError while
+    draining the captcha indicator task, then continues into ``session.stop()`` —
+    so a wedged CDP stop would still block past the deadline. Own the task and
+    stop awaiting it when the deadline expires. Retain it for eventual result
+    retrieval; the worker's bounded terminal-I/O shutdown owns its final drain.
+    """
+    task = asyncio.create_task(coro, name=_EXPIRED_OPTIONAL_CDP_TASK_NAME)
+    done, _pending = await asyncio.wait({task}, timeout=timeout_s)
+    if task in done:
+        exc = None if task.cancelled() else task.exception()
+        if exc is not None:
+            logger.warning(failure_message, error=extract_error_message(exc))
+        return
+    task.cancel()
+    # Keep a strong reference + retrieve the eventual result so a late
+    # non-CancelledError from session.stop() is not logged as "Task exception
+    # was never retrieved" after we abandon the deadline.
+    _background_browser_cleanup_tasks.add(task)
+
+    def _discard(done_task: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done_task)
+        with contextlib.suppress(BaseException):
+            done_task.result()
+
+    task.add_done_callback(_discard)
+    logger.warning(timeout_message, timeout_s=timeout_s)
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
 ) -> None:
-    """Capture credential evidence, then bound terminal CDP disconnect.
+    """Capture credential evidence before a terminal browser disconnect.
 
-    A stalled CDP disconnect must not hold the activity ahead of its finally
-    block, where the browser replay is stopped and attached to durable evidence.
+    Both the passkey readback and BrowserSession.stop() talk to CDP. When the
+    remote session is already gone (or CDP is wedged), either await can hang
+    indefinitely — which strands payment/write-lock returns before the workflow
+    can create the attention request (local repro: agent-payment-idempotent-
+    abandonment hung for 7+ minutes after write_lock_notification dump with
+    only BROWSER_CURSOR broadcasts, never reaching "Creating approval request").
+    Bound both steps so approval/handoff paths always resume.
     """
-    try:
-        await _bounded_browser_terminal_io(capture_passkey_usage(), "passkey capture")
-    finally:
-        await _bounded_browser_terminal_io(dom_service.disconnect(), "CDP disconnect")
+    await _await_bounded_browser_cleanup(
+        capture_passkey_usage(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Passkey usage capture timed out before disconnect",
+        failure_message="Passkey usage capture failed before disconnect",
+    )
+    await _await_bounded_browser_cleanup(
+        dom_service.disconnect(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser disconnect timed out; continuing terminal return",
+        failure_message="Browser disconnect failed; continuing terminal return",
+    )
 
 
 def _patch_cdp_use_websocket_proxy_default() -> None:
@@ -2067,7 +2129,7 @@ async def _call_browser_use_with_rotation(
     claude_auth = (
         ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=token_state.source or "user",
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,  # activity drives rotation; client does one attempt
@@ -2078,7 +2140,7 @@ async def _call_browser_use_with_rotation(
     gpt_auth = (
         GptAuthContext(
             token=gpt_token or "",
-            source=gpt_token_source or "user",  # type: ignore[arg-type]
+            source=gpt_token_source or "user",
             user_id=user_id,
             account_id=gpt_account_id,
             pool_token_id=gpt_token_pool_id,
@@ -2147,7 +2209,7 @@ async def _call_browser_use_with_rotation(
         browser_activity_checkpoint(f"Step {iteration} - retrying Rose API (rotation {rotations})")
         rotated_auth = ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=token_state.source or "user",
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
@@ -4128,7 +4190,13 @@ async def drain_background_browser_cleanups(
     default timeout covers the worst-case single-cleanup latency; drain returns
     as soon as all tasks finish, so the cap only bites on a genuinely stuck one.
     """
-    pending = [task for task in _background_browser_cleanup_tasks if not task.done()]
+    # Optional CDP children enter this set only after their own deadline expired.
+    # Keep them referenced, but do not spend the recording/provider drain on them
+    # again. The worker event-loop owner closes these narrowly named I/O tasks.
+    pending = [
+        task for task in _background_browser_cleanup_tasks
+        if not task.done() and task.get_name() != _EXPIRED_OPTIONAL_CDP_TASK_NAME
+    ]
     if not pending:
         return
     logger.info(
@@ -5011,7 +5079,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
     async def finalize_recording() -> None:
         if recorder:
             await _finalize_browser_recording_for_fe_resilient(
-                browser_recorder=recorder,  # type: ignore[arg-type]
+                browser_recorder=recorder,
                 agent_id=agent_id,
                 task_id=task_id,
                 user_id=user_id,
@@ -5678,6 +5746,15 @@ async def _spawn_browser_agent_activity_v3_real(
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
+        # Belt-and-suspenders: older resume payloads may still carry awaiting tool
+        # rows if they were parked before finalize-on-mint shipped.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            finalize_parked_payment_card_approval_history(
+                write_lock_resume_state,
+                last4=payment_card_last4,
+            )
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
             str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
@@ -10269,6 +10346,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # The workflow allocates task_id before starting the activity,
                     # so TRY_CANCEL cannot erase the ownership key along with the
                     # activity return value.
+                    # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
                     await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)
                     if workflow_instance.is_paused and not activity_handle.done():
                         logger.info("\U0001f534 Cancelling browser agent due to pause")
@@ -10549,7 +10627,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 task_id=result.get("task_id"),
                                 retry_seconds=retry_seconds,
                             )
-                            await workflow.sleep(retry_seconds)
+                            await sleep_or_generation_handoff(
+                                workflow_instance, retry_seconds, workflow_mod=workflow
+                            )
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -10672,7 +10752,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             if agentcard_status_result.get("connected"):
                                 break
-                            await workflow.sleep(5)
+                            await sleep_or_generation_handoff(
+                                workflow_instance, 5, workflow_mod=workflow
+                            )
 
                         if not agentcard_status_result.get("connected"):
                             logger.info(
@@ -10721,6 +10803,38 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             },
                         )
                         card = await mint_payment_card()
+
+                    # Over-limit: mint exceeded MAX_PURCHASE_CENTS. Hard tool error —
+                    # do NOT raise a subscribe gate (that mislabel hung agents that
+                    # simply asked for a cart larger than the org-wallet float).
+                    if card.get("status") == "purchase_above_max_limit":
+                        limit = card.get("maxPurchaseCents")
+                        if isinstance(limit, int):
+                            dollars = limit / 100
+                            limit_text = f" of ${dollars:.2f} ({limit} cents)"
+                        else:
+                            limit_text = ""
+                        message = str(
+                            card.get("error")
+                            or f"Purchase is above max limit{limit_text}."
+                        )
+                        # action_type must be a FE-terminal browser action
+                        # (task_complete / session_paused / write_lock_rejected)
+                        # or the live browser chip stays open after we return.
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Purchase above max limit",
+                            message=message,
+                            status=MessageStatus.ERROR,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "task_complete",
+                                "code": "purchase_above_max_limit",
+                                "maxPurchaseCents": limit,
+                            },
+                        )
+                        return
 
                     # Subscription gate: minting real money requires an active
                     # plan. If the backend says so, raise a subscription gate
@@ -10903,6 +11017,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         current_url=result.get("current_url"),
                     )
 
+                    payment_card_last4 = _normalize_payment_card_last4(card.get("last4"))
                     write_lock_resume_state = {
                         "pending_action": None,
                         "write_lock_approvals": current_approvals,
@@ -10913,11 +11028,17 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
-                        "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
+                        "payment_card_last4": payment_card_last4,
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    # Parked activity left request_payment_card as awaiting; mint finished —
+                    # complete that tool outcome before the resumed browser model reads history.
+                    finalize_parked_payment_card_approval_history(
+                        write_lock_resume_state,
+                        last4=payment_card_last4,
+                    )
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
@@ -10998,11 +11119,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
 
-                    await workflow.wait_condition(
+                    await wait_condition_or_generation_handoff(
                         lambda request_id=request_id: (
                             request_id in getattr(workflow_instance, "_signal_responses", {})
                             or not workflow_instance.is_paused
-                        )
+                        ),
+                        workflow_instance,
+                        workflow_mod=workflow,
                     )
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         workflow_instance._signal_responses.pop(request_id, None)
@@ -11119,6 +11242,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
+        except GenerationHandoffRequested:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Browser automation interrupted",
+                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                status=MessageStatus.FINISHED,
+                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+            )
+            raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
