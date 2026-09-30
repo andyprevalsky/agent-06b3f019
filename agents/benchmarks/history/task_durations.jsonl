@@ -3502,3 +3502,6 @@
 {"task": "grep-agent-trajectories-followup", "duration_seconds": 153.3, "cost_cents": 4.0, "timestamp": "2026-09-30T18:12:18.881386+00:00", "agent_id": "c2e7d05d-5748-42b2-af50-4c358eac6b99"}
 {"task": "grep-agent-trajectories-isolation", "duration_seconds": 203.8, "cost_cents": 0.0, "timestamp": "2026-09-30T18:12:18.881386+00:00", "agent_id": "3d7134c5-898d-48cb-8f43-11675e0e9bab"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 185.5, "cost_cents": 6.0, "timestamp": "2026-09-30T18:19:26.565296+00:00", "agent_id": "6d5c4b34-595c-4f2b-9307-29520ecfb6ae"}
+{"task": "grep-agent-trajectories-followup", "duration_seconds": 133.1, "cost_cents": 1.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "c274bd13-0737-43ad-8ab5-d3910e06eccb"}
+{"task": "grep-agent-trajectories-isolation", "duration_seconds": 153.2, "cost_cents": 2.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "eaa14d0b-9da6-4560-8420-9da341eda31f"}
+{"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 168.3, "cost_cents": 5.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "2c317b43-6e97-4d45-a725-caeb1f7b3253"}
