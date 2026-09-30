@@ -285,6 +285,31 @@ function testRetryResetsPerAttemptStreamState(): void {
     generator.indexOf('createGeneratorAttentionLifecycle', generatorAttempt) > generatorAttempt,
     'generator must start a fresh attention lifecycle on regenerate'
   );
+  assert.ok(
+    router.indexOf('fcCacheWon = false', routerAttempt) > routerAttempt,
+    'router must drop a stale cache-winner flag before each attempt'
+  );
+  assert.ok(
+    router.indexOf('attempt === 1 && fcKey && fastModeRead', routerAttempt) > routerAttempt,
+    'router must not replay Fast Mode cache on regenerate'
+  );
+  assert.ok(
+    router.indexOf('usage.prompt_tokens = 0', routerAttempt) > routerAttempt,
+    'router must reset usage so a silent retry cannot keep the failed attempt'
+  );
+  assert.ok(
+    generator.indexOf('fcCacheWon = false', generatorAttempt) > generatorAttempt,
+    'generator must drop a stale cache-winner flag before each attempt'
+  );
+  assert.ok(
+    generator.indexOf('attempt === 1 && fcKey && fastModeRead', generatorAttempt) >
+      generatorAttempt,
+    'generator must not replay Fast Mode cache on regenerate'
+  );
+  assert.ok(
+    generator.indexOf('usage.prompt_tokens = 0', generatorAttempt) > generatorAttempt,
+    'generator must reset usage so a silent retry cannot keep the failed attempt'
+  );
 }
 
 function testCallSitesUseSharedRegenerate(): void {

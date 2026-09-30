@@ -163,6 +163,10 @@ test('chat router caches successful output without gating downstream work', () =
     'router must log write-only mode'
   );
   assert.ok(router.includes('fast_cache.chat_router_stored'), 'router must log Fast Mode writes');
+  assert.ok(
+    router.includes('attempt === 1 && fcKey && fastModeRead'),
+    'router must skip Fast Mode cache reads after a structured-output miss'
+  );
   assert.doesNotMatch(
     router,
     /await cacheSet\(/,
@@ -203,6 +207,10 @@ test('backend chat cache sites support write-only without reads', () => {
   assert.ok(
     generator.includes('fast_cache.chat_generator_write_only'),
     'generator must skip reads in write-only mode'
+  );
+  assert.ok(
+    generator.includes('attempt === 1 && fcKey && fastModeRead'),
+    'generator must skip Fast Mode cache reads after a structured-output miss'
   );
   assert.ok(
     tools.includes('fastModeReadEnabled'),

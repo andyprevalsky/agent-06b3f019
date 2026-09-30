@@ -265,8 +265,14 @@ export async function callRouterLlm(params: {
   const attempted = await regenerateOnChatStructuredMiss({
     callSite: 'chat_router',
     agentId: params.agentId,
-    attempt: async () => {
+    attempt: async (attempt) => {
       lastStreamedText = '';
+      fcCacheWon = false;
+      usage.prompt_tokens = 0;
+      usage.completion_tokens = 0;
+      usage.total_tokens = 0;
+      usage.cache_creation_input_tokens = 0;
+      usage.cache_read_input_tokens = 0;
       if (webSearchToolCallId) {
         await broadcastToolEvent(
           params.agentId,
@@ -299,7 +305,7 @@ export async function callRouterLlm(params: {
         );
 
       let stream: AsyncIterable<CompletionChunk>;
-      if (fcKey && fastModeRead) {
+      if (attempt === 1 && fcKey && fastModeRead) {
         const cacheKey = fcKey;
         stream = delayedCacheStreamHedge({
           readCache: async (): Promise<CacheLookupResult<string>> => {
