@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { ChatLlmTransientMissError } from './chatStructuredRetry';
 import { extractCompleteTopLevelStringFields, extractPartialStringField } from './routerJsonStream';
 
 export const RouterDecisionSchema = z.discriminatedUnion('action', [
@@ -161,6 +162,27 @@ export function finalizeRouterDecisionFromStream(params: {
   } catch {
     return { decision: parsePartialRouterDecisionJson(fullJson), fullJson };
   }
+}
+
+/**
+ * Turn a finalized stream into a decision or a typed regenerate miss.
+ * Callers must retry this class — never fail the agent on the first miss.
+ */
+export function requireRouterDecision(params: {
+  finalized: { decision: RouterDecision | null; fullJson: string };
+  deadlineExpired: boolean;
+}): RouterDecision {
+  if (params.finalized.decision) return params.finalized.decision;
+  if (params.deadlineExpired) {
+    throw new ChatLlmTransientMissError('deadline', 'Chat router completion expired');
+  }
+  if (!params.finalized.fullJson) {
+    throw new ChatLlmTransientMissError('empty', 'Router LLM returned no content');
+  }
+  throw new ChatLlmTransientMissError(
+    'parse',
+    `Failed to parse router response as JSON: ${params.finalized.fullJson.substring(0, 200)}`
+  );
 }
 
 export function isValidRouterCacheJson(value: unknown): value is string {

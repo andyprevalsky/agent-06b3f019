@@ -10,6 +10,8 @@
  * triggers can reuse the same commit/abort safety boundary.
  */
 
+import { isChatLlmTransientMiss } from './chatStructuredRetry';
+
 type BufferedDelivery = () => Promise<void>;
 
 export interface TransactionalStreamGate {
@@ -147,7 +149,12 @@ export function createEarlyDirectGeneratorCoordinator<T>(
       if (!outcome || explicitlyDiscarded) return null;
       await streamGate.commit();
       const settled = await outcome;
-      if (settled.status === 'rejected') throw settled.reason;
+      if (settled.status === 'rejected') {
+        // A speculative empty/parse/deadline miss must not kill the turn.
+        // The canonical generator still runs via `?? runGenerator(...)`.
+        if (isChatLlmTransientMiss(settled.reason)) return null;
+        throw settled.reason;
+      }
       return settled.value as T;
     },
     async discard(): Promise<void> {

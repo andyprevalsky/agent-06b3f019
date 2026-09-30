@@ -1,23 +1,23 @@
 #!/usr/bin/env tsx
 /**
- * Chat router stream-finalization regression.
+ * Chat structured-output miss regression.
  *
- * Owning boundary: providers/chat/routerDecision.ts →
- * finalizeRouterDecisionFromStream (the step that shapes a consumed
- * rose-1-flash router stream into a RouterDecision).
+ * Owning boundary: providers/chat/chatStructuredRetry.ts +
+ * finalizeRouterDecisionFromStream / requireRouterDecision /
+ * requireGeneratorParsedJson.
  *
  * Prod agent 6e645c29-4b6f-4d87-9478-22ecb28ebba5 (2026-09-30, MAC_APP create):
  *   Router Cerebras 429 → OpenRouter failover → 3s completion deadline with
  *   zero eligible structured items. routerLlm called
  *   StructuredOutputAccumulator.finalText() and
- *   StructuredOutputCardinalityError ("Expected one structured output item,
- *   received 0") escaped handleChatMessage → startChatMode
+ *   StructuredOutputCardinalityError escaped handleChatMessage → startChatMode
  *   failAgentIfStillActive. Agent FAILED in ~5s with no assistant message.
  *
- * Invariant: a zero-item / reasoning-only / deadline-expired empty stream
- * must NOT throw StructuredOutputCardinalityError. The seam returns
- * decision=null so the caller can use its existing empty/expired path.
- * Create-path chat failures persist an apology and do not mark FAILED.
+ * July 19 SMS already settled the class: empty / reasoning-only / unparseable
+ * streams regenerate in place. An immediate apology or FAILED is giving up on
+ * the first miss. Chat router, generator, and speculative commit must use the
+ * same regenerate contract. The 3s per-attempt bound must not change.
+ *
  * No live server required.
  */
 
@@ -33,8 +33,16 @@ import {
 import {
   finalizeRouterDecisionFromStream,
   parseRouterDecisionAfterDeadline,
+  requireRouterDecision,
 } from '../../providers/chat/routerDecision';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
+import {
+  ChatLlmTransientMissError,
+  MAX_CHAT_STRUCTURED_ATTEMPTS,
+  regenerateOnChatStructuredMiss,
+} from '../../providers/chat/chatStructuredRetry';
+import { requireGeneratorParsedJson } from '../../providers/chat/generatorLlm';
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -115,16 +123,90 @@ function testCompleteStreamParsesWithoutDeadline(): void {
   });
 }
 
-async function testCreatePathChatFailureDoesNotFailAgent(): Promise<void> {
+function testRequireRouterDecisionTypesEveryMiss(): void {
+  const empty = { decision: null, fullJson: '' };
+  assert.throws(
+    () => requireRouterDecision({ finalized: empty, deadlineExpired: true }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'deadline',
+    'deadline without a decision is a typed regenerate miss'
+  );
+  assert.throws(
+    () => requireRouterDecision({ finalized: empty, deadlineExpired: false }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'empty',
+    'empty stream is a typed regenerate miss'
+  );
+  assert.throws(
+    () =>
+      requireRouterDecision({
+        finalized: { decision: null, fullJson: '{not-json' },
+        deadlineExpired: false,
+      }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
+    'unparseable stream is a typed regenerate miss'
+  );
+}
+
+function testRequireGeneratorParsedJsonTypesEveryMiss(): void {
+  assert.throws(
+    () => requireGeneratorParsedJson(''),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'empty',
+    'generator empty stream is a typed regenerate miss'
+  );
+  assert.throws(
+    () => requireGeneratorParsedJson('{not-json'),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'parse',
+    'generator unparseable stream is a typed regenerate miss'
+  );
+  assert.deepEqual(requireGeneratorParsedJson('{"reasoning":"r","response":"hello"}'), {
+    reasoning: 'r',
+    response: 'hello',
+  });
+}
+
+async function testFirstMissRegeneratesInsteadOfApologizing(): Promise<void> {
+  let attempts = 0;
+  const decision = await regenerateOnChatStructuredMiss({
+    callSite: 'chat_router',
+    agentId: '6e645c29-4b6f-4d87-9478-22ecb28ebba5',
+    attempt: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new ChatLlmTransientMissError('empty', 'Router LLM returned no content');
+      }
+      return { action: 'direct_answer' as const, reasoning: 'second attempt' };
+    },
+  });
+  assert.equal(attempts, 2, 'first empty stream must regenerate in place');
+  assert.deepEqual(decision, { action: 'direct_answer', reasoning: 'second attempt' });
+}
+
+async function testExhaustedMissesStayTypedAndDoNotFailAgent(): Promise<void> {
+  let attempts = 0;
+  await assert.rejects(
+    regenerateOnChatStructuredMiss({
+      callSite: 'chat_generator',
+      agentId: '6e645c29-4b6f-4d87-9478-22ecb28ebba5',
+      attempt: async () => {
+        attempts += 1;
+        throw new ChatLlmTransientMissError('deadline', 'Chat router completion expired');
+      },
+    }),
+    (error: unknown) => error instanceof ChatLlmTransientMissError && error.kind === 'deadline'
+  );
+  assert.equal(attempts, MAX_CHAT_STRUCTURED_ATTEMPTS, 'retry budget must be bounded');
+
   const events: string[] = [];
   await recoverChatHandlerFailure({
     agentId: '6e645c29-4b6f-4d87-9478-22ecb28ebba5',
-    error: new StructuredOutputCardinalityError('Expected one structured output item, received 0'),
+    error: new ChatLlmTransientMissError(
+      'empty',
+      'Expected one structured output item, received 0'
+    ),
     persistNotice: async () => {
       events.push('notice');
     },
   });
-  assert.deepEqual(events, ['notice'], 'create-path chat failure must surface a notice');
+  assert.deepEqual(events, ['notice'], 'exhausted miss may surface a notice');
 
   const lifecycle = readFileSync(
     join(here, '../../domains/agents/agentLifecycleService.ts'),
@@ -137,13 +219,68 @@ async function testCreatePathChatFailureDoesNotFailAgent(): Promise<void> {
   );
 }
 
+async function testNonTransientErrorsDoNotRetry(): Promise<void> {
+  let attempts = 0;
+  const boom = new Error('Agent not found');
+  await assert.rejects(
+    regenerateOnChatStructuredMiss({
+      callSite: 'chat_router',
+      agentId: 'agent',
+      attempt: async () => {
+        attempts += 1;
+        throw boom;
+      },
+    }),
+    (error: unknown) => error === boom
+  );
+  assert.equal(attempts, 1, 'non-transient errors must not consume the regenerate budget');
+}
+
+function testPerAttemptBoundUnchanged(): void {
+  assert.equal(
+    DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+    3_000,
+    'retry must not raise the per-attempt 3s router bound'
+  );
+  assert.equal(MAX_CHAT_STRUCTURED_ATTEMPTS, 2, 'one regenerate, not an unbounded loop');
+}
+
+function testCallSitesUseSharedRegenerate(): void {
+  const router = readFileSync(join(here, '../../providers/chat/routerLlm.ts'), 'utf8');
+  const generator = readFileSync(join(here, '../../providers/chat/generatorLlm.ts'), 'utf8');
+  const speculation = readFileSync(
+    join(here, '../../providers/chat/earlyDirectGenerator.ts'),
+    'utf8'
+  );
+  assert.match(router, /regenerateOnChatStructuredMiss/, 'router must regenerate in place');
+  assert.match(router, /requireRouterDecision/, 'router must use the typed miss seam');
+  assert.equal(
+    router.includes('.finalText()'),
+    false,
+    'router must never call finalText() on a degrade path'
+  );
+  assert.match(generator, /regenerateOnChatStructuredMiss/, 'generator must regenerate in place');
+  assert.match(generator, /requireGeneratorParsedJson/, 'generator must use the typed miss seam');
+  assert.match(
+    speculation,
+    /isChatLlmTransientMiss/,
+    'speculative commit must not kill the turn on a typed miss'
+  );
+}
+
 async function main(): Promise<void> {
   testEmptyDeadlineDoesNotThrowCardinality();
   testReasoningOnlyDoesNotThrowCardinality();
   testDeadlineRecoversPartialDirectAnswer();
   testCompleteStreamParsesWithoutDeadline();
-  await testCreatePathChatFailureDoesNotFailAgent();
-  process.stdout.write('PASS chat-router-stream (5 cases)\n');
+  testRequireRouterDecisionTypesEveryMiss();
+  testRequireGeneratorParsedJsonTypesEveryMiss();
+  await testFirstMissRegeneratesInsteadOfApologizing();
+  await testExhaustedMissesStayTypedAndDoNotFailAgent();
+  await testNonTransientErrorsDoNotRetry();
+  testPerAttemptBoundUnchanged();
+  testCallSitesUseSharedRegenerate();
+  process.stdout.write('PASS chat-router-stream (11 cases)\n');
 }
 
 void main().catch((error: unknown) => {

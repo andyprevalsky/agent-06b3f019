@@ -165,6 +165,21 @@ async function testEarlyFailureOnlyPropagatesForCommittedDirect(): Promise<void>
     (error: unknown) => error === committedFailure
   );
   assert.strictEqual(leakedFrames, 0, 'failed speculative frames must be discarded');
+
+  const { ChatLlmTransientMissError } = await import('../../providers/chat/chatStructuredRetry');
+  const transient = new ChatLlmTransientMissError('empty', 'Generator LLM returned no content');
+  const recoverable = createEarlyDirectGeneratorCoordinator({
+    start: async () => {
+      throw transient;
+    },
+  });
+  recoverable.start();
+  await flushMicrotasks();
+  assert.strictEqual(
+    await recoverable.commitDirectAnswer(),
+    null,
+    'speculative structured-output miss must fall through to the canonical generator'
+  );
 }
 
 async function testDiscardDoesNotWaitForNonCooperativeProvider(): Promise<void> {

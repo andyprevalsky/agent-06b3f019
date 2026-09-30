@@ -1,11 +1,11 @@
 /**
- * Shared recovery for a rejected handleChatMessage.
+ * Last-resort recovery after handleChatMessage rejects.
  *
- * Create-agent used to call failAgentIfStillActive (instant FAILED). The
- * follow-up message route persisted an apology and left the agent ACTIVE.
- * A recoverable router miss (empty structured output after Cerebras 429
- * failover) therefore killed a brand-new agent and only apologized on a
- * later turn. One policy: surface the notice, do not fail the agent.
+ * Router and generator already regenerate in place on empty / parse /
+ * deadline structured-output misses. This hook only runs after that
+ * budget is exhausted (or on a non-retryable failure). Create-agent
+ * used to call failAgentIfStillActive — that is forbidden for this
+ * class. Persist the notice and leave the agent ACTIVE.
  */
 
 import { createMessage } from '../messages';
