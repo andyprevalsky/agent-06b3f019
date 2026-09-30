@@ -2859,14 +2859,17 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
   });
   assert(deleted === null, 'deleted Gmail credential should be removed');
   const purge = await prisma.googleDataPurge.findFirst({
-    where: { userId, email: 'primary@gmail.com', processedAt: null },
+    // A concurrent purge worker may finish the obligation before this read.
+    where: { userId, email: 'primary@gmail.com' },
   });
   assert(purge !== null, 'disconnect should queue cached Google data for deletion');
-  await prisma.googleDataPurge.update({
-    where: { id: purge.id },
-    data: { revocationToken: null },
-  });
-  await processGoogleDataPurge(purge.id);
+  if (purge.processedAt === null) {
+    await prisma.googleDataPurge.update({
+      where: { id: purge.id },
+      data: { revocationToken: null, claimedUntil: null },
+    });
+    await processGoogleDataPurge(purge.id);
+  }
   let staleSyncRejected = false;
   try {
     await upsertPersonAndMessageRecords(
@@ -7241,10 +7244,6 @@ async function runAll() {
       fn: testGoogleRevocationFailure_retainsDurableRetry,
     },
     {
-      name: 'Google revocation failures do not starve later purges',
-      fn: testGoogleRevocationFailures_doNotStarveLaterPurge,
-    },
-    {
       name: 'Google external revocation queues data purge',
       fn: testGoogleExternalRevocation_queuesPurgeAndReconnect,
     },
@@ -7468,6 +7467,11 @@ async function runAll() {
 
   // Phase 3: Sequential tests (state-dependent + boundary capture)
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
+    // This case drains the global purge queue, so keep it after parallel cases.
+    {
+      name: 'Google revocation failures do not starve later purges',
+      fn: testGoogleRevocationFailures_doNotStarveLaterPurge,
+    },
     { name: 'state transition -- full lifecycle', fn: testStateTransition_fullLifecycle },
     {
       name: 'anthropic api-key cooldown -- mark then on-cooldown',
