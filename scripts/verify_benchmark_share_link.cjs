@@ -60,6 +60,11 @@ async function main() {
 }
 
 async function assertTranscript(page, snippets) {
+  await page.waitForFunction(
+    (texts) => texts.some((text) => document.body.innerText.includes(text)),
+    snippets.user,
+    { timeout: 30000 },
+  );
   if (
     snippets.assistant.length > 0 &&
     !(await page.evaluate(
@@ -68,7 +73,8 @@ async function assertTranscript(page, snippets) {
     ))
   ) {
     // Archived assistant progress may be inside a collapsed Thought section.
-    await page.getByText("Thought", { exact: true }).first().click();
+    const thought = page.getByText("Thought", { exact: true }).first();
+    if (await thought.isVisible()) await thought.click();
   }
   await page.waitForFunction(
     ({ user, assistant }) => {

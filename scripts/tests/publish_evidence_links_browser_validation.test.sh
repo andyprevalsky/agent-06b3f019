@@ -62,6 +62,17 @@ fe_url = mod.durable_fe_url(agent, agent, "run.signature")
 assert "?agent-id=" in fe_url and "#benchmark-share=run.signature" in fe_url, fe_url
 assert "benchmark-share=" not in fe_url.split("#", 1)[0], fe_url
 
+list_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "1. Open the benchmark link"},
+        {"role": "ASSISTANT", "text": "- [Inspect the run](https://example.com/run) before retrying"},
+    ]
+)
+assert list_snippets == {
+    "user": ["Open the benchmark link"],
+    "assistant": ["Inspect the run before retrying"],
+}, list_snippets
+
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 

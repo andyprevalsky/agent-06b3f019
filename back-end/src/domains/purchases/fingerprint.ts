@@ -32,11 +32,23 @@ function asPositiveInt(value: unknown): number {
  * Strip a trailing ` x{quantity}` echo of the quantity field so order-summary
  * prose ("Aurora Notebook x1") fingerprints the same as the product title.
  */
-function canonicalizeLineItemName(name: unknown, quantity: unknown): unknown {
+function canonicalizeLineItemName(
+  name: unknown,
+  quantity: unknown,
+  unitPriceCents: unknown
+): unknown {
   if (typeof name !== 'string') return name;
+  const qty = asPositiveInt(quantity);
+  const priced = /\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$/i.exec(name);
+  if (
+    priced !== null &&
+    Number.parseInt(priced[1], 10) === qty &&
+    Number.parseInt(priced[2], 10) * 100 + Number.parseInt(priced[3], 10) === unitPriceCents
+  ) {
+    return name.slice(0, priced.index).trimEnd();
+  }
   const match = /\s+x(\d+)\s*$/i.exec(name);
   if (match === null) return name;
-  const qty = asPositiveInt(quantity);
   if (Number.parseInt(match[1], 10) !== qty) return name;
   return name.slice(0, match.index).trimEnd();
 }
@@ -49,7 +61,7 @@ function canonicalizeLineItems(value: unknown): unknown[] | null {
       ? rawItem
       : {
           ...item,
-          name: canonicalizeLineItemName(item.name, item.quantity),
+          name: canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents),
           reviewCount: canonicalizeReviewCount(item.reviewCount),
         };
   });

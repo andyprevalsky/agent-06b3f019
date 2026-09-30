@@ -277,10 +277,19 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
         for line in content.splitlines():
             # React renders Markdown markers as formatting, so match the text
             # the signed-out visitor sees instead of the raw Markdown source.
-            visible_line = re.sub(r"^\s{0,3}(?:#{1,6}\s+|>\s?)", "", line)
+            visible_line = re.sub(
+                r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)", "", line
+            )
+            visible_line = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", visible_line)
             visible_line = re.sub(r"`([^`]+)`", r"\1", visible_line)
-            visible_line = re.sub(r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m[1] or m[2], visible_line)
-            visible_line = re.sub(r"(?<!\w)\*([^*]+)\*(?!\w)|(?<!\w)_([^_]+)_(?!\w)", lambda m: m[1] or m[2], visible_line)
+            visible_line = re.sub(
+                r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m[1] or m[2], visible_line
+            )
+            visible_line = re.sub(
+                r"(?<!\w)\*([^*]+)\*(?!\w)|(?<!\w)_([^_]+)_(?!\w)",
+                lambda m: m[1] or m[2],
+                visible_line,
+            )
             visible_line = re.sub(r"~~([^~]+)~~", r"\1", visible_line).strip()
             if len(visible_line) >= 12:
                 snippets[str(role).lower()].append(visible_line[:60])

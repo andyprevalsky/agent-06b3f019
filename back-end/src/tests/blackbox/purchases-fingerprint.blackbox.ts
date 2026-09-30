@@ -73,6 +73,27 @@ async function testQuantityEchoNameParity(): Promise<void> {
     'backend quantity-echo canonicalization must match the agents-side Python fingerprint'
   );
 
+  const pricedEcho = fixtureReceipt('Aurora Notebook - 1 x $12.00', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: pricedEcho,
+      totalCents: 1200,
+    }) === bareFp,
+    'matching order-summary quantity and price must reuse the bare-title card'
+  );
+  const wrongPrice = fixtureReceipt('Aurora Notebook - 1 x $13.00', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: wrongPrice,
+      totalCents: 1200,
+    }) !== bareFp,
+    'a suffix with a different price must stay a distinct purchase'
+  );
+
   const mismatchedQty = {
     ...echoed,
     lineItems: [{ ...(echoed.lineItems[0] as object), name: 'Aurora Notebook x2', quantity: 1 }],

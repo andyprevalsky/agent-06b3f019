@@ -108,9 +108,12 @@ def _canonicalize_review_count(value: str) -> str:
 
 
 _LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+x(\d+)\s*$", re.IGNORECASE)
+_LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
+    r"\s+-\s+(\d+)\s+x\s+\$(\d+)\.(\d{2})\s*$", re.IGNORECASE
+)
 
 
-def _canonicalize_line_item_name(name: Any, quantity: Any) -> Any:
+def _canonicalize_line_item_name(name: Any, quantity: Any, unit_price_cents: Any) -> Any:
     """Strip a trailing ` x{quantity}` echo of the quantity field.
 
     Browser agents often copy order-summary prose ("Aurora Notebook x1") into
@@ -119,12 +122,17 @@ def _canonicalize_line_item_name(name: Any, quantity: Any) -> Any:
     """
     if not isinstance(name, str):
         return name
-    match = _LINE_ITEM_QTY_SUFFIX_RE.search(name)
-    if match is None:
-        return name
     qty = quantity if isinstance(quantity, int) and not isinstance(quantity, bool) else _to_int(quantity)
     if qty <= 0:
         qty = 1
+    priced = _LINE_ITEM_PRICED_SUFFIX_RE.search(name)
+    if priced is not None:
+        echoed_price = int(priced.group(2)) * 100 + int(priced.group(3))
+        if int(priced.group(1)) == qty and echoed_price == _to_int(unit_price_cents):
+            return name[: priced.start()].rstrip()
+    match = _LINE_ITEM_QTY_SUFFIX_RE.search(name)
+    if match is None:
+        return name
     if int(match.group(1)) != qty:
         return name
     return name[: match.start()].rstrip()
@@ -140,7 +148,9 @@ def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
         review_count = item.get("reviewCount")
         if isinstance(review_count, str):
             item["reviewCount"] = _canonicalize_review_count(review_count)
-        item["name"] = _canonicalize_line_item_name(item.get("name"), item.get("quantity"))
+        item["name"] = _canonicalize_line_item_name(
+            item.get("name"), item.get("quantity"), item.get("unitPriceCents")
+        )
         candidate["lineItems"].append(item)
     return candidate
 

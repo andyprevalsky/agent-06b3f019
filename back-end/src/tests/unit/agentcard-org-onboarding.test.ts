@@ -145,6 +145,22 @@ async function main(): Promise<void> {
   assert.equal(missingSession.status, 'session_not_found');
   assert.equal(missingSession.setupSessionId, 'stale-session');
 
+  const missingSessionResult = await refreshOrgCardholderStatus(
+    'user-1',
+    deps({
+      getOrgOnboardingConfig: async () =>
+        ({
+          sessionId: 'stale-session',
+          setupUrl: 'https://example.invalid/setup',
+        }) as OrgOnboardingConfig,
+      callOrgTool: async () => ({
+        isError: true,
+        structuredContent: { status: 'error', message: 'Onboarding session not found' },
+      }),
+    })
+  );
+  assert.equal(missingSessionResult.status, 'session_not_found');
+
   let verificationArgs: Record<string, unknown> | undefined;
   const verificationStatus = await getOrgCardholderVerificationStatus('ch-ready', {
     callOrgTool: async (name, args) => {

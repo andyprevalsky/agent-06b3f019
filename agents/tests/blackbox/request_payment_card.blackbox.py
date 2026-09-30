@@ -452,6 +452,31 @@ def test_fingerprint_ignores_trailing_quantity_echo_on_item_name():
         != bare_payload["fingerprint"]
     )
 
+    priced_echo = _sample_tool_call()
+    priced_echo["line_items"][0]["name"] = "Aurora Notebook - 1 x $12.00"
+    priced_echo["line_items"][0]["unit_price_cents"] = 1200
+    priced_echo["line_items"][0]["quantity"] = 1
+    priced_echo["line_items"][0]["line_total_cents"] = 1200
+    bare_priced = _sample_tool_call()
+    bare_priced["line_items"][0]["name"] = "Aurora Notebook"
+    bare_priced["line_items"][0]["unit_price_cents"] = 1200
+    bare_priced["line_items"][0]["quantity"] = 1
+    bare_priced["line_items"][0]["line_total_cents"] = 1200
+    assert (
+        normalize_payment_payload(priced_echo, "user-123")["fingerprint"]
+        == normalize_payment_payload(bare_priced, "user-123")["fingerprint"]
+    )
+
+    wrong_price = _sample_tool_call()
+    wrong_price["line_items"][0]["name"] = "Aurora Notebook - 1 x $13.00"
+    wrong_price["line_items"][0]["unit_price_cents"] = 1200
+    wrong_price["line_items"][0]["quantity"] = 1
+    wrong_price["line_items"][0]["line_total_cents"] = 1200
+    assert (
+        normalize_payment_payload(wrong_price, "user-123")["fingerprint"]
+        != normalize_payment_payload(bare_priced, "user-123")["fingerprint"]
+    )
+
 
 def test_fingerprint_keeps_material_receipt_changes_distinct():
     from domains.request_payment_card.service import normalize_payment_payload
