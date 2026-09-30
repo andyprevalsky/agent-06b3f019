@@ -107,13 +107,10 @@ async function ensureIssuedCardIsRecorded(
   if (transferId === undefined || transferId.trim() === '') {
     throw new Error('AgentCard reconciliation returned a card without a company transfer id');
   }
-  await recordIssuedPurchaseCardFunding(
-    purchase,
-    'usd',
-    minted.cardId,
-    transferId,
-    { ...(minted.metadata ?? {}), last4: minted.last4 }
-  );
+  await recordIssuedPurchaseCardFunding(purchase, 'usd', minted.cardId, transferId, {
+    ...(minted.metadata ?? {}),
+    last4: minted.last4,
+  });
   return { cardId: minted.cardId, staticCard: false };
 }
 
