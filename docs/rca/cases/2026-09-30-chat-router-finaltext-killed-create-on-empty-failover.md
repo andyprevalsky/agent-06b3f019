@@ -1,12 +1,12 @@
 ---
 id: 2026-09-30-chat-router-finaltext-killed-create-on-empty-failover
 date: 2026-09-30
-title: Chat router called finalText() on an empty failover stream, so a brand-new agent was marked FAILED
+title: Chat treated the first empty structured-output stream as a terminal handler failure
 surface: back-end
 component: chat-router
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: back-end/src/providers/chat/routerLlm.ts — StructuredOutputAccumulator.finalText() after the 3s completion deadline on a zero-item stream
+first_bad_boundary: back-end/src/providers/chat/routerLlm.ts — first empty/deadline/parse miss threw out of handleChatMessage instead of regenerating in place
 symptoms:
   - 'Chat handler error: Expected one structured output item, received 0'
   - 'This agent instantly died???'
@@ -19,6 +19,7 @@ tags:
   - failover
   - create-agent
   - cardinality
+  - retry
 sources:
   - agent 6e645c29-4b6f-4d87-9478-22ecb28ebba5
 repro: back-end/src/tests/blackbox/chat-router-stream.blackbox.ts
@@ -45,10 +46,10 @@ Archive searches (relative, not a recurrence): the exact cardinality string;
 `Chat handler error agent instantly died FAILED`; `cerebras 429
 token_quota_exceeded pre_content_failover chat router`. Closest:
 `2026-07-19-final-text-called-outside-the-supervisor-try-catch` (same throw,
-SMS seam only — the guardrail never reached chat router);
-`2026-07-16-chat-pinned-to-cerebras-with-no-non-cerebras-failover` (429
-escape hatch started here; the chat-layer `finalText()` still terminalized
-it). Not the 2026-09-28 context-overflow case.
+SMS already regenerates — the guardrail never reached chat);
+`2026-07-16-malformed-structured-output-failed-agent-without-regenerating`
+(agent helper already regenerates; chat did not). Not the 2026-09-28
+context-overflow case.
 
 ## Diagnosis
 
@@ -57,43 +58,57 @@ Critical path: POST `/api/agents` → `startChatMode` → `handleChatMessage` �
 `finalText()` → `failAgentIfStillActive`.
 
 The 429 is third-party (Cerebras TPM). Failover started as designed. Data
-first goes wrong when the empty/incomplete failover stream is passed to
-`finalText()` (`requireExactlyOne=true`). That throw is the exact
-`status_message`. `parseRouterDecisionAfterDeadline` never ran.
+first goes wrong when an empty/incomplete failover stream is treated as a
+terminal handler error. `finalText()` (`requireExactlyOne=true`) produced the
+exact `status_message`, but that throw is a symptom of the class: chat had
+no SMS/agent-style regenerate on empty / reasoning-only / unparseable /
+deadline-without-decision streams.
 
-Step 5a: why was the throw possible? The July 19 SMS guard (`currentText()` /
-empty `tool_calls` inside the degrade path) was never applied to chat
-router/generator — every `finalText()` caller can still convert a normal
-empty stream into an unhandled exception. Why did that kill the row? Create
-mapped any `handleChatMessage` rejection to `failAgentIfStillActive`; the
-follow-up message route already persisted an apology and left ACTIVE.
-Stop: Cerebras TPM remaining and whether OpenRouter would have emitted after
-3s were not captured — do not relax the 3s bound or invent a first-turn
-speculation load-shed from correlation.
+Sibling miss sites in the same class:
+
+- Router: `'Router LLM returned no content'`, `'Chat router completion expired'`,
+  `'Failed to parse router response as JSON'`
+- Generator: `'Generator LLM returned no content'`, parse failure
+- Speculative `commitDirectAnswer()` rethrew those misses and skipped the
+  canonical generator (`?? runGenerator`)
+- Create mapped any `handleChatMessage` rejection to `failAgentIfStillActive`
+
+An apology-only hook after the first throw is still giving up on a
+recoverable miss. July 19: only if every regenerate stays empty does the
+terminal net deliver one apology. Stop: Cerebras TPM remaining and whether
+OpenRouter would have emitted after 3s were not captured — do not raise the
+per-attempt 3s bound.
 
 ## Solution
 
-`finalizeRouterDecisionFromStream` uses `currentText()` only. Empty /
-reasoning-only / deadline-expired streams return `decision: null` — never
-`StructuredOutputCardinalityError`. Generator uses `currentText()` too.
-`recoverChatHandlerFailure` is the single create+message policy: persist the
-existing apology, do not `failAgentIfStillActive`.
+One typed miss (`ChatLlmTransientMissError`) and one regenerate helper
+(`regenerateOnChatStructuredMiss`, 2 attempts). Router and generator both
+use it. `finalizeRouterDecisionFromStream` still uses `currentText()` only
+(never cardinality). `requireRouterDecision` / `requireGeneratorParsedJson`
+convert empty / parse / deadline-without-decision into the typed miss.
+Speculative commit returns `null` on that miss so the canonical generator
+runs. After the budget is exhausted, `recoverChatHandlerFailure` persists
+the existing apology and does **not** `failAgentIfStillActive`.
 
-The 3s completion bound is unchanged. First-turn speculation is unchanged.
-A Cerebras 429 remains a third-party miss; if the router still has no
-decision the user sees the apology and can retry, instead of a dead agent.
+The 3s per-attempt completion bound is unchanged. First-turn speculation
+load-shed is unchanged.
 
 Cemented in `back-end/src/tests/blackbox/chat-router-stream.blackbox.ts`.
-Pre-fix: `StructuredOutputCardinalityError: Expected one structured output
-item, received 0`. Post-fix: `PASS chat-router-stream (5 cases)`.
+Pre-fix: first empty stream → cardinality throw → FAILED. Post-fix:
+`PASS chat-router-stream (11 cases)` — first miss regenerates; exhausted
+miss stays typed and does not fail the agent.
 
-10k-agent behavior: O(1) work per chat turn on that agent. No shared fan-in.
+10k-agent behavior: O(1) extra in-process regenerate per chat turn on that
+agent (cap 2). No shared fan-in.
 
 ## Human feedback
 
-None recorded.
+The first product change (don't throw cardinality, persist an apology, leave
+ACTIVE) was rejected as too shallow: this class must never happen on the
+first miss, and the other chat error cases were on the same incorrect path.
 
 ## Reusable lesson
 
-Never call `finalText()` on a chat or SMS degrade path — an empty structured
-stream after provider failover must not mark a new agent FAILED.
+A transient empty or unparseable chat/SMS/agent structured stream must
+regenerate in place. Do not fail the agent, and do not apologize until the
+bounded regenerate budget is exhausted.
