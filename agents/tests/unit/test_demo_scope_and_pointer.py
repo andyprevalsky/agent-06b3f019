@@ -797,6 +797,31 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
             "status": "completed"
         }
 
+        demo_empty = SimpleNamespace(
+            goal=OAI_DEMO_ROOT_GOAL_PREFIX,
+            fast_cache_goal="",
+            fast_mode_cache_enabled=True,
+            child_results={},
+            pending_children={"cid"},
+        )
+
+        async def _durable_completed(fn, args=None, **kwargs):
+            assert args == ["cid"]
+            return {"status": "completed", "summary": "from-db"}
+
+        import domains.spawn_agent.handler as spawn_handler
+
+        with patch.object(spawn_handler.workflow, "execute_activity", _durable_completed):
+            recovered = await asyncio.wait_for(
+                _recover_oai_demo_for_each_timeout(
+                    demo_empty, "cid", TimeoutError("Activity task timed out")
+                ),
+                timeout=1.0,
+            )
+        assert recovered == {"status": "completed", "summary": "from-db"}
+        assert demo_empty.child_results["cid"]["summary"] == "from-db"
+        assert "cid" not in demo_empty.pending_children
+
     asyncio.run(_recover())
 
     assert normalize_oai_demo_creator_key("Dr. Andrew Huberman") == "andrew huberman"

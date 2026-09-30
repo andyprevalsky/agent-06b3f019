@@ -26,6 +26,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   StructuredOutputAccumulator,
@@ -348,6 +351,37 @@ async function testDispatchToolSafelyPassesThroughSuccess(): Promise<void> {
  * Guard the last-resort line stays warm + actionable — never regresses back to
  * the bare "something went wrong" dead-end this whole change set removes.
  */
+function testMalformedToolIsDroppedNotThrown(): void {
+  const acc = new StructuredOutputAccumulator();
+  acc.addChunk({
+    kind: 'content',
+    data: {
+      text: JSON.stringify({
+        reasoning: 'mixed',
+        tool_calls: [
+          { tool: 'send_user_message', arguments: { message: 'ok' } },
+          { tool: 'not_a_real_tool', arguments: {} },
+        ],
+      }),
+      item_id: 'mixed-tools',
+      output_index: 0,
+      content_index: 0,
+      phase: 'final_answer',
+    },
+  });
+  const res = finalizeSupervisorResponse([], acc, 'mixed');
+  assert.equal(res.tool_calls.length, 1);
+  assert.equal(res.tool_calls[0].tool, 'send_user_message');
+}
+
+function testFinalizeUsesZodNotFinalText(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, '../../providers/smsSupervisor/supervisorLlm.ts'), 'utf8');
+  assert.equal(source.includes('.finalText()'), false, 'SMS finalize must not call finalText()');
+  assert.match(source, /SmsSupervisorResponseSchema\.safeParse/);
+  assert.match(source, /SmsSupervisorToolCallSchema\.safeParse/);
+}
+
 function testFallbackMessageStaysWarm(): void {
   assert.ok(SUPERVISOR_FALLBACK_MESSAGE.length > 0, 'fallback message must be non-empty');
   assert.doesNotMatch(
@@ -370,8 +404,10 @@ async function main(): Promise<void> {
   await testLlmRetryStopsOnAbort();
   await testDispatchToolSafelyConvertsThrowToFailure();
   await testDispatchToolSafelyPassesThroughSuccess();
+  testMalformedToolIsDroppedNotThrown();
+  testFinalizeUsesZodNotFinalText();
   testFallbackMessageStaysWarm();
-  console.log('PASS sms-supervisor-stream (13 cases)');
+  console.log('PASS sms-supervisor-stream (15 cases)');
 }
 
 main().catch((error) => {

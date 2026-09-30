@@ -374,7 +374,6 @@ class SpawnSubAgentManager(ToolManager):
         file_pointers = extract_file_pointers_from_structured_response(structured_response, output_schema)
 
         child_summary = child_result.get("summary", "") or f"Completed: {child_info.get('goal', '')}"
-        workflow_instance.child_results.pop(child_agent_id, None)
 
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
@@ -393,6 +392,9 @@ class SpawnSubAgentManager(ToolManager):
                 for_each_child=for_each_child,
             ),
         )
+        # Pop after the FINISHED event is consumed. Popping first left timeout
+        # recovery waiting forever for a signal that will never be re-sent.
+        workflow_instance.child_results.pop(child_agent_id, None)
         if file_pointers:
             for fp in file_pointers:
                 yield AssistantEvent(message="", file_pointer=fp)

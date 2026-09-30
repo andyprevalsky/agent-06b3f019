@@ -3144,7 +3144,13 @@ async def call_llm_structured_streaming(
                 # body; existing markdown/balanced-brace extraction handles it.
                 accumulated_json = text_buffer
         elif structured_output.has_content():
-            accumulated_json = structured_output.final_text()
+            # Degrade selector: never throw cardinality. A reasoning-only /
+            # empty stream becomes "" and can salvage JSON from reasoning.
+            # Multiple final_answer items stay empty so the parse-retry
+            # regenerates instead of accepting one competing blob.
+            accumulated_json = (
+                "" if structured_output.is_ambiguous() else structured_output.current_text()
+            )
 
         logger.info(
             f"🏁 [{call_site}] Rose streaming complete, received {chunk_count} chunks, "
@@ -3222,7 +3228,11 @@ async def call_llm_structured_streaming(
         # Rose models output: [explanation text]```json\n{...}\n```
         # We need to extract the JSON from within the markdown code block
         try:
-            if not accumulated_json and accumulated_reasoning:
+            if (
+                not accumulated_json
+                and accumulated_reasoning
+                and not structured_output.is_ambiguous()
+            ):
                 # Thinking models (GPT-5.2, Kimi-K2.5) may put structured JSON
                 # in reasoning tokens instead of content tokens.
                 # Use balanced-brace extraction with JSON validation to skip
@@ -4411,7 +4421,13 @@ async def _call_llm_verifier(
             raise ValueError(f"Verifier native tool payload must be an object (got {type(first_input).__name__})")
         accumulated_json = json.dumps(first_input)
     elif structured_output.has_content():
-        accumulated_json = structured_output.final_text()
+        # Empty / reasoning-only streams become "". The outer
+        # check_progress retry loop regenerates on the ValueError below.
+        # Ambiguous multi-item streams stay empty so we do not salvage
+        # one competing blob from reasoning.
+        accumulated_json = (
+            "" if structured_output.is_ambiguous() else structured_output.current_text()
+        )
 
     # llm.cache event is emitted from RoseClient.complete (single source).
     # Still need these locally for the returned usage dict consumed by callers.
@@ -4422,7 +4438,7 @@ async def _call_llm_verifier(
     # Parse JSON - handle thinking models that put JSON in reasoning
     json_content = accumulated_json
 
-    if not json_content and accumulated_reasoning:
+    if not json_content and accumulated_reasoning and not structured_output.is_ambiguous():
         # Thinking models might put JSON in reasoning
         json_match = re.search(r"\{[\s\S]*\}", accumulated_reasoning)
         if json_match:

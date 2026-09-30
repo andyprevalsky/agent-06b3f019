@@ -2082,8 +2082,10 @@ class RoseClient:
                 structured_output.add_chunk(chunk)
             else:
                 _fold(result, chunk)
-        if structured_output is not None and structured_output.has_content():
-            result.content = structured_output.final_text()
+        if structured_output is not None:
+            extracted = structured_output.current_text()
+            if extracted:
+                result.content = extracted
         return result
 
 

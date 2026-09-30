@@ -599,6 +599,6 @@ async function classifierContent(
   for await (const chunk of stream) {
     structuredOutput.addCompletionChunk(chunk);
   }
-  return structuredOutput.finalText();
+  return structuredOutput.currentText();
   /* c8 ignore stop */
 }
