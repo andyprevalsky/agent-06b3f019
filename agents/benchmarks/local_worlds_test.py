@@ -20,7 +20,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 SELF = Path(__file__).resolve()
 IDENTITY = runpy.run_path(str(REPO / "scripts/process-identity.py"))
-PAIR = ["agent-payment-abandonment", "agent-payment-setup-resume"]
+PAIR = ["agent-payment-abandonment", "agent-payment-idempotent-abandonment"]
+EXCLUSIVE_PAIR = ["agent-payment-abandonment", "agent-payment-setup-resume"]
 USER = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 
@@ -99,8 +100,6 @@ def serve(folder, world):
             assert value["userId"] == USER
             action = value["action"]
             assert action in {"reset", "complete"}
-            if action == "complete" and len(names) > 1:
-                wait_file(folder / "reset.ready")
             state[value["userId"]] = "connect_required" if action == "reset" else "connected"
             event(folder, "fixture_write", world=str(world), action=action, user_id=value["userId"])
             atomic(folder / f"{action}.ready", {"pid": os.getpid()})
@@ -223,10 +222,16 @@ async def benchmark(folder, argv):
     async def headers():
         return {"X-API-Key": "fixture-only"}
 
-    async def fixtures(*_args):
-        marker = "complete.ready" if len(json.loads(os.environ["WORLD_TEST_TASKS"])) > 1 else "reset.ready"
+    async def fixtures(task, url):
+        # Exercise opposing same-user writes through the real HTTP helper in
+        # ordinary independent worlds. Setup/resume itself remains exclusive.
+        if task.name == "agent-payment-idempotent-abandonment":
+            await bench.configure_benchmark_agentcard_setup(url, "reset")
+        names = json.loads(os.environ["WORLD_TEST_TASKS"])
+        atomic(folder / f"{task.name}.fixture-ready", {"pid": os.getpid()})
+        ordinary_pair = task.name in PAIR and set(PAIR).issubset(names)
         until = time.monotonic() + 8
-        while not (folder / marker).exists():
+        while ordinary_pair and not all((folder / f"{name}.fixture-ready").exists() for name in PAIR):
             if time.monotonic() >= until:
                 raise TimeoutError("fixture writer barrier")
             await asyncio.sleep(0.01)
@@ -246,7 +251,7 @@ async def benchmark(folder, argv):
             backend_port=port,
             **response.json(),
         )
-        if os.environ.get("WORLD_TEST_CANCEL") == "1":
+        if os.environ.get("WORLD_TEST_CANCEL") == "1" and task.name in PAIR:
             event(folder, "benchmark_awaiting_signal", world=str(context))
             until = time.monotonic() + 8
             while not interrupted and time.monotonic() < until:
@@ -310,7 +315,7 @@ def clean_fixture(folder, direct):
     assert not alive
 
 
-def run_case(folder, names, cancel=False):
+def run_case(folder, names, cancel=False, overlap=True):
     folder.mkdir(parents=True)
     env = {
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
@@ -346,7 +351,20 @@ def run_case(folder, names, cancel=False):
         observations = [e for e in events if e["event"] == "task_observed"]
         starts = [e["at"] for e in events if e["event"] == "task_start"]
         ends = [e["at"] for e in events if e["event"] == "task_end"]
-        expected = {"agent-payment-setup-resume": "connect_required", "agent-payment-abandonment": "connected"}
+        expected = {
+            "agent-payment-setup-resume": "connect_required",
+            "agent-payment-abandonment": "connected",
+            "agent-payment-idempotent-abandonment": "connect_required",
+        }
+        task_events = [e for e in events if e["event"] in {"task_start", "task_end"}]
+        ordinary_starts = [e["at"] for e in task_events if e["event"] == "task_start" and e["task"] in PAIR]
+        ordinary_ends = [e["at"] for e in task_events if e["event"] == "task_end" and e["task"] in PAIR]
+        exclusive_ends = [e["at"] for e in task_events if e["event"] == "task_end" and e["task"] == EXCLUSIVE_PAIR[1]]
+        expected_overlap = (
+            len(ordinary_starts) == len(ordinary_ends) == 2
+            and max(ordinary_starts) < min(ordinary_ends)
+            and len(exclusive_ends) == 1 and exclusive_ends[0] < min(ordinary_starts)
+        ) if len(names) > 1 else max(starts) < min(ends)
         assertions = {
             "expected_controller_exit": code == (143 if cancel else 0),
             "all_tasks_observed": sorted(e["task"] for e in observations) == sorted(names),
@@ -357,7 +375,17 @@ def run_case(folder, names, cancel=False):
             "original_cohort_config_preserved": len(worlds) == len(names) and all(e["tasks"] == names for e in worlds),
             "same_user_fixture_preserved": len(observations) == len(names)
             and all(e["user_id"] == USER and e["status"] == expected[e["task"]] for e in observations),
-            "task_lifetimes_overlap": len(starts) == len(names) and len(ends) == len(names) and max(starts) < min(ends),
+            "task_lifetime_contract": len(starts) == len(names)
+            and len(ends) == len(names)
+            and (
+                expected_overlap if overlap else
+                [(e["event"], e["task"]) for e in task_events] == [
+                    ("task_start", "agent-payment-setup-resume"),
+                    ("task_end", "agent-payment-setup-resume"),
+                    ("task_start", "agent-payment-abandonment"),
+                    ("task_end", "agent-payment-abandonment"),
+                ]
+            ),
             "cleanup_verified_before_stack_stop": len(worlds) > 0
             and all(e["owner_state"] == "cleanup_verified" for e in events if e["event"] == "before_stack_stop")
             and len([e for e in events if e["event"] == "stack_joined"]) == len(worlds),
@@ -376,13 +404,14 @@ def run_case(folder, names, cancel=False):
 def replay(folder):
     folder.mkdir(parents=True, exist_ok=False)
     cases = {}
-    for name, names, cancel in [
-        ("single-control", [PAIR[1]], False),
-        ("pair", PAIR, False),
-        ("cancel-pair", PAIR, True),
+    for name, names, cancel, overlap in [
+        ("single-control", [EXCLUSIVE_PAIR[1]], False, True),
+        ("exclusive-pair", EXCLUSIVE_PAIR, False, False),
+        ("pair", [EXCLUSIVE_PAIR[1], *PAIR], False, True),
+        ("cancel-pair", [EXCLUSIVE_PAIR[1], *PAIR], True, True),
     ]:
         try:
-            cases[name] = run_case(folder / name, names, cancel)
+            cases[name] = run_case(folder / name, names, cancel, overlap)
         except Exception as error:
             cases[name] = {"fixture_error": type(error).__name__, "message": str(error)}
     result = {

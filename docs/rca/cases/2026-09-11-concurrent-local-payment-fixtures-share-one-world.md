@@ -151,6 +151,32 @@ fixture or smoke pass counts toward it.
 
 ## Human feedback
 
+### September 30 fixture maintenance
+
+The deploy-owned offline fixture still required setup/resume to overlap another
+payment task after production scheduling made setup/resume exclusive. Its writer
+barrier therefore timed out; duplicate-occurrence coverage also incorrectly
+expected input order to equal execution order. Scheduling and task sources were
+byte-identical to e7ad0782. The isolated ordinary-pair control reproduced the
+actual same-user collision when independent-world admission was absent.
+
+Keep the existing serial setup control and add an exclusive pair with an exact
+setup-before-ordinary event assertion. The mixed cohort then verifies setup
+finishes before two ordinary payment tasks overlap in separate worlds, with
+opposing fixture writes through the actual setup HTTP helper. Cancellation waits
+only in that ordinary phase, preserving the all-task observation barrier and
+exact child cleanup. Duplicate reports retain input order and unique occurrence
+identities; their execution follows the existing exclusive phase. No production
+task, fixture, evaluator, scheduler or timeout changed.
+
+`cd agents && source venv/bin/activate && python -m pytest
+benchmarks/local_worlds_test.py benchmarks/local_worlds_controls_test.py -q`
+passes all 12 controls in 12.93 seconds. Earlier unchanged gates that launched
+bare subprocess `python3` failed against an unconfigured asdf shim. Activating
+the venv makes the original private-source, runtime-evidence and dependency
+gates pass in 14.1, 48.4 and 33.0 seconds with their watchdogs unchanged.
+These offline maintenance results earn zero cloud-slice credit.
+
 The user directed the work to continue autonomously, requested ten consecutive
 cloud slices of ten outcomes with no infrastructure failures, and required a
 temporary five-minute cloud proof backstop while retaining the normal 120-minute

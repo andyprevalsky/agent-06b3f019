@@ -136,6 +136,10 @@ agents/requirements.txt` installs the same requirements into the same venv.
 After installing backend dependencies, run `npx prisma generate` from
 `back-end/` before database setup; schema push alone does not generate the
 client used by the seed/index scripts.
+For direct agent tests, run from `agents/` with `source venv/bin/activate`;
+an absolute venv Python alone leaves subprocess `python3` on the asdf shim.
+Install the matching browser once with `python -m playwright install chromium`
+inside that activated venv before browser blackbox tests.
 
 In Conductor, use `.conductor/settings.toml`; it supplies workspace variables,
 links env files from `$CONDUCTOR_ROOT_PATH`, and runs `scripts/setup-db.sh`.
@@ -352,6 +356,24 @@ cleanup failures cannot be borrowed into this progress check. A rejected primary
 route that recovers to a completed call is distinct from a terminal request
 failure. Inspect both rather than treating every fallback as an infrastructure
 failure or counting partial output as a completion.
+For latency investigations, `stream.profile.await_s` includes the terminal
+provider wait on errors, cancellation and EOF. Do not infer wire silence from
+normalized chunk counts alone: SSE parsers can buffer tool argument deltas until
+the tool finishes. Compare raw receipt times with normalized progress when
+reconstructing an idle failure, preserving the original request and budgets.
+Rose's existing idle guard also recognizes nonempty buffered tool-argument
+fragments; these preserve the normal complete-tool output and never count as
+successful queries. HTTP attempts reset TTFT independently. Use the failure
+receipt's `buffered_tool_argument_fragments` and `last_tool_argument_s` to
+distinguish buffered progress from genuine silence; comments/usage do not
+extend these bounds. The fixed 590-second model-request deadline still applies.
+Cerebras quota rejection now records a credential/model cooldown before the
+next request uses the existing pool waterfall. Provider retry/reset evidence
+controls expiry; missing timing uses 60 seconds. Shared backend state and local
+cached reads avoid repeated probes without retries or model-budget changes.
+Health RPCs have a two-second whole-operation bound and fail open for routing;
+backend-isolated fleets still have independent cooldown domains. A recovered
+quota rejection is not a terminal model failure or a completed query by itself.
 With `--min-successful-llm`, sampling excludes catalog tasks whose declared
 checks require `zero_live_spend` and rejects an explicit pool containing one
 before provisioning. Cached-only mass-agent/demo replays cannot establish live

@@ -55,8 +55,9 @@ its idle guard. Primary quota rejection proves the route transition, not the
 cause of the later stall. The existing backend Cerebras blackbox was run with a
 read-only header observer: the live key reports a 150,000-token/minute limit.
 Its hash agrees with Render and the cloud backend env. No credentials were
-printed or changed. A higher-quota project remains an external prerequisite
-under investigation; do not claim this observer fix repairs that capacity.
+printed or changed. Higher quota could reduce frequent route fall-through;
+neither its necessity for acceptance nor its causal connection to the later
+idle failure has been established. This observer fix does not change capacity.
 
 The first owned wrong decision was acceptance. The verifier deliberately omitted
 failed requests from successful counts, then treated any count of three as a
@@ -89,6 +90,20 @@ calls, production polling or shared hot-path coordination. Read-only adversarial
 verdict preservation or recurring registration. Final-source live
 acceptance and causal resolution of the upstream no-progress event remain
 pending, so the case stays mitigated.
+
+Proof81 on e7ad0782 exercised the stronger observer live. All ten tasks had
+8–91 correlated successful queries, trustworthy FAILED verdicts and verified
+retirement, but request c4a36e37 on polar-odysseys-17f506970491 failed its idle
+guard after 256 client chunks. The canonical proof now rejected the slice
+directly, with no retrospective waiver: zero credit, cleanup_status verified,
+ten native STOPPED machines and zero pool claims. Execution and retirement took
+690.7 seconds; each bench's E2E time was 606–615 seconds. The exact failing input
+was recovered privately: 31 messages, six tools and unchanged 590/90/120-second
+request budgets. A separate exception-accounting defect in stream.profile made
+its terminal wait appear to be parsing; see the linked profiler case. Raw-wire
+progress is still needed to distinguish silent transport from buffered tool
+deltas. The live rejection proves the acceptance guard works; it does not prove
+the underlying runtime fault is fixed.
 
 ## Human feedback
 

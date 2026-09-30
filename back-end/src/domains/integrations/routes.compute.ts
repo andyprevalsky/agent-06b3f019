@@ -116,6 +116,31 @@ router.get(
   })
 );
 
+/** Read the shared model/credential-specific Cerebras quota expiry. */
+router.get(
+  '/compute-code/cerebras-key/cooldown',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) return res.status(403).json({ error: 'Internal only' });
+    try {
+      return res.json(
+        await service.getCerebrasApiKeyCooldown(
+          String(req.query.credentialId ?? ''),
+          String(req.query.model ?? '')
+        )
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === 'Invalid Cerebras credential identity or model'
+      ) {
+        return res.status(400).json({ error: error.message });
+      }
+      throw error;
+    }
+  })
+);
+
 /** POST /api/integrations/compute-code/token/rate-limited */
 router.post(
   '/compute-code/token/rate-limited',
@@ -136,6 +161,8 @@ router.post(
           userId: (body.userId as string | undefined) ?? userIdFromHeader,
           rateLimitedUntil: body.rateLimitedUntil as string | undefined,
           failureReason: body.failureReason as string | undefined,
+          credentialId: body.credentialId as string | undefined,
+          model: body.model as string | undefined,
         }
       );
       return res.json(result);

@@ -4860,6 +4860,184 @@ async def test_flash_cerebras_failure_falls_to_openrouter_qwen():
     assert any(c.kind == "content" for c in chunks)
 
 
+def test_cerebras_cooldown_preserves_provider_reset_evidence():
+    from providers.rose.cerebras import _provider_cooldown_seconds
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    cases = [({}, 60.0), ({"retry-after": "0"}, 0.0), ({"retry-after": "12.5"}, 12.5),
+             ({"retry-after": "invalid"}, 60.0), ({"retry-after": "nan"}, 60.0),
+             ({"retry-after": "1e308"}, 60.0),
+             ({"retry-after": format_datetime(datetime.now(timezone.utc) - timedelta(seconds=30))}, 0.0),
+             ({"x-ratelimit-remaining-tokens-minute": "0",
+               "x-ratelimit-reset-tokens-minute": "23"}, 23.0),
+             ({"retry-after": "10", "x-ratelimit-remaining-tokens-minute": "0",
+               "x-ratelimit-reset-tokens-minute": "25"}, 25.0)]
+    for headers, expected in cases:
+        assert _provider_cooldown_seconds(httpx.Response(429, headers=headers)) == expected
+    assert _provider_cooldown_seconds(httpx.Response(503)) is None
+    assert _provider_cooldown_seconds(httpx.Response(200, headers={
+        "x-ratelimit-remaining-tokens-minute": "0", "x-ratelimit-reset-tokens-minute": "7"})) == 7
+    assert _provider_cooldown_seconds(httpx.Response(200, headers={
+        "x-ratelimit-remaining-tokens-minute": "3"})) is None
+    assert _provider_cooldown_seconds(httpx.Response(200, headers={
+        "x-ratelimit-remaining-tokens-minute": "-inf"})) is None
+
+
+async def test_cerebras_cooldown_skips_known_quota_then_reopens():
+    import providers.rose.cerebras as cb
+    from types import SimpleNamespace
+
+    cb._reset_cerebras_cooldown_cache()
+    clock = SimpleNamespace(now=1000.0)
+    seen = {"cerebras": 0, "fallback": 0}
+    sse = "\n".join(_openai_sse([
+        {"choices": [{"delta": {"content": "fixture-response"}, "finish_reason": "stop"}]},
+        {"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}},
+    ]))
+
+    def handler(req):
+        body = json.loads(req.content)
+        assert body["messages"][-1]["content"] == "unchanged request"
+        if req.url.host == "api.cerebras.ai":
+            seen["cerebras"] += 1
+            if seen["cerebras"] == 1:
+                return httpx.Response(429, headers={"retry-after": "30"}, text="fixture rate limit")
+        elif req.url.host == "openrouter.ai":
+            seen["fallback"] += 1
+            assert body["model"] == get_pool("rose-1-flash").waterfall[0]
+        else:
+            raise AssertionError(f"unexpected host {req.url.host}")
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    with (patch("providers.rose.cerebras.load_config", lambda: SimpleNamespace()),
+          patch("providers.rose.cerebras.time", SimpleNamespace(monotonic=lambda: clock.now)),
+          patch.dict(os.environ, {"CEREBRAS_API_KEY": "offline-quota-fixture"})):
+        for _ in range(3):
+            response = await RoseClient(openrouter_key="offline-fake").collect(
+                pool="rose-1-flash", messages=[{"role": "user", "content": "unchanged request"}],
+                dump_context=False,
+            )
+            assert response.content == "fixture-response"
+        assert seen == {"cerebras": 1, "fallback": 3}, seen
+        clock.now += 31
+        await RoseClient(openrouter_key="offline-fake").collect(
+            pool="rose-1-flash", messages=[{"role": "user", "content": "unchanged request"}], dump_context=False)
+        assert seen == {"cerebras": 2, "fallback": 3}, seen
+        # Credential rotation cannot inherit the exhausted credential's state.
+        first, _ = cb._cooldown_scope("old-key", "qwen-3.8-27b")
+        second, _ = cb._cooldown_scope("new-key", "qwen-3.8-27b")
+        other_model, _ = cb._cooldown_scope("old-key", "other-model")
+        cb._remember_cooldown(first, 60)
+        assert await cb._cerebras_on_cooldown(first, "") is True
+        assert await cb._cerebras_on_cooldown(second, "") is False
+        assert await cb._cerebras_on_cooldown(other_model, "") is False
+    cb._reset_cerebras_cooldown_cache()
+
+
+async def test_cerebras_shared_cooldown_singleflight_and_failures():
+    import providers.rose.cerebras as cb
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    cb._reset_cerebras_cooldown_cache()
+    requests = []
+    reset = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+    mode = {"value": "cooled"}
+
+    async def handler(req):
+        requests.append(req)
+        await asyncio.sleep(0.01)
+        if mode["value"] == "failed":
+            raise httpx.ConnectError("offline backend unavailable")
+        assert req.method == "GET"
+        assert req.url.params["model"] == "qwen-3.8-27b"
+        assert len(req.url.params["credentialId"]) == 64
+        return httpx.Response(200, json={"rateLimitedUntil": reset})
+
+    set_mock_handler(handler)
+    with patch("providers.rose.cerebras.load_config", lambda: SimpleNamespace(
+        backend=SimpleNamespace(api_url="https://backend.invalid", api_key="offline-backend-key"))):
+        scope, key = cb._cooldown_scope("never-serialize-this-provider-key", "qwen-3.8-27b")
+        results = await asyncio.gather(*(cb._cerebras_on_cooldown(scope, key) for _ in range(10)))
+        assert all(results) and len(requests) == 1
+        assert "never-serialize-this-provider-key" not in str(requests[0].url)
+        # A shorter observed reset cannot shorten existing local cooldown.
+        until = cb._cooldowns[scope][0]
+        cb._remember_cooldown(scope, 5)
+        assert cb._cooldowns[scope][0] >= until
+        cb._reset_cerebras_cooldown_cache()
+        mode["value"] = "failed"
+        assert await cb._cerebras_on_cooldown(scope, key) is False
+        await cb._mark_cerebras_cooldown(scope, key, 45)
+        assert await cb._cerebras_on_cooldown(scope, key) is True
+        # Local mark survives a failed backend write, so the hot path has no RPC.
+        assert len(requests) == 3
+    cb._reset_cerebras_cooldown_cache()
+
+
+async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
+    import providers.rose.cerebras as cb
+    from datetime import datetime, timedelta, timezone
+
+    cb._reset_cerebras_cooldown_cache()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = []
+    reset = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+
+    async def handler(req):
+        seen.append(req.method)
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, json={"rateLimitedUntil": reset})
+
+    set_mock_handler(handler)
+    scope = ("https://backend.invalid", "a" * 64, "qwen-3.8-27b")
+    real_client = httpx.AsyncClient
+
+    def offline_client(*args, **kwargs):
+        return real_client(transport=httpx.MockTransport(handler), trust_env=False)
+
+    with (patch("providers.rose.cerebras._COOLDOWN_RPC_TIMEOUT_S", 0.04),
+          patch("providers.rose.cerebras.httpx.AsyncClient", offline_client)):
+        try:
+            first = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
+            await entered.wait()
+            sibling = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+            else:
+                raise AssertionError("caller cancellation was swallowed")
+            release.set()
+            assert await sibling is True
+            assert seen == ["GET"], seen
+            cb._reset_cerebras_cooldown_cache()
+            release.clear()
+            entered.clear()
+            # The mocked request has no IO timeout of its own. A whole-RPC
+            # budget must release all ten callers, even with shielded lookup.
+            results = await asyncio.wait_for(asyncio.gather(*(
+                cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=0.3)
+            assert results == [False] * 10
+            assert seen == ["GET", "GET"]
+            await asyncio.sleep(0)
+            assert not cb._cooldown_reads
+            await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=0.3)
+            assert await cb._cerebras_on_cooldown(scope, "offline-fake") is True
+            assert seen == ["GET", "GET", "POST"]
+        finally:
+            pending = list(cb._cooldown_reads.values())
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            cb._reset_cerebras_cooldown_cache()
+
+
 async def test_client_collect_preserves_multiple_unstructured_text_items():
     async def complete(**_kwargs):
         yield StreamChunk(
@@ -6072,6 +6250,45 @@ async def test_client_enforces_idle_timeout_after_first_productive_chunk():
     assert raised, "expected RoseDeadlineError citing idle window"
 
 
+async def test_client_buffered_tool_arguments_keep_real_progress_alive():
+    """Actual parsing must not mistake 150s of incoming tool arguments for silence."""
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    for protocol in ("openai", "anthropic", "responses"):
+        await assert_progress_case(protocol=protocol)
+        await assert_progress_case(protocol=protocol, prelude=0)
+    await assert_progress_case(prelude=0, consumer_pause=100, expected_time=250.0)
+
+
+async def test_client_buffered_progress_keeps_silence_and_outer_bounds():
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    idle = "rose.complete idle for 120.0s (deadline 590.0s)"
+    for mode in ("silence", "metadata", "comments", "empty_tool"):
+        await assert_progress_case(mode=mode, expected_error=idle, expected_time=122.55)
+    for protocol, mode in (("anthropic", "orphan_anthropic"), ("responses", "orphan_responses"),
+                           ("anthropic", "mismatched_anthropic"), ("responses", "completed_responses")):
+        await assert_progress_case(protocol=protocol, mode=mode,
+                                   expected_error=idle, expected_time=122.55)
+    await assert_progress_case(tail_silence=121, expected_error=idle, expected_time=272.55)
+    await assert_progress_case(seconds=600, expected_error="rose.complete deadline exceeded after 590.0s",
+                               expected_time=590.0)
+    await assert_progress_case(mode="reasoning")
+
+
+async def test_client_buffered_progress_resets_for_new_waterfall_attempt():
+    from _rose_stream_progress_fixture import assert_progress_case
+
+    await assert_progress_case(seconds=110, prelude=0, fallback=True,
+                               expected_error="rose.complete TTFT exceeded 90.0s", expected_time=200.0)
+
+
+async def test_client_buffered_progress_isolates_siblings_and_cancellation():
+    from _rose_stream_progress_fixture import assert_concurrent_progress_and_cancellation
+
+    await assert_concurrent_progress_and_cancellation()
+
+
 # =====================================================================
 # Cache hit rate smoke tests
 # =====================================================================
@@ -7161,6 +7378,14 @@ async def run_all_tests():
         "flash_cerebras_failure_falls_to_openrouter_qwen",
         test_flash_cerebras_failure_falls_to_openrouter_qwen,
     )
+    r.record("cerebras_cooldown_preserves_provider_reset_evidence",
+             test_cerebras_cooldown_preserves_provider_reset_evidence)
+    await r.record_async("cerebras_cooldown_skips_known_quota_then_reopens",
+                         test_cerebras_cooldown_skips_known_quota_then_reopens)
+    await r.record_async("cerebras_shared_cooldown_singleflight_and_failures",
+                         test_cerebras_shared_cooldown_singleflight_and_failures)
+    await r.record_async("cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated",
+                         test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated)
     await r.record_async(
         "client_collect_multiple_unstructured_items",
         test_client_collect_preserves_multiple_unstructured_text_items,
@@ -7225,6 +7450,14 @@ async def run_all_tests():
         "client_enforces_idle_timeout_after_first_chunk",
         test_client_enforces_idle_timeout_after_first_productive_chunk,
     )
+    await r.record_async("client_buffered_tool_arguments_keep_real_progress_alive",
+                         test_client_buffered_tool_arguments_keep_real_progress_alive)
+    await r.record_async("client_buffered_progress_keeps_silence_and_outer_bounds",
+                         test_client_buffered_progress_keeps_silence_and_outer_bounds)
+    await r.record_async("client_buffered_progress_resets_for_new_waterfall_attempt",
+                         test_client_buffered_progress_resets_for_new_waterfall_attempt)
+    await r.record_async("client_buffered_progress_isolates_siblings_and_cancellation",
+                         test_client_buffered_progress_isolates_siblings_and_cancellation)
 
     r.record(
         "cache_accounting_claude_exclusive",
@@ -7299,6 +7532,8 @@ async def run_all_tests():
     )
 
     teardown_mock()
+    r.record("build_anthropic_body_omits_effort_for_haiku", test_build_anthropic_body_omits_effort_for_haiku)
+
     return r.summary()
 
 

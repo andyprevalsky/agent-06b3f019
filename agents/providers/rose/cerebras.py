@@ -6,12 +6,19 @@ OpenRouter provider pin — OpenRouter does not route Qwen 3.8 27B to Cerebras.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import math
+import time
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 import structlog
 
-from providers.rose.errors import RoseError
+from config import load_config
+from providers.rose.errors import RoseError, RoseRateLimitError
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
@@ -22,6 +29,140 @@ from providers.rose.waterfall import _openrouter_tool_choice, _openrouter_tools
 logger = structlog.get_logger()
 
 CEREBRAS_DIRECT_POOL = "cerebras-direct"
+
+# Same shared backend cooldown contract as the funded Anthropic key. Fast local
+# reads and a single in-flight lookup keep this off the per-token hot path.
+_COOLDOWN_RECHECK_S = 15.0
+_COOLDOWN_RPC_TIMEOUT_S = 2.0
+_cooldowns: Dict[tuple, tuple] = {}
+_cooldown_reads: Dict[tuple, asyncio.Task] = {}
+
+
+def _reset_cerebras_cooldown_cache() -> None:
+    """Test-only reset; active read tasks must already have completed."""
+    _cooldowns.clear()
+    _cooldown_reads.clear()
+
+
+def _cooldown_scope(key: str, model: str):
+    credential_id = hashlib.sha256(key.encode()).hexdigest()
+    cfg = load_config()
+    backend = getattr(cfg, "backend", None)
+    base = (getattr(backend, "api_url", "") or "").rstrip("/")
+    return (base, credential_id, model), getattr(backend, "api_key", "") or ""
+
+
+def _remember_cooldown(scope: tuple, seconds: float) -> None:
+    now = time.monotonic()
+    previous = _cooldowns.get(scope, (0.0, 0.0))
+    _cooldowns[scope] = (max(previous[0], now + seconds), now + _COOLDOWN_RECHECK_S)
+    if len(_cooldowns) > 256:
+        for key, (until, check_after) in list(_cooldowns.items()):
+            if max(until, check_after) <= now:
+                _cooldowns.pop(key, None)
+
+
+async def _cerebras_on_cooldown(scope: tuple, api_key: str) -> bool:
+    now = time.monotonic()
+    until, check_after = _cooldowns.get(scope, (0.0, 0.0))
+    if now < until:
+        return True
+    if now < check_after or not scope[0] or not api_key:
+        return False
+
+    async def read_shared():
+        try:
+            async with asyncio.timeout(_COOLDOWN_RPC_TIMEOUT_S):
+                async with httpx.AsyncClient(timeout=_COOLDOWN_RPC_TIMEOUT_S) as client:
+                    response = await client.get(
+                        f"{scope[0]}/api/integrations/compute-code/cerebras-key/cooldown",
+                        headers={"X-API-Key": api_key},
+                        params={"credentialId": scope[1], "model": scope[2]},
+                    )
+            value = response.json().get("rateLimitedUntil") if response.status_code == 200 else None
+            if isinstance(value, str):
+                reset = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                seconds = (reset - datetime.now(timezone.utc)).total_seconds()
+                if seconds > 0:
+                    _remember_cooldown(scope, seconds)
+        except Exception:
+            # Health lookup failure must not disable an otherwise usable route.
+            logger.warning("rose.cerebras.cooldown_read_failed")
+        finally:
+            old = _cooldowns.get(scope, (0.0, 0.0))
+            _cooldowns[scope] = (old[0], time.monotonic() + _COOLDOWN_RECHECK_S)
+
+    task = _cooldown_reads.get(scope)
+    if task is None:
+        task = asyncio.create_task(read_shared())
+        _cooldown_reads[scope] = task
+        task.add_done_callback(lambda done: _cooldown_reads.pop(scope, None)
+                               if _cooldown_reads.get(scope) is done else None)
+    await asyncio.shield(task)
+    return time.monotonic() < _cooldowns.get(scope, (0.0, 0.0))[0]
+
+
+def _provider_cooldown_seconds(response: httpx.Response) -> Optional[float]:
+    """Honor actual provider retry/reset headers; never guess token demand."""
+    exhausted = []
+    for header, value in response.headers.items():
+        if not header.startswith("x-ratelimit-remaining-"):
+            continue
+        try:
+            remaining = float(value)
+            if math.isfinite(remaining) and remaining <= 0:
+                exhausted.append(header.removeprefix("x-ratelimit-remaining-"))
+        except ValueError:
+            pass
+    if response.status_code != 429 and not exhausted:
+        return None
+    delays = []
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        try:
+            delays.append(float(retry_after))
+        except ValueError:
+            try:
+                delays.append((parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError):
+                pass
+    for dimension in exhausted:
+        try:
+            delays.append(float(response.headers.get(f"x-ratelimit-reset-{dimension}", "")))
+        except ValueError:
+            pass
+    valid = []
+    for delay in delays:
+        if math.isfinite(delay):
+            try:
+                # Malformed huge headers must not poison local state or raise
+                # before the already-existing waterfall can recover.
+                datetime.now(timezone.utc) + timedelta(seconds=max(0.0, delay))
+            except (OverflowError, ValueError):
+                continue
+            valid.append(max(0.0, delay))
+    return max(valid) if valid else 60.0
+
+
+async def _mark_cerebras_cooldown(scope: tuple, api_key: str, seconds: float) -> None:
+    if seconds <= 0:
+        return
+    _remember_cooldown(scope, seconds)
+    if not scope[0] or not api_key:
+        return
+    until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    try:
+        async with asyncio.timeout(_COOLDOWN_RPC_TIMEOUT_S):
+            async with httpx.AsyncClient(timeout=_COOLDOWN_RPC_TIMEOUT_S) as client:
+                response = await client.post(
+                    f"{scope[0]}/api/integrations/compute-code/token/rate-limited",
+                    headers={"X-API-Key": api_key},
+                    json={"type": "cerebras", "source": "pool", "credentialId": scope[1],
+                          "model": scope[2], "rateLimitedUntil": until},
+                )
+                response.raise_for_status()
+    except Exception:
+        logger.warning("rose.cerebras.cooldown_mark_failed")
 
 
 def _strip_cerebras_cache_control(value: Any) -> Any:
@@ -100,6 +241,10 @@ async def cerebras_complete(
     model = pool_spec.cerebras_model
     if not model:
         raise RoseError(f"pool {pool_spec.name} has no cerebras_model")
+    scope, backend_key = _cooldown_scope(cerebras_key, model)
+    if await _cerebras_on_cooldown(scope, backend_key):
+        logger.info("rose.cerebras.cooldown_skip", request_id=request_id, model=model)
+        raise RoseRateLimitError("Cerebras route is on its reported quota cooldown", status=429)
     body = build_cerebras_body(
         model=model,
         messages=messages,
@@ -128,6 +273,9 @@ async def cerebras_complete(
             connect_timeout_s=per_step_timeout_s,
         ) as response:
             status = response.status_code
+            cooldown_s = _provider_cooldown_seconds(response)
+            if cooldown_s is not None:
+                await _mark_cerebras_cooldown(scope, backend_key, cooldown_s)
             if status >= 400:
                 error_body = get_error_body(response)
                 raise RoseError(

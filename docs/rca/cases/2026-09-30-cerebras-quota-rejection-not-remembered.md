@@ -1,0 +1,91 @@
+---
+id: 2026-09-30-cerebras-quota-rejection-not-remembered
+date: 2026-09-30
+title: Every new agent request retried a known rate-limited Cerebras credential
+surface: infra
+component: cerebras-route-admission
+classification: our-bug
+problem_class: concurrency-inefficiency
+first_bad_boundary: agents/providers/rose/cerebras.py::cerebras_complete discarded quota/reset state before the next request selected its primary route
+symptoms:
+  - repeated Cerebras HTTP429 across a ten-bench fleet
+  - recovered calls still probed the known unavailable primary credential
+tags:
+  - cerebras
+  - rate-limit
+  - cloud-fleet
+  - cooldown
+sources:
+  - PR #1299
+  - fleet run 20260930-172350-24141
+  - commit e7ad0782f4791827ef86dfe55cac3abe91c0cf13
+repro: agents/tests/blackbox/rose.blackbox.py:test_cerebras_cooldown_skips_known_quota_then_reopens
+status: fixed
+---
+
+## Problem
+
+Proof80's ten-bench fleet recorded 116 Cerebras429 events, including111 recovered
+fallthroughs. The existing same-pool OpenRouter waterfall worked, but every new
+request still probed the exhausted primary. No higher-quota credential exists;
+the user asked to avoid known rate limits before issuing the next request.
+
+## Diagnosis
+
+Cerebras completion kept no quota expiry, unlike the existing shared funded
+Anthropic-key cooldown. An unchanged registered three-call fixture against
+e7ad0782 issues three primary requests despite the first429 with Retry-After30;
+the required behavior is one primary probe and three normal waterfall results.
+The fixture fails before and passes after, then advances time and verifies that
+the primary becomes eligible again. Inputs and waterfall models are unchanged.
+
+Archive searches `Cerebras 429 cooldown` and `rate limited token never marked`
+found the April17 missing-DB-marker and July28 shortened-cooldown cases. Their
+solution/feedback require persisted selection state and monotonic provider reset
+times. This is the same missing-admission-state class in a separate provider.
+It does not explain proof80/81's terminal idle request, which remains unproven.
+
+## Solution
+
+Remember429 and explicit exhausted-quota response headers before awaiting shared
+backend persistence. Subsequent requests skip the cooled credential and use the
+existing waterfall. State is scoped by backend, credential SHA256 and model;
+raw credentials never enter the state API or database. Reuse the Integration
+sentinel pattern without a migration. An atomic conditional timestamp update
+preserves the largest expiry across concurrent creators and shorter responses.
+
+Honor valid Retry-After/date and exhausted-dimension reset evidence, including
+zero/past expiry. Missing/invalid timing alone uses60 seconds; huge invalid
+numbers cannot poison admission state. This uses observed capacity rather than
+guessing prompt tokens or modifying generation budgets.
+
+Shared reads use15-second caching and one in-flight lookup per scope. Entire
+GET/POST operations have a2-second asyncio budget, including trickled response
+bodies; caller cancellation cannot cancel a sibling's shared lookup. Backend
+failure keeps local cooldown and ordinary fallback available. RPC time remains
+inside the original model-request guard and is not described as instantaneous.
+
+Registered Rose cases cover unchanged-request skip/reopen, credential/model
+isolation, singleflight, cancellation, backend failure, valid/invalid reset
+headers and bounded reads/writes. The autodiscovered backend unit runs ten real
+concurrent creators against an isolated local PostgreSQL database, proves the
+maximum expiry, validates scope/input and deletes its exact test sentinel.
+TypeScript compilation and the deploy-owned Rose/LLM runner validate integration.
+
+Workers sharing one backend/database share expiry. Fleet-isolated databases are
+separate domains, and already-in-flight probes may still return429. Backend TS
+inference paths are outside this agent-side admission change. This neither
+promises globally zero429 nor turns a terminal model failure into valid proof.
+At10,000 agents the hot path has no RPC during known cooldown; clear-state reads
+are cached/singleflight and writes occur only when quota evidence changes.
+
+## Human feedback
+
+Use the existing waterfall to preemptively avoid rate-limited providers. Fix
+infrastructure; keep task inputs, models, evaluator criteria and timeout caps.
+Credit only genuine completed live queries and fully evaluated/retired benches.
+
+## Reusable lesson
+
+Provider fallback must remember reported unavailability where the next request
+selects its route, while expiry updates preserve the longest valid reset.

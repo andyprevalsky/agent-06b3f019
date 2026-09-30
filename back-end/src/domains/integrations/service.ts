@@ -21,9 +21,11 @@ import {
 } from '../../providers/claudeCredentials';
 import {
   fetchComputeTokenForUser,
+  getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
+  markCerebrasApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
@@ -764,6 +766,8 @@ export async function markComputeTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    credentialId?: string;
+    model?: string;
   }
 ) {
   if (type === 'claude') {
@@ -779,8 +783,18 @@ export async function markComputeTokenRateLimited(
     await markAnthropicApiKeyOnCooldown(params.failureReason ?? 'rate_limit');
     return { ok: true, type, rateLimitedUntil: null };
   }
-  throw new Error('Invalid type. Must be "claude", "gpt", or "anthropic".');
+  if (type === 'cerebras') {
+    await markCerebrasApiKeyOnCooldown(
+      params.credentialId ?? '',
+      params.model ?? '',
+      params.rateLimitedUntil ?? ''
+    );
+    return { ok: true, type, rateLimitedUntil: params.rateLimitedUntil };
+  }
+  throw new Error('Invalid type. Must be "claude", "gpt", "anthropic", or "cerebras".');
 }
+
+export { getCerebrasApiKeyCooldown };
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.
  *  Consumers must require both configured=true and onCooldown=false before

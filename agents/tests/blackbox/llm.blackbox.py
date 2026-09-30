@@ -6898,6 +6898,77 @@ async def test_call_llm_structured_streaming_rose_cancelled_error_propagates():
     assert raised
 
 
+async def test_structured_stream_profile_accounts_for_terminal_waits():
+    """A failing next-chunk wait is accounted for, including after 256 chunks."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.errors import RoseDeadlineError
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    for ending in ("deadline", "error", "cancelled", "eof"):
+        clock = [0.0]
+        closed = []
+        profiles = []
+        terminal_wait = 8.0 if ending == "eof" else 120.0
+
+        class FakeRoseClient:
+            async def complete(self, **kwargs):
+                try:
+                    clock[0] += 0.04
+                    yield StreamChunk(kind="metadata", data={"actual_model": "qwen/qwen3.8-27b"})
+                    for _ in range(254 if ending == "eof" else 255):
+                        clock[0] += 0.04
+                        yield StreamChunk(kind="reasoning", data={"text": "thinking "})
+                    if ending == "eof":
+                        clock[0] += 0.04
+                        yield StreamChunk(kind="content", data={"text": '{"response":"ok","tool_calls":[]}'})
+                    clock[0] += terminal_wait
+                    if ending == "deadline":
+                        raise RoseDeadlineError("rose.complete idle for 120.0s (deadline 590.0s)")
+                    if ending == "error":
+                        raise RuntimeError("provider read failed")
+                    if ending == "cancelled":
+                        raise asyncio.CancelledError()
+                finally:
+                    closed.append(True)
+
+        async def on_chunk(text, tokens):
+            clock[0] += 0.01
+
+        def capture(event, **fields):
+            if event == "stream.profile":
+                profiles.append(fields)
+
+        expected_error = {"deadline": ValueError, "error": RuntimeError, "cancelled": asyncio.CancelledError}.get(ending)
+        with (
+            patch("helpers.llm._safe_time", side_effect=lambda: clock[0]),
+            patch("helpers.llm.RoseClient", FakeRoseClient),
+            patch("helpers.llm.logger.info", side_effect=capture),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            try:
+                response, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": "q"}],
+                    model="rose-labs/rose-1-flash",
+                    temperature=1,
+                    max_tokens=8192,
+                    response_model=create_agent_action_model([]),
+                    on_chunk=on_chunk,
+                    call_site="profile-terminal-wait",
+                )
+            except (ValueError, RuntimeError, asyncio.CancelledError) as error:
+                assert expected_error is not None and isinstance(error, expected_error)
+            else:
+                assert expected_error is None
+                assert response.response == ("thinking " * 254).strip() + "\n\nok"
+        assert closed == [True]
+        assert len(profiles) == 1
+        profile = profiles[0]
+        assert profile["chunk_count"] == 256
+        assert profile["await_s"] == round(256 * 0.04 + terminal_wait, 2), profile
+        assert profile["parse_s"] < 0.02, profile
+
+
 async def test_call_llm_structured_streaming_openrouter_cancelled_error_propagates():
     """OpenRouter stream cancellation must not become a successful empty AgentAction."""
     from unittest.mock import MagicMock, patch
@@ -8572,6 +8643,10 @@ async def run_all_tests():
         test_call_llm_structured_streaming_rose_cancelled_error_propagates,
     )
     await r.record_async(
+        "structured_stream_profile_accounts_for_terminal_waits",
+        test_structured_stream_profile_accounts_for_terminal_waits,
+    )
+    await r.record_async(
         "stream_openrouter_cancelled_propagates",
         test_call_llm_structured_streaming_openrouter_cancelled_error_propagates,
     )
@@ -8705,6 +8780,11 @@ async def run_all_tests():
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
         test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
     )
+    await r.record_async("set_response_schema_activity_cache_lookup_error_falls_through_to_live", test_set_response_schema_activity_cache_lookup_error_falls_through_to_live)
+    r.record("verifier_file_evidence_caps_nondeliverable_shortlist_small", test_verifier_file_evidence_caps_nondeliverable_shortlist_small)
+    r.record("verifier_file_evidence_keeps_full_top100_deliverable_json", test_verifier_file_evidence_keeps_full_top100_deliverable_json)
+    r.record("build_verifier_context_messages_skips_budget_for_declared_evaluator", test_build_verifier_context_messages_skips_budget_for_declared_evaluator)
+
     return r.summary()
 
 

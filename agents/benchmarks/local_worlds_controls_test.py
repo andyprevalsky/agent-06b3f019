@@ -256,8 +256,8 @@ def test_local_worlds_preserves_duplicate_task_occurrences():
         assert [row["task"] for row in rows] == tasks
         for field in ("ordinal", "run_id", "context_dir", "pid", "native_identity"):
             assert len({row[field] for row in rows}) == 3, field
-        assert [p.task for p in fixture.processes] == tasks
-        assert fixture.max_live == 2
+        assert [p.task for p in fixture.processes] == [SETUP, SETUP, ABANDON]
+        assert fixture.max_live == 1
         assert all(row["status"] == "passed" for row in rows)
 
 

@@ -67,6 +67,7 @@ from providers.rose.schema import (
     build_openai_response_format,
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.streaming import _stream_progress
 from providers.rose.types import (
     ChunkKind,
     ClaudeAuthContext,
@@ -1067,6 +1068,8 @@ class RoseClient:
         last_chunk_kind: Optional[str] = None
         chunk_counts: Dict[str, int] = {}
         active_route = "not_started"
+        buffered_tool_argument_fragments = 0
+        last_tool_argument_at: Optional[float] = None
 
         def _elapsed_s(timestamp: Optional[float]) -> Optional[float]:
             return round(timestamp - started, 3) if timestamp is not None else None
@@ -1080,6 +1083,8 @@ class RoseClient:
                 "last_chunk_s": _elapsed_s(last_chunk_at),
                 "last_chunk_kind": last_chunk_kind,
                 "chunk_counts": dict(chunk_counts),
+                "buffered_tool_argument_fragments": buffered_tool_argument_fragments,
+                "last_tool_argument_s": _elapsed_s(last_tool_argument_at),
             }
 
         async def _guarded(
@@ -1098,26 +1103,41 @@ class RoseClient:
               full deadline before the loop can retry. Hitting the idle
               window raises `RoseDeadlineError`; the outer deadline still
               caps total time.
+
+            Nonempty buffered tool-argument fragments are also real progress.
+            They refresh the same idle window without emitting partial tools.
+            Each HTTP attempt resets TTFT; metadata/keepalives do not refresh it.
             """
             nonlocal first_chunk_at, first_contentful_at, first_productive_kind
             nonlocal last_chunk_at, last_chunk_kind, last_heartbeat
+            nonlocal buffered_tool_argument_fragments, last_tool_argument_at
             ttft_budget = ttft_override if ttft_override is not None else ttft_timeout_s
             it = source.__aiter__()
             saw_productive_chunk = False
+            attempt_started = time.monotonic()
+            last_progress_at: Optional[float] = None
             productive_kinds = {"content", "reasoning", "tool_call", "codex_reasoning_item"}
+
+            def note_progress(kind: str, size: int) -> None:
+                nonlocal saw_productive_chunk, attempt_started, last_progress_at
+                nonlocal buffered_tool_argument_fragments, last_tool_argument_at
+                now = time.monotonic()
+                if kind == "attempt":
+                    attempt_started = now
+                    saw_productive_chunk = False
+                    last_progress_at = None
+                    last_tool_argument_at = None
+                elif kind == "tool_arguments" and size > 0:
+                    saw_productive_chunk = True
+                    last_progress_at = now
+                    last_tool_argument_at = now
+                    buffered_tool_argument_fragments += 1
+
             while True:
                 r = remaining()
                 if r <= 0:
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
-                if saw_productive_chunk:
-                    # Per-chunk idle ceiling once content has started. None
-                    # means "let the deadline handle it" (legacy behavior);
-                    # a finite value catches silent half-closes faster.
-                    progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
-                else:
-                    progress_timeout = ttft_budget
-                wait_timeout = min(r, progress_timeout)
-                outer_deadline_limited = r <= progress_timeout
+                wait_started = time.monotonic()
                 # Slice long waits so Temporal heartbeats keep firing during
                 # TTFT / mid-stream idle gaps. Without this, a single
                 # wait_for up to ttft_timeout_s (90s) or idle_timeout_s (120s)
@@ -1125,16 +1145,35 @@ class RoseClient:
                 # cancel the activity mid-call (seen as "activity Heartbeat
                 # timeout" on dag_reasoning while provider_read was still
                 # blocked on the first token).
-                wait_deadline = time.monotonic() + wait_timeout
                 chunk = None
                 timed_out = False
                 # Do NOT use asyncio.wait_for for sliced waits — on timeout it
                 # cancels the pending __anext__ and permanently closes the
                 # upstream async generator. Use asyncio.wait so heartbeats can
                 # fire while the same __anext__ awaitable stays outstanding.
-                next_item = asyncio.ensure_future(it.__anext__())
+                progress_token = _stream_progress.set(note_progress)
+                try:
+                    next_item = asyncio.ensure_future(it.__anext__())
+                finally:
+                    # The pending task inherits this request's callback; the
+                    # consumer and concurrent sibling requests never do.
+                    _stream_progress.reset(progress_token)
                 try:
                     while True:
+                        if saw_productive_chunk:
+                            progress_timeout = idle_timeout_s
+                            # Preserve consumer backpressure tolerance between
+                            # normalized chunks, while refreshing a pending
+                            # chunk only from actual parser progress.
+                            progress_deadline = (
+                                max(wait_started, last_progress_at or wait_started) + progress_timeout
+                                if progress_timeout is not None else started + deadline_s
+                            )
+                        else:
+                            progress_timeout = ttft_budget
+                            progress_deadline = attempt_started + ttft_budget
+                        outer_deadline_limited = started + deadline_s <= progress_deadline
+                        wait_deadline = min(started + deadline_s, progress_deadline)
                         slice_timeout = min(
                             _HEARTBEAT_INTERVAL_S,
                             wait_deadline - time.monotonic(),
@@ -1155,9 +1194,8 @@ class RoseClient:
                                 f"rose.complete waiting call_site={call_site} request_id={rid}"
                             )
                             last_heartbeat = now
-                        if now >= wait_deadline:
-                            timed_out = True
-                            break
+                        # Recompute before declaring expiry: the parser may
+                        # have consumed arguments without yielding a chunk.
                 finally:
                     # If the chunk landed in the same tick as the deadline,
                     # consume it instead of reporting a stall (CodeRabbit #1260).
@@ -1220,10 +1258,17 @@ class RoseClient:
                             chunk_counts=dict(chunk_counts),
                         )
                     saw_productive_chunk = True
+                    last_progress_at = now
                 if now - last_heartbeat >= _HEARTBEAT_INTERVAL_S:
                     _safe_heartbeat(f"rose.complete call_site={call_site} request_id={rid}")
                     last_heartbeat = now
+                yielded_at = time.monotonic()
                 yield chunk
+                if not saw_productive_chunk:
+                    # TTFT measures provider waits, excluding time a downstream
+                    # consumer deliberately keeps this generator suspended.
+                    # The fixed whole-call deadline still includes that time.
+                    attempt_started += time.monotonic() - yielded_at
 
         def _with_timing_if_done(chunk: StreamChunk) -> StreamChunk:
             if chunk.kind != "done":

@@ -23250,6 +23250,8 @@ async def run_all_tests():
         "browser_tool_events_declare_action_type",
         test_browser_tool_events_declare_action_type,
     )
+    await r.record_async("browser_agent_yields_when_ownership_is_already_user", test_browser_agent_yields_when_ownership_is_already_user)
+
     return r.all_passed
 
 if __name__ == "__main__":
