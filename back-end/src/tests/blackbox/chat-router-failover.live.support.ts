@@ -154,11 +154,13 @@ export async function startedWorkflowGoal(workflowId: string): Promise<string | 
 }
 
 /**
- * OpenRouter did not deliver this request's first content inside the budget:
- * no response headers at all, or a 200 whose first content came late or never.
- * Any other status, or events without the host field, is ours to fix.
+ * OpenRouter did not deliver this request's first content inside the budget
+ * after the request reached it: no response headers at all, or a 200 whose
+ * first content came late or never. A connect that never completed, any other
+ * status, or events without the host field is ours to fix.
  */
 function isOpenRouterSideMiss(request: LiveObservation, budgetMs: number): boolean {
+  if (request.connectStartMs !== undefined && request.connectedMs === undefined) return false;
   if (request.status === undefined) return true;
   if (request.status !== 200) return false;
   if (request.firstEventMs !== undefined && request.upstreamProvider === undefined) return false;
@@ -194,7 +196,49 @@ export interface LiveSample {
   goal?: string;
 }
 
-function assertServedOnFirstAttempt(sample: LiveSample, correctedAddress: RegExp): void {
+/** The address the user corrected the run to, and the one they rejected. */
+export interface GoalAnchor {
+  corrected: RegExp;
+  rejected: RegExp;
+}
+
+const LOCATIVE = String.raw`\b(?:near|around|close to|in|at|by|of|anchor(?:ed)? on)\s+`;
+const NEGATION = /\b(?:not|never|avoid|instead|rather|except|excluding)\b|n't\b/i;
+
+/** Whether `goal` places the search at `place`, not negated in its clause. */
+function anchorsOn(goal: string, place: RegExp): boolean {
+  for (const match of goal.matchAll(new RegExp(LOCATIVE + `(?:${place.source})`, 'gi'))) {
+    const clause =
+      goal
+        .slice(0, match.index)
+        .split(/[.;:!?\n—]/)
+        .pop() ?? '';
+    const lead = clause.trim().split(/\s+/).slice(-4).join(' ');
+    if (!NEGATION.test(lead)) return true;
+  }
+  return false;
+}
+
+/**
+ * Why `goal` does not send the re-planned run to the corrected address, or
+ * undefined. The replayed context still says not to anchor on that address and
+ * names the rejected one, so a goal that merely mentions it proves nothing.
+ */
+export function goalAnchorFailure(
+  goal: string | undefined,
+  anchor: GoalAnchor
+): string | undefined {
+  if (!goal) return 'no re-plan goal was started';
+  if (!anchorsOn(goal, anchor.corrected)) {
+    return `the re-plan goal does not anchor on ${anchor.corrected.source}: ${goal}`;
+  }
+  if (anchorsOn(goal, anchor.rejected)) {
+    return `the re-plan goal still anchors on the rejected ${anchor.rejected.source}: ${goal}`;
+  }
+  return undefined;
+}
+
+function assertServedOnFirstAttempt(sample: LiveSample, goalAnchor: GoalAnchor): void {
   assert.equal(
     sample.outcome.kind,
     'escalated',
@@ -208,11 +252,7 @@ function assertServedOnFirstAttempt(sample: LiveSample, correctedAddress: RegExp
       `(${describeLiveRequests(sample.glm)})`
   );
   assert.deepEqual(sample.alerts, [], 'a served turn must not raise an error alert');
-  assert.match(
-    sample.goal ?? '',
-    correctedAddress,
-    'the re-plan goal must carry the corrected address'
-  );
+  assert.equal(goalAnchorFailure(sample.goal, goalAnchor), undefined);
 }
 
 /** Every GLM request that did not serve the turn missed on OpenRouter's side. */
@@ -233,12 +273,12 @@ export async function probeLiveFailover(params: {
   runSample: (label: string) => Promise<LiveSample>;
   budgetMs: number;
   reprobeDelayMs: number;
-  correctedAddress: RegExp;
+  goalAnchor: GoalAnchor;
 }): Promise<void> {
   const first = await params.runSample('sample 1');
   let firstMiss: unknown;
   try {
-    assertServedOnFirstAttempt(first, params.correctedAddress);
+    assertServedOnFirstAttempt(first, params.goalAnchor);
     return;
   } catch (error) {
     if (!missedOnOpenRouterSide(first, params.budgetMs)) throw error;
@@ -249,7 +289,7 @@ export async function probeLiveFailover(params: {
   await new Promise((resolve) => setTimeout(resolve, params.reprobeDelayMs));
   const second = await params.runSample('sample 2');
   try {
-    assertServedOnFirstAttempt(second, params.correctedAddress);
+    assertServedOnFirstAttempt(second, params.goalAnchor);
   } catch (error) {
     throw new Error(
       `live GLM failover missed in two samples ${delayS}s apart. ` +

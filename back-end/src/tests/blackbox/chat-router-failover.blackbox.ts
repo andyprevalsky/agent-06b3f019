@@ -4,8 +4,9 @@
  * Cerebras router stalls and the turn is served by the OpenRouter failover.
  *
  * Prod agent e8f2279b-3ec9-4bd8-bbb4-d659b2e9cdf6 (2026-10-01). After a
- * completed hot-yoga run the user replied "wrong address, its the 88 howard
- * one" and got "Sorry — I couldn't generate a response just now."
+ * completed hot-yoga run the user replied "wrong address, its the 88 harlow
+ * one" (fixture stand-in for their building) and got "Sorry — I couldn't
+ * generate a response just now."
  *
  *   POST message ─> routeUserMessage ─> handleChatMessage ─> callRouterLlm
  *     Cerebras: no content inside its 1.2s stall guard
@@ -60,6 +61,8 @@ import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/trans
 import {
   assertProbesConfiguredOpenRouterAccount,
   describeLiveRequests,
+  type GoalAnchor,
+  goalAnchorFailure,
   type LiveObservation,
   type LiveSample,
   observedLiveFetch,
@@ -108,6 +111,11 @@ const streams = JSON.parse(
 
 const FOLLOW_UP = context.messages[context.messages.length - 1];
 const PRIOR_MESSAGES = context.messages.slice(0, -1);
+/** The follow-up moves the run from the Irving, TX home anchor to 88 Harlow. */
+const CORRECTED_GOAL: GoalAnchor = {
+  corrected: /88 Harlow\b/,
+  rejected: /(?:1000 )?Westward Oak|Irving|Las Colinas/,
+};
 /**
  * Router input the prod request carried: system prompt + 29 transcript turns.
  * Only the transcript is pinned by size; the router system prompt is code and
@@ -456,7 +464,7 @@ async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
       /88 Harlow/,
       'router reasoning must carry the corrected address'
     );
-    assert.match(goal ?? '', /88 Harlow/, 'the re-plan goal must carry the corrected address');
+    assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
     assert.equal(agent.status, 'ACTIVE');
     assert.equal(agent.temporalWorkflowId, seeded.agentId, 'Temporal accepted the re-plan');
     process.stdout.write(
@@ -598,7 +606,7 @@ async function testLiveFailoverEscalates(): Promise<void> {
     runSample: runLiveSample,
     budgetMs: FAILOVER_PRE_CONTENT_BUDGET_MS,
     reprobeDelayMs: LIVE_REPROBE_DELAY_MS,
-    correctedAddress: /88 harlow/i,
+    goalAnchor: CORRECTED_GOAL,
   });
 }
 
