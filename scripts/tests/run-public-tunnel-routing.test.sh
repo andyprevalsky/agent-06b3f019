@@ -24,7 +24,8 @@
 #   case 5 — edge always 000              → NOT routing, bounded by the timeout
 #   case 6 — edge 000 then 502            → routing (recovers within the window)
 #   case 7 — run.sh actually recycles a dead tunnel and backs off
-#   case 8 — prefers IPv4 (curl -4) + localtunnel fallback + NXDOMAIN skip
+#   case 8 — prefers IPv4 (curl -4) + localtunnel fallback
+#   case 12 — a record published after the host resolver cached NXDOMAIN routes
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -41,6 +42,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # preference is passed as curl args through that helper (`-4`), not inlined as
 # `curl -4` inside cloudflare_tunnel_edge_is_routing.
 awk '/^supervised_edge_probe\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
+awk '/^cloudflare_quick_tunnel_edge_ipv4s\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 awk '/^public_tunnel_hostname_resolves\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 grep -q 'supervised_edge_probe' "$TMP/fn.sh" \
@@ -78,11 +80,9 @@ STUB
 
   TMPDIR_FOR_STUB="$TMP" PATH="$TMP:$PATH" \
     CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$timeout" \
-    CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK=1 \
     bash -c "
       set -euo pipefail
       CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS=$timeout
-      CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK=1
       source '$TMP/fn.sh'
       cloudflare_tunnel_edge_is_routing https://stub.trycloudflare.com
     "
@@ -146,9 +146,7 @@ grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/start.sh" \
   || fail "case 7: tunnel startup no longer verifies the edge routes"
 echo "PASS: run.sh bounds, backs off, recycles, and de-registers dead quick tunnels"
 
-# --- case 8: NXDOMAIN skip + localtunnel last-resort fallback --------------
-grep -q 'skipping remaining quick-tunnel attempts' "$RUN_SH" \
-  || fail "case 8: run.sh no longer skips remaining quick tunnels on NXDOMAIN"
+# --- case 8: localtunnel last-resort fallback ------------------------------
 grep -q 'start_localtunnel_public_tunnel' "$RUN_SH" \
   || fail "case 8: run.sh no longer defines localtunnel fallback"
 awk '/^start_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_public.sh"
@@ -168,7 +166,7 @@ if grep -nE '^\s*exit 1\s*$' "$TMP/start_ngrok.sh" | grep -vq 'ngrok_public_tunn
 fi
 ! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
   || fail "case 8: start_ngrok_public_tunnel still bare-exits on missing authtoken"
-echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
+echo "PASS: localtunnel fallback is wired into start_public_tunnel"
 
 # --- case 9: ngrok mode survives a reserved domain held by another session ---
 # RCA cement (2026-10-01). Cloud VMs booted from one environment snapshot share
@@ -362,5 +360,91 @@ for name in back-end front-end agents; do
   done
 done
 echo "PASS: only an isolated run's own account-less tunnel is load-bearing"
+
+# --- case 12: a record published after the host resolver cached NXDOMAIN ---
+# RCA cement (2026-10-01). cloudflared prints a quick-tunnel hostname a few seconds
+# before Cloudflare publishes its record. The edge probe resolved it in that window,
+# the VM's caching resolver kept serving NXDOMAIN for trycloudflare.com's 60s
+# negative TTL, and the isolated run's 10s probe discarded a healthy tunnel (3 of 4
+# isolated stacks that day). The smoke stack then lost the shared ngrok fallback to
+# a concurrent lane and fronted /test_payment with localtunnel, whose password page
+# held every payment task's cloud browser until the task timed out.
+#
+# Stubs model that cache: the record publishes PUBLISH_AFTER seconds into the case,
+# and a host-resolver lookup of the new hostname made before then is cached as
+# NXDOMAIN for the rest of the case. The edge answers by SNI at its anycast
+# addresses regardless of DNS, exactly like Cloudflare's.
+mkdir -p "$TMP/dns/bin"
+cat > "$TMP/dns/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DNS_STATE/edge_args"
+[ "$EDGE_MODE" = dead ] && { printf '530'; exit 0; }
+case "$*" in
+  *--resolve*) printf '502' ;;
+  *) [ -f "$DNS_STATE/poisoned" ] && printf '000' || printf '502' ;;
+esac
+STUB
+for tool in getent dig; do
+  cat > "$TMP/dns/bin/$tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> "$DNS_STATE/host_resolver_calls"
+case "$*" in
+  *api.trycloudflare.com*)
+    [ "$EDGE_NAME" = unresolvable ] && exit 2
+    [ "$(basename "$0")" = getent ] && printf '104.16.231.132 STREAM api.trycloudflare.com\n104.16.230.132 STREAM\n' \
+      || printf '104.16.231.132\n104.16.230.132\n'
+    exit 0
+    ;;
+esac
+[ $(( $(date +%s) - $(cat "$DNS_STATE/started") )) -ge "$PUBLISH_AFTER" ] || : > "$DNS_STATE/poisoned"
+[ -f "$DNS_STATE/poisoned" ] && exit 2
+case "$(basename "$0")" in
+  getent) printf '104.16.230.132 STREAM race.trycloudflare.com\n' ;;
+  dig) printf '104.16.230.132\n' ;;
+esac
+STUB
+done
+chmod +x "$TMP/dns/bin/"*
+
+run_dns_case() { # run_dns_case <edge mode> <edge name> <timeout seconds>
+  rm -rf "$TMP/dns/state"; mkdir -p "$TMP/dns/state"
+  date +%s > "$TMP/dns/state/started"
+  PATH="$TMP/dns/bin:$PATH" DNS_STATE="$TMP/dns/state" \
+    EDGE_MODE="$1" EDGE_NAME="$2" PUBLISH_AFTER=3 \
+    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$3" CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=1 \
+    bash -c 'set -euo pipefail; source "$1"; cloudflare_tunnel_edge_is_routing https://race.trycloudflare.com' \
+    _ "$TMP/fn.sh" > "$TMP/dns/state/out"
+}
+resolved_new_hostname() {
+  grep -q 'race.trycloudflare.com' "$TMP/dns/state/host_resolver_calls" 2>/dev/null
+}
+
+run_dns_case routed resolvable 10 \
+  || fail "case 12a: a routing tunnel probed before its record publishes must pass ($(cat "$TMP/dns/state/out"))"
+resolved_new_hostname \
+  && fail "case 12a: the probe resolved the new hostname and seeded the cache: $(cat "$TMP/dns/state/host_resolver_calls")"
+grep -q -- '--resolve race.trycloudflare.com:443:104.16.230.132,104.16.231.132' "$TMP/dns/state/edge_args" \
+  || fail "case 12a: the probe must reach the quick-tunnel edge directly: $(cat "$TMP/dns/state/edge_args" 2>/dev/null)"
+grep -q 'edge 104.16.230.132,104.16.231.132: HTTP 502' "$TMP/dns/state/out" \
+  || fail "case 12a: the probe must log each edge result: $(cat "$TMP/dns/state/out")"
+echo "PASS: a tunnel probed before its record publishes routes without seeding the resolver cache"
+
+started=$SECONDS
+if run_dns_case dead resolvable 3; then
+  fail "case 12b: a pinned edge answering 530 (no tunnel route) must NOT count as routing"
+fi
+elapsed=$(( SECONDS - started ))
+[ "$elapsed" -le 9 ] || fail "case 12b: a dead tunnel must fail at the probe deadline, ran ${elapsed}s"
+resolved_new_hostname \
+  && fail "case 12b: the probe resolved a dead tunnel's hostname: $(cat "$TMP/dns/state/host_resolver_calls")"
+echo "PASS: a dead tunnel at the pinned edge is still rejected (${elapsed}s)"
+
+run_dns_case routed unresolvable 10 \
+  || fail "case 12c: without edge addresses the plain probe must still run ($(cat "$TMP/dns/state/out"))"
+grep -q -- '--resolve' "$TMP/dns/state/edge_args" \
+  && fail "case 12c: no edge addresses means nothing to pin: $(cat "$TMP/dns/state/edge_args")"
+grep -q 'No edge addresses for api.trycloudflare.com; probing race.trycloudflare.com through DNS' "$TMP/dns/state/out" \
+  || fail "case 12c: the unpinned probe must say why it uses DNS: $(cat "$TMP/dns/state/out")"
+echo "PASS: an unresolvable edge name falls back to the plain probe"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

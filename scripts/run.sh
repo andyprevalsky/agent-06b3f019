@@ -1474,11 +1474,6 @@ CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
 CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
 
-# True when the tunnel hostname has at least one A/AAAA record. trycloudflare
-# quick tunnels sometimes print a hostname that never gets DNS (NXDOMAIN from
-# 1.1.1.1 / 8.8.8.8 / local resolver) even after "Registered tunnel connection".
-# Curl then reports 000 forever; fail that case early instead of burning the
-# full edge timeout × retry budget.
 # One Cloudflare-edge status probe, supervised from the parent shell.
 #
 # Prints the HTTP status ('' or 000 when unreachable). Extra args are passed to
@@ -1529,26 +1524,43 @@ public_tunnel_hostname_resolves() {
     return 1
 }
 
+# The anycast addresses Cloudflare serves trycloudflare.com from, read through
+# the zone's long-lived API name.
+#
+# The edge probe must never resolve a new quick-tunnel hostname itself:
+# cloudflared prints it a few seconds before Cloudflare publishes the record, and
+# any recursive resolver asked in that window (the host's, 1.1.1.1, dns.google)
+# caches the NXDOMAIN for the zone's 60s negative TTL, longer than the probe. The
+# edge routes by SNI, so probing these addresses measures the tunnel without
+# creating that cache entry; DNS is first exercised by the public-tunnel smoke,
+# long after publication.
+cloudflare_quick_tunnel_edge_ipv4s() {
+    local name="api.trycloudflare.com"
+    if command -v getent >/dev/null 2>&1; then
+        getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true
+    elif command -v dig >/dev/null 2>&1; then
+        dig +short A "$name" 2>/dev/null | grep -E '^[0-9.]+$' | sort -u | paste -sd, - || true
+    fi
+}
+
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
     local started=$SECONDS
-    local dns_grace_seconds="${CLOUDFLARE_TUNNEL_DNS_GRACE_SECONDS:-15}"
-    while [ "$SECONDS" -lt "$deadline" ]; do
-        # NXDOMAIN fast-fail is trycloudflare-specific: account-less quick tunnels
-        # can print a hostname that never gets public DNS. Other providers
-        # (ngrok/loca.lt) resolve normally; skip this gate for them so unit tests
-        # with stub hostnames and non-CF providers keep exercising the HTTP path.
-        if [ "${CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK:-0}" != "1" ] &&
-            [[ "$url" == *".trycloudflare.com" || "$url" == *".trycloudflare.com/"* ]] &&
-            ! public_tunnel_hostname_resolves "$url"; then
-            # Hostname never entered DNS — no amount of curling will help.
-            if [ $((SECONDS - started)) -ge "$dns_grace_seconds" ]; then
-                return 1
-            fi
-            sleep "$retry_seconds"
-            continue
+    local host="${url#https://}"
+    host="${host%%/*}"
+    local -a pinned_address=()
+    local pinned=0 edge_addresses=""
+    if [[ "$host" == *".trycloudflare.com" ]]; then
+        edge_addresses="$(cloudflare_quick_tunnel_edge_ipv4s)"
+        if [ -n "$edge_addresses" ]; then
+            pinned_address=(--resolve "$host:443:$edge_addresses")
+            pinned=1
+        else
+            echo "   No edge addresses for api.trycloudflare.com; probing $host through DNS."
         fi
+    fi
+    while [ "$SECONDS" -lt "$deadline" ]; do
         # --noproxy '*': this probe must measure the Cloudflare edge itself, not
         # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
         # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
@@ -1566,9 +1578,12 @@ cloudflare_tunnel_edge_is_routing() {
         # wedged edge probe must not block quick-tunnel recycling / ngrok
         # fallback. Merge keeps both protections — IPv4-first for correctness,
         # supervision for liveness.
-        status="$(supervised_edge_probe "$url" -4)"
-        if [ -z "$status" ] || [ "$status" = "000" ]; then
+        status="$(supervised_edge_probe "$url" -4 ${pinned_address[@]+"${pinned_address[@]}"})"
+        if [ "$pinned" = 0 ] && { [ -z "$status" ] || [ "$status" = "000" ]; }; then
             status="$(supervised_edge_probe "$url")"
+        fi
+        if [ "$pinned" = 1 ]; then
+            echo "   +$((SECONDS - started))s edge $edge_addresses: HTTP ${status:-none}"
         fi
         if [ -n "$status" ] && [ "$status" != "000" ] && [ "$status" != "530" ]; then
             return 0
@@ -1620,19 +1635,6 @@ start_cloudflare_quick_tunnel() {
                 return 0
             fi
             echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
-            # NXDOMAIN across public resolvers means more quick-tunnel attempts
-            # from this IP will almost certainly fail the same way — fall through
-            # to ngrok/localtunnel instead of burning ~minutes of backoff.
-            if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
-                echo "⚠️  $PUBLIC_BASE_URL has no DNS (NXDOMAIN); skipping remaining quick-tunnel attempts."
-                kill "$NGROK_PID" 2>/dev/null || true
-                wait "$NGROK_PID" 2>/dev/null || true
-                unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
-                NGROK_PID=""
-                echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT (DNS never provisioned)."
-                echo "   trycloudflare.com is account-less and best-effort."
-                return 1
-            fi
         fi
 
         # Retire this hostname before asking Cloudflare for a new one, so the dead
