@@ -241,10 +241,13 @@ def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any
     return False
 
 
-def _safe_heartbeat(message: str) -> None:
-    """Call activity.heartbeat() if we're in an activity context, otherwise silently skip."""
+def _safe_heartbeat(message: str, *details: Any) -> None:
+    """Call activity.heartbeat() if we're in an activity context, otherwise silently skip.
+
+    ``details`` ride along for the next attempt (``activity.info().heartbeat_details``).
+    """
     with contextlib.suppress(Exception):
-        activity.heartbeat(message)
+        activity.heartbeat(message, *details)
 
 
 def _safe_time() -> float:

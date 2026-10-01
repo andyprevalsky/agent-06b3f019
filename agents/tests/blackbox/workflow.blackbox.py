@@ -314,6 +314,7 @@ CUTOVER_SMS: Dict[str, List[str]] = {}
 CUTOVER_USAGE: Dict[str, List[Dict[str, Any]]] = {}
 CUTOVER_APPROVAL_REQUESTS: Dict[str, List[str]] = {}
 CUTOVER_BROWSER: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded calls
+CUTOVER_CODE: Dict[str, Dict[str, Any]] = {}  # agent_id -> scenario + recorded code-agent calls
 
 
 def _record_workflow_env_activity(agent_id: Optional[str], activity_name: str) -> None:
@@ -948,6 +949,82 @@ async def mock_spawn_browser_agent_activity_v3(
     }
 
 
+@activity.defn(name="resolve_code_agent_provider_activity")
+async def mock_resolve_code_agent_provider_activity(default_provider: str) -> str:
+    return default_provider
+
+
+CUTOVER_CODE_SESSION = {
+    "task_id": "cc-task-1",
+    "sandbox_id": "sb-1",
+    "ws_url": "wss://3000-sb-1.e2b.example",
+    "code_provider": "claude",
+    "started_at": 1000.0,
+    "loop_started_at": 1005.0,
+}
+
+
+@activity.defn(name="spawn_claude_code_activity")
+async def mock_spawn_claude_code_activity(
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    output_schema: Optional[Dict[str, Any]] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+    model: str = "rose-labs/rose-1-flash",
+    github_repo_url: Optional[str] = None,
+    _legacy_claude_token: Optional[str] = None,
+    code_provider: str = "claude",
+    gpt_token: Optional[str] = None,
+    gpt_account_id: Optional[str] = None,
+    gpt_token_source: Optional[str] = None,
+    gpt_token_pool_id: Optional[str] = None,
+    fast_mode_cache_enabled: bool = False,
+    resume_session: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Claude Code run that a deploy drains once mid-run, then finishes in the same sandbox.
+
+    Returns the payloads the real activity returns at those boundaries; the
+    manager/workflow under test are production code.
+    """
+    info = activity.info()
+    scenario = CUTOVER_CODE[agent_id]
+    scenario["calls"].append(
+        {
+            "task_queue": info.task_queue,
+            "workflow_run_id": info.workflow_run_id,
+            "tool_call_id": tool_call_id,
+            "code_provider": code_provider,
+            "resume_session": dict(resume_session) if resume_session else None,
+        }
+    )
+    if len(scenario["calls"]) == 1:
+        from domains.spawn_claude_code_agent.config import CODE_AGENT_DRAIN_YIELD_STATUS
+        from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+        # The deploy moved the live pointer while Claude Code was working; the
+        # real activity detaches from the sandbox at its next drain check.
+        CUTOVER_POINTER[info.workflow_id] = scenario["new_queue"]
+        return {
+            "status": CODE_AGENT_DRAIN_YIELD_STATUS,
+            "yield_reason": GENERATION_SUPERSEDED,
+            "code_session": dict(CUTOVER_CODE_SESSION),
+            "task_id": CUTOVER_CODE_SESSION["task_id"],
+            "code_provider": code_provider,
+        }
+    return {
+        "status": "completed",
+        "success": True,
+        "message": "answer.txt contains 42",
+        "task_id": (resume_session or {}).get("task_id"),
+        "structured_response": {"answer": "42"},
+        "output_files": [],
+        "code_provider": code_provider,
+        "usage_items": [{"type": "service", "provider": "E2B Sandbox", "cost_cents": 3.0}],
+    }
+
+
 # Collect all mock activities for Worker registration
 MOCK_ACTIVITIES = [
     mock_get_model_context_window,
@@ -988,6 +1065,8 @@ MOCK_ACTIVITIES = [
     mock_resolve_fast_cache_goal_activity,
     mock_create_approval_request_activity,
     mock_spawn_browser_agent_activity_v3,
+    mock_resolve_code_agent_provider_activity,
+    mock_spawn_claude_code_activity,
 ]
 
 
@@ -1435,7 +1514,20 @@ CUTOVER_NEW_QUEUE = "cutover-e2e-new"
 CUTOVER_BROWSER_GOAL = "Buy the $12 item on shop.example.com and report the confirmation number"
 
 
-def _opt_in_cutover_agent(agent_id: str, workflow_id: str, scenario: Dict[str, Any]) -> None:
+CUTOVER_CODE_TOOL_CALL = {
+    "tool": "spawn_agent",
+    "type": "code",
+    "goal": "Write answer.txt containing the answer to the puzzle",
+    "output_schema": {"fields": [{"name": "answer", "type": "str", "required": True}]},
+}
+
+
+def _opt_in_cutover_agent(
+    agent_id: str,
+    workflow_id: str,
+    scenario: Dict[str, Any],
+    tool_call: Optional[Dict[str, Any]] = None,
+) -> None:
     CUTOVER_POINTER[workflow_id] = CUTOVER_OLD_QUEUE
     CUTOVER_POINTER_FETCHES[workflow_id] = []
     CUTOVER_MESSAGES[agent_id] = []
@@ -1445,9 +1537,11 @@ def _opt_in_cutover_agent(agent_id: str, workflow_id: str, scenario: Dict[str, A
     CUTOVER_USAGE[agent_id] = []
     CUTOVER_APPROVAL_REQUESTS[agent_id] = []
     CUTOVER_BROWSER[agent_id] = {**scenario, "calls": []}
+    CUTOVER_CODE[agent_id] = {**scenario, "calls": []}
     CUTOVER_LLM_SCRIPTS[agent_id] = [
         [
-            {
+            tool_call
+            or {
                 "tool": "spawn_agent",
                 "type": "browser",
                 "goal": CUTOVER_BROWSER_GOAL,
@@ -1535,13 +1629,13 @@ def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> N
     ), "the continued generation's context must contain the resumed browser result"
 
 
-async def _run_parked_browser_cutover_tests() -> List[tuple]:
-    """Real AgentWorkflow crossing a deploy cutover while a browser task is in flight.
+async def _run_parked_tool_cutover_tests() -> List[tuple]:
+    """Real AgentWorkflow crossing a deploy cutover while a browser/code task is in flight.
 
     Two workers stand in for the old and new code generations. The fetched
-    queue pointer moves to the new generation mid-task; the browser tool must
-    park, ride continue_as_new, and finish on the new generation from the
-    same step / the same approval request instead of DEPLOY_INTERRUPTED.
+    queue pointer moves to the new generation mid-task; the tool must park,
+    ride continue_as_new, and finish on the new generation from the same
+    browser step / approval request / code sandbox instead of DEPLOY_INTERRUPTED.
     """
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
@@ -1658,7 +1752,66 @@ async def _run_parked_browser_cutover_tests() -> List[tuple]:
                     await _cancel_workflow(handle)
                 results.append((name, e))
 
+            name = "wf_cutover_drained_code_agent_reattaches_same_sandbox_on_new_generation"
+            agent_id = "agent-cutover-code"
+            workflow_id = _next_wf_id("cutover-code")
+            handle = None
+            try:
+                _opt_in_cutover_agent(
+                    agent_id, workflow_id, {"new_queue": CUTOVER_NEW_QUEUE}, tool_call=CUTOVER_CODE_TOOL_CALL
+                )
+                handle = await _start_cutover_workflow(env.client, agent_id, workflow_id)
+                outcome = await asyncio.wait_for(handle.result(), timeout=60)
+                assert isinstance(outcome, dict) and outcome.get("status") == "completed", outcome
+                _assert_code_agent_reattached_on_new_generation(agent_id)
+                results.append((name, None))
+            except Exception as e:
+                if handle is not None:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
     return results
+
+
+def _assert_code_agent_reattached_on_new_generation(agent_id: str) -> None:
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+
+    calls = CUTOVER_CODE[agent_id]["calls"]
+    assert len(calls) == 2, f"expected one drained + one reattached code-agent activity, got {calls}"
+    first, second = calls
+    assert first["task_queue"] == CUTOVER_OLD_QUEUE and first["resume_session"] is None, first
+    assert second["task_queue"] == CUTOVER_NEW_QUEUE, f"reattach ran on {second['task_queue']}"
+    assert second["workflow_run_id"] != first["workflow_run_id"], "reattach must run in the continued generation"
+    assert second["tool_call_id"] == first["tool_call_id"], "reattach must re-enter the same tool call"
+    assert second["resume_session"] == CUTOVER_CODE_SESSION, (
+        f"the live generation must reattach to the drained sandbox (and may yield again), got {second}"
+    )
+    assert second["code_provider"] == first["code_provider"], second
+
+    rows = CUTOVER_MESSAGES[agent_id]
+    assert not any(DEPLOY_INTERRUPTED_TOOL_MESSAGE in (row["text"] or "") for row in rows), (
+        "a parked code agent must never be closed with DEPLOY_INTERRUPTED"
+    )
+    tool_rows = [row for row in rows if row["metadata"].get("toolCallId") == first["tool_call_id"]]
+    titles = [row["metadata"].get("title") for row in tool_rows]
+    starting = [row for row in tool_rows if row["metadata"].get("title") == "Starting Claude Code sandbox"]
+    assert len(starting) == 1 and starting[0]["task_queue"] == CUTOVER_OLD_QUEUE, titles
+    complete = [row for row in tool_rows if row["metadata"].get("title") == "✓ Task Completed"]
+    assert len(complete) == 1 and complete[0]["task_queue"] == CUTOVER_NEW_QUEUE, titles
+    assert complete[0]["metadata"].get("task_id") == CUTOVER_CODE_SESSION["task_id"], complete[0]["metadata"]
+    assert complete[0]["metadata"].get("structured_response") == {"answer": "42"}, complete[0]["metadata"]
+    assert not any(title in {"Task Incomplete", "Code session failed"} for title in titles), titles
+
+    assert CUTOVER_LLM_QUEUES[agent_id] == [CUTOVER_OLD_QUEUE, CUTOVER_NEW_QUEUE], (
+        f"expected one LLM turn per generation (spawn, then complete), got {CUTOVER_LLM_QUEUES[agent_id]}"
+    )
+    verifier_contexts = CUTOVER_VERIFIER_CONTEXTS[agent_id]
+    assert verifier_contexts and any(
+        row.get("role") == "TOOL"
+        and (row.get("metadata") or {}).get("toolCallId") == first["tool_call_id"]
+        and (row.get("metadata") or {}).get("toolStatus") == "FINISHED"
+        for row in verifier_contexts[-1]
+    ), "the continued generation's context must contain the reattached code-agent result"
 
 
 # ===========================================================================
@@ -8776,7 +8929,7 @@ async def run_all_tests():
 
     # Temporal workflow tests (all run inside one shared environment)
     wf_results = await _run_all_workflow_tests()
-    wf_results += await _run_parked_browser_cutover_tests()
+    wf_results += await _run_parked_tool_cutover_tests()
     for test_name, err in wf_results:
         if err is None:
             r.passed += 1
