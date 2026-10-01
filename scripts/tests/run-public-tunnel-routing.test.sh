@@ -24,8 +24,9 @@
 #   case 5 — edge always 000              → NOT routing, bounded by the timeout
 #   case 6 — edge 000 then 502            → routing (recovers within the window)
 #   case 7 — run.sh actually recycles a dead tunnel and backs off
-#   case 8 — prefers IPv4 (curl -4) + localtunnel fallback
+#   case 8 — a missing ngrok authtoken is reported, not a bare exit
 #   case 12 — a record published after the host resolver cached NXDOMAIN routes
+#   case 13 — the public smoke certifies what a cloud browser sees
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -43,14 +44,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # `curl -4` inside cloudflare_tunnel_edge_is_routing.
 awk '/^supervised_edge_probe\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
 awk '/^cloudflare_quick_tunnel_edge_ipv4s\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
-awk '/^public_tunnel_hostname_resolves\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 grep -q 'supervised_edge_probe' "$TMP/fn.sh" \
   || fail "could not extract supervised_edge_probe from run.sh"
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/fn.sh" \
   || fail "could not extract cloudflare_tunnel_edge_is_routing from run.sh"
-grep -q 'public_tunnel_hostname_resolves' "$TMP/fn.sh" \
-  || fail "could not extract public_tunnel_hostname_resolves from run.sh"
 grep -q '000' "$TMP/fn.sh" \
   || fail "extracted routing check no longer distinguishes the 000 no-response case"
 grep -qE 'supervised_edge_probe "\$url" -4' "$TMP/fn.sh" \
@@ -146,17 +144,12 @@ grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/start.sh" \
   || fail "case 7: tunnel startup no longer verifies the edge routes"
 echo "PASS: run.sh bounds, backs off, recycles, and de-registers dead quick tunnels"
 
-# --- case 8: localtunnel last-resort fallback ------------------------------
-grep -q 'start_localtunnel_public_tunnel' "$RUN_SH" \
-  || fail "case 8: run.sh no longer defines localtunnel fallback"
+# --- case 8: a missing ngrok authtoken is reported, not a bare exit --------
 awk '/^start_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_public.sh"
-grep -q 'start_localtunnel_public_tunnel && return 0' "$TMP/start_public.sh" \
-  || fail "case 8: start_public_tunnel no longer calls localtunnel before hard-fail"
-grep -q 'ngrok has no authtoken; trying localtunnel' "$TMP/start_public.sh" \
-  || fail "case 8: start_public_tunnel no longer short-circuits to localtunnel when ngrok is unconfigured"
-grep -q 'loca\.lt' "$RUN_SH" \
-  || fail "case 8: localtunnel URL parser no longer accepts loca.lt"
-# Bare `exit 1` on missing authtoken must not remain — it skipped localtunnel.
+grep -q 'tried cloudflare; ngrok has no authtoken' "$TMP/start_public.sh" \
+  || fail "case 8: start_public_tunnel no longer reports an unconfigured ngrok fallback"
+# A bare `exit 1` on a missing authtoken tears the stack down before the caller
+# can report which providers it tried.
 awk '/^start_ngrok_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_ngrok.sh"
 grep -q 'ngrok_public_tunnel_fail.*missing an authtoken' "$TMP/start_ngrok.sh" \
   || fail "case 8: start_ngrok_public_tunnel must use ngrok_public_tunnel_fail for missing authtoken"
@@ -166,7 +159,7 @@ if grep -nE '^\s*exit 1\s*$' "$TMP/start_ngrok.sh" | grep -vq 'ngrok_public_tunn
 fi
 ! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
   || fail "case 8: start_ngrok_public_tunnel still bare-exits on missing authtoken"
-echo "PASS: localtunnel fallback is wired into start_public_tunnel"
+echo "PASS: a missing ngrok authtoken is reported by start_public_tunnel"
 
 # --- case 9: ngrok mode survives a reserved domain held by another session ---
 # RCA cement (2026-10-01). Cloud VMs booted from one environment snapshot share
@@ -221,10 +214,6 @@ run_ngrok_mode() { # run_ngrok_mode <ngrok_ok> <ngrok_log_line> <cloudflare_ok>
         sleep 30 & NGROK_PID=$!
         PIDS+=("$NGROK_PID"); NAMES+=(cloudflared)
       }
-      start_localtunnel_public_tunnel() {
-        echo localtunnel >> "$RUN_CONTEXT_DIR/calls"
-        public_tunnel_publish_environment "https://stub.loca.lt" "$ALLOWED_ORIGINS"
-      }
       start_public_tunnel
       echo "url=$PUBLIC_BASE_URL"
       echo "origins=$ALLOWED_ORIGINS"
@@ -247,15 +236,16 @@ printf '%s\n' "$out" | grep -qx 'names=cloudflared' \
   || fail "case 9a: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
 echo "PASS: ERR_NGROK_334 falls back to an account-less cloudflare origin"
 
-out="$(run_ngrok_mode 0 "$held_line" 0)" \
-  || fail "case 9b: localtunnel must serve when cloudflare also fails ($(cat "$TMP/ngrok_mode.err"))"
-printf '%s\n' "$out" | grep -qx 'url=https://stub.loca.lt' \
-  || fail "case 9b: expected the localtunnel origin, got: $out"
-printf '%s\n' "$out" | grep -qx 'origins=http://localhost:3002,https://stub.loca.lt' \
-  || fail "case 9b: the unroutable cloudflare origin must not stay in ALLOWED_ORIGINS, got: $out"
-[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare localtunnel " ] \
+# Every remaining provider gates or fails cloud browsers, so the stack stops here
+# and names what it tried instead of fronting an origin the smoke must reject.
+if out="$(run_ngrok_mode 0 "$held_line" 0)"; then
+  fail "case 9b: no routable provider must stop the stack, got: $out"
+fi
+grep -q 'reserved ngrok domain held elsewhere; tried cloudflare' "$TMP/ngrok_mode.err" \
+  || fail "case 9b: the failure must name the providers it tried: $(cat "$TMP/ngrok_mode.err")"
+[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare " ] \
   || fail "case 9b: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
-echo "PASS: ERR_NGROK_334 reaches localtunnel when cloudflare cannot route"
+echo "PASS: ERR_NGROK_334 stops the stack when cloudflare cannot route either"
 
 if out="$(run_ngrok_mode 0 'lvl=crit msg="command failed" err="authentication failed ERR_NGROK_107"' 1)"; then
   fail "case 9c: a non-collision ngrok failure must stay fatal, got: $out"
@@ -343,16 +333,14 @@ tunnel_optional() { # tunnel_optional <process name> <ephemeral mode>
   bash -c 'source "$1/scripts/lib/ngrok-tunnel.sh"; public_tunnel_process_is_optional "$2" "$3"' \
     _ "$ROOT_DIR" "$1" "$2"
 }
-for name in ngrok cloudflared localtunnel; do
+for name in ngrok cloudflared; do
   tunnel_optional "$name" 0 \
     || fail "case 11: a dead $name tunnel must not stop a shared (non-isolated) stack"
 done
 tunnel_optional ngrok 1 \
   || fail "case 11: the isolated-run ngrok fallback stays optional"
-for name in cloudflared localtunnel; do
-  tunnel_optional "$name" 1 \
-    && fail "case 11: an isolated run must stop when its $name tunnel dies"
-done
+tunnel_optional cloudflared 1 \
+  && fail "case 11: an isolated run must stop when its cloudflared tunnel dies"
 for name in back-end front-end agents; do
   for mode in 0 1; do
     tunnel_optional "$name" "$mode" \
@@ -446,5 +434,79 @@ grep -q -- '--resolve' "$TMP/dns/state/edge_args" \
 grep -q 'No edge addresses for api.trycloudflare.com; probing race.trycloudflare.com through DNS' "$TMP/dns/state/out" \
   || fail "case 12c: the unpinned probe must say why it uses DNS: $(cat "$TMP/dns/state/out")"
 echo "PASS: an unresolvable edge name falls back to the plain probe"
+
+# --- case 13: the public smoke certifies what a cloud browser sees ----------
+# RCA cement (2026-10-01). The smoke stack fronted /test_payment with localtunnel
+# and scripts/test-public-tunnel.sh passed it: localtunnel serves curl's
+# User-Agent normally and answers browsers with a 511 "Tunnel Password" page. All
+# three payment tasks' cloud browsers sat on that page until their task timeouts.
+SMOKE="$ROOT_DIR/scripts/test-public-tunnel.sh"
+app_marker="$(sed -n "s/^APP_SHELL_MARKER='\(.*\)'$/\1/p" "$SMOKE")"
+[ -n "$app_marker" ] || fail "case 13: test-public-tunnel.sh no longer declares APP_SHELL_MARKER"
+grep -qF "$app_marker" "$ROOT_DIR/front-end/index.html" \
+  || fail "case 13: front-end/index.html no longer contains the smoke's app-shell marker $app_marker"
+
+mkdir -p "$TMP/smoke/bin" "$TMP/smoke/ctx"
+cat > "$TMP/smoke/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+out="" ua="" url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift ;;
+    -A) ua="$2"; shift ;;
+    -w|--noproxy|--max-time|--connect-timeout|-H) shift ;;
+    http*://*) url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  */api/test-payment/public-url) printf '{"url":"%s"}' "$PUBLIC_BASE_URL"; exit 0 ;;
+esac
+printf '%s\n' "$ua" >> "$STUB_STATE/user_agents"
+app='<!doctype html><html><head><title>Rose</title></head><body><div id="root"></div></body></html>'
+status=200 body="$app"
+case "$ua" in
+  Mozilla/*)
+    case "$TUNNEL_MODE" in
+      localtunnel) status=511 body='<html><body><h1>Friendly Reminder</h1><input placeholder="e.g. 203.0.113.42"></body></html>' ;;
+      interstitial) body='<html><body>You are about to visit this site. <button>Visit Site</button></body></html>' ;;
+    esac
+    ;;
+esac
+[ -n "$out" ] && printf '%s' "$body" > "$out"
+printf '%s' "$status"
+STUB
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/smoke/bin/sleep"
+chmod +x "$TMP/smoke/bin/curl" "$TMP/smoke/bin/sleep"
+
+run_smoke() { # run_smoke <tunnel mode>
+  rm -f "$TMP/smoke/ctx/user_agents"
+  PATH="$TMP/smoke/bin:$PATH" STUB_STATE="$TMP/smoke/ctx" TUNNEL_MODE="$1" \
+    BENCHMARK_CONTEXT_DIR="$TMP/smoke/ctx" BACKEND_PORT=28600 \
+    PUBLIC_BASE_URL="https://stub-origin.trycloudflare.com" \
+    bash "$SMOKE" > "$TMP/smoke/out" 2>&1
+}
+
+run_smoke app || fail "case 13a: the app shell must pass the smoke: $(cat "$TMP/smoke/out")"
+grep -q '^Mozilla/' "$TMP/smoke/ctx/user_agents" \
+  || fail "case 13a: the smoke must request /test_payment as a browser, sent: $(cat "$TMP/smoke/ctx/user_agents")"
+echo "PASS: the app shell over the tunnel passes, requested as a browser"
+
+if run_smoke localtunnel; then
+  fail "case 13b: a 511 browser interstitial must fail the smoke: $(cat "$TMP/smoke/out")"
+fi
+grep -q 'HTTP 511' "$TMP/smoke/out" || fail "case 13b: the failure must report the 511: $(cat "$TMP/smoke/out")"
+grep -q 'interstitial that cloud browsers cannot pass' "$TMP/smoke/out" \
+  || fail "case 13b: the failure must name the browser gate: $(cat "$TMP/smoke/out")"
+[ "$(wc -l < "$TMP/smoke/ctx/user_agents" | tr -d ' ')" = "1" ] \
+  || fail "case 13b: a 511 gate is not transient and must not be retried ($(wc -l < "$TMP/smoke/ctx/user_agents") requests)"
+echo "PASS: a 511 browser interstitial fails the smoke immediately"
+
+if run_smoke interstitial; then
+  fail "case 13c: a 200 interstitial page must fail the smoke: $(cat "$TMP/smoke/out")"
+fi
+grep -q 'not the app' "$TMP/smoke/out" \
+  || fail "case 13c: the failure must say the page is not the app: $(cat "$TMP/smoke/out")"
+echo "PASS: a 200 interstitial page fails the smoke"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

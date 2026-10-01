@@ -162,7 +162,7 @@ echo "PASS: run.sh reserved-domain pagination cursor survives bash single-quotin
 
 # Create rejection (e.g. ERR_NGROK_415 at the 100-domain cap) must warn and
 # return — never bare-exit — or every stack on a full ngrok account dies before
-# ephemeral/cloudflare/localtunnel fallback can run.
+# the ephemeral/cloudflare fallback can run.
 ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
 echo "$ensure_fn" | grep -q 'tunnel start / fallback is authoritative' \
   || { echo "FAIL: ensure_ngrok_domain_reserved must continue after create rejection" >&2; exit 1; }

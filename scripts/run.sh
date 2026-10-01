@@ -576,7 +576,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel|localtunnel --port'
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -1447,7 +1447,7 @@ PY
         echo "$create_output"
         # Reservation is advisory. ERR_NGROK_415 (account at the 100 reserved-
         # domain cap) and other create rejections must not tear down the stack —
-        # the agent bind (or ephemeral/cloudflare/localtunnel fallback) is the
+        # the agent bind (or ephemeral/cloudflare fallback) is the
         # authoritative path. Soft callers still see return 1 so they can skip
         # a reserved-domain bind that was never created.
         echo "⚠️  Could not reserve $domain. Continuing — tunnel start / fallback is authoritative."
@@ -1507,21 +1507,6 @@ supervised_edge_probe() {
     status="$(cat "$status_file" 2>/dev/null || true)"
     rm -f "$status_file"
     printf '%s' "$status"
-}
-
-public_tunnel_hostname_resolves() {
-    local url="$1" host
-    host="${url#https://}"
-    host="${host%%/*}"
-    [ -n "$host" ] || return 1
-    if command -v getent >/dev/null 2>&1 && getent ahosts "$host" >/dev/null 2>&1; then
-        return 0
-    fi
-    if command -v dig >/dev/null 2>&1; then
-        dig +short A "$host" 2>/dev/null | grep -Eq '^[0-9.]+$' && return 0
-        dig +short AAAA "$host" 2>/dev/null | grep -Eq ':' && return 0
-    fi
-    return 1
 }
 
 # The anycast addresses Cloudflare serves trycloudflare.com from, read through
@@ -1659,66 +1644,6 @@ start_cloudflare_quick_tunnel() {
     return 1
 }
 
-# Last-resort public tunnel when trycloudflare DNS is dead AND ngrok has no
-# authtoken (common on Cursor Cloud VMs: NGROK_API_KEY present but invalid,
-# NGROK_AUTHTOKEN unset). loca.lt is already allowlisted in authRealm + browser
-# agent crypto; no account required.
-start_localtunnel_public_tunnel() {
-    if ! command -v npx >/dev/null 2>&1; then
-        echo "   localtunnel fallback unavailable: npx is not installed."
-        return 1
-    fi
-
-    mkdir -p "$RUN_CONTEXT_DIR"
-    local lt_log="$RUN_CONTEXT_DIR/localtunnel.log"
-    echo "🌐 Falling back to localtunnel (loca.lt) → localhost:$FRONTEND_PORT"
-    # --yes: non-interactive install of the CLI if missing from the cache.
-    npx --yes localtunnel --port "$FRONTEND_PORT" > "$lt_log" 2>&1 &
-    NGROK_PID=$!
-    PUBLIC_TUNNEL_SERVICE_NAME="localtunnel"
-    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
-
-    local lt_url=""
-    for attempt in $(seq 1 45); do
-        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-            echo "❌ localtunnel exited before publishing a tunnel."
-            tail -20 "$lt_log" || true
-            return 1
-        fi
-        lt_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' "$lt_log" 2>/dev/null | head -1 || true)"
-        [ -n "$lt_url" ] && break
-        sleep 1
-    done
-    [ -n "$lt_url" ] || {
-        echo "❌ localtunnel did not publish an HTTPS endpoint."
-        tail -20 "$lt_log" || true
-        return 1
-    }
-
-    public_tunnel_publish_environment "$lt_url" "$ALLOWED_ORIGINS" || {
-        echo "❌ localtunnel published an unusable origin: $lt_url"
-        return 1
-    }
-
-    # loca.lt does NOT return 502 when the origin is down — the request hangs
-    # until the client times out (curl http_code 000). The Cloudflare-style
-    # edge probe therefore falsely fails here because the frontend is started
-    # AFTER the public tunnel. Verify DNS + process liveness now; HTTP proof
-    # is deferred to scripts/test-public-tunnel.sh once vite is up.
-    echo "🔎 Verifying localtunnel DNS + process: $PUBLIC_BASE_URL"
-    if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
-        echo "❌ $PUBLIC_BASE_URL has no DNS."
-        return 1
-    fi
-    if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-        echo "❌ localtunnel process exited after publishing $PUBLIC_BASE_URL."
-        tail -20 "$lt_log" || true
-        return 1
-    fi
-    echo "🌐 Public tunnel ready (localtunnel; HTTP verify deferred until frontend up): $PUBLIC_BASE_URL"
-    return 0
-}
-
 # Fallback provider when trycloudflare is unavailable.
 #
 # trycloudflare.com has no uptime guarantee and can refuse to route EVERY quick
@@ -1851,8 +1776,8 @@ reap_failed_ngrok_tunnel() {
 start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
         # Must use ngrok_public_tunnel_fail: in cloudflare/ephemeral mode this
-        # function is a non-fatal fallback and a bare `exit 1` would skip
-        # localtunnel and tear down the whole stack.
+        # function is a non-fatal fallback and a bare `exit 1` would tear down
+        # the whole stack before the caller can report what it tried.
         ngrok_public_tunnel_fail "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken." || return 1
     fi
     if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
@@ -1950,14 +1875,10 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
-            # No ngrok credentials at all → skip the reserved-domain path (it
-            # cannot succeed) and go straight to account-less localtunnel.
-            # Previously start_ngrok_public_tunnel used bare `exit 1` here, which
-            # tore down the stack before localtunnel could run (Cloud AgentCard).
+            # No ngrok credentials at all → the reserved-domain path cannot
+            # succeed either.
             if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
-                echo "⚠️  cloudflare unavailable and ngrok has no authtoken; trying localtunnel." >&2
-                start_localtunnel_public_tunnel && return 0
-                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then localtunnel; ngrok unconfigured)." >&2
+                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare; ngrok has no authtoken)." >&2
                 echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
                 echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
                 exit 1
@@ -2009,11 +1930,7 @@ start_public_tunnel() {
             fi
             NGROK_PUBLIC_TUNNEL_NONFATAL=0
             [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
-            # Cursor Cloud / Linux VMs often have trycloudflare NXDOMAIN + no
-            # ngrok authtoken. localtunnel (loca.lt) needs neither.
-            reap_failed_ngrok_tunnel
-            start_localtunnel_public_tunnel && return 0
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain, localtunnel)." >&2
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain)." >&2
             echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
             echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
             exit 1
@@ -2039,8 +1956,7 @@ start_public_tunnel() {
                 start_cloudflare_quick_tunnel && return 0
                 export ALLOWED_ORIGINS="$origins_before_ngrok"
             fi
-            start_localtunnel_public_tunnel && return 0
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (reserved ngrok domain held elsewhere; tried cloudflare, localtunnel)." >&2
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (reserved ngrok domain held elsewhere; tried cloudflare)." >&2
             exit 1
             ;;
         *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;

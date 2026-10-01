@@ -20,16 +20,13 @@ public_tunnel_provider_for_mode() {
 public_tunnel_process_is_required() {
   local process_name="$1" ephemeral="$2"
   [ "$(public_tunnel_provider_for_mode "$ephemeral")" = "cloudflare" ] || return 1
-  case "$process_name" in
-    cloudflared|localtunnel) return 0 ;;
-    *) return 1 ;;
-  esac
+  [ "$process_name" = "cloudflared" ]
 }
 
 public_tunnel_process_is_optional() {
   local process_name="$1" ephemeral="$2"
   case "$process_name" in
-    ngrok|cloudflared|localtunnel) ;;
+    ngrok|cloudflared) ;;
     *) return 1 ;;
   esac
   ! public_tunnel_process_is_required "$process_name" "$ephemeral"
