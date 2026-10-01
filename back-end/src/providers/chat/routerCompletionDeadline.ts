@@ -7,7 +7,10 @@
  * from the turn start) that failover emitted first content at p50 1.8s / p90
  * 3.8s / max 8.6s, never paused more than ~0.4s between chunks, and closed the
  * decision in 4.1–19.1s (p50 6.0s, p90 10.7s). A whole-completion bound sized
- * for the healthy primary (3s) killed every failover attempt.
+ * for the healthy primary (3s) killed every failover attempt. The completion
+ * cap holds only while the failover picks GLM hosts by throughput
+ * (OPENROUTER_FAST_CHAT_PROVIDER): on the slow hosts that price-weighted
+ * routing favors, the same request finished at p90 16.6s.
  *
  * - stall: no content/reasoning progress for this long (hung provider).
  *   Reasoning counts: the router streams it to the user as the thinking row.

@@ -27,6 +27,8 @@ interface ParseOptions {
   requestId: string;
   /** Maximum ms between SSE lines before stalling. */
   idleTimeoutMs?: number;
+  /** Called once with OpenRouter's top-level `provider` (the serving host). */
+  onUpstreamProvider?: (provider: string) => void;
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
@@ -272,6 +274,7 @@ export async function* parseOpenAISSE(
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
+  let reportedUpstreamProvider = false;
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
   const flushedToolIndices = new Set<number>();
 
@@ -306,6 +309,10 @@ export async function* parseOpenAISSE(
     }
 
     if (event.usage) usage = event.usage;
+    if (typeof event.provider === 'string' && !reportedUpstreamProvider) {
+      reportedUpstreamProvider = true;
+      options.onUpstreamProvider?.(event.provider);
+    }
 
     const choices = event.choices ?? [];
     if (choices.length === 0) continue;

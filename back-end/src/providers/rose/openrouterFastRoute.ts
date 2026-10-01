@@ -6,6 +6,7 @@
  * preserves the same strict JSON-schema/tool-call contract.
  */
 
+import { createLogger } from '../logger';
 import {
   RoseAuthError,
   RoseError,
@@ -20,6 +21,8 @@ import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
+
+const log = createLogger('Rose');
 
 export const OPENROUTER_FAST_CHAT_MODEL = 'z-ai/glm-5.3-flash';
 export const OPENROUTER_FAST_CHAT_POOL = 'openrouter-fast-chat';
@@ -49,12 +52,26 @@ function normalizeOpenRouterFastChatEffort(effort?: string): string {
   return effort ?? DEFAULT_OPENROUTER_FAST_CHAT_EFFORT;
 }
 
+/**
+ * OpenRouter's default routing is price-weighted, and after the first cached
+ * response it keeps each conversation on that host for 10 minutes (sticky
+ * routing; `sort` only picks the first host). On the e8f2279b router request
+ * the cheap hosts it favors finished in p50 8.4s / p90 11.9s; throughput
+ * sorting finished in p50 2.9s / p90 3.9s and spreads conversations across
+ * hosts. `require_parameters` keeps hosts that would ignore `response_format`.
+ */
+export const OPENROUTER_FAST_CHAT_PROVIDER = {
+  sort: 'throughput',
+  require_parameters: true,
+} as const;
+
 export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<string, unknown> {
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
+    provider: OPENROUTER_FAST_CHAT_PROVIDER,
     // Always stamp reasoning.effort so every Rose body builder is well-formed.
     // Callers (chat router/generator) may pass effort:'minimal' for latency;
     // omit → xhigh to match the rest of the Rose surface.
@@ -95,6 +112,7 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
     preTokenTimeoutMs
   );
   let emittedMeaningfulChunk = false;
+  const startedAt = Date.now();
 
   try {
     const response = await postOpenRouterStream({
@@ -119,6 +137,13 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
       poolName: OPENROUTER_FAST_CHAT_POOL,
       requestId: params.requestId,
       idleTimeoutMs: preTokenTimeoutMs,
+      onUpstreamProvider: (provider) =>
+        log.info('openrouter_fast_chat.upstream_provider', {
+          request_id: params.requestId,
+          call_site: params.callSite,
+          provider,
+          first_event_ms: Date.now() - startedAt,
+        }),
     })) {
       if (clearsChatStallGuard(chunk.kind)) {
         emittedMeaningfulChunk = true;

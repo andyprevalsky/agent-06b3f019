@@ -2320,6 +2320,35 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   }
 }
 
+async function testOpenRouterFastChat_routesByThroughputWithRequiredParameters() {
+  const body = buildOpenRouterFastChatBody({
+    messages: [{ role: 'user', content: 'wrong address' }],
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'router_decision', strict: true, schema: { type: 'object' } },
+    },
+  });
+  const provider = body.provider as Record<string, unknown> | undefined;
+  assertEqual(
+    provider?.sort,
+    'throughput',
+    'Cerebras-stall failover must not ride price-weighted routing to the slowest GLM hosts'
+  );
+  assertEqual(
+    provider?.require_parameters,
+    true,
+    'failover must only reach GLM hosts that honor response_format'
+  );
+  assert(
+    provider?.order === undefined && provider?.only === undefined,
+    'failover must not pin every Cerebras-stall turn onto one GLM host'
+  );
+  assert(
+    provider?.allow_fallbacks !== false,
+    'failover must still reach another GLM host when the fastest errors'
+  );
+}
+
 async function testClaudeAuth_omitsEffortForHaiku() {
   // rose-1-mini claudeAuth is claude-haiku-4-5, which 400s on
   // output_config.effort. Mirror agents rose.blackbox (spawn-sub-agents
@@ -2958,6 +2987,31 @@ async function testStreaming_openai_parseErrorTolerated() {
     .map((c) => (c.kind === 'content' ? c.data.text : ''))
     .join('');
   assertEqual(text, 'xy', 'malformed line skipped, surrounding content preserved');
+}
+
+async function testStreaming_openai_reportsUpstreamProviderOnce() {
+  const lines = [
+    'data: {"provider":"InferenceNet","choices":[{"index":0,"delta":{"role":"assistant"}}]}',
+    '',
+    'data: {"provider":"InferenceNet","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"stop"}]}',
+    '',
+    'data: [DONE]',
+    '',
+  ];
+  const providers: string[] = [];
+  await collectRose(
+    parseOpenAISSE(rawStream([lines.join('\n') + '\n']), {
+      actualModel: 'or-test',
+      poolName: 'openrouter-fast-chat',
+      requestId: 'r-or-provider',
+      onUpstreamProvider: (provider) => providers.push(provider),
+    })
+  );
+  assertEqual(
+    JSON.stringify(providers),
+    JSON.stringify(['InferenceNet']),
+    'the serving OpenRouter host is reported exactly once per stream'
+  );
 }
 
 async function testStreaming_openai_reasoningField() {
@@ -3982,6 +4036,10 @@ async function main(): Promise<void> {
       fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
     },
     {
+      name: 'openrouter-fast / routes by throughput and requires response_format support',
+      fn: testOpenRouterFastChat_routesByThroughputWithRequiredParameters,
+    },
+    {
       name: 'claudeAuth / omits effort for haiku (rose-1-mini)',
       fn: testClaudeAuth_omitsEffortForHaiku,
     },
@@ -4039,6 +4097,10 @@ async function main(): Promise<void> {
     {
       name: 'streaming / openai parse error tolerated',
       fn: testStreaming_openai_parseErrorTolerated,
+    },
+    {
+      name: 'streaming / openai reports the upstream OpenRouter host once',
+      fn: testStreaming_openai_reportsUpstreamProviderOnce,
     },
     {
       name: 'streaming / openai reasoning field → reasoning chunk',
