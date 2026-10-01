@@ -30,7 +30,9 @@ export function kernelRecreateProxySelection(
   const recorded = managedKernelProxyFromSource(source);
   if (recorded !== undefined) return { exactManagedProxy: recorded };
   // Rows predating kernelProxySource retain only the tier, not the fallback geo.
-  if (source === null && proxyTier === 'mobile') return { forceManagedProxyType: 'mobile' };
+  if (source === null && (proxyTier === 'mobile' || proxyTier === 'residential')) {
+    return { forceManagedProxyType: proxyTier };
+  }
   return {};
 }
 

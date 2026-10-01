@@ -159,6 +159,10 @@ const tests: Array<[string, () => void]> = [
         'legacy rotated sessions must stay on mobile'
       );
       assert(
+        kernelRecreateProxySelection(null, 'residential').forceManagedProxyType === 'residential',
+        'legacy rotated sessions must stay on residential'
+      );
+      assert(
         kernelRecreateProxySelection('kernel_configured', 'mobile').forceManagedProxyType ===
           undefined,
         'configured proxy must not switch to managed mobile'
