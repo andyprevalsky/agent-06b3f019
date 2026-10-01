@@ -7275,6 +7275,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 logger.warning(f"Failed to disconnect browser before drain yield: {e}")
                             dom_service = None
                         browser_task_paused_for_resume = True
+                        step_timer.finish()
                         return {
                             "status": BROWSER_DRAIN_YIELD_STATUS,
                             "yield_reason": drain_reason,

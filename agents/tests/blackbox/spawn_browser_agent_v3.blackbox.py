@@ -19311,6 +19311,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     """
     from contextlib import ExitStack
 
+    from structlog.testing import capture_logs
     from temporalio.testing import ActivityEnvironment
 
     from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
@@ -19376,6 +19377,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     with ExitStack() as stack:
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
+        captured = stack.enter_context(capture_logs())
         result = await env.run(
             spawn_browser_agent_activity_v3,
             user_id="user-1",
@@ -19390,6 +19392,11 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
 
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    step_phases = [entry for entry in captured if entry.get("event") == "browser.step.phases"]
+    assert [entry.get("step") for entry in step_phases] == [1], (
+        f"the step that ran before the drain yield must report its phases: {step_phases}"
+    )
+    assert "execute_action" in step_phases[0]["phases_ms"], step_phases[0]
     assert llm_step.await_count == 1, "the activity must not start another step after the drain began"
     assert len(executed_steps) == 1, executed_steps
     assert result["step_count"] == 1, result
