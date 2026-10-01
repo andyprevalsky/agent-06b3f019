@@ -114,7 +114,7 @@ class MessagePersonManager(ToolManager):
             yield channel_error
             return
 
-        # -- Step 1b: Fetch general recent messages for voice/style --
+        # -- Step 1b: Fetch latest messages across contacts for voice/style --
         # Per-call context_gates override workflow-level gates.
         context_gates = tool_call.get("context_gates") or getattr(workflow_instance, "context_gates", None) or {}
         general_messages_context = await self._fetch_voice_context(context_gates, user_id)
@@ -352,7 +352,7 @@ class MessagePersonManager(ToolManager):
         try:
             general_result = await workflow.execute_activity(
                 fetch_recent_messages_activity,
-                args=[user_id, 100, 30],
+                args=[user_id, 100],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(
                     maximum_attempts=2,

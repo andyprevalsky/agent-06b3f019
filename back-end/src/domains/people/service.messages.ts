@@ -5,12 +5,7 @@
 
 import * as repo from './repo';
 import { type FormattedMessage, type PersonMatch, ValidationError } from './types';
-import {
-  DEFAULT_MESSAGE_LIMIT,
-  DEFAULT_RECENT_DAYS,
-  MAX_RECENT_DAYS,
-  DEFAULT_RECENT_LIMIT,
-} from './config';
+import { DEFAULT_MESSAGE_LIMIT, MAX_RECENT_DAYS, DEFAULT_RECENT_LIMIT } from './config';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -192,11 +187,12 @@ export async function getPersonMessages(userId: string, body: PersonMessageBody)
 
 export async function getRecentMessages(userId: string, opts: { limit?: number; days?: number }) {
   const limit = opts.limit !== undefined && opts.limit !== null ? opts.limit : DEFAULT_RECENT_LIMIT;
-  const rawDays = opts.days !== undefined && opts.days !== null ? opts.days : DEFAULT_RECENT_DAYS;
-  const days = Math.min(Math.max(rawDays, 1), MAX_RECENT_DAYS);
-
-  const cutoffTime = new Date();
-  cutoffTime.setDate(cutoffTime.getDate() - days);
+  const days =
+    opts.days === undefined || opts.days === null
+      ? undefined
+      : Math.min(Math.max(opts.days, 1), MAX_RECENT_DAYS);
+  const cutoffTime =
+    days === undefined ? undefined : new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const messages = await repo.findRecentMessages(userId, cutoffTime, limit);
 
@@ -205,6 +201,6 @@ export async function getRecentMessages(userId: string, opts: { limit?: number; 
   return {
     messages: formattedMessages,
     count: formattedMessages.length,
-    days,
+    ...(days === undefined ? {} : { days }),
   };
 }

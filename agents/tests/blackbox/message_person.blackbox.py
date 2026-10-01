@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -462,6 +463,39 @@ async def test_fetch_recent_messages_boundary():
     # Query params are in the URL
     assert "limit=100" in call["url"]
     assert "days=7" in call["url"]
+
+
+async def test_fetch_voice_context_has_no_calendar_cutoff_and_keeps_timestamps():
+    """Live voice history uses the latest messages regardless of calendar age."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.message_person import fetch_recent_messages_activity
+
+        result = await fetch_recent_messages_activity(user_id="user-99", limit=100)
+
+    call = assert_captured_call(url_contains="/api/people/messages/recent", method="GET")
+    assert "limit=100" in call["url"]
+    assert "days=" not in call["url"]
+    assert result["messages"][0]["timestamp"] == "2026-04-01T10:00:00Z"
+
+
+async def test_fetch_voice_context_includes_messages_from_current_minute():
+    """Fresh messages are not hidden by a prompt-cache time bucket."""
+    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    setup_mock(
+        {
+            "/api/people/messages/recent": {
+                "status": 200,
+                "json": {"messages": [{"timestamp": timestamp, "message": "just sent"}], "count": 1},
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from tools.message_person import fetch_recent_messages_activity
+
+        result = await fetch_recent_messages_activity(user_id="user-99")
+
+    assert result["messages"] == [{"timestamp": timestamp, "message": "just sent"}]
 
 
 async def test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx():
@@ -942,6 +976,7 @@ def test_format_messages_for_context_happy():
     assert "[imessage]" in out
     assert "[email]" in out
     assert "hi" in out and "yo" in out
+    assert "T1" in out and "T2" in out
     assert "→" in out
 
 
@@ -1282,6 +1317,35 @@ def _patch_handler_workflow(fake):
         h.workflow = original
 
     return restore
+
+
+async def test_live_message_person_uses_dated_voice_history_without_days_filter():
+    from domains.message_person.handler import MessagePersonManager
+
+    fake = _FakeWFModule(
+        activity_results={
+            "fetch_recent_messages_activity": {
+                "messages": [
+                    {
+                        "channel": "imessage",
+                        "from": "me",
+                        "to": "+15551111111",
+                        "timestamp": "2025-01-01T10:00:00.000Z",
+                        "message": "older style sample",
+                    }
+                ]
+            }
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    try:
+        context = await MessagePersonManager._fetch_voice_context({}, "user-1")
+    finally:
+        restore()
+
+    assert fake.calls[0]["args"] == ["user-1", 100]
+    assert "2025-01-01T10:00:00.000Z" in context
+    assert "older style sample" in context
 
 
 class _WFInstance:
@@ -2011,6 +2075,14 @@ async def run_all_tests():
     await r.record_async("fetch_recent_messages_happy_path", test_fetch_recent_messages_happy_path)
     await r.record_async("fetch_recent_messages_boundary", test_fetch_recent_messages_boundary)
     await r.record_async(
+        "fetch_voice_context_no_calendar_cutoff",
+        test_fetch_voice_context_has_no_calendar_cutoff_and_keeps_timestamps,
+    )
+    await r.record_async(
+        "fetch_voice_context_includes_current_minute",
+        test_fetch_voice_context_includes_messages_from_current_minute,
+    )
+    await r.record_async(
         "agent_sms_generation_text_prompt_no_httpx",
         test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx,
     )
@@ -2036,6 +2108,10 @@ async def run_all_tests():
     )
     await r.record_async("message_person_echo_deadline_fallback", test_message_person_falls_back_after_echo_deadline)
     r.record("message_person_echo_outbound_samples", test_echo_voice_samples_never_treat_incoming_as_writer_examples)
+    await r.record_async(
+        "live_message_person_dated_voice_history",
+        test_live_message_person_uses_dated_voice_history_without_days_filter,
+    )
     # classify_person_id
     r.record("classify_phone_full", test_classify_person_id_phone_full)
     r.record("classify_phone_10digit", test_classify_person_id_phone_10_digit)
