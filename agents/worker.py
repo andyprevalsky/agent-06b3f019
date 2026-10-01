@@ -65,12 +65,12 @@ from domains.request_user_approval.repo import (
     resolve_attention_request_activity,
 )
 from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,
     spawn_browser_agent_activity_v3,
@@ -567,6 +567,40 @@ def _activity_admission_scale_threshold(current_machines: int) -> int:
     return max(2, math.ceil(current_machines * 0.20))
 
 
+async def _machine_in_flight_activities(machine: dict, http: httpx.AsyncClient) -> int | None:
+    """Return the activity slots in use on a peer machine, or None when unknown."""
+    ip = str(machine.get("private_ip") or "").strip()
+    if not ip:
+        return None
+    try:
+        resp = await http.get(f"http://[{ip}]:{HEALTH_CHECK_PORT}/metrics", timeout=1.0)
+        if resp.status_code != 200:
+            return None
+        value = _extract_metric_value(resp.text, "activity_slots_used")
+    except Exception as e:
+        logger.debug("Failed to scrape peer activity slots", machine_id=machine.get("id"), error=str(e))
+        return None
+    if value is None or math.isnan(value):
+        return None
+    return int(value)
+
+
+async def _idle_stop_candidates(candidates: list[dict], http: httpx.AsyncClient) -> tuple[list[dict], list[dict]]:
+    """Split stop candidates into (idle, busy_or_unknown).
+
+    Stopping a machine SIGTERMs its worker, and in-flight activities that
+    outlive the 5m shutdown grace (30m browser, claude-code) die with a
+    heartbeat timeout. Only machines that report zero in-flight activities are
+    safe to stop; an unknown count is treated as busy.
+    """
+    counts = await asyncio.gather(*(_machine_in_flight_activities(m, http) for m in candidates))
+    idle: list[dict] = []
+    busy: list[dict] = []
+    for machine, count in zip(candidates, counts, strict=True):
+        (idle if count == 0 else busy).append(machine)
+    return idle, busy
+
+
 async def _scale_fleet(desired: int, http: httpx.AsyncClient):
     """Start/stop Fly machines to reach desired count. Called by leader only.
 
@@ -619,7 +653,15 @@ async def _scale_fleet(desired: int, http: httpx.AsyncClient):
         elif desired < current:
             to_stop = current - desired
             candidates = [m for m in started if m["id"] != my_machine_id]
-            for m in candidates[:to_stop]:
+            idle, busy = await _idle_stop_candidates(candidates, http)
+            if len(idle) < to_stop:
+                logger.info(
+                    "Autoscaler: deferring scale-down of busy machines",
+                    wanted_to_stop=to_stop,
+                    idle_machines=len(idle),
+                    busy_machine_ids=[m["id"] for m in busy],
+                )
+            for m in idle[:to_stop]:
                 try:
                     await http.post(
                         f"{FLY_MACHINES_API}/apps/{fly_app}/machines/{m['id']}/stop",
