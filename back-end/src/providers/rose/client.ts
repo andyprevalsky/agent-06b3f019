@@ -400,6 +400,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             requestId: opts.requestId,
             callSite: opts.callSite,
             providerFastMode: opts.options.provider_fast_mode,
+            abortSignal: opts.options.abort_signal,
           }),
         emit: emitChunk,
       });
@@ -450,6 +451,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             requestId: opts.requestId,
             callSite: opts.callSite,
             providerFastMode: true,
+            abortSignal: opts.options.abort_signal,
           }),
         emit: emitChunk,
       });
@@ -510,6 +512,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             requestId: opts.requestId,
             callSite: opts.callSite,
             providerFastMode: opts.options.provider_fast_mode,
+            abortSignal: opts.options.abort_signal,
           }),
         emit: emitChunk,
       });
@@ -655,6 +658,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           requestId: opts.requestId,
           callSite: opts.callSite,
           providerFastMode: opts.options.provider_fast_mode,
+          abortSignal: opts.options.abort_signal,
         }),
       emit: emitChunk,
     });

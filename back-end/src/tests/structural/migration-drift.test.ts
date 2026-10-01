@@ -230,7 +230,9 @@ function parseSchemaPrisma(): TableState {
       const fieldName = fieldMatch[1];
       // Strip `?`, `[]`, attributes from the type token.
       const rawType = fieldMatch[2].replace(/[?[\]]/g, '');
-      const isScalar = SCALAR_TYPES.has(rawType) || enumNames.has(rawType);
+      // `Unsupported("vector(1024)")` is a real DB column Prisma cannot type.
+      const isScalar =
+        SCALAR_TYPES.has(rawType) || enumNames.has(rawType) || rawType.startsWith('Unsupported(');
       if (!isScalar) continue;
       const mapMatch = line.match(/@map\("([^"]+)"\)/);
       columns.add(mapMatch ? mapMatch[1] : fieldName);

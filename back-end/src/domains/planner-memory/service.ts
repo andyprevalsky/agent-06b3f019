@@ -7,6 +7,7 @@ import type {
   PlannerMemoryCompressionClaimBody,
   PlannerMemoryCompressionReleaseBody,
   PlannerMemoryCriticalPathBody,
+  PlannerMemoryEmbedPendingBody,
   PlannerMemorySearchBody,
   PlannerMemoryUpsertBody,
   PlannerMemoryJson,
@@ -19,6 +20,7 @@ export async function search(body: PlannerMemorySearchBody) {
     excludeRootAgentId: body.exclude_root_agent_id ?? null,
     limit: body.limit,
     passedOnly: body.passed_only,
+    minSimilarity: body.min_similarity,
   });
   return { candidates };
 }
@@ -41,6 +43,8 @@ export async function upsert(id: string, body: PlannerMemoryUpsertBody) {
       body.compressor_version ?? 'fixture'
     );
   }
+  // Internal writers (benchmark fixtures, backfill) get a searchable row on return.
+  await repo.embedPlannerMemory(id);
   return repo.findPlannerMemory(id);
 }
 
@@ -80,4 +84,8 @@ export async function get(id: string) {
 
 export async function stats() {
   return repo.plannerMemoryStats();
+}
+
+export async function embedPending(body: PlannerMemoryEmbedPendingBody) {
+  return repo.embedPendingPlannerMemories(body.limit ?? 50);
 }

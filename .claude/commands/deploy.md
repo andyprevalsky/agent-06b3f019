@@ -711,7 +711,7 @@ if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q
   else
     docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
       -p "$LOCAL_DB_PORT:5432" -v "$DB_VOLUME:/var/lib/postgresql/data" \
-      postgres:16-alpine >/dev/null
+      pgvector/pgvector:pg16 >/dev/null
     # Wait + push schema + seed for fresh containers
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
     (cd back-end && DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \

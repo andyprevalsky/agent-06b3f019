@@ -47,6 +47,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-service-readiness.sh"
 . "$SCRIPT_DIR/lib/seed-cache.sh"
 . "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -828,8 +829,10 @@ elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
             -e POSTGRES_DB=victoria \
             -p "$LOCAL_DB_PORT:5432" \
             -v "$DB_VOLUME:/var/lib/postgresql/data" \
-            postgres:16-alpine >/dev/null
+            "$LOCAL_PG_IMAGE" >/dev/null
     }
+
+    recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
 
     if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
         ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)

@@ -7,68 +7,32 @@
  * filled cache (no TTL): the first planner that retrieves a row without one
  * reads the bundle, compresses the trajectory, and stores the result here.
  *
- * 10k-agent shape: one indexed FTS query over pre-tokenized goals per planner
- * call, one upsert per finalized run, and one atomically leased cache fill per
- * bundle/version. No per-agent fan-in, in-memory corpus, or scheduled rebuild.
+ * Retrieval is semantic (plannerMemoryEmbedding.ts): the query goal is
+ * embedded once and scored against each visible row's goal vector with exact
+ * pgvector cosine distance.
+ *
+ * 10k-agent shape: one embedding call + one visibility-filtered vector query
+ * per planner call, one upsert (+ detached embed) per finalized run, and one
+ * atomically leased cache fill per bundle/version. No per-agent fan-in,
+ * in-memory corpus, or scheduled rebuild.
  */
 
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { prisma } from './database';
+import {
+  embedTexts,
+  plannerMemoryGoalHash,
+  PLANNER_MEMORY_INDEX_VERSION,
+  toVectorLiteral,
+} from './plannerMemoryEmbedding';
 
 export const PLANNER_MEMORY_SEARCH_MAX_LIMIT = 50;
 export const PLANNER_MEMORY_SEARCH_DEFAULT_LIMIT = 20;
 export const PLANNER_MEMORY_COMPRESSION_LEASE_MS = 30 * 60 * 1000;
 
-const TOKEN_RE = /[a-z0-9]+/g;
-const STOPWORDS = new Set(
-  `a an the and or but if then else of to in on at by for with from as is are was were be been being am
-   do does did done doing have has had having will would shall should can could may might must i me my we our
-   you your he she it its they them their this that these those there here what which who whom whose when where
-   why how all any each every some such no nor not only own same so than too very just also into over under
-   again further once about above below up down out off through during before after between both while until
-   use using used need needs needed please make sure want wants get got go going`
-    .split(/\s+/)
-    .filter(Boolean)
-);
-
-function stemToken(token: string): string {
-  if (token.length <= 4 || /^\d+$/.test(token)) return token;
-  for (const [suffix, replacement] of [
-    ['ies', 'y'],
-    ['ing', ''],
-    ['ed', ''],
-    ['es', ''],
-    ['s', ''],
-  ] as const) {
-    if (token.endsWith(suffix) && token.length - suffix.length >= 3) {
-      return token.slice(0, -suffix.length) + replacement;
-    }
-  }
-  return token;
-}
-
-/** Must stay byte-for-byte equivalent to agents planner-memory tokenize(). */
-export function tokenizePlannerMemoryGoal(goal: string): string[] {
-  return [
-    ...new Set(
-      (goal.toLowerCase().match(TOKEN_RE) ?? [])
-        .filter((token) => token.length >= 2 && !STOPWORDS.has(token))
-        .map(stemToken)
-    ),
-  ];
-}
-
-/** PostgreSQL applies its own English stemming; feed it the original words. */
-function plannerMemoryFtsWords(goal: string): string[] {
-  return [
-    ...new Set(
-      (goal.toLowerCase().match(TOKEN_RE) ?? []).filter(
-        (token) => token.length >= 2 && !STOPWORDS.has(token)
-      )
-    ),
-  ];
-}
+/** Candidates below this cosine similarity never reach the judge. */
+export const PLANNER_MEMORY_DEFAULT_MIN_SIMILARITY = 0.7;
 
 export interface PlannerMemoryRunInput {
   rootAgentId: string;
@@ -92,9 +56,8 @@ export interface PlannerMemoryCandidate {
   agent_created_at: string | null;
   critical_path: unknown | null;
   compressor_version: string | null;
-  fts_rank: number;
-  trgm_similarity: number;
-  lexical_coverage: number;
+  /** cosine(query vector, goal vector). */
+  similarity: number;
 }
 
 export interface PlannerMemorySearchInput {
@@ -103,6 +66,7 @@ export interface PlannerMemorySearchInput {
   excludeRootAgentId?: string | null;
   limit?: number;
   passedOnly?: boolean;
+  minSimilarity?: number;
 }
 
 export type PlannerMemoryCompressionClaim =
@@ -127,7 +91,6 @@ export async function upsertPlannerMemoryFromRun(input: PlannerMemoryRunInput): 
   const data = {
     userId: input.userId,
     goal,
-    goalTokens: tokenizePlannerMemoryGoal(goal),
     benchmarkTaskName: input.benchmarkTaskName ?? null,
     rootStatus: input.rootStatus ?? null,
     passed: input.passed ?? null,
@@ -150,31 +113,31 @@ export async function upsertPlannerMemoryFromRun(input: PlannerMemoryRunInput): 
       compressionLeaseUntil: null,
     },
   });
+  // A re-finalized goal invalidates its vector; the pending drain re-embeds it.
+  await prisma.plannerMemoryEmbedding.deleteMany({
+    where: { plannerMemoryId: input.rootAgentId, goalHash: { not: plannerMemoryGoalHash(goal) } },
+  });
 }
 
 /**
- * One-query OR-of-token retrieval. The bounded candidate stage is ordered
- * by the same query-token coverage used by the runtime scorer, so a concise
- * goal contained in a stored goal with appended constraints cannot be evicted
- * by high-trigram or repeated-term partial matches. Visibility: benchmark runs
- * are shared; private runs are visible only to their own user. Only real-world
- * runs (never simulator rollouts) are eligible.
+ * Semantic retrieval: embed the query goal once, then exact cosine KNN over the
+ * visible embedded goal vectors. Visibility: benchmark runs are shared; private runs are
+ * visible only to their own user. Only real-world (never simulator) runs.
  */
 export async function searchPlannerMemories(
   input: PlannerMemorySearchInput
 ): Promise<PlannerMemoryCandidate[]> {
   const goal = input.goal.trim();
   if (goal.length === 0) return [];
-  const queryTokens = tokenizePlannerMemoryGoal(goal);
-  if (queryTokens.length === 0) return [];
-  const queryTokenArray = Prisma.sql`ARRAY[${Prisma.join(queryTokens)}]::text[]`;
-  const tsquery = plannerMemoryFtsWords(goal).join(' | ');
   const limit = Math.max(
     1,
     Math.min(PLANNER_MEMORY_SEARCH_MAX_LIMIT, input.limit ?? PLANNER_MEMORY_SEARCH_DEFAULT_LIMIT)
   );
+  const minSimilarity = input.minSimilarity ?? PLANNER_MEMORY_DEFAULT_MIN_SIMILARITY;
   const exclude = input.excludeRootAgentId ?? '';
   const userId = input.userId ?? '';
+  const [queryVector] = await embedTexts([goal]);
+  const query = toVectorLiteral(queryVector);
   // Completed-only corpus: a benchmark verdict of passed, or (no verdict) a
   // root that finished COMPLETED. Failed/paused/timed-out runs never surface.
   const passedFilter =
@@ -193,45 +156,27 @@ export async function searchPlannerMemories(
       agentCreatedAt: Date | null;
       criticalPath: unknown | null;
       compressorVersion: string | null;
-      fts_rank: number;
-      trgm_similarity: number;
-      lexical_coverage: number;
+      similarity: number;
     }>
   >(Prisma.sql`
-    WITH search_query AS MATERIALIZED (
-      SELECT to_tsquery('english', ${tsquery}) AS value
-    ), ranked AS MATERIALIZED (
+    WITH q AS MATERIALIZED (SELECT ${query}::vector AS v),
+    scored AS (
       SELECT m."id", m."userId", m."goal", m."benchmarkTaskName", m."rootStatus", m."passed",
              m."worldModelMode", m."agentCreatedAt", m."criticalPath", m."compressorVersion",
-             ts_rank(to_tsvector('english', m."goal"), search_query.value)::float8 AS fts_rank,
-             overlap.count / ${queryTokens.length}::float8 AS lexical_coverage,
-             overlap.count / GREATEST(cardinality(m."goalTokens"), 1)::float8 AS reverse_coverage
+             (1 - (e."goalVector" <=> q.v))::float8 AS similarity
       FROM "PlannerMemory" m
-      CROSS JOIN search_query
-      CROSS JOIN LATERAL (
-        SELECT COUNT(*)::float8 AS count
-        FROM unnest(${queryTokenArray}) AS query_terms(query_token)
-        WHERE query_token = ANY(m."goalTokens")
-      ) overlap
+      JOIN "PlannerMemoryEmbedding" e
+        ON e."plannerMemoryId" = m."id" AND e."model" = ${PLANNER_MEMORY_INDEX_VERSION}
+      CROSS JOIN q
       WHERE m."id" <> ${exclude}
         AND m."worldModelMode" = 'real'
         AND (m."benchmarkTaskName" IS NOT NULL OR m."userId" = ${userId})
-        -- PostgreSQL's English dictionary can reduce a syntactically valid
-        -- query to zero nodes (for example, "against"). In that case retain
-        -- the home-token overlap path instead of silently returning no rows.
-        AND (
-          (numnode(search_query.value) = 0 AND overlap.count > 0)
-          OR to_tsvector('english', m."goal") @@ search_query.value
-        )
         ${passedFilter}
-      ORDER BY lexical_coverage DESC, reverse_coverage DESC,
-               m."agentCreatedAt" DESC NULLS LAST, m."id" ASC
-      LIMIT ${limit}
     )
-    SELECT ranked.*, similarity(ranked."goal", ${goal})::float8 AS trgm_similarity
-    FROM ranked
-    ORDER BY ranked.lexical_coverage DESC, ranked.reverse_coverage DESC,
-             ranked."agentCreatedAt" DESC NULLS LAST, ranked."id" ASC
+    SELECT * FROM scored
+    WHERE similarity >= ${minSimilarity}
+    ORDER BY similarity DESC, "agentCreatedAt" DESC NULLS LAST, "id" ASC
+    LIMIT ${limit}
   `);
   return rows.map((row) => ({
     id: row.id,
@@ -244,9 +189,7 @@ export async function searchPlannerMemories(
     agent_created_at: row.agentCreatedAt ? row.agentCreatedAt.toISOString() : null,
     critical_path: row.criticalPath ?? null,
     compressor_version: row.compressorVersion,
-    fts_rank: Number(row.fts_rank),
-    trgm_similarity: Number(row.trgm_similarity),
-    lexical_coverage: Number(row.lexical_coverage),
+    similarity: Number(row.similarity),
   }));
 }
 
@@ -338,6 +281,7 @@ export async function findPlannerMemory(id: string) {
 
 export interface PlannerMemoryStats {
   total: number;
+  embedded: number;
   compressed: number;
   passed: number;
   benchmark: number;
@@ -345,10 +289,11 @@ export interface PlannerMemoryStats {
   distinct_tasks: number;
 }
 
-/** Corpus size counters (the "how many history items are embedded" answer). */
+/** Corpus size counters, including how many rows carry a current-model embedding. */
 export async function plannerMemoryStats(): Promise<PlannerMemoryStats> {
-  const [total, compressed, passed, benchmark, distinct] = await Promise.all([
+  const [total, embedded, compressed, passed, benchmark, distinct] = await Promise.all([
     prisma.plannerMemory.count(),
+    prisma.plannerMemoryEmbedding.count({ where: { model: PLANNER_MEMORY_INDEX_VERSION } }),
     prisma.plannerMemory.count({ where: { criticalPath: { not: Prisma.DbNull } } }),
     prisma.plannerMemory.count({ where: { passed: true } }),
     prisma.plannerMemory.count({ where: { benchmarkTaskName: { not: null } } }),
@@ -360,6 +305,7 @@ export async function plannerMemoryStats(): Promise<PlannerMemoryStats> {
   ]);
   return {
     total,
+    embedded,
     compressed,
     passed,
     benchmark,

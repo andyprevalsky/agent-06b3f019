@@ -55,6 +55,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
+# pgvector for the distro's Postgres major (planner-memory vector columns;
+# prisma db push creates the extension). Debian/Ubuntu ship it as
+# postgresql-<major>-pgvector.
+RUN apt-get update \
+    && PG_MAJOR="$(ls /usr/lib/postgresql | sort -n | tail -1)" \
+    && apt-get install -y --no-install-recommends "postgresql-${PG_MAJOR}-pgvector" \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Non-root user that owns the repo + can drive the Postgres cluster ──────
 # run.sh's system-Postgres fallback uses `su - postgres` / pg_ctlcluster; the
 # entrypoint runs those bits via sudo-less gosu as needed. The app itself runs
