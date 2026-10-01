@@ -3508,3 +3508,13 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 196.4, "cost_cents": 5.0, "timestamp": "2026-09-30T19:26:54.740604+00:00", "agent_id": "57afbff7-3279-4f3b-ae5c-b1cd529fa844"}
 {"task": "agent-payment-setup-resume", "duration_seconds": 221.7, "cost_cents": 5.0, "timestamp": "2026-09-30T19:26:54.638533+00:00", "agent_id": "0337a696-21d8-4907-8a31-cd3993c6b1fb"}
 {"task": "agent-payment-abandonment", "duration_seconds": 285.0, "cost_cents": 1.0, "timestamp": "2026-09-30T19:26:54.638533+00:00", "agent_id": "762970f5-929e-4ce5-9873-ba4bca471f00"}
+{"task": "grep-agent-trajectories-isolation", "duration_seconds": 101.3, "cost_cents": 0.0, "timestamp": "2026-10-01T03:32:13.022891+00:00", "agent_id": "e12613d3-04b6-4b59-aac2-62807f55e489"}
+{"task": "grep-agent-trajectories-browser-verification", "duration_seconds": 132.0, "cost_cents": 2.0, "timestamp": "2026-10-01T03:32:13.022891+00:00", "agent_id": "8ec05fb4-0c44-4f00-a61a-fca4fd2ed584"}
+{"task": "grep-agent-trajectories-code-tool-status", "duration_seconds": 157.7, "cost_cents": 1.0, "timestamp": "2026-10-01T03:32:13.022891+00:00", "agent_id": "2aa31cdc-944d-4772-98e1-b701e7365bcd"}
+{"task": "grep-agent-trajectories-followup", "duration_seconds": 156.7, "cost_cents": 1.0, "timestamp": "2026-10-01T03:32:13.022891+00:00", "agent_id": "ea50b367-a464-4aae-9cdd-17097685b98d"}
+{"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 215.6, "cost_cents": 5.0, "timestamp": "2026-10-01T03:32:13.022891+00:00", "agent_id": "cdde6bb8-1fa8-4baf-a1ba-ff82850536ed"}
+{"task": "grep-agent-trajectories-code-tool-status", "duration_seconds": 75.1, "cost_cents": 0.0, "timestamp": "2026-10-01T03:42:03.151598+00:00", "agent_id": "c7333d3c-ae03-4af2-ba8c-1799e765ef6b"}
+{"task": "grep-agent-trajectories-isolation", "duration_seconds": 107.2, "cost_cents": 0.0, "timestamp": "2026-10-01T03:42:03.151598+00:00", "agent_id": "eb9a73c7-2004-4ea4-a05a-e1c85c768599"}
+{"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 127.9, "cost_cents": 1.0, "timestamp": "2026-10-01T03:42:03.151598+00:00", "agent_id": "3365ba8b-7213-4160-9c63-3202ea6990c8"}
+{"task": "grep-agent-trajectories-followup", "duration_seconds": 178.2, "cost_cents": 2.0, "timestamp": "2026-10-01T03:42:03.151598+00:00", "agent_id": "dd3416c4-27f2-4e7f-8e01-f7141c78356e"}
+{"task": "grep-agent-trajectories-browser-verification", "duration_seconds": 284.1, "cost_cents": 5.0, "timestamp": "2026-10-01T03:42:03.151598+00:00", "agent_id": "46ce4de6-0ee8-49a7-b21a-1ecd0f99badf"}

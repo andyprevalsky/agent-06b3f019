@@ -167,7 +167,7 @@ async def execute_grep(
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute grep search and post events via handle_tool_event."""
-    pattern = tool_call.get("pattern", "")
+    pattern = tool_call.get("pattern") or ""
     source = tool_call.get("source", "")
 
     progress_title = _format_grep_title("Searching", pattern, source)

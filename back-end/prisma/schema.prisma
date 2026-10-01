@@ -208,6 +208,7 @@ model AgentTrajectorySearch {
 
   @@index([userId, createdAt(sort: Desc), messageId(sort: Desc)])
   @@index([userId, rootAgentId, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_root_time_idx")
+  @@index([userId, role, traceKind, createdAt(sort: Desc), messageId(sort: Desc)], map: "AgentTrajectorySearch_user_role_kind_time_idx")
 }
 
 model Waitlist {

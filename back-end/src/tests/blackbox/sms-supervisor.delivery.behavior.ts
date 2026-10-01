@@ -273,6 +273,9 @@ export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient)
     await prisma.message.create({
       data: { agentId: prior.id, role: 'ASSISTANT', text: `Earlier decision ${token}` },
     });
+    await prisma.message.create({
+      data: { agentId: prior.id, role: 'USER', text: `Earlier request ${token}` },
+    });
     registerUserDataGrep(userDataGrep);
     const result = await executeGrepTool(
       { pattern: token, source: 'agent_trajectories', filters: { surface: 'SMS' } },
@@ -283,11 +286,28 @@ export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient)
       matches: Array<{ path: string; content: string }>;
     };
     if (
-      payload.matches.length !== 1 ||
+      payload.matches.length !== 2 ||
       !payload.matches[0].path.startsWith(`agent_trajectories/${prior.id}/`) ||
       !payload.matches[0].content.includes(token)
     ) {
       throw new Error(`SMS supervisor did not retrieve the prior agent message: ${result.result}`);
+    }
+    const metadataOnly = await executeGrepTool(
+      { role: 'USER', record_kind: 'message', surface: 'SMS', trace_path: prior.id },
+      userId
+    );
+    if (!metadataOnly.success) {
+      throw new Error(`Expected SMS metadata grep success: ${metadataOnly.error}`);
+    }
+    const userMessages = JSON.parse(metadataOnly.result) as {
+      matches: Array<{ role: string; content: string }>;
+    };
+    if (
+      userMessages.matches.length !== 1 ||
+      userMessages.matches[0].role !== 'USER' ||
+      !userMessages.matches[0].content.includes(`Earlier request ${token}`)
+    ) {
+      throw new Error(`SMS metadata grep did not filter by role: ${metadataOnly.result}`);
     }
   } finally {
     await cleanupAgentScopedUser(prisma, userId);

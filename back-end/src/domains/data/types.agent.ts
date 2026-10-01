@@ -1,9 +1,18 @@
 /** Filters for grep over agent messages. */
 
+export interface AgentMetadataParams {
+  role?: string;
+  record_kind?: string;
+  surface?: string;
+  trace_path?: string;
+  until?: string;
+}
+
 export interface AgentNetworkGrepFilters {
   pathAgentId?: string;
   pathRole?: string;
   pathMessageId?: string;
+  role?: string;
 }
 
 export interface AgentTrajectoryGrepFilters {

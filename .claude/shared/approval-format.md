@@ -7,6 +7,12 @@ summary, and do not rename, reorder, or omit its six required sections
 (TL;DR, Evidence, Detail, Before Behavior, After Behavior, Downstream
 Implications).
 
+For `/RCA` only, use the presentation order in `.claude/commands/rca.md`:
+FE LINK, TL;DR, Before Behavior, After Behavior, Downstream Implications,
+Detail. Put the other required Evidence fields inside Detail. This overrides
+the section order above for `/RCA`; all evidence and approval requirements
+still apply.
+
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
 decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
@@ -31,8 +37,9 @@ Implications, its headline belongs in the TL;DR.
 
 ## Evidence
 
-Put the inspectable artifacts here, before the argument. Render this exact
-shape — labeled lines, not a prose paragraph. Do not bury these in Detail.
+Put the inspectable artifacts here, before the argument. For `/RCA`, put them
+under `## Detail` after the other required sections. Render this exact
+shape — labeled lines, not a prose paragraph.
 Each field is required; when a field does not apply, keep the label and write
 `Not applicable — <reason>`. Inventing a URL or omitting the reason is invalid.
 

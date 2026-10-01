@@ -222,7 +222,7 @@ def test_planner_response_schema_is_compact():
 
 
 def test_grep_tool_schema_exact_contract():
-    """Grep exposes only the v1 DB-backed grep params."""
+    """Grep exposes typed agent metadata queries alongside legacy filters."""
     from utils.tool_schemas import GrepTool
 
     schema = GrepTool.model_json_schema()
@@ -232,6 +232,11 @@ def test_grep_tool_schema_exact_contract():
         "pattern",
         "sources",
         "source",
+        "role",
+        "record_kind",
+        "surface",
+        "trace_path",
+        "until",
         "require_source_access",
         "-B",
         "-A",
@@ -274,6 +279,11 @@ def test_grep_tool_schema_exact_contract():
 
     assert _enum_values(schema["properties"]["source"]) == expected_sources
     assert _enum_values(schema["properties"]["sources"]) == expected_sources
+    assert _enum_values(schema["properties"]["role"]) == {"USER", "ASSISTANT", "TOOL"}
+    assert _enum_values(schema["properties"]["record_kind"]) == {
+        "message", "llm_output", "llm_context", "all"
+    }
+    assert "pattern" not in schema.get("required", [])
 
     removed = {
         "path",

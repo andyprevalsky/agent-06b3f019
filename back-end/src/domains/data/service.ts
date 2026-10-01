@@ -144,6 +144,7 @@ async function searchSource(
       pathAgentId: agentNetworkFilters?.pathAgentId,
       pathRole: agentNetworkFilters?.pathRole,
       pathMessageId: agentNetworkFilters?.pathMessageId,
+      role: agentNetworkFilters?.role,
     }),
     grepRepo.searchAgentNetworkGrepRows({
       agentIds,
@@ -154,6 +155,7 @@ async function searchSource(
       pathAgentId: agentNetworkFilters?.pathAgentId,
       pathRole: agentNetworkFilters?.pathRole,
       pathMessageId: agentNetworkFilters?.pathMessageId,
+      role: agentNetworkFilters?.role,
     }),
   ]);
   return { total, matches: rows.map((row) => buildAgentNetworkMatch(row, input)) };
@@ -228,14 +230,14 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
   }
 
   log.info(
-    `grep: '${params.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`
+    `grep: '${input.pattern}' -> ${matches.length}/${totalMatches} matches in ${input.sources.join(',')}`
   );
 
   return {
     matches,
     total_matches: totalMatches,
     truncated,
-    pattern: params.pattern,
+    pattern: input.pattern,
     sources: input.sources,
     applied_limit: input.headLimit,
     applied_offset: input.offset,
@@ -251,11 +253,7 @@ export async function grep(userId: string, params: GrepParams): Promise<GrepResu
     ...(Object.keys(summaries).length > 0 ? { summaries } : {}),
     ...(matches.length === 0
       ? {
-          message: `No matches for '${params.pattern}' in ${input.sources.join(', ')}.${
-            input.sources.includes('agent_trajectories')
-              ? ' Trajectory patterns search message text, not metadata labels. Use filters.role, filters.record_kind, filters.surface, or filters.path to narrow records.'
-              : ''
-          }`,
+          message: `No matches for '${input.pattern}' in ${input.sources.join(', ')}.`,
         }
       : {}),
   };

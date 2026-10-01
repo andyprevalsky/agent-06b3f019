@@ -8,8 +8,6 @@ import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from 
 import { checkPatternSafety, extractInlineFlags, stripNamedGroups } from './regexSafety';
 import {
   parseBoundedNumber,
-  parseAgentNetworkFilters,
-  parseAgentTrajectoryFilters,
   parseDocumentFilters,
   parseMessageFilters,
   parseNetworkFilters,
@@ -17,6 +15,7 @@ import {
   rejectUnsupportedFilters,
   requireFilterObject,
 } from './validate.filters';
+import { parseAgentNetworkFilters, parseAgentTrajectoryFilters } from './validate.agent';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -47,6 +46,11 @@ const ALLOWED_GREP_KEYS = new Set([
   'source',
   'sources',
   'filters',
+  'role',
+  'record_kind',
+  'surface',
+  'trace_path',
+  'until',
   '-A',
   '-B',
   '-C',
@@ -77,6 +81,15 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
 
 function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const { source, sources } = params;
+  const rawFilters = requireFilterObject(params);
+  const trajectoryNarrowing =
+    params.role !== undefined ||
+    params.record_kind !== undefined ||
+    params.surface !== undefined ||
+    params.trace_path !== undefined ||
+    params.until !== undefined ||
+    ['role', 'record_kind', 'surface'].some((key) => key in rawFilters) ||
+    (typeof rawFilters.path === 'string' && rawFilters.path.startsWith('agent_trajectories/'));
   if (source !== undefined && !(source in VALID_SOURCES)) {
     throw new SourceNotFoundError(source);
   }
@@ -91,16 +104,22 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     }
   }
 
-  // Explicit `sources` array (deduped) wins, then a single `source`, else the
-  // default trio.
+  // Typed trajectory narrowing chooses its source when the caller omits one.
   const resolvedSources: ValidSource[] =
     sources !== undefined
       ? [...new Set(sources as ValidSource[])]
       : source !== undefined
         ? [source as ValidSource]
-        : DEFAULT_GREP_SOURCES;
+        : trajectoryNarrowing
+          ? ['agent_trajectories']
+          : DEFAULT_GREP_SOURCES;
 
-  if (params.filters !== undefined && source === undefined && sources === undefined) {
+  if (
+    params.filters !== undefined &&
+    source === undefined &&
+    sources === undefined &&
+    !trajectoryNarrowing
+  ) {
     throw new InvalidGrepParamError('filters');
   }
 
@@ -110,6 +129,18 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const hasNetwork = resolvedSources.includes('network');
   const hasAgentNetwork = resolvedSources.includes('agent_network');
   const hasAgentTrajectories = resolvedSources.includes('agent_trajectories');
+  if (
+    !hasAgentTrajectories &&
+    (params.record_kind !== undefined ||
+      params.surface !== undefined ||
+      params.trace_path !== undefined ||
+      params.until !== undefined)
+  ) {
+    throw new InvalidGrepParamError('agent_trajectories source');
+  }
+  if (params.role !== undefined && !hasAgentTrajectories && !hasAgentNetwork) {
+    throw new InvalidGrepParamError('role');
+  }
 
   // Reject filters that NO resolved source can consume. Message/transaction/
   // document families reject unsupported keys inside their own parse step; the
@@ -117,7 +148,7 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   // those parsers run — without this the filters would be silently dropped.
   // Covers both the single-source (byte-identical to pre-`sources` behavior when
   // resolvedSources===[selectedSource]) and the multi-source path.
-  const filterObj = requireFilterObject(params);
+  const filterObj = rawFilters;
   if (Object.keys(filterObj).length > 0 && !hasMessageFamily && !hasTransactions && !hasDocuments) {
     rejectUnsupportedFilters(resolvedSources[0], filterObj);
   }
@@ -144,11 +175,6 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     }
   }
 
-  const { pattern } = params;
-  if (pattern === undefined || pattern === null || typeof pattern !== 'string') {
-    throw new InvalidPatternError();
-  }
-
   const {
     resolvedSources,
     hasMessageFamily,
@@ -159,6 +185,14 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     hasAgentTrajectories,
     mergeTopLevelNarrowing,
   } = resolveSourceSelection(params);
+
+  const pattern =
+    params.pattern === undefined
+      ? hasAgentTrajectories || hasAgentNetwork
+        ? ''
+        : undefined
+      : params.pattern;
+  if (typeof pattern !== 'string') throw new InvalidPatternError();
 
   const multiline = parseBoolean(params.multiline, false);
   // Fix 1: fold inline (?i) into case-insensitivity (JS RegExp + Postgres ARE reject it).

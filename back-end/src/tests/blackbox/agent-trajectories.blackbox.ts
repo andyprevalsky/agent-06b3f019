@@ -375,7 +375,8 @@ async function run(): Promise<void> {
   `;
   if (
     !indexes.some((index) => index.indexdef.includes('gin_trgm_ops')) ||
-    !indexes.some((index) => index.indexname === 'AgentTrajectorySearch_user_root_time_idx')
+    !indexes.some((index) => index.indexname === 'AgentTrajectorySearch_user_root_time_idx') ||
+    !indexes.some((index) => index.indexname === 'AgentTrajectorySearch_user_role_kind_time_idx')
   ) {
     throw new Error(`Trajectory search indexes missing: ${JSON.stringify(indexes)}`);
   }
@@ -485,14 +486,45 @@ async function run(): Promise<void> {
         `Trajectory role/root filters lost the user's message: ${JSON.stringify(userMessage)}`
       );
     }
-    const metadataPattern = await grep(ownerId, {
-      source: 'agent_trajectories',
-      pattern: 'message_role: USER',
-      filters: { path: sms.id },
-    });
-    requireResult(metadataPattern, 0);
-    if (!String((metadataPattern.data as { message?: string }).message).includes('filters.role')) {
-      throw new Error('An empty trajectory search did not explain how to filter metadata');
+    const [typedUserMessage] = requireResult(
+      await grep(ownerId, {
+        role: 'user',
+        record_kind: 'MESSAGE',
+        surface: 'sms',
+        trace_path: sms.id,
+      }),
+      1
+    );
+    if (typedUserMessage.path !== userMessage.path) {
+      throw new Error('Typed trajectory parameters did not resolve the original USER message');
+    }
+    const [mixedUserMessage] = requireResult(
+      await grep(ownerId, {
+        sources: ['agent_network', 'agent_trajectories'],
+        pattern: 'dispatch at noon',
+        role: 'USER',
+        record_kind: 'message',
+        agent_id: current.id,
+      }),
+      1
+    );
+    if (mixedUserMessage.path !== userMessage.path) {
+      throw new Error('Typed role filter failed in a multi-source search');
+    }
+    requireResult(
+      await grep(ownerId, {
+        source: 'agent_network',
+        agent_id: current.id,
+        pattern: 'Orchid current-only decoy',
+        role: 'USER',
+      }),
+      0
+    );
+    const invalidRole = await grep(ownerId, { source: 'agent_network', role: 12 });
+    if (invalidRole.status !== 400) {
+      throw new Error(
+        `Malformed role should be rejected as client input: ${JSON.stringify(invalidRole)}`
+      );
     }
     requireResult(await grep(otherId, { source: 'agent_trajectories', pattern: 'maple-73' }), 0);
     const forbidden = await grep(ownerId, {

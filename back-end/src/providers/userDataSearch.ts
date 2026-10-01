@@ -8,9 +8,14 @@
  */
 
 export interface UserDataGrepParams {
-  pattern: string;
+  pattern?: string;
   source?: string;
   filters?: Record<string, unknown>;
+  role?: string;
+  record_kind?: string;
+  surface?: string;
+  trace_path?: string;
+  until?: string;
   '-A'?: string | number;
   '-B'?: string | number;
   '-C'?: string | number;

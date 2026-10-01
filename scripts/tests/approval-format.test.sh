@@ -150,8 +150,16 @@ require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
   "/descend Stop 1 must describe what the local repro tests"
 require_text "$DESCEND" "**<how checked>**" \
   "/descend Stop 1 must name how each evaluator is checked"
-require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
-  "/rca approval output must require the Evidence pack"
+require_text "$RCA" "**FE LINK** first, then **TL;DR**, **Before Behavior**," \
+  "/rca reports must begin with the FE link and requested section order"
+require_text "$RCA" "**After Behavior**, **Downstream Implications**, and **Detail**" \
+  "/rca reports must end with downstream implications then detail"
+require_text "$RCA" '`## FE LINK`,
+`## TL;DR`, `## Before Behavior`, `## After Behavior`,
+`## Downstream Implications`, `## Detail`' \
+  "/rca reports must use the requested Markdown headings"
+require_text "$RCA" "task-framed \`What failed:\` sentence in Detail" \
+  "/rca approval output must retain the task-framed failure evidence"
 require_text "$RCA" "## Autonomous fix-and-deploy default" \
   "/rca must define the autonomous fix-and-deploy default"
 require_text "$RCA" 'immediately run `/deploy`; drive it fully autonomously' \

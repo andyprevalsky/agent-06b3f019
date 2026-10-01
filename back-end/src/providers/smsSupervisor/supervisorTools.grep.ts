@@ -18,8 +18,13 @@ import type { ToolResult } from './supervisorTools';
 const log = createLogger('SmsSupervisorGrep');
 
 export interface GrepArgs {
-  pattern: string;
+  pattern?: string;
   source?: string | null;
+  role?: 'USER' | 'ASSISTANT' | 'TOOL' | null;
+  record_kind?: 'message' | 'llm_output' | 'llm_context' | 'all' | null;
+  surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP' | null;
+  trace_path?: string | null;
+  until?: string | null;
   context?: number | null;
   '-B'?: number | null;
   '-A'?: number | null;
@@ -94,7 +99,11 @@ function mergeFanOutResults(results: UserDataGrepResult[], limit: number): UserD
 export async function executeGrepTool(args: GrepArgs, userId: string): Promise<ToolResult> {
   const params = toGrepParams(args);
   const startTime = Date.now();
-  log.info('Executing grep', { pattern: params.pattern, source: params.source ?? 'all', userId });
+  log.info('Executing grep', {
+    pattern: params.pattern ?? '',
+    source: params.source ?? 'all',
+    userId,
+  });
 
   if (params.source === 'agent_network') {
     return {
@@ -107,7 +116,15 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
   }
 
   let result: UserDataGrepResult;
-  if (params.source === undefined) {
+  const trajectoryNarrowing =
+    params.role !== undefined ||
+    params.record_kind !== undefined ||
+    params.surface !== undefined ||
+    params.trace_path !== undefined ||
+    params.until !== undefined;
+  if (params.source === undefined && trajectoryNarrowing) {
+    result = await executeUserDataGrep(userId, { ...params, source: 'agent_trajectories' });
+  } else if (params.source === undefined) {
     if (params.filters !== undefined) {
       // Mirrors the domain's validateGrepInput: nested filters need an explicit source.
       return {

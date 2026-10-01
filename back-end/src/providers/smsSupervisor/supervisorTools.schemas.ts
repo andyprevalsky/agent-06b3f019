@@ -113,8 +113,8 @@ Usage:
 - \`pattern\` is a regular expression. Plain text works for literal searches.
 - \`source\` is optional. Omit it to search messages and network.
 - Supported sources: messages, network, agent_trajectories, transactions, documents. agent_trajectories searches this user's prior agent runs across chat, SMS, and Temporal.
-- For agent trajectory citations, copy the returned path and message role exactly. Root or child identifies the agent's place in a tree, not the message role.
-- Trajectory record_kind: message is a stored agent message, llm_output is a model response, and llm_context is text passed to a model and may replay earlier turns. Ordinary results include messages and outputs, newest first; use record_kind=llm_context for replayed inputs or record_kind=all for the full corpus.
+- Agent trajectory results include trace_path, message_role, and agent_title as separate fields.
+- Trajectory record_kind: message is a stored agent message, llm_output is a model response, and llm_context is text passed to a model and may replay earlier turns. Ordinary results include messages and outputs, newest first; record_kind=all includes replayed inputs.
 - Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
@@ -129,13 +129,37 @@ Returns:
         pattern: {
           type: 'string' as const,
           description:
-            'Regular expression pattern to search for. Plain text works as a literal regex. Use -i for case-insensitive matching and multiline for cross-line patterns.',
+            'Regular expression over record text. Omit for agent_trajectories to list recent records using metadata filters.',
         },
         source: {
           type: 'string' as const,
           enum: ['messages', 'network', 'agent_trajectories', 'transactions', 'documents'],
           description:
             "Optional source bucket. Omit to search messages and network. agent_trajectories searches this user's agent history across chat, SMS, and Temporal. Other sources: messages, network, transactions, documents.",
+        },
+        role: {
+          type: 'string' as const,
+          enum: ['USER', 'ASSISTANT', 'TOOL'],
+          description:
+            'Agent trajectory message role. Implies agent_trajectories when source is omitted.',
+        },
+        record_kind: {
+          type: 'string' as const,
+          enum: ['message', 'llm_output', 'llm_context', 'all'],
+          description: 'Agent trajectory record kind.',
+        },
+        surface: {
+          type: 'string' as const,
+          enum: ['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'],
+          description: 'Agent trajectory origin surface.',
+        },
+        trace_path: {
+          type: 'string' as const,
+          description: 'Agent trajectory path or root UUID returned by grep.',
+        },
+        until: {
+          type: 'string' as const,
+          description: 'Latest timestamp for agent trajectory results (ISO 8601).',
         },
         '-B': {
           type: 'number' as const,
@@ -212,10 +236,10 @@ Returns:
         since: {
           type: 'string' as const,
           description:
-            'messages source only: only return messages at or after this time. ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources.',
+            'Messages or agent trajectories at or after this time. ISO 8601 timestamp or a relative form like 7d, 24h, 30m.',
         },
       },
-      required: ['pattern'],
+      required: [],
     },
   },
   {

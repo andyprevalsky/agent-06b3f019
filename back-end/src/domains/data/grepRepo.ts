@@ -435,11 +435,13 @@ function agentNetworkPathFilters(params: {
   pathAgentId?: string;
   pathRole?: string;
   pathMessageId?: string;
+  role?: string;
 }): Prisma.Sql {
   const parts: Prisma.Sql[] = [];
   if (params.pathAgentId !== undefined)
     parts.push(Prisma.sql`AND m."agentId" = ${params.pathAgentId}`);
   if (params.pathRole !== undefined) parts.push(Prisma.sql`AND m.role::text = ${params.pathRole}`);
+  if (params.role !== undefined) parts.push(Prisma.sql`AND m.role::text = ${params.role}`);
   if (params.pathMessageId !== undefined)
     parts.push(Prisma.sql`AND m.id = ${params.pathMessageId}`);
   return parts.length > 0 ? Prisma.join(parts, ' ') : Prisma.empty;
@@ -452,6 +454,7 @@ export async function countAgentNetworkGrepRows(params: {
   pathAgentId?: string;
   pathRole?: string;
   pathMessageId?: string;
+  role?: string;
 }): Promise<number> {
   if (params.agentIds.length === 0) return 0;
   const expression = Prisma.sql`(
@@ -477,6 +480,7 @@ export async function searchAgentNetworkGrepRows(params: {
   pathAgentId?: string;
   pathRole?: string;
   pathMessageId?: string;
+  role?: string;
 }): Promise<AgentMessageGrepRow[]> {
   if (params.agentIds.length === 0) return [];
   const expression = Prisma.sql`(

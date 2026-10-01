@@ -168,6 +168,29 @@ async def test_grep_boundary_normalizes_model_dump_keys():
     }
 
 
+async def test_grep_agent_metadata_only():
+    """Typed trajectory selectors reach the backend without a text pattern."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import grep_activity
+
+        await grep_activity(
+            {"role": "USER", "record_kind": "message", "surface": "SMS"},
+            user_id="user-42",
+            agent_id="agent-1",
+        )
+
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST")
+    body = json.loads(call["requestBody"])
+    assert body == {
+        "role": "USER",
+        "record_kind": "message",
+        "surface": "SMS",
+        "user_id": "user-42",
+        "agent_id": "agent-1",
+    }
+
+
 async def test_fetch_local_data_summary():
     """fetch_local_data_summary returns formatted summary string."""
     _setup()

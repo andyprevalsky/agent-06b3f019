@@ -432,10 +432,11 @@ class GrepTool(BaseModel):
     """Search local data sources with regex grep semantics."""
 
     tool: Literal["grep"]
-    pattern: str = Field(
+    pattern: Optional[str] = Field(
+        default=None,
         description=(
-            "Regular expression pattern to search for. Plain text works as a literal regex. "
-            "Use -i for case-insensitive matching and multiline for cross-line patterns."
+            "Regular expression over record text. Omit for agent_trajectories or "
+            "agent_network to list recent records using metadata filters."
         ),
     )
     sources: Optional[
@@ -468,15 +469,12 @@ class GrepTool(BaseModel):
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
             "agent_trajectories searches prior user-owned agent runs across chat, SMS, and "
-            "Temporal; it excludes the current agent tree. Use agent_trajectories for earlier "
-            "agents and agent_network for only the current tree; do not mix them for a prior-run "
-            "search. Cite its returned path and message "
-            "role exactly; root or child is an agent hierarchy label, not a message role. "
+            "Temporal; it excludes the current agent tree. Results carry a trace path, "
+            "message role, and agent title as separate fields. "
             "Trajectory record_kind=message is a stored agent message; llm_output is a model "
             "response; llm_context is text passed to a model and may replay earlier turns. "
-            "Ordinary results include messages and outputs; set record_kind=llm_context for "
-            "replayed inputs or record_kind=all for the full corpus. If a hit only summarizes "
-            "an action, search for its underlying message before reporting direct evidence. "
+            "Ordinary results include messages and outputs; record_kind=all includes replayed "
+            "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
@@ -506,6 +504,26 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
+        default=None,
+        description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
+    )
+    record_kind: Optional[Literal["message", "llm_output", "llm_context", "all"]] = Field(
+        default=None,
+        description="Agent trajectory record kind; message is the stored conversation record.",
+    )
+    surface: Optional[Literal["WEB", "MAC_APP", "SMS", "WHATSAPP"]] = Field(
+        default=None,
+        description="Agent trajectory origin surface.",
+    )
+    trace_path: Optional[str] = Field(
+        default=None,
+        description="Agent trajectory path or root UUID returned by grep.",
+    )
+    until: Optional[str] = Field(
+        default=None,
+        description="Latest timestamp for agent trajectory results (ISO 8601).",
     )
     require_source_access: Optional[bool] = Field(
         default=None,
@@ -584,8 +602,8 @@ class GrepTool(BaseModel):
     since: Optional[str] = Field(
         default=None,
         description=(
-            "messages source only: only return messages at or after this time. "
-            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m. Ignored for other sources."
+            "Messages or agent trajectories at or after this time. "
+            "ISO 8601 timestamp or a relative form like 7d, 24h, 30m."
         ),
     )
     model_config = ConfigDict(populate_by_name=True)

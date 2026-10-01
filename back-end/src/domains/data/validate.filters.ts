@@ -10,8 +10,6 @@ import { InvalidGrepParamError } from './errors';
 import { parseGrepPath } from './path';
 import {
   DATA_SOURCE_CONFIGS,
-  type AgentNetworkGrepFilters,
-  type AgentTrajectoryGrepFilters,
   type DocumentGrepFilters,
   type GrepParams,
   type MessageGrepFilters,
@@ -163,75 +161,6 @@ export function parseMessageFilters(
           pathThread: parsedPath.thread,
           ...(parsedPath.messageId !== undefined ? { pathMessageId: parsedPath.messageId } : {}),
         }
-      : {}),
-  };
-}
-
-export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('agent_network', raw);
-  const rawPath = parseFilterString(raw, 'path');
-  if (rawPath === undefined) return undefined;
-  const parsed = parseGrepPath(rawPath);
-  if (parsed === null || parsed.source !== 'agent_network') {
-    throw new InvalidGrepParamError('filters.path');
-  }
-  return {
-    ...(parsed.agentId !== undefined ? { pathAgentId: parsed.agentId } : {}),
-    ...(parsed.role !== undefined ? { pathRole: parsed.role } : {}),
-    ...(parsed.messageId !== undefined ? { pathMessageId: parsed.messageId } : {}),
-  };
-}
-
-export function parseAgentTrajectoryFilters(
-  params: GrepParams
-): AgentTrajectoryGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('agent_trajectories', raw);
-  const rawPath = parseFilterString(raw, 'path');
-  const parsed =
-    rawPath === undefined
-      ? undefined
-      : parseGrepPath(
-          /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(rawPath)
-            ? `agent_trajectories/${rawPath}`
-            : rawPath
-        );
-  if (rawPath !== undefined && parsed?.source !== 'agent_trajectories') {
-    throw new InvalidGrepParamError('filters.path');
-  }
-  const path = parsed?.source === 'agent_trajectories' ? parsed : undefined;
-  const role = parseFilterString(raw, 'role')?.toUpperCase();
-  const surface = parseFilterString(raw, 'surface')?.toUpperCase();
-  const recordKind = parseFilterString(raw, 'record_kind')?.toLowerCase();
-  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
-    throw new InvalidGrepParamError('filters.role');
-  }
-  if (path?.role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
-    throw new InvalidGrepParamError('filters.path');
-  }
-  if (surface !== undefined && !['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'].includes(surface)) {
-    throw new InvalidGrepParamError('filters.surface');
-  }
-  if (
-    recordKind !== undefined &&
-    !['all', 'message', 'llm_output', 'llm_context'].includes(recordKind)
-  ) {
-    throw new InvalidGrepParamError('filters.record_kind');
-  }
-  return {
-    ...(path?.rootAgentId !== undefined ? { pathRootAgentId: path.rootAgentId } : {}),
-    ...(path?.agentId !== undefined ? { pathAgentId: path.agentId } : {}),
-    ...(path?.role !== undefined ? { pathRole: path.role } : {}),
-    ...(path?.messageId !== undefined ? { pathMessageId: path.messageId } : {}),
-    since: parseFilterSince(raw, 'since'),
-    until: parseFilterDate(raw, 'until'),
-    ...(role !== undefined ? { role: role as AgentTrajectoryGrepFilters['role'] } : {}),
-    ...(surface !== undefined ? { surface: surface as AgentTrajectoryGrepFilters['surface'] } : {}),
-    ...(recordKind !== undefined
-      ? { recordKind: recordKind as AgentTrajectoryGrepFilters['recordKind'] }
       : {}),
   };
 }
