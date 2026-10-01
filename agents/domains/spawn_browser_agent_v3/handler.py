@@ -137,6 +137,7 @@ from .repo import (
     save_browser_credential_ref_message,
     upload_file_to_session,
 )
+from .resume_store import hydrate_resume_context, persist_resume_context
 from .service import (
     AuthRuntimeState,
     accumulate_model_usage,
@@ -154,15 +155,6 @@ from .service import (
     extract_session_files,
     safe_time,
     select_auth_assistance_current_url,
-)
-from .visible_result_completion import (
-    forced_visible_result_completion_action,
-    should_force_visible_result_completion,
-)
-from .resume_store import hydrate_resume_context, persist_resume_context
-from .verifier_reject_circuit import (
-    next_identical_reject_streak,
-    should_soft_accept_identical_verifier_reject,
 )
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
@@ -190,6 +182,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
 )
+from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
 from .verifier_reject_circuit import (
@@ -7186,10 +7179,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         observe_page_state: Dict[str, Any] = {}
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
+        step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         while iteration < MAX_ITERATIONS:
             iteration += 1
+            step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
             await _wait_for_browser_user_control(config, task_id)
+            step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
             # browser-use focus changes -> resolve matching Playwright target
@@ -7205,6 +7201,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 browser_recorder=browser_recorder,
                 cursor_observer=observe_cursor,
             )
+            step_timer.mark("tab_rebind")
 
             # Handle pending write lock action
             if pending_write_lock_action:
@@ -7302,6 +7299,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     otp_history_count = len(otp_user_messages)
             except Exception as e:
                 logger.warning("Failed to fetch OTPs", error=str(e))
+            step_timer.mark("otp_fetch")
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
@@ -7319,6 +7317,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         dom_service.ensure_browser_overlays_suppressed(),
                         timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
                     )
+                step_timer.mark("overlay_suppress")
                 observe_page_state = await asyncio.wait_for(
                     dom_service.get_browser_state(include_screenshot=False),
                     timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
@@ -7340,7 +7339,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if recovered:
                     continue
                 raise
+            step_timer.mark("observe_state")
             await record_passkey_usage_once()
+            step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
             # Clicks, form submissions, and server redirects can cross an auth
@@ -7616,6 +7617,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     task_id=task_id,
                                     iteration=iteration,
                                 )
+                step_timer.mark("realm_and_payment_prep")
                 if browser_recorder:
                     with contextlib.suppress(Exception):
                         # Reuse observe_page_state from earlier in this iteration —
@@ -7626,6 +7628,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_state=observe_page_state,
                             action_entries=action_entries,
                         )
+                step_timer.mark("record_observation")
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -7676,6 +7679,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     iteration=iteration,
                 )
                 await browser_stream.start()
+                step_timer.mark("thinking_stream_start")
                 rose_client.set_thinking_stream(browser_stream)
                 decision_succeeded = False
                 try:
@@ -7712,11 +7716,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
                     )
                     decision_succeeded = True
+                    step_timer.mark("llm_decision")
                 finally:
                     rose_client.set_thinking_stream(None)
                     await browser_stream.finish()
                     if not decision_succeeded:
                         await browser_stream.finish_tools(status="ERROR")
+                step_timer.mark("thinking_stream_finish")
+                llm_timing = llm_result.get("timing") if isinstance(llm_result.get("timing"), dict) else {}
+                step_timer.annotate(
+                    llm_round_trip_ms=(
+                        int(llm_timing["round_trip_s"] * 1000)
+                        if isinstance(llm_timing.get("round_trip_s"), (int, float))
+                        else None
+                    ),
+                    llm_mode=llm_result.get("mode"),
+                    llm_from_fast_cache=bool((llm_result.get("usage") or {}).get("from_fast_cache")),
+                )
                 llm_result = {**llm_result, "_thinking_stream_id": browser_stream.stream_id}
                 # Track waterfall fall-through so subsequent iterations skip claudeAuth.
                 if llm_result.get("mode") != "claude" and browser_use_mode == "claude":
@@ -9182,6 +9198,8 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
+            step_timer.mark("pre_action_bookkeeping")
+            step_timer.annotate(action=action_name)
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -9336,6 +9354,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     ),
                     "supervisor_recovered": True,
                 }
+            step_timer.mark("execute_action")
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -9781,8 +9800,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     consecutive_keystroke_free=consecutive_keystroke_free,
                 )
 
+            step_timer.mark("post_action_bookkeeping")
             await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
+            step_timer.mark("loop_delay")
 
+        step_timer.finish()
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 
