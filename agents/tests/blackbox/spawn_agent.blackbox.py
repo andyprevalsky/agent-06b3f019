@@ -4261,6 +4261,59 @@ async def test_explore_fe_posts_are_ordered_within_one_tool_call():
     )
 
 
+async def test_explore_timeout_during_threshold_drain_preserves_fe_posts():
+    """A live deadline must wait for posts already removed from the pending queue."""
+    from datetime import timedelta
+
+    from domains.spawn_agent import service
+
+    delivered: list[str] = []
+    threshold_reached = asyncio.Event()
+    release_posts = asyncio.Event()
+
+    async def slow_save(**kwargs):
+        await release_posts.wait()
+        delivered.append(kwargs["tool_call_id"])
+
+    async def fake_run_agent(**kwargs):
+        post_message = kwargs["post_message"]
+        for index in range(64):
+            if index == 63:
+                threshold_reached.set()
+            await post_message(
+                "Evidence",
+                "TOOL",
+                {"toolCallId": f"chip-{index}", "toolName": "grep", "toolStatus": "FINISHED"},
+            )
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    async def release_after_deadline():
+        await threshold_reached.wait()
+        await asyncio.sleep(1.1)
+        release_posts.set()
+
+    release_task = asyncio.create_task(release_after_deadline())
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("loop.run_agent.run_agent", new=fake_run_agent),
+            patch("domains.spawn_agent.service.save_explore_message", new=slow_save),
+            patch.object(service, "LIVE_EXPLORE_PARENT_WAIT", timedelta(seconds=1)),
+            patch.object(service, "LIVE_EXPLORE_DRAIN_SLACK_SECONDS", 0),
+        ):
+            await asyncio.wait_for(
+                service.spawn_explore_agent_activity(
+                    agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+                ),
+                timeout=5,
+            )
+    finally:
+        release_task.cancel()
+        await asyncio.gather(release_task, return_exceptions=True)
+
+    assert len(delivered) == 64
+
+
 def test_three_sibling_explores_get_stable_isolated_cache_sequences():
     """Each explore task owns one stable lane even under a shared parent agent."""
     from loop.run_agent import _resolve_cache_sequence_id
@@ -5051,6 +5104,10 @@ async def run_all_tests():
         "explore_tool_error_keeps_tool_name", test_explore_tool_error_persists_under_the_failing_tools_name
     )
     await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
+    await r.record_async(
+        "explore_timeout_preserves_inflight_fe_posts",
+        test_explore_timeout_during_threshold_drain_preserves_fe_posts,
+    )
     r.record(
         "explore_cache_sequences_stable_and_isolated",
         test_three_sibling_explores_get_stable_isolated_cache_sequences,

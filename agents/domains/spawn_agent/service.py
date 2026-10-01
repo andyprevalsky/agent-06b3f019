@@ -593,6 +593,9 @@ async def spawn_explore_agent_activity(
     # Background FE posts so fanout does not serialize on createMessage.
     # Fast Mode does not change this — cache only mocks external lib calls.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    # A timeout can cancel the awaiter while a threshold drain is in progress.
+    # Keep those drains alive until final cleanup has observed their results.
+    _inflight_fe_drains: "list[asyncio.Task[None]]" = []
     # Tail of the in-flight post chain for each chip, keyed by toolCallId.
     _fe_post_chain: "dict[str, asyncio.Task]" = {}
     _FE_POST_DRAIN_THRESHOLD = 64
@@ -686,7 +689,9 @@ async def spawn_explore_agent_activity(
 
     async def _maybe_drain_pending_fe_posts() -> None:
         if len(_pending_fe_posts) >= _FE_POST_DRAIN_THRESHOLD:
-            await _drain_pending_fe_posts()
+            drain = asyncio.create_task(_drain_pending_fe_posts())
+            _inflight_fe_drains.append(drain)
+            await asyncio.shield(drain)
 
     # Send the system prompt verbatim. Contact + message-thread context is
     # fetched on-demand via the grep tool (network / agent_network_* / messages
@@ -986,9 +991,18 @@ async def spawn_explore_agent_activity(
             await heartbeat_task
         except (asyncio.CancelledError, Exception):
             pass
-        # Flush any backgrounded FE posts before returning/propagating so the FE
-        # receives every tool message even though they no longer blocked the leaf loop.
-        await _drain_pending_fe_posts()
+        # A timed-out explore may have been awaiting a threshold drain. Its
+        # shielded posts must finish before a final drain or activity return.
+        drain_error: BaseException | None = None
+        if _inflight_fe_drains:
+            results = await asyncio.gather(*_inflight_fe_drains, return_exceptions=True)
+            drain_error = next((item for item in results if isinstance(item, BaseException)), None)
+        # Flush posts queued after the last threshold drain as well.
+        try:
+            await _drain_pending_fe_posts()
+        finally:
+            if drain_error is not None:
+                raise drain_error
 
     # Defensive fallback: when the explore agent terminates with attempt_completion
     # but leaves result empty, the parent receives no evidence. Synthesize a

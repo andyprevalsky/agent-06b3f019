@@ -3937,3 +3937,12 @@
 {"task": "claude-code-agent", "duration_seconds": 59.2, "cost_cents": 5.0, "timestamp": "2026-10-01T11:49:58.441318+00:00", "agent_id": "79edd9e9-0c5e-4c40-8c62-703b7fef95a1"}
 {"task": "chat-mode", "duration_seconds": 43.6, "cost_cents": 0.0, "timestamp": "2026-10-01T11:49:58.441318+00:00", "agent_id": "203fa2ff-8c6d-4aca-957b-889833f7a258"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 205.1, "cost_cents": 3.0, "timestamp": "2026-10-01T12:18:30.029882+00:00", "agent_id": "ddda80da-1181-468f-9e51-70057ddfa37b"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 321.4, "cost_cents": 5.0, "timestamp": "2026-10-01T18:18:15.015462+00:00", "agent_id": "16be0c21-b315-4ed2-a26d-0065ac89ad5b"}
+{"task": "agent-payment-test-shop", "duration_seconds": 217.7, "cost_cents": 2.0, "timestamp": "2026-10-01T18:18:15.015462+00:00", "agent_id": "2d6cc0c4-0357-4a2f-b3a4-235567dcd602"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 605.3, "cost_cents": 13.0, "timestamp": "2026-10-01T18:18:15.015462+00:00", "agent_id": "e50e0a5b-d35d-432d-a2d7-1233d873e513"}
+{"task": "agent-payment-abandonment", "duration_seconds": 302.8, "cost_cents": 2.0, "timestamp": "2026-10-01T18:18:15.015462+00:00", "agent_id": "b7db0325-993e-4de0-86ee-bea0838863e4"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 378.8, "cost_cents": 9.0, "timestamp": "2026-10-01T18:18:16.977479+00:00", "agent_id": "0b61eab6-0fd6-43fe-ba44-f551963f4d4f"}
+{"task": "grep-agent-trajectories-isolation", "duration_seconds": 75.1, "cost_cents": 2.0, "timestamp": "2026-10-01T18:45:34.989632+00:00", "agent_id": "24e9984a-3867-4b1d-9ac9-4b5e1c58f0ec"}
+{"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 101.9, "cost_cents": 0.0, "timestamp": "2026-10-01T18:45:34.989632+00:00", "agent_id": "54d70eb3-42c8-4c7a-af9c-69f9222b1452"}
+{"task": "grep-agent-trajectories-code-tool-status", "duration_seconds": 101.7, "cost_cents": 0.0, "timestamp": "2026-10-01T18:45:34.989632+00:00", "agent_id": "fd860431-4692-435d-bbce-53c1ddb96dad"}
+{"task": "grep-agent-trajectories-browser-verification", "duration_seconds": 112.0, "cost_cents": 0.0, "timestamp": "2026-10-01T18:45:34.989632+00:00", "agent_id": "030b47f4-437b-4403-b964-065a48b53677"}
