@@ -150,6 +150,17 @@ _CHALLENGE_INTERSTITIAL_HTML_MARKERS = (
 _CHALLENGE_HTML_MARKERS = _CHALLENGE_SENSOR_HTML_MARKERS + _CHALLENGE_INTERSTITIAL_HTML_MARKERS
 
 
+class ChallengeConfigSearchFailedError(RuntimeError):
+    """Keep failed-search details without representing the result as a winner."""
+
+    def __init__(self, result: Mapping[str, Any]):
+        self.result = copy.deepcopy(dict(result))
+        error = result.get("error")
+        super().__init__(
+            error if isinstance(error, str) and error else "Browser configuration search failed"
+        )
+
+
 @dataclass(frozen=True)
 class ChallengeRecoveryResult:
     recovery: str
@@ -942,6 +953,8 @@ async def recover_from_challenge(
             proven_safe_removals=proven_safe_removals,
         )
         config_result = await search_configs(lanes)
+        if config_result.get("success") is False:
+            raise ChallengeConfigSearchFailedError(config_result)
         return ChallengeRecoveryResult(
             "config_selected",
             tuple(proven_safe_removals),

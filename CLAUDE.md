@@ -585,6 +585,14 @@ batch classification, and failure propagation are exercised with fake provider
 children inside existing deploy tests; keep that proof offline and `$0`, with
 no separate live benchmark stage or cloud wait added to `/deploy`.
 
+When browser recovery reports a missing CDP URL, inspect the preceding backend
+configuration-search result before blaming provider allocation. A failed search
+(`success: false`) must preserve its error and metadata and must never become a
+selected browser. Challenge exhaustion alone can be a genuine task failure;
+check candidate allocation/probe errors separately. The existing
+`challenge_recovery` agent blackbox domain covers failed-search decoding,
+successful winners, and preservation of the caller's malformed-winner guard.
+
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
 ## Cursor Cloud / Linux dev environment
