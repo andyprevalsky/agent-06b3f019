@@ -743,3 +743,67 @@ Strict canonical evidence publication passed and verified the durable frontend f
 This run allocated no browser agent or provider browser session, so it did not exercise native-to-Steel promotion with zero screenshot frames or establish live native media reachability/decoding. The separate identical-test real-recorder/Chromium RED→GREEN proof establishes the producer/player repair. The live result establishes a clean evaluated task failure with complete applicable durable evidence and teardown. It cannot recover lost original traces or close unrelated historical outcome/observability gaps. Private bootstrap and observer configuration failures are retained separately; none caused a paid task rerun or changed production behavior.
 
 Evidence: `.context/acceptance/proof86-bu063-outcome/outcome-final.receipt.private.json` (SHA256 `18ac6ab073f2e72486b8976311cb364741b561e900e76d39e6b254b1286c8795`), strict durable manifest SHA256 `8a43b9d43b0c3175733d66a857fc4f3121dbb3919fd06a9268b6b5225ea19d23`, native audit SHA256 `883054d98f5ffd6ead2af535454583f6c7b989ab3e76f33286ae88fe08c37f55`, sealed 154-member private archive SHA256 `c6c167819b42f2ef404dbdb2f367ed1a55f6c859a20ad7afc297077a4fe3c9af`.
+
+### 2026-10-01 recurrence: write approval remained parked after PAUSE
+
+Run `20261001-131557-13371`, source `8289a73e`, rejected its first slice.
+`browser-agent-amazon-cookie-payment` returned a write-approval request at
+13:23:52 UTC and persisted its recording at 13:23:56. The root received PAUSE
+at 13:24:12. The final readiness observation at 13:25:40 still had
+`recording=true, complete=false` for that exact browser task. Finalization
+reported `archive: TimeoutError`; the controller then correctly rejected the
+missing driver cleanup acknowledgement. Credential injection had completed in
+282 ms, and retained backend logs contain no OOM marker. No RSS samples were
+captured, so this is not a memory-peak or original-OOM resolution claim.
+
+The browser activity deliberately defers its terminal while a resume is pending.
+Its manager then called the direct approval helper, which waited for a response
+or generation handoff but did not observe workflow PAUSE. The completed activity
+could finish its recording while that manager remained parked. Archive readiness
+correctly required both the recording and the same-task terminal. Searches of
+this case, the September 29 premature runner-receipt case and the September 6/11
+abandoned-resume cases distinguished that producer failure from the downstream
+collector error. Neither archive readiness nor cleanup acknowledgement is relaxed.
+
+The owning fixture runs the real manager, direct approval helper, handoff wait,
+bound `AgentWorkflow.pause`, tool-event serializer and message POST through a
+local HTTP transport, then the actual archive refresh predicate. Only scheduling,
+browser activity and external I/O are substituted. On unchanged source it failed
+in 1.217 seconds because PAUSE left the manager parked; the identical fixture
+passed in 1.096 seconds after the repair. An earlier unmocked Temporal logger
+error is preserved as invalid fixture setup, not causal evidence. Independent
+review exposed PAUSE during persistence of the granted-approval event; a reproduction confirmed it:
+RED in 1.280 seconds, unchanged GREEN in 1.213 seconds after a post-yield guard.
+
+The manager now owns and joins its approval and PAUSE waits, closes only the
+interrupted approval chip using its original request metadata, and emits the
+canonical same-task terminal when PAUSE ends that deferred resume. Already-paused
+admission creates no request. The interruption is not an approval or rejection;
+unanswered attention rows retain exact-root DELETE ownership. Generic approval
+callers keep their default behavior. Direct external cancellation still propagates
+without the manager inventing a terminal; generation handoff is preserved. The
+repair uses two owned waits only at this existing approval boundary, no provider or
+model call, shared state, fleet scan or larger timeout.
+
+One registered case, `test_manager_write_pause_seals_persisted_browser_for_archive`
+in `agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py`, covers persisted
+readiness, successful same-task resume, PAUSE races, foreign identities and joined
+waits. Existing case bodies remain intact. Private reproduction and review receipts
+live under `.context/acceptance/proof88-write-lock-pause-rca/`.
+
+The first aggregate agents gate passed 102 domains but rejected this new case
+before manager execution: an earlier network-error case left the shared HTTP
+capture handler installed, overriding the fixture's explicit transport. The
+ordered earlier-case-to-new-case reproduction failed in 1.298 seconds. The
+identical reproduction passed in 0.864 seconds after the new fixture scoped and
+restored that capture handler. Production code and all prior test bodies stayed
+unchanged. The original failed aggregate and isolated successes are retained
+separately; neither is relabeled as a complete aggregate pass.
+
+Original controller evidence was sealed before exact-owner recovery, SHA256
+`c979a52c0407b1e855190bd4d2ce2e334b2b12ac645f11546ed7f301957a8ac5`,
+with zero files changing during capture. The canonical forensic archive retains
+nine sealed tasks and one interrupted task. Recovery returned all ten exact pool
+Machines stopped with their expected volumes, zero claims and no owner registry;
+its processes retired. Recovery and fixture success award zero acceptance credit.
+The source repair requires a fresh task pool and ten consecutive live slices.

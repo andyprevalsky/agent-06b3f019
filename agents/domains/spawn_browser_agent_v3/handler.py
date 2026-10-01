@@ -10114,6 +10114,32 @@ def _browser_abandoned_resume_event(task_id: str, reason: str) -> ToolEvent:
     )
 
 
+async def _request_browser_write_approval_until_paused(workflow_instance: Any, **approval_kwargs):
+    """End an exact deferred browser resume on PAUSE without inventing rejection."""
+    if workflow_instance.is_paused:
+        return None
+    from tools.request_user_approval import request_user_approval_direct
+
+    approval = asyncio.create_task(
+        request_user_approval_direct(workflow_instance, **approval_kwargs, close_on_cancel=True)
+    )
+    pause = asyncio.create_task(workflow.wait_condition(lambda: workflow_instance.is_paused))
+    try:
+        await asyncio.wait({approval, pause}, return_when=asyncio.FIRST_COMPLETED)
+        if workflow_instance.is_paused and not approval.done():
+            approval.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await approval
+            return None
+        response = await approval
+        return None if workflow_instance.is_paused else response
+    finally:
+        for owned in (approval, pause):
+            if not owned.done():
+                owned.cancel()
+        await asyncio.gather(approval, pause, return_exceptions=True)
+
+
 class SpawnBrowserAgentManagerV3(ToolManager):
     """Manager using browser-use BrowserSession + Rose API."""
 
@@ -10347,7 +10373,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     try:
-                        approval_response = await request_user_approval_direct(
+                        approval_response = await _request_browser_write_approval_until_paused(
                             workflow_instance,
                             question=result["question"],
                             metadata={
@@ -10358,6 +10384,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
                         )
+                        if approval_response is None:
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id,
+                                "Browser paused while awaiting write approval.",
+                            )
+                            return
 
                         approval_type = result.get("approval_type", "unknown")
                         approved_at = workflow.now().timestamp()
@@ -10433,6 +10465,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             },
                         )
+                        if workflow_instance.is_paused:
+                            yield _browser_abandoned_resume_event(
+                                result.get("task_id") or known_task_id,
+                                "Browser paused before resuming the approved action.",
+                            )
+                            return
 
                         continue
 

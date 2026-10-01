@@ -20923,6 +20923,275 @@ async def test_manager_terminal_scope_and_pending_resumes():
         await _drive_browser_manager_terminal_boundary(kind)
 
 
+async def _drive_browser_write_pause_archive_boundary(
+    *, pause: bool, concurrent_approval=False, cancel=False, handoff=False, pause_on_grant=False
+):
+    import copy
+    import httpx
+    from benchmarks import run_benchmark as bench
+    from domains.spawn_browser_agent_v3 import handler as browser
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+    from helpers.messages import post_agent_message
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from tools.base import MessageStatus
+    from workflows.agent_workflow import AgentWorkflow
+
+    root, tool = "00000000-0000-4000-8000-000000000088", "owned-write-tool"
+    task_id = browser._stable_browser_task_id(root, tool)
+    rows, starts, paused_starts = [], [], []
+    parked, changed = asyncio.Event(), asyncio.Event()
+    wf = SimpleNamespace(
+        user_id="fixture-user",
+        agent_id=root,
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        context=[],
+        _signal_responses={},
+        _update_tree_state=AsyncMock(),
+        _get_pending_child_workflow_ids=lambda: [],
+        _track_usage=AsyncMock(),
+    )
+    wf._handle_tool_event = AgentWorkflow._handle_tool_event.__get__(wf)
+    config = SimpleNamespace(backend=SimpleNamespace(api_url="http://fixture.invalid", api_key="fixture-key"))
+    real_client = httpx.AsyncClient
+
+    def persisted(request):
+        assert request.method == "POST" and request.url.path == f"/api/agents/{root}/messages"
+        payload = json.loads(request.content)
+        row = {**payload, "text": payload["message"], "timestamp": datetime.now(timezone.utc).isoformat()}
+        rows.append(copy.deepcopy(row))
+        wf.context.append(copy.deepcopy(row))
+        return httpx.Response(201, json={"message_id": str(len(rows))})
+
+    def client(*args, **kwargs):
+        return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(persisted)})
+
+    async def execute_activity(function, *, args, **_kwargs):
+        if function is post_agent_message:
+            if pause_on_grant and (args[3] or {}).get("action_type") == "write_lock_granted":
+                await AgentWorkflow.pause(wf)
+            return await function(*args)
+        if function.__name__ == "create_approval_request_activity":
+            assert args[0:2] == [wf.user_id, root]
+            return "owned-approval"
+        if function.__name__ == "notify_sms_event_activity":
+            return None
+        raise AssertionError(f"unexpected activity: {function.__name__}")
+
+    async def wait_condition(predicate, **kwargs):
+        while not predicate():
+            if "timeout" in kwargs:
+                assert kwargs["timeout"].total_seconds() == 30, "handoff poll bound changed"
+                if getattr(wf, "handoff_requested", False):
+                    raise asyncio.TimeoutError
+            parked.set()
+            await changed.wait()
+            changed.clear()
+
+    class Handle:
+        def done(self):
+            return True
+
+        def cancel(self):
+            raise AssertionError("completed browser activity must not be cancelled")
+
+        def __await__(self):
+            async def result():
+                if len(starts) == 1:
+                    return {
+                        "status": "awaiting_write_approval",
+                        "task_id": task_id,
+                        "session_id": "owned-session",
+                        "question": "Approve fixture write?",
+                        "approval_type": "write",
+                        "current_url": "https://fixture.invalid/",
+                        "write_lock_approvals": {},
+                    }
+                return {
+                    "status": "completed",
+                    "success": True,
+                    "task_id": task_id,
+                    "session_id": "owned-session",
+                    "message": "Fixture complete",
+                }
+
+            return result().__await__()
+
+    def start_activity(_function, *, args, **_kwargs):
+        if wf.is_paused:
+            paused_starts.append(True)
+        assert args[4] == task_id and not wf.is_paused, "paused browser started a resume"
+        starts.append(copy.deepcopy(args[8] if len(args) > 8 else None))
+        return Handle()
+
+    async def archive():
+        logs = {}
+        with (
+            patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": root}])),
+            patch.object(bench, "get_agent", AsyncMock(side_effect=lambda *_args: {"messages": copy.deepcopy(rows)})),
+        ):
+            snapshot = await bench._refresh_browser_archive_snapshot(
+                "http://fixture.invalid", root, {}, logs, expected_agent_ids={root}, timeout_seconds=0.1
+            )
+        assert bench._agent_messages_ready_for_durable_browser_evidence(snapshot["messages"])
+        return logs
+
+    with (
+        patch("helpers.httpx_capture._mock_handler", persisted),
+        patch("httpx.AsyncClient", side_effect=client),
+        patch("config.load_config", return_value=config),
+        patch("helpers.messages.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+        patch.object(browser.workflow, "logger", MagicMock()),
+        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root)),
+        patch.object(browser.workflow, "uuid4", return_value="approval-tool"),
+        patch.object(browser.workflow, "now", return_value=datetime(2026, 10, 1, tzinfo=timezone.utc)),
+        patch.object(browser.workflow, "start_activity", side_effect=start_activity),
+        patch.object(browser.workflow, "execute_activity", side_effect=execute_activity),
+        patch.object(browser.workflow, "wait_condition", side_effect=wait_condition),
+        patch.object(browser, "get_manager", return_value=browser.SpawnBrowserAgentManagerV3()),
+    ):
+        assert await save_browser_action_message(
+            root,
+            "Started",
+            "Fixture started",
+            MessageStatus.IN_PROGRESS,
+            task_id,
+            action_type="task_started",
+            tool_call_id=tool,
+        )
+        previous_tasks = asyncio.all_tasks()
+        owned = asyncio.create_task(browser.spawn_browser_agent(wf, {"goal": "Fixture write"}, tool))
+        try:
+            await asyncio.wait_for(parked.wait(), 1)
+            assert await save_browser_action_message(
+                root,
+                "Recording saved",
+                "Fixture retained native replay",
+                MessageStatus.FINISHED,
+                task_id,
+                action_type="recording",
+                tool_call_id=tool,
+                extra_metadata={"recording_view_url": "https://recording.example/owned"},
+            )
+            assert not owned.done() and len(starts) == 1
+            assert not bench._agent_messages_ready_for_durable_browser_evidence(rows)
+            wf._signal_responses["unrelated-approval"] = "approved"
+            changed.set()
+            await asyncio.sleep(0)
+            assert not owned.done() and len(starts) == 1, "foreign approval resumed owned browser"
+            if cancel or handoff:
+                if cancel:
+                    owned.cancel()
+                else:
+                    wf.handoff_requested = True
+                    wf._check_generation_handoff = AsyncMock(return_value="candidate-queue")
+                    changed.set()
+                try:
+                    await asyncio.wait_for(asyncio.shield(owned), 1)
+                except (asyncio.CancelledError, GenerationHandoffRequested) as interrupted:
+                    assert (
+                        isinstance(interrupted, asyncio.CancelledError)
+                        if cancel
+                        else interrupted.task_queue == "candidate-queue"
+                    )
+                else:
+                    raise AssertionError("manager swallowed cancellation or generation handoff")
+                assert len(starts) == 1
+                assert not any(
+                    row.get("metadata", {}).get("task_id") == task_id
+                    and row["metadata"].get("action_type") == "task_complete"
+                    for row in rows
+                )
+                if cancel:
+                    closed = next(
+                        row["metadata"]
+                        for row in rows
+                        if row.get("metadata", {}).get("title") == "Approval interrupted"
+                    )
+                    opened = next(
+                        row["metadata"]
+                        for row in rows
+                        if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                    )
+                    assert closed == {
+                        **opened,
+                        "title": "Approval interrupted",
+                        "toolStatus": "FINISHED",
+                        "excludeFromModel": True,
+                    }
+                return
+            if pause:
+                await AgentWorkflow.pause(wf)
+                wf._update_tree_state.assert_awaited_once_with(status="PAUSED")
+                if concurrent_approval:
+                    wf._signal_responses["owned-approval"] = "approved"
+                changed.set()
+                done, _ = await asyncio.wait({owned}, timeout=0.25)
+                assert done, "real PAUSE left write-approval manager parked after durable recording"
+            else:
+                wf._signal_responses["owned-approval"] = "approved"
+                changed.set()
+                await asyncio.wait_for(asyncio.shield(owned), 1)
+            await owned
+            assert not paused_starts, "PAUSE during grant persistence started a resumed browser activity"
+            terminals = [row for row in rows if row.get("metadata", {}).get("action_type") == "task_complete"]
+            assert len(terminals) == 1 and terminals[0]["metadata"]["task_id"] == task_id
+            assert len(starts) == (1 if pause or pause_on_grant else 2)
+            if pause and not concurrent_approval:
+                opened = next(
+                    row["metadata"]
+                    for row in rows
+                    if row.get("metadata", {}).get("toolName") == "request_user_approval"
+                )
+                closed = next(
+                    row["metadata"] for row in rows if row.get("metadata", {}).get("title") == "Approval interrupted"
+                )
+                assert closed == {
+                    **opened,
+                    "title": "Approval interrupted",
+                    "toolStatus": "FINISHED",
+                    "excludeFromModel": True,
+                }
+                assert closed["requestUserApproval"]["attentionRequestId"] == "owned-approval"
+            await archive()
+            foreign = copy.deepcopy(rows)
+            for row in foreign:
+                if row.get("metadata", {}).get("action_type") == "task_complete":
+                    row["metadata"]["task_id"] = "unrelated-browser"
+            assert not bench._agent_messages_ready_for_durable_browser_evidence(foreign), (
+                "foreign terminal sealed owned browser"
+            )
+            return {
+                "case": "pause" if pause else "successful-resume",
+                "activity_starts": len(starts),
+                "same_task_terminal": True,
+                "actual_archive_ready": True,
+                "unrelated_identity_rejected": True,
+            }
+        finally:
+            if not owned.done():
+                owned.cancel()
+            await asyncio.gather(owned, return_exceptions=True)
+            assert not (asyncio.all_tasks() - previous_tasks), "owned approval/pause await survived manager exit"
+
+
+async def test_manager_write_pause_seals_persisted_browser_for_archive():
+    """PAUSE ends the manager's deferred write resume with a durable terminal."""
+    await _drive_browser_write_pause_archive_boundary(pause=False)
+    await _drive_browser_write_pause_archive_boundary(pause=True)
+    await _drive_browser_write_pause_archive_boundary(pause=True, concurrent_approval=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, pause_on_grant=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, cancel=True)
+    await _drive_browser_write_pause_archive_boundary(pause=False, handoff=True)
+    from domains.spawn_browser_agent_v3.handler import _request_browser_write_approval_until_paused
+
+    with patch("tools.request_user_approval.request_user_approval_direct", new_callable=AsyncMock) as request:
+        assert await _request_browser_write_approval_until_paused(SimpleNamespace(is_paused=True)) is None
+        request.assert_not_awaited()
+
+
 async def test_manager_abandoned_payment_resumes_close_exact_browser_task():
     from tools.base import MessageStatus
 
@@ -23815,6 +24084,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_terminal_scope_and_pending_resumes",
         test_manager_terminal_scope_and_pending_resumes,
+    )
+    await r.record_async(
+        "manager_write_pause_seals_persisted_browser_for_archive",
+        test_manager_write_pause_seals_persisted_browser_for_archive,
     )
     await r.record_async(
         "manager_abandoned_payment_resume_terminal",

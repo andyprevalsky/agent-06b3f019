@@ -450,6 +450,18 @@ change that can reduce the slice's end-to-end wall clock by more than 5% without
 changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
 streak on a clean commit; forensic recovery never retroactively grants credit.
+If cloud collection reports `driver exited without cleanup acknowledgement`,
+inspect the guest's original finalization error first. For `archive: TimeoutError`,
+check the last `browser_archive_observation` by exact browser task: a recording
+attachment and a terminal message are separate requirements. A completed browser
+activity may still have its manager parked on write approval. PAUSE must end that
+deferred resume, join its owned approval wait and persist the same-task terminal;
+it must not invent a user rejection or start another activity after PAUSE. The
+existing browser blackbox verifies this through actual message serialization and
+the archive predicate, alongside successful resume, cancellation, handoff and
+foreign-identity controls. Keep this compact owning case in the normal gate;
+neither a longer archive timeout nor a fabricated cleanup acknowledgement fixes
+the producer boundary.
 Local benchmark launchers require normal trace capture: use
 `TRACE_ARCHIVE_ENABLED=1` for `run-bench --local` and predeploy smoke. The CLI
 rejects explicit disabled values before allocating a stack; semantic latency

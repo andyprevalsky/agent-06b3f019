@@ -6,6 +6,7 @@ Imports: own repo, own types, own config, external packages.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -180,6 +181,8 @@ async def request_user_approval_direct(
     question: str,
     image_url: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    *,
+    close_on_cancel: bool = False,
 ) -> ApprovalResult:
     """Direct call helper for tools that need to request user approval.
 
@@ -190,6 +193,8 @@ async def request_user_approval_direct(
         question: The question to ask the user.
         image_url: Optional image URL (e.g. product thumbnail).
         metadata: Optional additional metadata.
+        close_on_cancel: Close only the interrupted approval chip; never invent
+            a response.
 
     Returns:
         Dict with response, question, and attention_request_id.
@@ -300,6 +305,17 @@ async def request_user_approval_direct(
             workflow_instance,
             workflow_mod=workflow,
         )
+    except asyncio.CancelledError:
+        if close_on_cancel:
+            interrupt_event = ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Approval interrupted",
+                message="Approval wait interrupted.",
+                status=MessageStatus.FINISHED,
+                metadata={**event_metadata, "excludeFromModel": True},
+            )
+            await workflow_instance._handle_tool_event(interrupt_event, tool_call_id, TOOL_NAME)
+        raise
     except GenerationHandoffRequested:
         interrupt_event = ToolEvent(
             type=EventType.POST_MESSAGE,
