@@ -1,7 +1,7 @@
 """Model pool registry — single source of truth for Rose's pool definitions.
 
-Both rose-1-flash and rose-1-ultra share the same code path (claudeAuth ->
-waterfall); the only difference is which models are tried at each layer.
+Both rose-1-flash and rose-1-ultra share the same router; ultra adds a
+GPT-6 Sol Foundry fallback after direct credentials and before OpenRouter.
 
 Model contract — 2026-09-27 live stream bench plus Artificial Analysis
 Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
@@ -37,6 +37,7 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-opus-5-5
         gptAuth    = gpt-6-sol
+        foundry    = gpt-6-sol (when configured)
         waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:  (same rose-fast hop as flash)
@@ -83,6 +84,9 @@ class PoolSpec:
     """Provider-prefixed model IDs tried in order if claudeAuth fails (or
     is unavailable). Format matches OpenRouter's `provider/model` convention,
     which the transport layer maps to the right endpoint."""
+
+    foundry_enabled: bool = False
+    """Try a matching Microsoft Foundry deployment after direct credentials."""
 
     waterfall_reasoning_effort: str | None = None
     """When set, the OpenRouter waterfall stamps this effort instead of the
@@ -136,6 +140,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         name="rose-1-ultra",
         claude_auth_model="claude-opus-5-5",
         gpt_auth_model="gpt-6-sol",
+        foundry_enabled=True,
         # Opus 5.5 is the AA v4.3.2 leader (58) and cheaper than Fable 5.1
         # ($4/$20 vs $10/$50). Paid waterfall is gpt-6-sol ($2/$10, index 48)
         # then kimi-k3 (index 44). Fable stays off this waterfall.

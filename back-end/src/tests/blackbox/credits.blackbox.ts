@@ -352,6 +352,44 @@ async function testUsage_inviteCodeMonthlyAllowance() {
   }
 }
 
+/** Concurrent usage reads must all observe the one committed monthly grant. */
+async function testUsage_inviteCodeConcurrentAllowance() {
+  const { prisma } = await import('../../providers/database');
+  const { INVITE_MONTHLY_CREDIT_CENTS } = await import('../../providers/credits');
+  const invitedUserId = `credits-invite-concurrent-${Date.now()}`;
+
+  await prisma.user.create({
+    data: { userId: invitedUserId, phone: `+1998${Date.now() % 10000000}`, usedInviteCode: 181818 },
+  });
+
+  try {
+    const responses = await Promise.all(
+      Array.from({ length: 16 }, () =>
+        request(`${BASE_URL}/api/credits/usage?userId=${invitedUserId}`, {
+          headers: apiKeyHeaders(),
+        })
+      )
+    );
+    for (const response of responses) {
+      assertStatus(response.status, 200, response.data);
+      const body = assertSchema(UsageResponse, response.data, 'GET /usage (concurrent invited)');
+      if (body.total < INVITE_MONTHLY_CREDIT_CENTS / 100) {
+        throw new Error(`Concurrent invited usage returned $${body.total} before the grant`);
+      }
+    }
+
+    const grants = await prisma.credit.count({
+      where: { userId: invitedUserId, amountCents: INVITE_MONTHLY_CREDIT_CENTS },
+    });
+    if (grants !== 1) {
+      throw new Error(`Concurrent invited usage created ${grants} grants instead of 1`);
+    }
+  } finally {
+    await prisma.credit.deleteMany({ where: { userId: invitedUserId } });
+    await prisma.user.deleteMany({ where: { userId: invitedUserId } });
+  }
+}
+
 /** A user who never redeemed an invite code must NOT receive the allowance. */
 async function testUsage_noAllowanceWithoutInviteCode() {
   const { prisma } = await import('../../providers/database');
@@ -582,6 +620,10 @@ async function runAll() {
     {
       name: 'GET /credits/usage -- invite-code user gets a recurring monthly allowance',
       fn: testUsage_inviteCodeMonthlyAllowance,
+    },
+    {
+      name: 'GET /credits/usage -- concurrent invited reads observe one allowance',
+      fn: testUsage_inviteCodeConcurrentAllowance,
     },
     {
       name: 'GET /credits/usage -- no allowance without an invite code',

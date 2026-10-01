@@ -3,7 +3,9 @@
 Pipeline (see docs in each module):
 
     R2 bundle ──extract──► transcript ──compress (once, cached)──► CriticalPath
-    Postgres PlannerMemory rows (written at archive finalize) ──search──► hits
+    Postgres PlannerMemory rows (written + embedded at archive finalize)
+    goal ──backend embed + pgvector cosine──► candidates (goal vectors)
+    candidates ──cosine >= 0.70, top 3 distinct goals──► hits
     hits ──render──► native get_memories fork (assistant tool_call + tool result)
 """
 
@@ -28,7 +30,7 @@ from providers.planner_memory.retrieval import (
     RetrievalConfig,
     planner_memory_available,
     retrieve_memories,
-    score_candidates,
+    select_hits,
 )
 from providers.planner_memory.transcript import build_transcript, load_bundle_transcript, trim_rows
 
@@ -54,6 +56,6 @@ __all__ = [
     "planner_memory_available",
     "render_memories",
     "retrieve_memories",
-    "score_candidates",
+    "select_hits",
     "trim_rows",
 ]

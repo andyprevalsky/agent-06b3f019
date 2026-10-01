@@ -18,12 +18,13 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
         "anthropic_api_key",
         "claude-fable-5",
     )
+    assert classify_model("gpt-6-sol-foundry") == ("foundry", "gpt-6-sol")
     # Slot models track POOL_REGISTRY. openai/gpt-5.6-sol left the ultra
     # waterfall when it moved to openai/gpt-6-sol -> kimi-k3. A model that is
     # merely a pool's direct-auth choice no longer classifies as a slot.
     assert classify_model("openai/gpt-6-sol")[0] == "openrouter_model_1"
     assert classify_model("openai/gpt-5.6-sol") == ("unclassified", "openai/gpt-5.6-sol")
-    assert classify_model("z-ai/glm-5.3-flash")[0] == "openrouter_model_1"
+    assert classify_model("z-ai/glm-5.3-flash")[0] == "openrouter_model_2"
     assert classify_model("google/gemini-3.8-flash")[0] == "openrouter_model_2"
     assert classify_model("google/gemini-3.6-flash") == (
         "unclassified",
@@ -62,6 +63,9 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
     assert classify_usage_item(
         {"model": "gpt-5.6-sol-gpt", "provider": "Rose 1 Browser Use"}
     ) == ("codex_token", "gpt-5.6-sol")
+    assert classify_usage_item(
+        {"model": "gpt-6-sol-foundry", "provider": "Rose 1 Browser Use"}
+    ) == ("foundry", "gpt-6-sol")
     # AgentWorkflow._track_usage fills a browser usage item's absent transport
     # model from the parent agent alias before persisting it. Provider identity
     # remains authoritative for the browser pool in this production shape.
@@ -99,6 +103,13 @@ def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
             "tokens_out": 10,
             "cost_cents": 12.5,
         },
+        {
+            "type": "llm",
+            "model": "gpt-6-sol-foundry",
+            "tokens_in": 100,
+            "tokens_out": 10,
+            "cost_cents": 0,
+        },
         {"type": "service", "provider": "Perplexity", "cost_cents": 99},
     ]
     first = aggregate_usage_items(items)
@@ -120,11 +131,14 @@ def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
     merged = merge_usage_breakdowns([first, first])
     assert merged["openrouter_model_1"]["calls"] == 2
     assert merged["openrouter_model_1"]["cost_usd"] == 0.25
+    assert merged["foundry"]["calls"] == 2
+    assert merged["foundry"]["cost_usd"] == 0.0
     assert list(merged) == [
         "codex_token",
         "claude_oauth_token",
         "gpt_api_key",
         "anthropic_api_key",
+        "foundry",
         "openrouter_model_1",
         "openrouter_model_2",
     ]

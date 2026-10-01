@@ -8,8 +8,10 @@ set -euo pipefail
 DEPS_DIR="${1:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 REPO_DIR="${2:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 REBUILD_DEPS="${CLOUDBENCH_REBUILD_DEPS:-0}"
+CONTROL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+[ -d "$CONTROL_DIR/lib" ] && CONTROL_LIB_DIR="$CONTROL_DIR/lib" || CONTROL_LIB_DIR="$CONTROL_DIR"
 # shellcheck source=lib/cloudbench-env.sh
-source "$REPO_DIR/scripts/lib/cloudbench-env.sh"
+source "${CLOUDBENCH_ENV_HELPER:-$CONTROL_LIB_DIR/cloudbench-env.sh}"
 
 if ! command -v rsync >/dev/null 2>&1; then
     echo "[cloudbench] FATAL: rsync is required to refresh baked dependency trees." >&2

@@ -1,11 +1,14 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  // Only extensions Prisma must create for `db push`; Supabase-managed ones stay unmanaged.
+  extensions = [vector]
 }
 
 model Agent {
@@ -710,31 +713,31 @@ model ComputeTokenFastCacheAffinity {
 /// NOT (userId, provider): keying on the provider alone is exactly what limited
 /// users to one Claude and one Codex account.
 model ComputeAccountConnection {
-  id           String  @id @default(uuid())
-  userId       String
+  id                     String    @id @default(uuid())
+  userId                 String
   /// "claude" | "codex"
-  provider     String
+  provider               String
   /// Provider-side account identifier (Anthropic account uuid / ChatGPT account_id).
-  accountId    String
+  accountId              String
   /// Shown on the FE chip.
-  accountEmail String?
+  accountEmail           String?
   /// RSA+AES envelope wrapping the account session (cookies). Never a token.
-  encryptedSession String?
+  encryptedSession       String?
   /// "connected" | "needs_reconnect"
-  state        String  @default("connected")
+  state                  String    @default("connected")
   /// When the underlying session expires (~28d for claude.ai, observed).
-  sessionExpiresAt DateTime?
+  sessionExpiresAt       DateTime?
   /// Why the connection was last marked unhealthy, for the chip tooltip.
-  lastErrorReason  String?
+  lastErrorReason        String?
   /// Mirrors Integration.poolingEnabled so grants minted from this account can
   /// serve the shared pool. Inherited from the user's existing compute
   /// integrations at connect time -- a user who already pools should not have to
   /// re-enable it per account.
-  poolingEnabled         Boolean  @default(false)
+  poolingEnabled         Boolean   @default(false)
   /// Explicit user choice, which beats the inherited default in both directions.
   poolingEnabledOverride Boolean?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
   grants ComputeGrant[]
 
@@ -757,33 +760,33 @@ model ComputeAccountConnection {
 /// per surface" is enforced transactionally in the repo layer, not by a
 /// constraint, because Prisma cannot express a partial unique index.
 model ComputeGrant {
-  id           String  @id @default(uuid())
-  connectionId String
-  userId       String
-  provider     String
-  accountId    String
+  id                   String    @id @default(uuid())
+  connectionId         String
+  userId               String
+  provider             String
+  accountId            String
   /// Which surface owns this grant -- "cloud" | "local" | "sandbox".
-  surface      String  @default("cloud")
+  surface              String    @default("cloud")
   /// "setup_token" (Claude, 1y, no refresh) | "oauth_refresh" (Codex).
-  grantType    String
+  grantType            String
   /// RSA+AES envelope wrapping the token material.
   encryptedCredentials String
   /// "active" | "dead"
-  status       String  @default("active")
+  status               String    @default("active")
   /// Provider's reason when the grant was revoked, from the completion path.
-  deadReason   String?
+  deadReason           String?
   /// Provider's own cooldown for THIS token. A rate limit is not death: the
   /// grant stays active and simply becomes unselectable until this passes, which
   /// is what stops a 429 from being mistaken for revocation and burning a mint.
-  rateLimitedUntil DateTime?
+  rateLimitedUntil     DateTime?
   /// Nominal expiry. A HINT only -- liveness is decided by real traffic, since
   /// setup-tokens have been observed dying well before their stated lifetime.
-  expiresAt    DateTime?
-  lastUsedAt   DateTime?
-  mintedAt     DateTime @default(now())
-  diedAt       DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  expiresAt            DateTime?
+  lastUsedAt           DateTime?
+  mintedAt             DateTime  @default(now())
+  diedAt               DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   connection ComputeAccountConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
@@ -879,20 +882,20 @@ model UserSnapshotRevision {
 }
 
 model EmailIntegrationCredential {
-  id            String        @id @default(uuid())
-  userId        String
-  integrationId String
-  provider      EmailProvider
-  pkceVerifier  String?
-  stateToken    String?
-  accessToken   String?
-  refreshToken  String?
-  expiresAt     DateTime?
-  scopes        String[]      @default([])
-  metadata      Json?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  email         String?
+  id               String        @id @default(uuid())
+  userId           String
+  integrationId    String
+  provider         EmailProvider
+  pkceVerifier     String?
+  stateToken       String?
+  accessToken      String?
+  refreshToken     String?
+  expiresAt        DateTime?
+  scopes           String[]      @default([])
+  metadata         Json?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  email            String?
   /// Per-ACCOUNT health, mirroring ComputeAccountConnection.state.
   ///
   /// Health has to live here rather than on Integration because one `gmail`
@@ -905,11 +908,11 @@ model EmailIntegrationCredential {
   /// chip amber, and it is only ever set for errors that re-consent can fix
   /// (invalid_grant and friends). Transient sync errors use "sync_failed" so a
   /// network blip never asks the user to re-authorize.
-  state         String        @default("connected")
+  state            String        @default("connected")
   /// Human-readable cause of the current non-connected state, for the chip tooltip.
-  lastErrorReason String?
+  lastErrorReason  String?
   lastFailedSyncAt DateTime?
-  integration   Integration   @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  integration      Integration   @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
   @@unique([userId, provider, email])
   @@index([integrationId])
@@ -1607,25 +1610,41 @@ model AgentQueuePointer {
 // TTL): the worker reads the bundle, compresses the trajectory once, and
 // stores the result here. Retrieval is one indexed FTS query per planner call.
 model PlannerMemory {
-  id                String    @id
-  userId            String?
-  goal              String
-  goalTokens        String[]  @default([])
-  benchmarkTaskName String?
-  rootStatus        String?
-  passed            Boolean?
-  worldModelMode    String    @default("real")
-  agentCreatedAt    DateTime?
-  archivedAt        DateTime  @default(now())
-  criticalPath      Json?
-  compressorVersion String?
-  compressedAt      DateTime?
+  id                    String    @id
+  userId                String?
+  goal                  String
+  benchmarkTaskName     String?
+  rootStatus            String?
+  passed                Boolean?
+  worldModelMode        String    @default("real")
+  agentCreatedAt        DateTime?
+  archivedAt            DateTime  @default(now())
+  criticalPath          Json?
+  compressorVersion     String?
+  compressedAt          DateTime?
   compressionLeaseId    String?
   compressionLeaseUntil DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  embedding PlannerMemoryEmbedding?
 
   @@index([benchmarkTaskName])
   @@index([userId])
   @@index([passed, archivedAt])
+}
+
+/// Semantic retrieval vector for one PlannerMemory row (voyage-4 embedding of
+/// the goal). `model` holds the index version; `goalHash` + `model` make
+/// re-embedding idempotent.
+model PlannerMemoryEmbedding {
+  plannerMemoryId String                      @id
+  plannerMemory   PlannerMemory               @relation(fields: [plannerMemoryId], references: [id], onDelete: Cascade)
+  model           String
+  goalHash        String
+  goalVector      Unsupported("vector(1024)")
+  createdAt       DateTime                    @default(now())
+  updatedAt       DateTime                    @updatedAt
+
+  @@index([model])
 }

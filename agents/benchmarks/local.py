@@ -103,7 +103,9 @@ SERVICE_START_TIMEOUT_SECONDS = 600
 # manifest. Keep the normal bound for cached starts, but give that one-time
 # bootstrap enough room to finish cleanly.
 COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
+DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-idempotent-abandonment",
@@ -112,6 +114,7 @@ AGENT_PAYMENT_TASK_NAMES = {
 }
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
+    NEW_USER_PAYMENT_JOURNEY_TASK_NAME,
     "gate-subscription-card-mint",
     "gate-subscription-webhook-resume",
     "gate-kyc-card-mint",
@@ -181,6 +184,7 @@ class ServiceStack:
     isolated: bool
     workspace_name: str | None = None
     base_port: int | None = None
+    use_system_postgres: bool = False
 
 
 def slugify(value: str) -> str:
@@ -369,6 +373,10 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         isolated=True,
         workspace_name=workspace_name,
         base_port=allocate_port_range(preferred_base),
+        use_system_postgres=(
+            sys.platform.startswith("linux")
+            or os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() in {"1", "true", "yes"}
+        ),
     )
 
 
@@ -661,9 +669,10 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
                 cwd=REPO_ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError:
-            return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
@@ -675,14 +684,15 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
                 cwd=REPO_ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
             )
-        except FileNotFoundError:
-            return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
 
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
     """Remove the exact isolated DB when startup failed before its manifest."""
-    if not stack.isolated or not stack.workspace_name:
+    if not stack.isolated or not stack.workspace_name or stack.use_system_postgres:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
@@ -693,16 +703,21 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
         )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    try:
         subprocess.run(
             ["docker", "volume", "rm", volume],
             cwd=REPO_ROOT,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=DOCKER_CLEANUP_TIMEOUT_SECONDS,
         )
-    except FileNotFoundError:
-        return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -919,7 +934,7 @@ def validate_agentcard_org_credentials(
     env: Mapping[str, str] | None = None,
     env_path: Path | None = None,
 ) -> None:
-    if not (AGENT_PAYMENT_TASK_NAMES & set(tasks)):
+    if not ((AGENT_PAYMENT_TASK_NAMES | {NEW_USER_PAYMENT_JOURNEY_TASK_NAME}) & set(tasks)):
         return
     configured = _dotenv_values(env_path or REPO_ROOT / "back-end" / ".env")
     configured.update(os.environ if env is None else env)
@@ -957,7 +972,7 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
     selected = set(tasks)
     if needs_non_purchase_gates(tasks):
         os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
-    if AGENT_PAYMENT_TASK_NAMES & selected:
+    if (AGENT_PAYMENT_TASK_NAMES | {NEW_USER_PAYMENT_JOURNEY_TASK_NAME}) & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,
         # must execute uncached, and need the allowlisted hosted callback even
@@ -1371,6 +1386,17 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
         return False
 
 
+def apply_isolated_postgres_default(
+    env: dict[str, str], host_platform: str | None = None, *, use_system_postgres: bool = False
+) -> None:
+    """Prefer system Postgres on Linux while preserving explicit benchmark overrides."""
+    if use_system_postgres:
+        env["ROSE_USE_SYSTEM_PG"] = "true"
+        return
+    if (host_platform or sys.platform).startswith("linux"):
+        env.setdefault("ROSE_USE_SYSTEM_PG", "true")
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -1400,14 +1426,10 @@ def start_services(
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
-        # Cloud/Linux VMs often cannot create Docker overlay mounts; system Postgres is
-        # the supported local benchmark path (see CLAUDE.md Cursor Cloud section).
-        if sys.platform.startswith("linux") and os.environ.get("ROSE_USE_SYSTEM_PG", "").lower() not in {
-            "1",
-            "true",
-            "yes",
-        }:
-            env["ROSE_USE_SYSTEM_PG"] = "true"
+        # Cloud/Linux VMs often cannot create Docker overlay mounts. macOS can
+        # isolate each stack in Docker; forcing every stack onto the 100-client
+        # host Postgres starves concurrent mass-agent benchmarks.
+        apply_isolated_postgres_default(env, use_system_postgres=stack.use_system_postgres)
         # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
         # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
         # + compute-token fetch — it surfaces as a phantom "Can't reach database

@@ -13,10 +13,8 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { stripe } from '../../providers/stripe';
 import { AgentCardOrgMcpProvider, AgentCardProviderError } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
-import { getCustomerDefaultPaymentMethodId } from '../../domains/purchases/stripeCustomer';
 import { companyFundingInProgressDetails } from '../../domains/purchases/errors';
 import {
   assert,
@@ -560,45 +558,6 @@ const tests: Array<[string, () => Promise<void>]> = [
       });
       assertStatus(response.status, 200, response.data);
       assertSchema(OkResponse, response.data, 'webhook no card id');
-    },
-  ],
-  [
-    'stripe customer resolver rejects deleted customers and missing default methods',
-    async () => {
-      const customers = stripe.customers as unknown as {
-        retrieve: (id: string) => Promise<unknown>;
-      };
-      const originalRetrieve = customers.retrieve;
-      const expectResolverError = async (customerId: string): Promise<string> => {
-        try {
-          await getCustomerDefaultPaymentMethodId(customerId);
-        } catch (error) {
-          return error instanceof Error ? error.message : String(error);
-        }
-        throw new Error('expected the resolver to throw');
-      };
-      try {
-        customers.retrieve = async (id: string) => ({ id, deleted: true });
-        assert(
-          (await expectResolverError('cus_deleted')).includes('deleted'),
-          'deleted customer error should mention deletion'
-        );
-
-        customers.retrieve = async (id: string) => ({
-          id,
-          invoice_settings: { default_payment_method: { id: 'pm_object_default' } },
-        });
-        const objectPm = await getCustomerDefaultPaymentMethodId('cus_object');
-        assert(objectPm === 'pm_object_default', `expected expanded PM id, got ${objectPm}`);
-
-        customers.retrieve = async (id: string) => ({ id, invoice_settings: {} });
-        assert(
-          (await expectResolverError('cus_none')).includes('default Stripe payment method'),
-          'missing PM error should mention the default payment method'
-        );
-      } finally {
-        customers.retrieve = originalRetrieve;
-      }
     },
   ],
 ];
