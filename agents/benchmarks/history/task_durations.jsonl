@@ -3864,3 +3864,5 @@
 {"task": "claude-code-agent", "duration_seconds": 59.2, "cost_cents": 5.0, "timestamp": "2026-10-01T11:49:58.441318+00:00", "agent_id": "79edd9e9-0c5e-4c40-8c62-703b7fef95a1"}
 {"task": "chat-mode", "duration_seconds": 43.6, "cost_cents": 0.0, "timestamp": "2026-10-01T11:49:58.441318+00:00", "agent_id": "203fa2ff-8c6d-4aca-957b-889833f7a258"}
 {"task": "agent-payment-new-user-journey", "duration_seconds": 205.1, "cost_cents": 3.0, "timestamp": "2026-10-01T12:18:30.029882+00:00", "agent_id": "ddda80da-1181-468f-9e51-70057ddfa37b"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 140.8, "cost_cents": 11.0, "timestamp": "2026-10-01T20:37:09.838682+00:00", "agent_id": "837e1bcf-b430-40c4-b7e9-243157eb4852"}
+{"task": "browser-auth-saved-password-retry", "duration_seconds": 160.3, "cost_cents": 10.0, "timestamp": "2026-10-01T20:37:09.838682+00:00", "agent_id": "850ac61b-853b-4090-ac99-7a5c5e44ad69"}
