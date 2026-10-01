@@ -98,3 +98,76 @@ def test_import_time_env_defaults_survive_domain_restore(tmp_path: Path, monkeyp
     finally:
         sys.modules.pop(module_name, None)
         os.environ.pop(default_key, None)
+
+
+def _write_cached_default_module(tmp_path: Path, module_name: str, key: str) -> None:
+    (tmp_path / f"{module_name}.py").write_text(f"import os\nos.environ.setdefault('{key}', '300')\n")
+
+
+def _observing_domain(tmp_path: Path, module_name: str, key: str) -> Path:
+    domain = tmp_path / "observing.blackbox.py"
+    domain.write_text(
+        "import os\n"
+        "async def run_all_tests():\n"
+        f"    import {module_name}\n"
+        f"    return os.environ.get('{key}') == '300'\n"
+    )
+    return domain
+
+
+def test_domain_module_override_keeps_cached_import_default(tmp_path: Path, monkeypatch):
+    """A domain file overwriting a cached module's default at module scope must not delete that default."""
+    runner = load_runner()
+    key = "BLACKBOX_RUNNER_OVERRIDDEN_DEFAULT"
+    module_name = "blackbox_runner_overridden_default_mod"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_cached_default_module(tmp_path, module_name, key)
+    overriding_domain = tmp_path / "overriding.blackbox.py"
+    overriding_domain.write_text(
+        "import os\n"
+        f"import {module_name}\n"
+        f"os.environ['{key}'] = 'domain-override'\n"
+        "async def run_all_tests():\n"
+        f"    return os.environ.get('{key}') == 'domain-override'\n"
+    )
+
+    try:
+        assert asyncio.run(runner.run_single_domain(overriding_domain, "overriding"))[1]
+        assert asyncio.run(runner.run_single_domain(_observing_domain(tmp_path, module_name, key), "observing"))[1]
+    finally:
+        sys.modules.pop(module_name, None)
+        os.environ.pop(key, None)
+
+
+def test_failed_import_write_keeps_cached_import_default(tmp_path: Path, monkeypatch):
+    """A module whose import fails after writing a key must not erase an earlier cached module's default."""
+    runner = load_runner()
+    key = "BLACKBOX_RUNNER_FAILED_IMPORT_DEFAULT"
+    module_name = "blackbox_runner_failed_import_default_mod"
+    broken_name = "blackbox_runner_failed_import_broken_mod"
+    monkeypatch.delenv(key, raising=False)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _write_cached_default_module(tmp_path, module_name, key)
+    (tmp_path / f"{broken_name}.py").write_text(
+        f"import os\nos.environ['{key}'] = 'broken'\nraise RuntimeError('import failed')\n"
+    )
+    importing_domain = tmp_path / "importing.blackbox.py"
+    importing_domain.write_text(
+        "async def run_all_tests():\n"
+        f"    import {module_name}\n"
+        "    try:\n"
+        f"        import {broken_name}\n"
+        "    except RuntimeError:\n"
+        "        return True\n"
+        "    return False\n"
+    )
+
+    try:
+        assert asyncio.run(runner.run_single_domain(importing_domain, "importing"))[1]
+        assert broken_name not in sys.modules
+        assert asyncio.run(runner.run_single_domain(_observing_domain(tmp_path, module_name, key), "observing"))[1]
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(broken_name, None)
+        os.environ.pop(key, None)

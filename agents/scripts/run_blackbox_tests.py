@@ -80,8 +80,10 @@ def list_domains() -> None:
 # Imported modules stay cached across domains, so an env default a module sets
 # while it is being imported (spawn_browser_agent_v3.config's browser-use event
 # timeouts) must survive the per-domain restore, as it would in a fresh process
-# that imported the same module. Writes made by test code are still reverted.
-_IMPORT_TIME_ENV: dict[str, tuple[str, str]] = {}
+# that imported the same module. Writes made by test code are still reverted,
+# and so are a domain file's own module-scope writes: the runner executes it
+# without caching it, so a later domain never re-imports it.
+_IMPORT_TIME_ENV: dict[str, list[tuple[str, str]]] = {}
 
 
 def _record_import_time_env(event: str, args: tuple) -> None:
@@ -94,8 +96,11 @@ def _record_import_time_env(event: str, args: tuple) -> None:
         return
     if not frame.f_back.f_code.co_filename.startswith("<frozen importlib"):
         return
+    module_name = frame.f_globals.get("__name__", "")
+    if module_name not in sys.modules:
+        return
     key, value = (os.fsdecode(arg) for arg in args)
-    _IMPORT_TIME_ENV[key] = (frame.f_globals.get("__name__", ""), value)
+    _IMPORT_TIME_ENV.setdefault(key, []).append((module_name, value))
 
 
 sys.addaudithook(_record_import_time_env)
@@ -103,9 +108,13 @@ sys.addaudithook(_record_import_time_env)
 
 def _restore_environ(snapshot: dict[str, str]) -> None:
     target = dict(snapshot)
-    for key, (module_name, value) in _IMPORT_TIME_ENV.items():
-        if module_name in sys.modules:
-            target[key] = value
+    # The newest write from a module that is still cached wins; one whose import
+    # later failed has left sys.modules and falls back to the earlier writer.
+    for key, records in _IMPORT_TIME_ENV.items():
+        for module_name, value in reversed(records):
+            if module_name in sys.modules:
+                target[key] = value
+                break
     for key in set(os.environ) - target.keys():
         del os.environ[key]
     for key, value in target.items():
