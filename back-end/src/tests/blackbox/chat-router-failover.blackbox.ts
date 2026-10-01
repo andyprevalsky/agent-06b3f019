@@ -18,11 +18,12 @@
  *     deadline misses were not regenerated ─> chat_handler_failure notice
  *
  * Every case drives the production entrypoint (`postMessage`) against the
- * local database, seeded with the transcript whose chat-model projection is
- * the exact 30-message, 88,440-char router request prod sent
+ * local database, seeded with the agent's stored transcript. Its chat-model
+ * projection is the 30-message router request prod logged; prod does not log
+ * content, so the 88,440 chars are this projection of the stored rows
  * (fixtures/chat-router-failover-prod-e8f2279b.json; PII, including the
- * delivery street, replaced with same-length stand-ins), and replays provider
- * streams recorded on that exact request with their real timing
+ * delivery street, replaced with same-length stand-ins). It replays provider
+ * streams recorded on that request with their real timing
  * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). Only the
  * network boundary is replaced; the Rose hedge, race, stall guards, router
  * bounds, regenerate, escalation, and Temporal acceptance all run for real
