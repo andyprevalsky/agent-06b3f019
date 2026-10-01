@@ -576,7 +576,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel|localtunnel --port'
+    local pattern="$RUN_STALE_BENCHMARK_STACK_PATTERN"
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -659,7 +659,7 @@ if $IS_CLOUD; then
     # Without this guard, a Step 5 semantic run.sh murders in-flight smoke
     # workers that kill_stale_same_worktree_benchmark_stack just preserved.
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
-        for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
+        for pattern in "${RUN_CLOUD_SERVICE_KILL_PATTERNS[@]}"; do
             for pid in $(pgrep -f "$pattern" 2>/dev/null); do
                 if pid_belongs_to_active_isolated_benchmark "$pid"; then
                     echo "⏭️  Preserving ACTIVE isolated benchmark $pattern (PID $pid)"
