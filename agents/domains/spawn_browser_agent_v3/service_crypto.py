@@ -556,7 +556,7 @@ def auth_realm_from_url(url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(
-        (".ngrok-free.dev", ".ngrok.app", ".ngrok.io", ".loca.lt")
+        (".ngrok-free.dev", ".ngrok.app", ".ngrok.io")
     )
     if allow_query_override:
         query = parse_qs(parsed.query)
