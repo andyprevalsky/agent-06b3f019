@@ -264,7 +264,7 @@ function syncUrlParam(id: string | null) {
     url.searchParams.delete('agent-id');
     url.searchParams.delete('browser-id');
   }
-  window.history.replaceState({}, '', url.toString());
+  window.history.replaceState(window.history.state ?? {}, '', url.toString());
 }
 
 function killConnections(

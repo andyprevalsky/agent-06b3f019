@@ -179,7 +179,7 @@ export async function fetchClaudeCodeCredentialsWithMeta(
     // can exchange. Keep direct callers off the rejected access token (the
     // integration remains EXPIRED), but let the CLI consume the full envelope
     // without re-injecting that known-bad token as CLAUDE_CODE_OAUTH_TOKEN.
-    const directAuthFailedIntegration = await prisma.integration.findFirst({
+    const directAuthFailedIntegrations = await prisma.integration.findMany({
       where: {
         userId,
         name: 'claude_code',
@@ -187,9 +187,10 @@ export async function fetchClaudeCodeCredentialsWithMeta(
         failureReason: 'auth_error',
         OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
       },
+      orderBy: { createdAt: 'asc' },
     });
-    if (directAuthFailedIntegration) {
-      const decrypted = decryptIntegrationCredentials(directAuthFailedIntegration, decryptionKey);
+    for (const integration of directAuthFailedIntegrations) {
+      const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
       if (decrypted) {
         const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
         if (result?.credentialMode === 'oauth_envelope') {

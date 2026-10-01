@@ -2443,6 +2443,8 @@ async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
 
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
+    from copy import deepcopy
+
     from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
     from benchmarks.run_benchmark import _validate_payment_lifecycle
 
@@ -2464,6 +2466,16 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert idempotency.min_tool_counts["request_payment_card"] == 2
     assert "invoke spawn_browser_agent exactly twice" in idempotency.prompt
     assert idempotency.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    assert idempotency.expected_payment_lifecycle["integrity"] == {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1,
+    }
+    duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
+    duplicate_lifecycle["integrity"]["cardCount"] = 2
+    assert _validate_payment_lifecycle(
+        idempotency, {"_benchmark": {"payment_lifecycle": duplicate_lifecycle}}
+    ) == "payment_lifecycle.integrity.cardCount mismatch: expected 1, got 2"
     abandonment = get_task_by_name("agent-payment-abandonment")
     assert abandonment.payment_card_request_action == "abandon"
     assert abandonment.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"

@@ -1367,8 +1367,9 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
 
-def test_browser_navigation_uses_event_timeout_without_global_patch():
-    """Navigation follows browser-use's event budget without mutating asyncio globally."""
+def test_browser_navigation_handles_installed_timeout_without_global_patch():
+    """Older browser-use releases need start-url recovery for their fixed CDP wait."""
+    import inspect
     import browser_use.browser.session as browser_session_mod
     from browser_use.browser.events import NavigateToUrlEvent
 
@@ -1377,9 +1378,14 @@ def test_browser_navigation_uses_event_timeout_without_global_patch():
 
     upstream_source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
     handler_source = Path(handler_mod.__file__).read_text(encoding="utf-8")
-    assert "nav_timeout = 20.0" not in upstream_source
     assert NavigateToUrlEvent(url="https://example.com").event_timeout == NAVIGATE_TO_URL_TIMEOUT_SECONDS
     assert "apply_browser_use_navigate_timeout_patch" not in handler_source
+    if "nav_timeout" in inspect.signature(browser_session_mod.BrowserSession._navigate_and_wait).parameters:
+        assert "nav_timeout=event.event_timeout" in upstream_source
+    else:
+        assert "nav_timeout = 20.0" in upstream_source
+        assert "start_url_nav_error = nav_exc" in handler_source
+        assert "Start URL navigation failed (continuing into agent loop)" in handler_source
 
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
@@ -21461,8 +21467,8 @@ async def run_all_tests():
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
     r.record(
-        "browser_navigation_uses_event_timeout_without_global_patch",
-        test_browser_navigation_uses_event_timeout_without_global_patch,
+        "browser_navigation_handles_installed_timeout_without_global_patch",
+        test_browser_navigation_handles_installed_timeout_without_global_patch,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",

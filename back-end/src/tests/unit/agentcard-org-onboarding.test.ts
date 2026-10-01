@@ -145,26 +145,28 @@ async function main(): Promise<void> {
   assert.equal(missingSession.status, 'session_not_found');
   assert.equal(missingSession.setupSessionId, 'stale-session');
 
-  const missingSessionResult = await refreshOrgCardholderStatus(
-    'user-1',
-    deps({
-      getOrgOnboardingConfig: async () =>
-        ({
-          sessionId: 'stale-session',
-          setupUrl: 'https://example.invalid/setup',
-        }) as OrgOnboardingConfig,
-      callOrgTool: async () => ({
-        isError: true,
-        structuredContent: {
-          status: 'error',
-          message: 'get_onboarding_session failed: Onboarding session not found',
-        },
-      }),
-    })
-  );
-  assert.equal(missingSessionResult.connected, false);
-  assert.equal(missingSessionResult.status, 'session_not_found');
-  assert.equal(missingSessionResult.setupSessionId, 'stale-session');
+  for (const message of [
+    'Onboarding session not found',
+    'get_onboarding_session failed: Onboarding session not found',
+  ]) {
+    const missingSessionResult = await refreshOrgCardholderStatus(
+      'user-1',
+      deps({
+        getOrgOnboardingConfig: async () =>
+          ({
+            sessionId: 'stale-session',
+            setupUrl: 'https://example.invalid/setup',
+          }) as OrgOnboardingConfig,
+        callOrgTool: async () => ({
+          isError: true,
+          structuredContent: { status: 'error', message },
+        }),
+      })
+    );
+    assert.equal(missingSessionResult.connected, false);
+    assert.equal(missingSessionResult.status, 'session_not_found');
+    assert.equal(missingSessionResult.setupSessionId, 'stale-session');
+  }
 
   let verificationArgs: Record<string, unknown> | undefined;
   const verificationStatus = await getOrgCardholderVerificationStatus('ch-ready', {

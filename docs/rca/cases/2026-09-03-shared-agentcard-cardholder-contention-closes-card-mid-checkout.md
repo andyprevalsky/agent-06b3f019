@@ -21,7 +21,7 @@ tags:
 sources:
   - agent d12b582c-f7ec-419e-9633-8e1d7b882900
   - agent a4a282c5-697c-49b0-b553-9d0e0c6fbbf7
-repro: none
+repro: back-end/src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts
 status: open
 ---
 
@@ -109,3 +109,120 @@ inside an unrelated change.
    instead of burning the task's whole timeout budget.
 3. Do not run the AgentCard gate concurrently from more than one machine while
    the shared cardholder remains first preference.
+
+## 2026-09-30 recurrence: treasury test closed foreign cards
+
+The local AgentCard lifecycle gate failed `agent-payment-idempotent-abandonment`
+for agent `6baad852-3cad-4d0a-89cd-2623e585b101`. Its two sequential browser
+tasks sent the same purchase fingerprint (`ed2c4449…b8177`) for the same
+agent. The first request minted a card at 01:19:29Z and left checkout
+unsubmitted. At 01:21:14Z, the second request's liveness check got AgentCard
+`card_closed` for that card; Rose marked the first purchase `CLEARED` and minted
+a second card at 01:21:19Z. The differing last four prevented checkout, and
+the task timed out at its 900-second cap. This local backend issued no
+`close_card` call for the first card. The provider response proves closure but
+does not identify the external caller that closed this particular card.
+
+The current sandbox org differs from the earlier case: live read-only
+`list_cardholders` returned `agentcard-benchmark@roselabs.ai` as verified,
+and its ID matches the configured fixture cardholder (`…gfto`). The old
+`andy@roselabs.ai` candidate was absent. All four lifecycle tasks in this
+isolated stack minted against `…gfto`; other workspaces using the same sandbox
+org credentials can also target it. Selecting the dedicated email again would
+therefore select the same ID and would not isolate the run.
+
+The owned cross-workspace hazard is in
+`back-end/src/tests/blackbox/treasury-rails.blackbox.ts`: its final cleanup
+listed every OPEN card on this shared cardholder and closed each one, including
+cards minted by other active workspaces. The safe cleanup now filters to card
+IDs returned by this test's own `create_card`. A permanent owning-boundary
+blackbox supplies one owned OPEN card and one foreign OPEN card. Before the fix,
+`npx tsx src/tests/blackbox/treasury-rails-card-cleanup.blackbox.ts` failed
+with `2 !== 1` because both cards were closed. After the fix, the identical
+command passed, leaving the foreign card OPEN. The backend blackbox runner
+discovers and passes this test. This removes a proven mechanism, while the
+specific external caller in the failed run remains unattributed.
+
+The exact unchanged `agent-payment-idempotent-abandonment` benchmark still
+needs a passing local run after this fix before this RCA can be marked fixed.
+
+A second isolated run on September 30 (`3f47fcda-ca99-4313-91f6-e684a05cb333`)
+finished its checkout after the first card closed during the sequential reuse
+check. The agent minted a replacement, so the lifecycle contained two purchases,
+two wallet fundings, and two cards. The benchmark initially reported a pass
+because its expected lifecycle did not assert those counts. The task contract
+now requires exactly one of each, and a regression test confirms that this
+archived run fails validation. That earlier green result does not close this
+case; the stricter exact benchmark needs a new pass.
+
+The next strict rerun (`88706c44-eb1a-4258-8714-6ad8a930facc`) failed for a
+separate, fully attributed fingerprint difference. Its first browser sent the
+three bare product titles; its second browser sent the same titles with a
+redundant ` - x1` suffix while also setting `quantity: 1`. All other receipt
+fields matched. The two purchase fingerprints differed, so the backend minted
+another card. Both the agents-side fingerprint builder and the backend's
+stored-receipt backfill now ignore that exact matching quantity echo. A replay
+of the two archived request payloads produces one canonical fingerprint, and
+the tests keep a mismatched quantity distinct. The next exact live run
+(`49095574-4a49-4d4b-ad21-ee8b0b2da186`) passed in 289 seconds: both browser
+requests used fingerprint `d54a9df1…`, the second lookup returned `reusable:
+true`, and both payment-card responses returned the same provider card ID
+`card_b4d522c1e7d8eca7f9af1aa9`. The terminal lifecycle had one purchase,
+one wallet funding, one Stripe payment intent, and one local card. This proves
+the idempotency path in that run; the shared cardholder still needs provider
+isolation to prevent unrelated workspaces from affecting future runs.
+
+The full four-task AgentCard gate then exposed two more browser-rendering
+variants (`20260930_025123_agent-payment-test-shop,agent-payment-setup-resume,agent-payment-idempotent-abandonment,agent-payment-abandonment.json`):
+setup/resume sent `http://placehold.co/...` for the three image URLs expected
+with `https://` in the checkout fixture, and the idempotency task's second
+browser appended `x1 (Rose Labs Test Payment)` to each product title. Its two
+fingerprints differed, giving two purchases. The payment payload now upgrades
+only the known placeholder image host to HTTPS; both fingerprint builders
+strip a quantity-plus-merchant suffix only when it matches the separate
+quantity and merchant fields. Replaying the archived requests now produces
+secure receipt image URLs and one fingerprint.
+
+The focused live rerun (`1c4ebfa8-63db-4e4a-a468-e4749d69e6dc`) passed both
+affected tasks. Setup/resume completed onboarding and checkout; idempotency's
+second browser returned `reusable: true` for fingerprint `9b7392f8…` and the
+same card ID `card_3f56552739e49626483f0248`. Its terminal lifecycle had one
+purchase, one funding, and one card. The four-task deploy gate remains pending.
+
+## 2026-10-01 recurrence: verified cart-summary text changed the purchase key
+
+The four-task local deploy gate failed `agent-payment-idempotent-abandonment`
+for agent `847cc7c7-ffe9-4ced-aecd-44bfe6d49998` at the 900-second cap.
+Its first browser submitted item names such as
+`Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)`, while its
+second browser submitted the bare product titles. Product URLs, structured
+quantities, unit prices, fees, merchant, and total were unchanged. The agents
+fingerprinted these as `8fb86c27…` and `8bd7b485…`; the second lookup returned
+`reusable: false` and minted purchase `5d2cbd4b…` after the first had minted
+`b9bdc4f5…`. The second browser then called `request_payment_card` four more
+times, each rejected with `Payment approval is already complete. Do not call
+request_payment_card again`, and spent 622 seconds in that browser activity.
+
+The first bad boundary was both sides of purchase fingerprint canonicalization:
+they recognized some repeated quantity/price display forms but not the combined
+cart-summary form above. The new blackboxes
+`agents/tests/blackbox/request_payment_card.blackbox.py` and
+`back-end/src/tests/blackbox/purchases-fingerprint.blackbox.ts` capture the
+form and assert reuse only when the echoed quantity, price, and merchant match
+the structured receipt. Before the fix,
+`agents/venv/bin/python agents/tests/blackbox/request_payment_card.blackbox.py`
+failed with `the same product URL, quantity, price, and merchant must reuse its
+card`; `cd back-end && npx tsx
+src/tests/blackbox/purchases-fingerprint.blackbox.ts` failed with `the captured
+first-browser name must resolve to the same held card as the bare title`. After
+the Python and TypeScript canonicalizers were updated, those identical commands
+passed; conflicting quantity, price, and merchant annotations remain distinct.
+The exact unchanged paid benchmark still requires a post-fix local pass before
+this recurrence can be called fixed.
+
+Archive searches: `Timeout after 900s browser_activity_wait payment AgentCard`
+and `browser agent spent long time repeated navigation payments idempotent
+abandonment`. This is a recurrence of the receipt fingerprint drift already
+recorded above, not another sandbox cardholder closure. Human feedback for this
+recurrence: the operator directed the agent to fix the runtime issue without
+raising timeouts, weakening tests, or touching the separate Explore issue.
