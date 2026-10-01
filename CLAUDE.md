@@ -396,6 +396,10 @@ responses, a real evaluator result, and full cleanup/evidence; an interrupted
 diagnostic that misses those requirements earns no credit. Restore the normal
 backstop after this validation. These are proof acceptance requirements, not
 changes to benchmark pass criteria or deploy-selection qualification.
+Benchmark request identity is scoped per task; exact resource cleanup temporarily
+overrides it with the persisted root owner. Preserve that precedence and restore
+both scopes on cancellation. The existing cleanup and benchmark identity tests
+cover concurrent siblings, preflight failures and callback/result contracts.
 The live-query verifier also rejects an owned terminal `rose.complete.failed`
 inside the benchmark's execution window, even if three other calls completed.
 The benchmark blackbox gate runs the fast completed-query regressions: distinct

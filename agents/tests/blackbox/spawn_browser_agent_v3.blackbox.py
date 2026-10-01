@@ -10075,6 +10075,33 @@ async def test_action_history_record_action_accepts_tuple_coordinates():
     assert dict_entry.coordinates == {"x": 3, "y": 4}
 
 
+async def test_child_text_submit_click_can_complete_visible_result():
+    """A nested button label must survive into history for post-submit completion."""
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.visible_result_completion import (
+        should_force_visible_result_completion,
+    )
+
+    submit_button = SimpleNamespace(
+        tag_name="button",
+        text_content="",
+        get_all_children_text=lambda: "Submit (Protected by Invisible CAPTCHA)",
+    )
+    dom = SimpleNamespace(
+        selector_map={2713: submit_button},
+        get_element_coordinates=AsyncMock(return_value=(445, 429)),
+    )
+    history = ActionHistory()
+    click = await history.record_action(dom_service=dom, action="click", index=2713)
+
+    assert "Submit (Protected by Invisible CAPTCHA)" in click.element_description
+    assert should_force_visible_result_completion(
+        action_name="scroll",
+        last_reasoning='The form showed Risk Score: 0.07 and "Bot detected - form blocked".',
+        action_entries=history.get_entries(),
+    )
+
+
 async def test_execute_drag_records_through_real_action_history():
     """Unmocked record_action after a successful CDP drag must not TypeError."""
     from browser_tools.dom_service import ActionHistory
@@ -23340,6 +23367,10 @@ async def run_all_tests():
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",
         test_action_history_record_action_accepts_tuple_coordinates,
+    )
+    await r.record_async(
+        "child_text_submit_click_can_complete_visible_result",
+        test_child_text_submit_click_can_complete_visible_result,
     )
     await r.record_async(
         "execute_drag_records_through_real_action_history",

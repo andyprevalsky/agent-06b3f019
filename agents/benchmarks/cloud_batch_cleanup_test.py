@@ -927,14 +927,16 @@ async def test_deferred_cleanup_uses_exact_database_owner():
 @async_case
 async def test_cleanup_identity_isolated_and_reset_after_cancellation():
     import os
+    from contextvars import ContextVar
     ambient = bench.USER_ID
+    task_user = "00000000-0000-4000-8000-000000000105"
     fixture_owner = bench.GATE_FIXTURE_TASK_USER_IDS["gate-kyc-card-mint"]
     before = {"root_user_id": fixture_owner, "tree_agent_ids": [ROOT], "browser_sessions": [], "purchase_cleanup": []}
     entered, observed = asyncio.Event(), asyncio.Event()
 
     async def sibling():
         await entered.wait()
-        assert bench._current_benchmark_user_id() == ambient
+        assert bench._current_benchmark_user_id() == task_user
         assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient
 
         observed.set()
@@ -950,6 +952,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
 
     with (
         patch.dict(os.environ, {"BENCHMARK_RUN_USER_ID": ambient}),
+        patch.object(bench, "_task_benchmark_user_id", ContextVar("fixture_task_user", default=task_user)),
         patch.object(cleanup, "exact_root_sessions", return_value=before),
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
         patch.object(bench, "_refresh_browser_archive_snapshot", snapshot),
@@ -965,7 +968,7 @@ async def test_cleanup_identity_isolated_and_reset_after_cancellation():
         finally:
             observer.cancel()
             await asyncio.gather(observer, return_exceptions=True)
-        assert bench._current_benchmark_user_id() == ambient
+        assert bench._current_benchmark_user_id() == task_user
         assert os.environ["BENCHMARK_RUN_USER_ID"] == ambient
 
 

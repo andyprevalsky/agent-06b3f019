@@ -50,6 +50,26 @@ def test_oai_demo_requires_readable_files_and_forbids_browser_calls():
     assert goal == task.prompt
 
 
+def test_google_oauth_demo_uses_isolated_fixture_without_browser_or_cache():
+    from providers.fast_cache.normalize import demo_cache_allowed
+
+    task = get_task_by_name("google-oauth")
+    assert task.title == "Google OAuth"
+    assert task.tags == ["DEMO"]
+    assert task.production_only is False
+    assert task.fast_cache == "off"
+    assert task.requires_browser_agent is False
+    assert task.expected_tool_counts == {"spawn_claude_code_agent": 1}
+    assert "spawn_browser_agent" in task.forbidden_tools
+    assert task.environment["mode"] == "synthetic"
+    assert "gmail_create_reply_draft" in task.prompt
+    assert "calendar_create_event" in task.prompt
+    assert "drive_append_line" in task.prompt
+    goal = _benchmark_goal_for_task(task, "https://navi-j9a9.onrender.com")
+    assert "{demo_run_nonce}" not in goal
+    assert not demo_cache_allowed(goal)
+
+
 def test_agentcard_idempotency_task_terminates_after_reporting_results():
     """The root must grade its result instead of looping on progress messages."""
     task = get_task_by_name("agent-payment-idempotent-abandonment")
