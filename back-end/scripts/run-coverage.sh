@@ -375,6 +375,12 @@ fi
 DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 ISOLATED_DB_RESOLVED=false
+STACK_MANIFEST="$ROOT_DIR/.context/services.json"
+
+if [[ -f "$STACK_MANIFEST" ]] && ! jq -e . "$STACK_MANIFEST" >/dev/null 2>&1; then
+  echo "❌ Workspace service manifest is invalid; refusing to guess a coverage database." >&2
+  exit 1
+fi
 
 if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   if ! node -e '
@@ -395,6 +401,20 @@ if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then
   fi
   DB_FOUND=true
   echo "Using isolated system Postgres database victoria_$WORKSPACE_HINT"
+elif [[ -f "$STACK_MANIFEST" ]] &&
+  [[ "$(jq -r '.database.container // empty' "$STACK_MANIFEST")" == "$DB_CONTAINER" ]] &&
+  [[ "$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")" == "false" ]]; then
+  # The worktree manifest declares a Docker database. Verify that exact
+  # container even when Docker's broad info probe stalls under host load;
+  # falling through to shared system Postgres could target another workspace.
+  ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
+  if [[ -z "$ACTUAL_PORT" ]] || ! docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
+    echo "❌ Expected workspace Postgres container $DB_CONTAINER is unavailable; refusing system Postgres fallback." >&2
+    exit 1
+  fi
+  LOCAL_DB_PORT="$ACTUAL_PORT"
+  DB_FOUND=true
+  echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
 elif docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
