@@ -18,6 +18,13 @@
  *       ─> deadline miss
  *     deadline misses were not regenerated ─> chat_handler_failure notice
  *
+ * Every chat timeout on this path is now CHAT_TIMEOUT_MS (15s) from the start
+ * of its request or router attempt; the 0.8s hedge only starts the failover
+ * early. Time to first content grows with the context, so two cases replay
+ * the recorded streams at the first-content times measured on the longest
+ * prod router context: direct Cerebras past its old 1.2s guard, and GLM past
+ * the old 3s router attempt by more than 4s.
+ *
  * Every case drives the production entrypoint (`postMessage`) against the
  * local database, seeded with the agent's stored transcript. Its chat-model
  * projection is the 30-message router request prod logged; prod does not log
@@ -26,10 +33,11 @@
  * delivery street, replaced with same-length stand-ins). It replays provider
  * streams recorded on that request with their real timing
  * (fixtures/chat-router-failover-prod-e8f2279b-streams.json). Only the
- * network boundary is replaced; the Rose hedge, race, stall guards, router
- * bounds, regenerate, escalation, and Temporal acceptance all run for real
- * (Temporal through the in-memory blackbox client), under the bound defaults
- * prod runs with (inherited overrides are removed for the run).
+ * network boundary (chat-router-failover.network.support.ts) is replaced; the
+ * Rose hedge, race, stall guards, router bounds, regenerate, escalation, and
+ * Temporal acceptance all run for real (Temporal through the in-memory
+ * blackbox client), under the bound defaults prod runs with (inherited
+ * overrides are removed for the run).
  *
  * CHAT_ROUTER_FAILOVER_LIVE=1 adds the live probe: same seeded agent, a
  * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
@@ -53,22 +61,28 @@ import { prisma } from '../../providers/database';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
-import { DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
+import { DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import { DEFAULT_CEREBRAS_CHAT_HEDGE_MS } from '../../providers/rose/exclusiveCerebrasChatRoute';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
-import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import {
   assertProbesConfiguredOpenRouterAccount,
   describeLiveRequests,
   type GoalAnchor,
   goalAnchorFailure,
-  type LiveObservation,
   type LiveSample,
-  observedLiveFetch,
   probeLiveFailover,
   startedWorkflowGoal,
 } from './chat-router-failover.live.support';
+import {
+  type FailoverNetwork,
+  firstContentDt,
+  installNetwork,
+  LONG_CONTEXT_GLM_DELAY_MS,
+  LONG_PREFILL_CEREBRAS_DELAY_MS,
+  type Scenario,
+  streams,
+} from './chat-router-failover.network.support';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.CHAT_ROUTER_FAILOVER_LIVE === '1';
@@ -82,7 +96,6 @@ const PROD_DEFAULT_BOUND_ENV = [
   'CEREBRAS_CHAT_IDLE_TIMEOUT_MS',
   'CEREBRAS_CHAT_HEDGE_MS',
   'OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS',
-  'CHAT_ROUTER_STALL_TIMEOUT_MS',
   'CHAT_ROUTER_COMPLETION_TIMEOUT_MS',
 ] as const;
 
@@ -92,22 +105,9 @@ interface FixtureMessage {
   metadata: Record<string, unknown>;
 }
 
-interface RecordedEvent {
-  dt: number;
-  line: string;
-}
-
 const context = JSON.parse(
   readFileSync(join(here, '../fixtures/chat-router-failover-prod-e8f2279b.json'), 'utf8')
 ) as { agentId: string; messages: FixtureMessage[] };
-
-const streams = JSON.parse(
-  readFileSync(join(here, '../fixtures/chat-router-failover-prod-e8f2279b-streams.json'), 'utf8')
-) as {
-  cerebrasStall: RecordedEvent[];
-  cerebrasHealthy: { events: RecordedEvent[] };
-  openrouterGlm: { events: RecordedEvent[] };
-};
 
 const FOLLOW_UP = context.messages[context.messages.length - 1];
 const PRIOR_MESSAGES = context.messages.slice(0, -1);
@@ -123,173 +123,16 @@ const CORRECTED_GOAL: GoalAnchor = {
  */
 const PROD_ROUTER_MESSAGE_COUNT = 30;
 const PROD_ROUTER_TRANSCRIPT_CHARS = 82_649;
-/** A failover request must reach first content within the router stall bound minus the hedge delay. */
+/** A failover request starts at the hedge, so it has the router attempt's bound minus the hedge delay. */
 const FAILOVER_PRE_CONTENT_BUDGET_MS =
-  DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS - DEFAULT_CEREBRAS_CHAT_HEDGE_MS;
+  DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS - DEFAULT_CEREBRAS_CHAT_HEDGE_MS;
+/** The FE chat lifecycle ratchet (front-end/tests-e2e/chat-lifecycle-latency.spec.ts). */
+const HEALTHY_TURN_MS = 5_000;
 /** OpenRouter-side misses on the e8f2279b profile came in a window of about a minute. */
 const LIVE_REPROBE_DELAY_MS = 60_000;
-
-// ── network boundary ─────────────────────────────────────────────────────────
-
-type Behavior = 'stall' | 'healthy' | 'glm-recorded' | 'live';
-
-/** Live requests also record the OpenRouter host that served, and when. */
-interface ProviderRequest extends LiveObservation {
-  provider: 'cerebras' | 'openrouter';
-  model: string;
-  schema: string;
-  messageCount: number;
-  transcriptChars: number;
-  sessionId?: string;
-  atMs: number;
-}
-
-interface Scenario {
-  cerebras: (routerAttempt: number) => Behavior;
-  glm: (routerAttempt: number) => Behavior;
-  openrouterOther: Behavior;
-}
-
-/** Replays recorded SSE lines at their recorded offsets; optionally stays open. */
-function replayResponse(
-  events: RecordedEvent[],
-  signal: AbortSignal | null | undefined,
-  holdOpen: boolean
-): Response {
-  const timers: ReturnType<typeof setTimeout>[] = [];
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const fail = (): void => {
-        timers.forEach(clearTimeout);
-        try {
-          controller.error(signal?.reason ?? new Error('aborted'));
-        } catch {
-          // already closed
-        }
-      };
-      if (signal?.aborted) {
-        fail();
-        return;
-      }
-      signal?.addEventListener('abort', fail, { once: true });
-      events.forEach((event, index) => {
-        timers.push(
-          setTimeout(() => {
-            try {
-              controller.enqueue(encoder.encode(`${event.line}\n\n`));
-              if (index === events.length - 1 && !holdOpen) controller.close();
-            } catch {
-              // stream already errored by abort
-            }
-          }, event.dt)
-        );
-      });
-    },
-    cancel() {
-      timers.forEach(clearTimeout);
-    },
-  });
-  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
-}
-
-function transcriptChars(messages: Array<{ role?: string; content?: unknown }>): number {
-  return messages.reduce((total, message) => {
-    if (message.role === 'system') return total;
-    if (typeof message.content === 'string') return total + message.content.length;
-    if (Array.isArray(message.content)) {
-      return (
-        total +
-        message.content.reduce(
-          (sum: number, part: { text?: unknown }) =>
-            sum + (typeof part.text === 'string' ? part.text.length : 0),
-          0
-        )
-      );
-    }
-    return total;
-  }, 0);
-}
-
-const ALERT_HOSTS = new Set(['slack.com', 'hooks.slack.com', 'api.github.com']);
-
-function installNetwork(scenario: Scenario, startedAt: number) {
-  const realFetch = globalThis.fetch;
-  const requests: ProviderRequest[] = [];
-  const unexpected: string[] = [];
-  const alerts: string[] = [];
-  let cerebrasRouterRequests = 0;
-  let glmRouterRequests = 0;
-
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (url.endsWith('/realtime/v1/api/broadcast')) {
-      return new Response('{}', { status: 202 });
-    }
-    if (ALERT_HOSTS.has(new URL(url).hostname)) {
-      alerts.push(url);
-      return new Response('{"ok":false}', { status: 503 });
-    }
-    if (url !== CEREBRAS_API_URL && url !== OPENROUTER_API_URL) {
-      unexpected.push(url);
-      throw new Error(`chat-router-failover: unexpected outbound ${url}`);
-    }
-    const body = JSON.parse(String(init?.body)) as {
-      model: string;
-      messages: Array<{ role?: string; content?: unknown }>;
-      response_format?: { json_schema?: { name?: string } };
-      session_id?: string;
-    };
-    const schema = body.response_format?.json_schema?.name ?? '';
-    const provider = url === CEREBRAS_API_URL ? 'cerebras' : 'openrouter';
-    const request: ProviderRequest = {
-      provider,
-      model: body.model,
-      schema,
-      messageCount: body.messages.length,
-      transcriptChars: transcriptChars(body.messages),
-      sessionId: body.session_id,
-      atMs: Date.now() - startedAt,
-    };
-    requests.push(request);
-    const isRouter = schema === 'router_decision';
-    let behavior: Behavior;
-    if (provider === 'cerebras') {
-      behavior = isRouter ? scenario.cerebras((cerebrasRouterRequests += 1)) : 'stall';
-    } else if (body.model === OPENROUTER_FAST_CHAT_MODEL) {
-      behavior = isRouter ? scenario.glm((glmRouterRequests += 1)) : scenario.openrouterOther;
-    } else {
-      behavior = scenario.openrouterOther;
-    }
-    const signal = init?.signal;
-    switch (behavior) {
-      case 'live':
-        return observedLiveFetch(realFetch, input, init, request);
-      case 'healthy':
-        return replayResponse(streams.cerebrasHealthy.events, signal, false);
-      case 'glm-recorded':
-        return replayResponse(streams.openrouterGlm.events, signal, false);
-      case 'stall':
-        return replayResponse(provider === 'cerebras' ? streams.cerebrasStall : [], signal, true);
-    }
-  }) as typeof fetch;
-
-  return {
-    requests,
-    unexpected,
-    alerts,
-    routerRequests: (provider: ProviderRequest['provider'], model?: string) =>
-      requests.filter(
-        (request) =>
-          request.schema === 'router_decision' &&
-          request.provider === provider &&
-          (model === undefined || request.model === model)
-      ),
-    restore: () => {
-      globalThis.fetch = realFetch;
-    },
-  };
-}
+/** Prod bounds that ended these turns: the router attempt and the Cerebras pre-content guard. */
+const OLD_ROUTER_ATTEMPT_MS = 3_000;
+const OLD_CEREBRAS_GUARD_MS = 1_200;
 
 // ── prod-shaped agent ────────────────────────────────────────────────────────
 
@@ -377,7 +220,7 @@ async function sendFollowUp(
   timeoutMs: number
 ): Promise<{
   outcome: Outcome;
-  network: ReturnType<typeof installNetwork>;
+  network: FailoverNetwork;
   seeded: SeededAgent;
   agent: { status: string; temporalWorkflowId: string | null };
   goal?: string;
@@ -409,7 +252,7 @@ async function sendFollowUp(
   }
 }
 
-function assertExactProdRouterContext(network: ReturnType<typeof installNetwork>): void {
+function assertExactProdRouterContext(network: FailoverNetwork): void {
   const [first] = network.routerRequests('cerebras');
   assert.ok(first, 'router must try direct Cerebras first');
   assert.equal(first.messageCount, PROD_ROUTER_MESSAGE_COUNT, 'router message count drifted');
@@ -420,11 +263,11 @@ function assertExactProdRouterContext(network: ReturnType<typeof installNetwork>
   );
 }
 
-function assertNoStrayOutbound(network: ReturnType<typeof installNetwork>): void {
+function assertNoStrayOutbound(network: FailoverNetwork): void {
   assert.deepEqual(network.unexpected, [], 'chat turn reached an unexpected outbound host');
 }
 
-function assertHealthyTurn(network: ReturnType<typeof installNetwork>): void {
+function assertHealthyTurn(network: FailoverNetwork): void {
   assertNoStrayOutbound(network);
   assert.deepEqual(network.alerts, [], 'a served turn must not raise an error alert');
 }
@@ -469,6 +312,78 @@ async function testExactProdFollowUpEscalatesThroughFailover(): Promise<void> {
     assert.equal(agent.temporalWorkflowId, seeded.agentId, 'Temporal accepted the re-plan');
     process.stdout.write(
       `  escalated at ${outcome.atMs}ms via ${OPENROUTER_FAST_CHAT_MODEL} (Cerebras stalled)\n`
+    );
+  } finally {
+    await cleanup(seeded);
+  }
+}
+
+async function testLongContextFailoverServesOnFirstAttempt(): Promise<void> {
+  const firstContentAt =
+    DEFAULT_CEREBRAS_CHAT_HEDGE_MS +
+    LONG_CONTEXT_GLM_DELAY_MS +
+    firstContentDt(streams.openrouterGlm.events);
+  assert.ok(
+    firstContentAt > OLD_ROUTER_ATTEMPT_MS,
+    `precondition: GLM's first content (${firstContentAt}ms) lands past the old ${OLD_ROUTER_ATTEMPT_MS}ms attempt`
+  );
+  const { outcome, network, seeded, goal } = await sendFollowUp(
+    { cerebras: () => 'stall', glm: () => 'glm-recorded-long-context', openrouterOther: 'stall' },
+    40_000
+  );
+  try {
+    assertExactProdRouterContext(network);
+    assert.equal(
+      outcome.kind,
+      'escalated',
+      `a long-context failover must serve, got ${outcome.kind} after ${outcome.atMs}ms`
+    );
+    assertHealthyTurn(network);
+    assert.equal(
+      network.routerRequests('cerebras').length,
+      1,
+      'the first router attempt must serve it: no regenerate'
+    );
+    assert.ok(
+      outcome.atMs < DEFAULT_CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
+      `decision at ${outcome.atMs}ms must land inside the first attempt's bound`
+    );
+    assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
+    process.stdout.write(
+      `  GLM first content at ${firstContentAt}ms; escalated at ${outcome.atMs}ms on attempt 1\n`
+    );
+  } finally {
+    await cleanup(seeded);
+  }
+}
+
+async function testLongPrefillCerebrasKeepsRacing(): Promise<void> {
+  const firstContentAt =
+    LONG_PREFILL_CEREBRAS_DELAY_MS + firstContentDt(streams.cerebrasHealthy.events);
+  assert.ok(
+    firstContentAt > OLD_CEREBRAS_GUARD_MS,
+    `precondition: Cerebras's first content (${firstContentAt}ms) lands past its old ${OLD_CEREBRAS_GUARD_MS}ms guard`
+  );
+  const { outcome, network, seeded, goal } = await sendFollowUp(
+    { cerebras: () => 'healthy-long-prefill', glm: () => 'stall', openrouterOther: 'stall' },
+    30_000
+  );
+  try {
+    assertExactProdRouterContext(network);
+    assert.equal(
+      outcome.kind,
+      'escalated',
+      `a long-prefill Cerebras response must serve, got ${outcome.kind} after ${outcome.atMs}ms`
+    );
+    assertHealthyTurn(network);
+    assert.equal(network.routerRequests('cerebras').length, 1, 'no regenerate');
+    assert.ok(
+      network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL).length > 0,
+      'precondition: the hedge started the (stalled) failover while Cerebras was still silent'
+    );
+    assert.equal(goalAnchorFailure(goal, CORRECTED_GOAL), undefined);
+    process.stdout.write(
+      `  Cerebras first content at ${firstContentAt}ms; escalated at ${outcome.atMs}ms\n`
     );
   } finally {
     await cleanup(seeded);
@@ -524,8 +439,8 @@ async function testHealthyCerebrasPathUnchanged(): Promise<void> {
       'healthy Cerebras must not arm the OpenRouter hedge'
     );
     assert.ok(
-      outcome.atMs < DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
-      `healthy router turn took ${outcome.atMs}ms — no router bound may be involved`
+      outcome.atMs < HEALTHY_TURN_MS,
+      `healthy router turn took ${outcome.atMs}ms, past the ${HEALTHY_TURN_MS}ms chat lifecycle ratchet`
     );
     process.stdout.write(`  healthy Cerebras escalated at ${outcome.atMs}ms\n`);
   } finally {
@@ -534,11 +449,7 @@ async function testHealthyCerebrasPathUnchanged(): Promise<void> {
 }
 
 async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
-  const saved = {
-    stall: process.env.CHAT_ROUTER_STALL_TIMEOUT_MS,
-    completion: process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS,
-  };
-  process.env.CHAT_ROUTER_STALL_TIMEOUT_MS = '400';
+  const saved = process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
   process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = '400';
   try {
     const { outcome, network, seeded, agent } = await sendFollowUp(
@@ -563,13 +474,8 @@ async function testExhaustedBudgetSurfacesOneNotice(): Promise<void> {
       await cleanup(seeded);
     }
   } finally {
-    for (const [key, value] of [
-      ['CHAT_ROUTER_STALL_TIMEOUT_MS', saved.stall],
-      ['CHAT_ROUTER_COMPLETION_TIMEOUT_MS', saved.completion],
-    ] as const) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    if (saved === undefined) delete process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS;
+    else process.env.CHAT_ROUTER_COMPLETION_TIMEOUT_MS = saved;
   }
 }
 
@@ -642,6 +548,14 @@ async function main(): Promise<void> {
         [
           'exact prod follow-up escalates through the recorded GLM failover',
           testExactProdFollowUpEscalatesThroughFailover,
+        ],
+        [
+          'long-context GLM failover serves on the first router attempt',
+          testLongContextFailoverServesOnFirstAttempt,
+        ],
+        [
+          'long-prefill Cerebras keeps racing past its old 1.2s guard',
+          testLongPrefillCerebrasKeepsRacing,
         ],
         ['a fully stalled first router attempt regenerates', testFirstStalledAttemptRegenerates],
         ['healthy Cerebras router path is unchanged', testHealthyCerebrasPathUnchanged],
