@@ -45,6 +45,7 @@ import unicodedata
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1833,10 +1834,11 @@ _cached_headers: Optional[dict] = None
 _cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
 _subscription_webhook_stripe_customers: Dict[str, str] = {}
+_task_benchmark_user_id: ContextVar[Optional[str]] = ContextVar("task_benchmark_user_id", default=None)
 
 
 def _current_benchmark_user_id() -> str:
-    return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+    return _task_benchmark_user_id.get() or os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
 
 
 def _new_user_payment_journey_user_id() -> str:
@@ -12113,7 +12115,6 @@ async def run_single_task(
     if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
-    previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
     # Includes the non-admin payment identities: the admin funding path mints a company-funded card
     # with no personal Stripe hold, which the lifecycle tasks explicitly assert.
     # `_benchmark_user_id_for_task` is base-URL aware (it declines to redirect a sandbox payment
@@ -12131,8 +12132,9 @@ async def run_single_task(
         # and running as her without the fixture is the FK crash this fixture
         # exists to prevent.
         run_user_id_override = _live_fixture_run_user_id(task)
-    if run_user_id_override:
-        os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
+    # Parallel tasks share os.environ. Keep the benchmark identity in this
+    # async task so a sibling's teardown cannot switch approval polling users.
+    benchmark_user_token = _task_benchmark_user_id.set(run_user_id_override)
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
     if getattr(task, "disable_purchase_reuse", False):
@@ -13081,10 +13083,7 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
         else:
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
-        if previous_benchmark_user_id is None:
-            os.environ.pop("BENCHMARK_RUN_USER_ID", None)
-        else:
-            os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
+        _task_benchmark_user_id.reset(benchmark_user_token)
 
 
 def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
