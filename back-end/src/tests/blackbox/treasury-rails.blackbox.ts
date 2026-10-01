@@ -37,6 +37,8 @@ import {
 import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
+import { planFloatReplenish } from '../../providers/brex/replenish';
+import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
 
 loadDotenvWithCallerOverrides();
 
@@ -297,6 +299,7 @@ async function main(): Promise<void> {
   })) as { structuredContent?: { cardId?: string } };
   const cardId = minted.structuredContent?.cardId;
   assert.ok(cardId !== undefined, 'create_card returned no cardId');
+  const createdCardIds = new Set([cardId]);
   record(`minted ${usd(mintCents)} card ${cardId}`);
 
   let cardClosed = false;
@@ -335,8 +338,13 @@ async function main(): Promise<void> {
       `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
     );
   } finally {
-    // The sandbox org is shared. Cleanup may close only the card this test created.
-    if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
+    try {
+      if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
+    } finally {
+      // The sandbox cardholder is shared. Cleanup may close only cards this test created.
+      const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
+      if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
+    }
   }
 
   console.log('\ntreasury-rails blackbox: all checks passed');

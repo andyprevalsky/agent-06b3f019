@@ -2,6 +2,7 @@ import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
 import { getAdminAccessToken } from '../impersonation';
 import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
 import { hydrateAgentDetail } from './hydrateAgentDetail';
+import { benchmarkShareToken } from '../benchmarkShare';
 
 function assertAgentDetailIdentity(
   agentId: string,
@@ -91,6 +92,22 @@ export async function getBenchmarkAgentPreview(
     throw new Error('Failed to fetch benchmark agent preview');
   }
 
+  return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
+}
+
+/** Fetch an archived agent using only the run-scoped capability in the URL. */
+export async function getBenchmarkSharedAgent(
+  agentId: string,
+  signal?: AbortSignal,
+): Promise<AgentDetailResponse> {
+  const token = benchmarkShareToken();
+  if (!token) throw new Error('Missing benchmark share token');
+  const url = `${API_BASE_WITH_PATH}/benchmarks/shared-agent/${encodeURIComponent(agentId)}`;
+  const response = await fetch(url, {
+    signal,
+    headers: { Authorization: `BenchmarkShare ${token}` },
+  });
+  if (!response.ok) throw new Error('Failed to fetch shared benchmark agent');
   return assertAgentDetailIdentity(agentId, hydrateAgentDetail(await response.json()));
 }
 

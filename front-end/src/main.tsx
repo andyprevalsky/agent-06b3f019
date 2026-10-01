@@ -14,6 +14,7 @@ import { createRoot } from 'react-dom/client';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
+import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 import AppShell, {
   initDevLogging,
   initAmplitude,
@@ -24,6 +25,7 @@ import AppShell, {
 import './index.css';
 
 // Bootstrap side-effects (dev logging, analytics, viewport height)
+captureBenchmarkShareToken();
 initDevLogging();
 logStartupMode();
 initAmplitude();

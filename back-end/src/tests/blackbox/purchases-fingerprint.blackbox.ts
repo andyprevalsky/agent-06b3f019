@@ -73,6 +73,90 @@ async function testQuantityEchoNameParity(): Promise<void> {
     'backend quantity-echo canonicalization must match the agents-side Python fingerprint'
   );
 
+  const hyphenEcho = fixtureReceipt('Aurora Notebook - x1', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: hyphenEcho,
+      totalCents: 1200,
+    }) === bareFp,
+    'matching hyphenated quantity echo must reuse the bare-title card'
+  );
+
+  const merchantEcho = fixtureReceipt(
+    'Aurora Notebook x1 (Rose Labs Test Payment)',
+    '1,284 reviews'
+  );
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: merchantEcho,
+      totalCents: 1200,
+    }) === bareFp,
+    'matching quantity and merchant echo must reuse the bare-title card'
+  );
+  const wrongMerchantEcho = fixtureReceipt('Aurora Notebook x1 (Different Shop)', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: wrongMerchantEcho,
+      totalCents: 1200,
+    }) !== bareFp,
+    'a different merchant in the name suffix must remain distinct'
+  );
+
+  const placeholderHttp = fixtureReceipt(
+    'Aurora Notebook',
+    '1,284 reviews',
+    1200,
+    'http://placehold.co/320x220/png?text=Aurora+Notebook'
+  );
+  const placeholderHttps = fixtureReceipt(
+    'Aurora Notebook',
+    '1,284 reviews',
+    1200,
+    'https://placehold.co/320x220/png?text=Aurora+Notebook'
+  );
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: placeholderHttp,
+      totalCents: 1200,
+    }) ===
+      canonicalStoredPurchaseFingerprint({
+        userId: 'fixture-user',
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: placeholderHttps,
+        totalCents: 1200,
+      }),
+    'placeholder HTTP and HTTPS image URLs must identify the same item'
+  );
+
+  const pricedEcho = fixtureReceipt('Aurora Notebook - 1 x $12.00', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: pricedEcho,
+      totalCents: 1200,
+    }) === bareFp,
+    'matching order-summary quantity and price must reuse the bare-title card'
+  );
+  const wrongPrice = fixtureReceipt('Aurora Notebook - 1 x $13.00', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: wrongPrice,
+      totalCents: 1200,
+    }) !== bareFp,
+    'a suffix with a different price must stay a distinct purchase'
+  );
+
   const mismatchedQty = {
     ...echoed,
     lineItems: [{ ...(echoed.lineItems[0] as object), name: 'Aurora Notebook x2', quantity: 1 }],
@@ -86,6 +170,44 @@ async function testQuantityEchoNameParity(): Promise<void> {
     }) !== bareFp,
     'x{n} that does not match quantity must remain a distinct cart'
   );
+
+  const mismatchedHyphenQty = fixtureReceipt('Aurora Notebook - x2', '1,284 reviews');
+  assert(
+    canonicalStoredPurchaseFingerprint({
+      userId: 'fixture-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: mismatchedHyphenQty,
+      totalCents: 1200,
+    }) !== bareFp,
+    'a hyphenated quantity echo with a different quantity must remain distinct'
+  );
+}
+
+async function testCheckoutSummaryNameParity(): Promise<void> {
+  const fingerprint = (name: string) =>
+    canonicalStoredPurchaseFingerprint({
+      userId: 'checkout-summary-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: fixtureReceipt(name, '1,284 reviews'),
+      totalCents: 1200,
+    });
+  const bare = fingerprint('Aurora Notebook');
+  assert(bare !== null, 'the purchase receipt must be fingerprintable');
+  assert(
+    fingerprint('Aurora Notebook - x1 - $12.00 (Rose Labs Test Payment checkout)') === bare,
+    'the captured first-browser name must resolve to the same held card as the bare title'
+  );
+  assert(
+    fingerprint('Aurora Notebook - x1 - $12.00') === bare,
+    'a matching quantity and price echo is display-only'
+  );
+  for (const conflictingName of [
+    'Aurora Notebook - x2 - $12.00 (Rose Labs Test Payment checkout)',
+    'Aurora Notebook - x1 - $13.00 (Rose Labs Test Payment checkout)',
+    'Aurora Notebook - x1 - $12.00 (Different Merchant checkout)',
+  ]) {
+    assert(fingerprint(conflictingName) !== bare, `${conflictingName} must remain distinct`);
+  }
 }
 
 async function testUnicodeParity(): Promise<void> {
@@ -338,6 +460,7 @@ async function testChargingMintGuard(): Promise<void> {
 async function main(): Promise<void> {
   try {
     await testQuantityEchoNameParity();
+    await testCheckoutSummaryNameParity();
     await testUnicodeParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();

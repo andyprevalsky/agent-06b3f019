@@ -13,6 +13,7 @@ import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import React from 'react';
 import type { AgentContextValue, AgentProviderProps } from '@/features/agent-context/types';
+import { benchmarkShareToken, captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 
 // Mock subs BEFORE importing hook
 vi.mock('@/features/agent-context/hooks/useRealtimeSubscription', () => ({
@@ -170,6 +171,45 @@ describe('useAgentProvider', () => {
       expect(result.current.agent?.agent_id).toBe('bench-agent-001');
     });
     expect(result.current.messages[0]?.metadata?.gate).toMatchObject({ type: 'subscription' });
+    unmount();
+  });
+
+  it('loads a shared benchmark transcript without a session or agent API auth', async () => {
+    localStorage.clear();
+    window.history.replaceState({}, '', '/?agent-id=shared-agent#benchmark-share=run.token');
+    captureBenchmarkShareToken();
+    server.use(
+      http.get(`${API_BASE}/benchmarks/shared-agent/:agentId`, ({ request, params }) => {
+        expect(new URL(request.url).searchParams.has('share')).toBe(false);
+        expect(request.headers.get('authorization')).toBe('BenchmarkShare run.token');
+        expect(request.headers.has('x-api-key')).toBe(false);
+        return HttpResponse.json({
+          agent: makeAgent({ agent_id: params.agentId as string, goal: 'shared recording' }),
+          messages: [
+            {
+              message_id: 'recorded-message',
+              timestamp: 't',
+              text: 'Recorded transcript',
+              role: 'ASSISTANT',
+            },
+          ],
+          pagination: { has_more: false, oldest_timestamp: null },
+        });
+      }),
+    );
+
+    const { result, unmount } = renderHook(() =>
+      useAgentProvider(defaultDeps({ user: null, isAuthenticated: false, realtimeReady: false })),
+    );
+    await waitFor(() => expect(result.current.messages[0]?.text).toBe('Recorded transcript'));
+    expect(result.current.agent?.agent_id).toBe('shared-agent');
+    expect(capturedRequests.some((request) => request.url.includes('/agents/shared-agent'))).toBe(
+      false,
+    );
+    act(() => result.current.setSelectedAgentId('sibling-agent'));
+    await waitFor(() => expect(result.current.agent?.agent_id).toBe('sibling-agent'));
+    expect(benchmarkShareToken()).toBe('run.token');
+    expect(window.location.search).toBe('?agent-id=sibling-agent');
     unmount();
   });
 
