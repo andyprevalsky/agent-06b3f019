@@ -291,6 +291,12 @@ export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"
 export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
 export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+# The benchmark-share blackbox signs a temporary bearer link against the
+# instrumented backend. Give both processes one throwaway key when the shell
+# has no share secret exported.
+if [[ -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
+  export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
+fi
 # The instrumented backend starts independently of run-blackbox-tests.sh.
 # OAuth URL cases need the same synthetic local client, never the production one.
 export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
