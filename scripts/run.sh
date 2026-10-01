@@ -1757,8 +1757,11 @@ start_ngrok_ephemeral_tunnel() {
     # relies on exactly that. Gating the domain on the API key would silently
     # drop every fallback back onto the shared free endpoint, which is the
     # collision this is here to prevent.
+    # Isolated runs rename the workspace "<worktree>-bench-<run id>"; deriving
+    # from that reserved a new domain per run and filled the account roster.
     local fallback_label fallback_domain
-    fallback_label="$(dns_label_from_workspace)" || return 1
+    fallback_label="$(CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME%%-bench-*}" \
+        dns_label_from_workspace)" || return 1
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
     if [ -n "${NGROK_API_KEY:-}" ]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
