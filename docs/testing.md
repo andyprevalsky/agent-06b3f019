@@ -138,9 +138,13 @@ For each valid slice, log elapsed wall time from launch through verified cleanup
 and each bench's elapsed wall time from its exact machine admission through
 guest shutdown. Also report the task duration from the sealed run artifact so
 provisioning, evaluation, evidence transfer, and teardown remain visible.
-Review the slice's critical path before advancing and implement any safe
-infrastructure improvement exceeding 5% of end-to-end slice time. A code change
-starts a new ten-slice streak; do not shorten or change the task evaluation to
+The user's October 1 override waives routine speedup reviews when the whole slice
+stays within 20 minutes launch-to-durable wall time and every benchmark stays
+within 20 minutes allocation-to-durable wall time.
+Inspect any spike above that threshold before advancing. Correctness, hidden
+infrastructure errors, trajectories, durable evidence and teardown still require
+review. The independent 1800-second cancellation cutoff remains unchanged. A code
+change starts a new ten-slice streak; do not shorten or change task evaluation to
 make this proof pass.
 
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.

@@ -15,8 +15,11 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 path = Path("scripts/publish_evidence_links.py")
 spec = importlib.util.spec_from_file_location("publish_evidence_links", path)
@@ -105,6 +108,70 @@ assert list_snippets == {
     "user": ["Open the benchmark link"],
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
+
+# A root recording keeps nested browser reasoning in its browser panel. Those
+# messages must not crowd out the actual root transcript's visible phrases.
+scoped_messages = [
+    {"role": "USER", "text": "Review the completed browser recording"},
+    *[
+        {
+            "role": "ASSISTANT",
+            "text": f"Nested browser reasoning step {i}",
+            "metadata": {"subAgentId": "browser-task", "streamId": f"stream-{i}"},
+        }
+        for i in range(12)
+    ],
+    {
+        "role": "USER",
+        "text": "Nested browser task instructions",
+        "metadata": json.dumps({"subAgentId": "browser-task"}),
+    },
+    {
+        "role": "ASSISTANT",
+        "text": "Root transcript remains visible",
+        "metadata": json.dumps({"subAgentId": None}),
+    },
+    {
+        "role": "ASSISTANT",
+        "text": "Empty scope still belongs to a child",
+        "metadata": {"subAgentId": ""},
+    },
+    {
+        "role": "ASSISTANT",
+        "text": "Visible exploration progress",
+        "metadata": {"subAgentId": "explore-task", "agentType": "explore"},
+    },
+    {
+        "role": "ASSISTANT",
+        "text": "Hidden exploration progress",
+        "metadata": {
+            "subAgentId": "explore-task",
+            "agentType": "explore",
+            "hidden": True,
+        },
+    },
+    {
+        "role": "ASSISTANT",
+        "text": "Code lifecycle anchor stays on root",
+        "metadata": {
+            "subAgentId": "code-task",
+            "toolName": "spawn_claude_code_agent",
+            "action_type": "task_complete",
+        },
+    },
+]
+assert mod.visible_transcript_snippets(scoped_messages) == {
+    "user": ["Review the completed browser recording"],
+    "assistant": [
+        "Root transcript remains visible",
+        "Visible exploration progress",
+        "Code lifecycle anchor stays on root",
+    ],
+}
+assert mod.visible_transcript_snippets(scoped_messages[:13]) == {
+    "user": ["Review the completed browser recording"],
+    "assistant": [],
+}
 
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
@@ -296,6 +363,96 @@ failures = mod.validate_browser_agents_terminated_with_recording(
     ],
 )
 assert any("no correctly attached recording" in f for f in failures), failures
+
+# Exercise actual socket timeouts at the public verifier boundary. A fresh GET
+# can recover a stalled response, while persistent/auth/JSON failures stay closed.
+for fault in ("headers-once", "body-once", "always", "forbidden", "malformed"):
+    requests: list[str | None] = []
+    release = threading.Event()
+    body = json.dumps(
+        {
+            "messages": [
+                {"role": "USER", "text": "Inspect the durable root transcript"},
+            ]
+        }
+    ).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            is_api = self.path.startswith("/api/benchmarks/shared-agent/")
+            if is_api:
+                requests.append(self.headers.get("Authorization"))
+            stalled = is_api and (
+                fault == "always" or (len(requests) == 1 and fault.endswith("-once"))
+            )
+            try:
+                if stalled and fault != "body-once":
+                    release.wait(2)
+                response = b"{" if is_api and fault == "malformed" else body
+                self.send_response(403 if is_api and fault == "forbidden" else 200)
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                if stalled and fault == "body-once":
+                    self.wfile.write(response[:1])
+                    self.wfile.flush()
+                    release.wait(2)
+                    response = response[1:]
+                self.wfile.write(response)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = False
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+    thread.start()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    browser_calls: list[dict] = []
+
+    def verify_browser(
+        command: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess:
+        assert command[0] == "node" and command[1].endswith(
+            "verify_benchmark_share_link.cjs"
+        )
+        observed = json.loads(kwargs["input"])
+        assert observed["snippets"] == {
+            "user": ["Inspect the durable root transcript"],
+            "assistant": [],
+        }
+        browser_calls.append(observed)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    try:
+        with (
+            patch.object(mod, "DEFAULT_HUB", origin),
+            patch.object(mod, "DURABLE_ORIGIN", origin),
+            patch.object(mod.subprocess, "run", verify_browser),
+        ):
+            try:
+                observed = mod.verify_agent_reachable(
+                    agent, "fixture.signature", timeout=0.1
+                )
+            except SystemExit:
+                observed = None
+        recovered = fault.endswith("-once")
+        assert observed == (("verified in fresh browser", 1) if recovered else None), (
+            fault
+        )
+        expected_requests = 2 if recovered or fault == "always" else 1
+        assert requests == ["BenchmarkShare fixture.signature"] * expected_requests, (
+            fault,
+            requests,
+        )
+        assert len(browser_calls) == int(recovered), fault
+    finally:
+        release.set()
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+        assert not thread.is_alive()
 
 print("publish_evidence_links browser validation checks passed")
 PY

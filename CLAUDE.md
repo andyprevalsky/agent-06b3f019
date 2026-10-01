@@ -621,6 +621,15 @@ On Linux, install the host libraries with the declared backend Playwright CLI
 (`node back-end/node_modules/playwright/cli.js install-deps chromium`) as well as
 its Chromium binary. If a direct launch reports that the browser closed, inspect
 complete native stderr for missing libraries before changing launch timeouts.
+If fresh-browser transcript verification times out, compare expected snippets
+with the root MessageList scope: nested browser `subAgentId` messages belong in
+their browser panel, while root replies, exploration progress and code lifecycle
+anchors remain visible. Keep terminal/recording checks intact. The shared-agent
+GET retries one direct transport timeout with the same per-attempt limit; HTTP,
+JSON and evidence failures fail closed. Never apply that read-only retry policy
+to an ambiguous message POST timeout. The existing
+`scripts/tests/publish_evidence_links_browser_validation.test.sh` covers scope,
+native socket timeouts and rejection controls without a new test stage.
 
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 

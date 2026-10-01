@@ -411,9 +411,20 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
+        metadata = _message_metadata(message)
+        if role not in ("USER", "ASSISTANT") or metadata.get("hidden"):
+            continue
+        # Match MessageList's root scope: nested browser reasoning is rendered
+        # inside its browser panel, not in the root transcript being checked.
+        # Explore progress and Claude Code lifecycle anchors remain root-visible.
         if (
-            role not in ("USER", "ASSISTANT")
-            or _message_metadata(message).get("hidden")
+            metadata.get("subAgentId") is not None
+            and metadata.get("agentType") != "explore"
+            and not (
+                metadata.get("toolName") == "spawn_claude_code_agent"
+                and metadata.get("action_type")
+                in {"claude_code_started", "task_complete", "session_cancelled"}
+            )
         ):
             continue
         for line in content.splitlines():
@@ -453,8 +464,17 @@ def verify_agent_reachable(
         url, headers={"Authorization": f"BenchmarkShare {token}"}, method="GET"
     )
     try:
-        with _opener().open(request, timeout=timeout) as response:
-            payload = json.loads(response.read() or b"{}")
+        for attempt in range(2):
+            try:
+                with _opener().open(request, timeout=timeout) as response:
+                    payload = json.loads(response.read() or b"{}")
+                break
+            except TimeoutError:
+                # This read-only request can safely start a fresh connection.
+                # Preserve the per-attempt timeout and the caller's outer bound;
+                # HTTP/auth, malformed JSON, and evidence failures never retry.
+                if attempt:
+                    raise
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"agent API HTTP {exc.code}: {body[:300]}") from exc
