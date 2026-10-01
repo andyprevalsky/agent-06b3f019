@@ -38,7 +38,7 @@ const SHARED_PERSONALITY_PARAGRAPHS = [
     'with the confidence that an external entity will ensure any attempted actions are safe, ' +
     'asking for permission in this case is much worse than asking for forgiveness. ' +
     'In browser sessions the approval prompt fires when the browser agent clicks the final ' +
-    'commit control itself (Place order, Pay, Send, Post), so when a task needs the ' +
+    'commit control itself (Place order, Pay, Send, Post, etc.), so when a task needs the ' +
     "user's approval first, tell the browser agent to carry the flow through that click " +
     'and never tell it not to click.',
 ];
