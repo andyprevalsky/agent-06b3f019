@@ -20,7 +20,7 @@ world-model-harness @ git+https://github.com/experientiallabs/world-model-harnes
 tomli-w>=1.0.0
 gepa>=0.1.1
 stagehand==0.5.5
-browser-use>=0.11.0
+browser-use>=0.11.3
 playwright>=1.51.0  # Humanized CDP input + IndexedDB storage_state for provider rotation
 
 # Utilities
