@@ -433,6 +433,154 @@ async def test_browser_use_pending_request_probe_disabled():
         DOMWatchdog._get_pending_network_requests = original
 
 
+async def test_dom_build_skips_serial_page_evaluates():
+    from types import SimpleNamespace
+
+    from browser_use.dom.service import DomService
+
+    from browser_tools.dom_service import drop_browser_use_serial_dom_probes
+
+    sent = []
+
+    class _Domain:
+        def __init__(self, name):
+            self.name = name
+
+        def __getattr__(self, method):
+            async def call(params=None, session_id=None):
+                sent.append(f"{self.name}.{method}")
+                if method == "captureSnapshot":
+                    return {"documents": [{"nodes": []}] * 3, "strings": []}
+                return {"root": {"nodeId": 1}}
+
+            return call
+
+    cdp_session = SimpleNamespace(
+        session_id="s-1",
+        cdp_client=SimpleNamespace(
+            send=SimpleNamespace(
+                Runtime=_Domain("Runtime"), DOMSnapshot=_Domain("DOMSnapshot"), DOM=_Domain("DOM")
+            )
+        ),
+    )
+
+    async def get_or_create_cdp_session(target_id, focus):
+        return cdp_session
+
+    async def ax_tree(target_id):
+        raise RuntimeError("AX stalled")
+
+    async def viewport_ratio(target_id):
+        return 2.0
+
+    service = SimpleNamespace(
+        browser_session=SimpleNamespace(get_or_create_cdp_session=get_or_create_cdp_session),
+        _get_ax_tree_for_all_frames=ax_tree,
+        _get_viewport_ratio=viewport_ratio,
+        max_iframes=2,
+    )
+    original = DomService._get_all_trees
+    try:
+        drop_browser_use_serial_dom_probes()
+        trees = await DomService._get_all_trees(service, "target-1")
+    finally:
+        DomService._get_all_trees = original
+    assert not [call for call in sent if call.startswith("Runtime.")], sent
+    assert sorted(sent) == ["DOM.getDocument", "DOMSnapshot.captureSnapshot"]
+    assert trees.ax_tree == {"nodes": []}, "a failed AX tree must not fail the DOM build"
+    assert trees.device_pixel_ratio == 2.0
+    assert len(trees.snapshot["documents"]) == 2
+    assert trees.js_click_listener_backend_ids is None
+
+
+class _PrefetchDom:
+    def __init__(self, url="https://shop.example/s?k=tv", error=None, delay=0.0):
+        self.url = url
+        self.error = error
+        self.delay = delay
+        self.builds = 0
+
+    async def get_browser_state(self, include_screenshot=False):
+        self.builds += 1
+        await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        return {"url": self.url, "title": "Shop", "dom_tree": "[5]<button>Add</button>"}
+
+
+async def test_speculative_state_only_after_page_changing_actions():
+    from domains.spawn_browser_agent_v3.state_prefetch import BrowserStatePrefetch
+
+    dom = _PrefetchDom()
+    prefetch = BrowserStatePrefetch(settle_s=0)
+    for action, success in (("evaluate", True), ("read_browser_state", True), ("click", False), (None, True)):
+        prefetch.arm(action, success=success)
+        prefetch.start(dom)
+        assert not prefetch.in_flight, action
+    prefetch.start(dom)
+    assert not prefetch.in_flight, "start without a preceding page-changing action must not build"
+    await asyncio.sleep(0)
+    assert dom.builds == 0
+
+    prefetch.arm("click", success=True)
+    prefetch.start(dom)
+    assert prefetch.in_flight
+    state = await prefetch.take(dom, "https://shop.example/s?k=tv")
+    assert state["dom_tree"] == "[5]<button>Add</button>"
+    assert dom.builds == 1
+    assert await prefetch.take(dom, "https://shop.example/s?k=tv") is None, "a build is used at most once"
+
+
+async def test_speculative_state_rejected_when_page_or_session_changed():
+    from domains.spawn_browser_agent_v3.state_prefetch import BrowserStatePrefetch
+
+    async def built(dom, live_url, *, take_dom=None):
+        prefetch = BrowserStatePrefetch(settle_s=0)
+        prefetch.arm("goto", success=True)
+        prefetch.start(dom)
+        return await prefetch.take(take_dom or dom, live_url)
+
+    dom = _PrefetchDom()
+    assert await built(dom, "https://shop.example/cart") is None
+    assert await built(dom, None) is None
+    assert await built(dom, "https://shop.example/s?k=tv", take_dom=_PrefetchDom()) is None
+    assert await built(_PrefetchDom(error=RuntimeError("renderer frozen")), "https://shop.example/s?k=tv") is None
+
+    slow = _PrefetchDom(delay=10)
+    prefetch = BrowserStatePrefetch(settle_s=0)
+    prefetch.arm("click", success=True)
+    prefetch.start(slow)
+    await asyncio.sleep(0)
+    task = prefetch._task
+    prefetch.discard()
+    await asyncio.sleep(0)
+    assert task.cancelled() and not prefetch.in_flight
+
+
+def test_speculative_state_wired_after_step_start_mutations():
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    loop = source[source.index("while iteration < MAX_ITERATIONS:") :]
+    started = loop.index("state_prefetch.start(dom_service)")
+    for step_start_mutation in (
+        'step_timer.mark("realm_and_payment_prep")',
+        'step_timer.mark("observe_state")',
+        'step_timer.mark("passkey_usage")',
+    ):
+        assert loop.index(step_start_mutation) < started, step_start_mutation
+    assert started < loop.index('step_timer.mark("thinking_stream_start")')
+    pre_action = loop[loop.index("prefetched_browser_state = observe_page_state") :]
+    pre_action = pre_action[: pre_action.index('step_timer.mark("pre_action_bookkeeping")')]
+    assert 'action_name == "read_browser_state"' in pre_action
+    assert "state_prefetch.discard()" in pre_action
+    assert loop.index('step_timer.mark("execute_action")') < loop.index("state_prefetch.arm(")
+    teardown = source[source.rindex("finally:") :]
+    assert "state_prefetch.discard()" in teardown
+
+
 async def run_all_tests():
     print("browser-step-timing blackbox tests:")
     r = BlackboxResult()
@@ -453,6 +601,14 @@ async def run_all_tests():
     r.record("browser_loop_never_awaits_otp_poll", test_browser_loop_never_awaits_otp_poll)
     await r.record_async("otp_sources_fetched_concurrently", test_otp_sources_fetched_concurrently)
     await r.record_async("pending_request_probe_disabled", test_browser_use_pending_request_probe_disabled)
+    await r.record_async("dom_build_skips_serial_evaluates", test_dom_build_skips_serial_page_evaluates)
+    await r.record_async(
+        "speculative_state_after_page_changes", test_speculative_state_only_after_page_changing_actions
+    )
+    await r.record_async(
+        "speculative_state_rejected_on_change", test_speculative_state_rejected_when_page_or_session_changed
+    )
+    r.record("speculative_state_wiring", test_speculative_state_wired_after_step_start_mutations)
     r.record("step_observe_dom_only_for_consumers", test_step_observe_builds_dom_only_for_dom_consumers)
     await r.record_async(
         "light_observe_read_browser_state_builds_dom",

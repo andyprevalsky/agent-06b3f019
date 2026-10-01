@@ -182,6 +182,7 @@ from .service_crypto import (
     has_payment_card_secret_refs,
     is_usable_email_otp,
 )
+from .state_prefetch import BrowserStatePrefetch
 from .step_timing import StepPhaseTimer
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
@@ -1828,6 +1829,29 @@ def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) ->
     if fast_mode_replay:
         return True
     return browser_recorder is not None and not getattr(browser_recorder, "uses_kernel_replay", False)
+
+
+async def _take_speculative_browser_state(
+    state_prefetch: BrowserStatePrefetch,
+    dom_service: Any,
+) -> Optional[Dict[str, Any]]:
+    """Speculative DOM build for read_browser_state, if still on the same page."""
+    if not state_prefetch.in_flight or dom_service is None:
+        state_prefetch.discard()
+        return None
+    try:
+        live_url = (await dom_service.get_page_identity()).get("url")
+    except Exception:
+        state_prefetch.discard()
+        return None
+    try:
+        return await asyncio.wait_for(
+            state_prefetch.take(dom_service, live_url),
+            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Speculative browser state build timed out; building fresh")
+        return None
 
 
 async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, Any]:
@@ -6104,6 +6128,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
     otp_poll_task: Optional["asyncio.Task[int]"] = None
+    state_prefetch = BrowserStatePrefetch()
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -7212,6 +7237,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             activity.heartbeat(f"Step {iteration}")
             if await _wait_for_browser_user_control(config, task_id):
                 tab_focus_cache.foreground = None
+                state_prefetch.discard()
             step_timer.mark("user_control_wait")
 
             # TAB/INPUT/LIVE-VIEW STATE MACHINE:
@@ -7233,6 +7259,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             # Handle pending write lock action
             if pending_write_lock_action:
+                state_prefetch.discard()
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
@@ -7664,6 +7691,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             action_entries=action_entries,
                         )
                 step_timer.mark("record_observation")
+                if not observe_needs_dom:
+                    state_prefetch.start(dom_service)
 
                 # Fast Mode: replay the recorded decision when the browser request
                 # fingerprint matches. The live browser session still executes the
@@ -7857,6 +7886,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
                 tab_focus_cache.foreground = None
+                state_prefetch.discard()
                 await browser_stream.finish_tools(status="ERROR")
                 continue
 
@@ -9234,6 +9264,13 @@ Based on this feedback, I need to continue working on the task and address the i
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 
+            prefetched_browser_state = observe_page_state
+            if action_name == "read_browser_state" and "dom_tree" not in observe_page_state:
+                speculative_state = await _take_speculative_browser_state(state_prefetch, dom_service)
+                step_timer.annotate(state_prefetch="hit" if speculative_state else "miss")
+                prefetched_browser_state = speculative_state or observe_page_state
+            else:
+                state_prefetch.discard()
             step_timer.mark("pre_action_bookkeeping")
             step_timer.annotate(action=action_name)
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
@@ -9259,7 +9296,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
-                        prefetched_browser_state=observe_page_state,
+                        prefetched_browser_state=prefetched_browser_state,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -9392,6 +9429,10 @@ Based on this feedback, I need to continue working on the task and address the i
                     "supervisor_recovered": True,
                 }
             step_timer.mark("execute_action")
+            state_prefetch.arm(
+                action_name,
+                success=isinstance(result, dict) and bool(result.get("success", True)),
+            )
             if isinstance(result, dict) and result.get("current_url"):
                 current_url = str(result.get("current_url") or "")
                 if current_url and (not visited_urls or current_url != visited_urls[-1]):
@@ -10119,6 +10160,7 @@ Based on this feedback, I need to continue working on the task and address the i
         stop_browser_activity_heartbeat(_heartbeat_token)
         if otp_poll_task is not None and not otp_poll_task.done():
             otp_poll_task.cancel()
+        state_prefetch.discard()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:

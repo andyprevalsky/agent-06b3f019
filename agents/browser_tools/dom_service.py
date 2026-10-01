@@ -68,6 +68,104 @@ def disable_browser_use_pending_request_probe() -> None:
     DOMWatchdog._get_pending_network_requests = _no_pending_network_requests
 
 
+async def _get_all_trees_without_serial_probes(self: Any, target_id: Any) -> Any:
+    """browser-use ``DomService._get_all_trees`` minus its serial page evaluates.
+
+    Upstream runs three Runtime.evaluate calls one after another before the
+    parallel snapshot / DOM / AX requests: a ``document.readyState`` read whose
+    result is discarded, an iframe scroll-position read that is only logged,
+    and a ``getEventListeners`` walk over every element. Each waits on the
+    renderer main thread (listener walk: up to ~2.8s p90 on retail pages).
+    Clickability still comes from tags, ARIA/AX properties, cursor style, and
+    attributes; the agent can also act by coordinates.
+    """
+    from browser_use.dom.enhanced_snapshot import REQUIRED_COMPUTED_STYLES
+    from browser_use.dom.views import TargetAllTrees
+    from browser_use.utils import create_task_with_error_handling
+
+    cdp_session = await self.browser_session.get_or_create_cdp_session(target_id=target_id, focus=False)
+
+    def snapshot_request() -> Any:
+        return cdp_session.cdp_client.send.DOMSnapshot.captureSnapshot(
+            params={
+                "computedStyles": REQUIRED_COMPUTED_STYLES,
+                "includePaintOrder": True,
+                "includeDOMRects": True,
+                "includeBlendedBackgroundColors": False,
+                "includeTextColorOpacities": False,
+            },
+            session_id=cdp_session.session_id,
+        )
+
+    def dom_tree_request() -> Any:
+        return cdp_session.cdp_client.send.DOM.getDocument(
+            params={"depth": -1, "pierce": True}, session_id=cdp_session.session_id
+        )
+
+    factories = {
+        "snapshot": snapshot_request,
+        "dom_tree": dom_tree_request,
+        "ax_tree": lambda: self._get_ax_tree_for_all_frames(target_id),
+        "device_pixel_ratio": lambda: self._get_viewport_ratio(target_id),
+    }
+    started = time.time()
+    tasks = {key: create_task_with_error_handling(factory(), name=f"get_{key}") for key, factory in factories.items()}
+    _, pending = await asyncio.wait(tasks.values(), timeout=10.0)
+    if pending:
+        for key, task in list(tasks.items()):
+            if task in pending:
+                task.cancel()
+                tasks[key] = create_task_with_error_handling(factories[key](), name=f"get_{key}_retry")
+        _, pending_retry = await asyncio.wait([t for t in tasks.values() if not t.done()], timeout=2.0)
+        for task in pending_retry:
+            task.cancel()
+
+    # The AX tree only enriches names/roles; a page structure without it is
+    # still usable, so only the snapshot / DOM / viewport are required.
+    results: Dict[str, Any] = {}
+    failed: List[str] = []
+    for key, task in tasks.items():
+        if task.done() and not task.cancelled():
+            try:
+                results[key] = task.result()
+                continue
+            except Exception as exc:
+                logger.warning("CDP request %s failed: %s", key, exc)
+        else:
+            logger.warning("CDP request %s timed out", key)
+        if key == "ax_tree":
+            results[key] = {"nodes": []}
+        else:
+            failed.append(key)
+    if failed:
+        raise TimeoutError(f"CDP requests failed or timed out: {', '.join(failed)}")
+
+    snapshot = results["snapshot"]
+    if snapshot and "documents" in snapshot and len(snapshot["documents"]) > self.max_iframes:
+        logger.warning("Limiting DOM snapshot to the first %s of %s frames", self.max_iframes, len(snapshot["documents"]))
+        snapshot["documents"] = snapshot["documents"][: self.max_iframes]
+
+    return TargetAllTrees(
+        snapshot=snapshot,
+        dom_tree=results["dom_tree"],
+        ax_tree=results["ax_tree"],
+        device_pixel_ratio=results["device_pixel_ratio"],
+        cdp_timing={
+            "iframe_scroll_detection_ms": 0.0,
+            "js_listener_detection_ms": 0.0,
+            "cdp_parallel_calls_ms": (time.time() - started) * 1000,
+            "snapshot_processing_ms": 0.0,
+        },
+        js_click_listener_backend_ids=None,
+    )
+
+
+def drop_browser_use_serial_dom_probes() -> None:
+    from browser_use.dom.service import DomService
+
+    DomService._get_all_trees = _get_all_trees_without_serial_probes
+
+
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
@@ -598,6 +696,7 @@ class DOMService:
             from browser_use.browser.session import BrowserSession
 
             disable_browser_use_pending_request_probe()
+            drop_browser_use_serial_dom_probes()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
