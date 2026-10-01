@@ -40,6 +40,10 @@ The deployment name substitutes for the GPT model ID in the request body.
 The exact outbound JSON body is compared against the GPT compute builder in
 both code paths. The live contract tests also confirm Azure accepts xhigh
 reasoning, forced tool calls, strict JSON schema, streaming, and Priority.
+A direct nonstreaming call on 2026-10-01 returned HTTP 200 with
+`model=gpt-6-sol`, `service_tier=priority`, and completed usage, confirming
+that Priority actually served that sampled request. Azure can still downgrade
+individual Priority requests when capacity or ramp limits apply.
 `temperature` and `max_tokens` are omitted by the GPT compute builder for
 this model, so Foundry omits them too; an accepted `store=false` or cache key
 does not itself prove server-side retention or cache hit behavior.
@@ -80,7 +84,7 @@ does not itself prove server-side retention or cache hit behavior.
    agents/tests/e2e/test_foundry_live.py` and, from `back-end/`,
    `RUN_FOUNDRY_LIVE=1 npx tsx src/tests/unit/rose-foundry-live.test.ts`.
    These verify text, forced function calling, strict JSON, and a full Rose
-   Ultra route through the actual deployment. Both passed again on 2026-09-29 with
+   Ultra route through the actual deployment. Both passed again on 2026-10-01 with
    `actual_model=gpt-6-sol-foundry`. They read local `.env` files without
    printing credentials.
 
@@ -144,11 +148,11 @@ and [quota management guide](https://learn.microsoft.com/en-us/azure/foundry/ope
 
 The mocked Responses and 429/stream tests and both live contract tests pass.
 Local `agents/.env` and `back-end/.env` contain the endpoint, key, and deployment
-name. Render's stored values were read back and matched, its env-only deploy
-completed, and `/health` returned 200. Fly lists all three secrets as Deployed,
-and every started worker checked had the matching runtime values. Production
-serves this route only after a commit containing the fallback deploys to both
-Render and Fly.
+name. Render's stored values were read back and matched, its deploy completed,
+and `/health` returned 200. Fly lists all three secrets as Deployed, and every
+started worker checked had the matching runtime values. The fallback was merged
+and deployed to both Render and Fly on 2026-10-01. The production semantic gate
+passed after rollout. These checks do not measure sustained throughput.
 The repo also requires these backend secrets mirrored to its
 Codex-cloud `rose` environment through that environment's settings UI; this
 workspace has no setter for it, so that mirror remains to be verified.
