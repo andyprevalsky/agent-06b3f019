@@ -379,7 +379,11 @@ cleanup() {
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup EXIT INT TERM
+# Bash resumes the script after a signal trap returns, so INT/TERM must exit
+# (and let the EXIT trap clean up) rather than release the lock and keep going.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Sets PORT and PORT_LOCK_DIR in the caller's shell; running it in a command
 # substitution would drop PORT_LOCK_DIR and leave the lock behind forever.

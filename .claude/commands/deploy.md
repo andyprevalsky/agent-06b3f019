@@ -529,6 +529,11 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
 This one command runs all 91 deterministic back-end blackbox domains plus unit
 tests under V8 coverage. It must both pass every test and meet
 `back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
+which drives the isolated-backend runner through a normal exit and a SIGTERM and
+fails if either leaves its backend or port lock behind. It runs here, after the
+coverage server stops, rather than in Step 4s because it boots a real backend
+and regenerates the Prisma client.
 
 ## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
