@@ -661,7 +661,7 @@ stall, with the real OpenRouter GLM failover as the only path that can serve.
 It must run on the OpenRouter account `back-end/.env` configures, escalate on
 router attempt 1, and start the workflow with a goal anchored on the corrected
 address and not on the rejected one. A miss OpenRouter caused (the connection
-opened but no response headers came, or no first content within the 4.2s
+opened but no response headers came, or no first content within the 14.2s
 pre-content budget) is re-probed once 60s later. A second miss, or any other
 failure, blocks the deploy. A block means the failover could not serve that
 turn at that moment: diagnose it from the printed host, connect, and response
