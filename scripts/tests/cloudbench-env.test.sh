@@ -1958,7 +1958,9 @@ compiled = compile(program, f"{sys.argv[1]}:cloudbench_tcp_listener_present", "e
 for result, expected in [
     (0, 0),
     (errno.ECONNREFUSED, 1),
-    (errno.EAGAIN, 3),
+    # A full accept backlog remains occupied; these names alias on Linux.
+    (errno.EAGAIN, 0),
+    (errno.EWOULDBLOCK, 0),
     (errno.ETIMEDOUT, 3),
     (errno.EHOSTUNREACH, 3),
     (errno.ENETUNREACH, 3),
@@ -1998,6 +2000,19 @@ PY
     fail "TCP probe error must prevent hub port selection"
   fi
   [ -z "$selected" ] || fail "TCP probe error must not return a port"
+)
+
+# An occupied foreign hub, including the backlog errno result above, must never
+# be selected as free or reused without the expected runs-root identity.
+(
+  cloudbench_tcp_listener_present() {
+    [ "$1" -ne 19731 ] || return 0
+    return 1
+  }
+  cloudbench_central_hub_matches() { return 1; }
+  selected="$(cloudbench_select_central_hub_port 19731 /tmp/foreign-hub-root)"
+  [ "$selected" = "19732" ] ||
+    fail "an occupied foreign hub must be skipped before selecting a free port"
 )
 
 # Hub port selection must fail closed when the TCP probe errors (not "free").

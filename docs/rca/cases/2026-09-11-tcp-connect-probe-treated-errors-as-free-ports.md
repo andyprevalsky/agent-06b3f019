@@ -11,6 +11,7 @@ symptoms:
   - connect_ex returns EAGAIN while an owned listener remains open
   - TCP probe returns 1 for a timed out connection instead of error 3
   - occupied port probe must exit 0
+  - "AssertionError: (11, 3, 0) after integration with upstream backlog classification"
 tags:
   - cloudbench
   - tcp
@@ -20,7 +21,7 @@ sources:
   - PR #1299
   - commit 8fec27c4d80e54f44d25e930ebdbd3dff1999fd7
 repro: scripts/tests/cloudbench-env.test.sh; scripts/tests/cloudbench-multi-workstream.test.sh
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -114,11 +115,52 @@ adversarial review approved the two-file repair and causal evidence in
 live fleet acceptance; these local results do not claim that the fleet gate
 has completed.
 
+### October 1 integration: stale backlog errno expectation
+
+The final Linux Step 4cb command sequence on `28232da29` stopped in its first
+command, `cloudbench-env.test.sh`, after 27.573 seconds with
+`AssertionError: (11, 3, 0)`. All later commands remained unstarted. The exact
+source, owner identities, failed aggregate and raw command output were retained
+under `.context/acceptance/proof85-native-scenario3-rca/native282-stage1-failure/`.
+
+This follow-up is a test-contract mismatch, rather than recurrence of the
+original free-port bug. Upstream `c6ad9772b` deliberately classifies
+EAGAIN/EWOULDBLOCK as occupied (`0`) because a full accept backlog still owns
+the port. Integration retained that production behavior and the branch's older
+expectation of probe error (`3`). Both policies reserve free (`1`) exclusively
+for ECONNREFUSED. Other timeout, network, permission and socket failures still
+report `3`; bad arguments still report `2`.
+
+Archive searches were `AssertionError 11 3 0 TCP errno` and
+`EAGAIN EWOULDBLOCK occupied accept backlog`. They found this case and the
+related saturated-listener fixture case. The actual unchanged embedded test
+block reproduced the stale expectation on Mac in 0.081 seconds with
+`AssertionError: (35, 3, 0)`. Only the fixture now expects occupied for both errno
+names; they alias to `11` on Linux. An adjacent control executes the actual hub
+selector and requires a foreign occupied preferred port to be skipped before
+choosing the next free port. The existing probe-error rejection, all exception
+and argument checks, and every timeout remain intact.
+
+The final permanent block passed against unchanged production on Mac in 0.076
+seconds and Linux in 0.114 seconds. The same final block failed against the
+actual historical runtime preceding `8fec27c4d` with
+`AssertionError: (35, 0, 1)`, retaining protection against declaring a backlog
+errno free. Production file hashes are identical before and after this fixture
+repair; it adds no runtime work, model call or provider allocation. Exact
+receipts and the focused runner are in
+`.context/acceptance/proof85-tcp-errno-fixture-rca/`. The existing owning command
+remains registered in `/deploy` Step 4cb and `scripts/test.sh`. The final full
+native sequence is still pending, so this case is open for that outcome.
+
 ## Human feedback
 
 The user required completion without weakening validation. The parent required
 proof before changing production behavior, explicit refusal as the only free
 result, and unchanged timeout bounds.
+
+For the October 1 integration, the parent required preserving the upstream
+occupied-backlog policy, retaining all failure and identity assertions, and a
+small focused fixture repair without another broad coverage rerun.
 
 ## Reusable lesson
 
