@@ -68,7 +68,13 @@ async def mock_create_approval_request_activity(
 
 
 @activity.defn(name="notify_sms_event_activity")
-async def mock_notify_sms_event_activity(*_args: Any, **_kwargs: Any) -> None:
+async def mock_notify_sms_event_activity(
+    user_id: str,
+    event_type: str,
+    agent_id: str,
+    payload: dict[str, Any],
+    world_model_mode: str | None = None,
+) -> None:
     return None
 
 

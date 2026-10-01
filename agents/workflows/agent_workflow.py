@@ -60,6 +60,8 @@ with workflow.unsafe.imports_passed_through():
     from helpers.generation_handoff import (
         DEPLOY_INTERRUPTED_TOOL_MESSAGE,
         GenerationHandoffRequested,
+        pending_tool_record,
+        pending_tool_resumes_fit,
         should_handoff_to_generation,
     )
     from helpers.handle_tool_event import handle_tool_event
@@ -839,6 +841,14 @@ class AgentWorkflow:
         self.iteration_offset: int = 0
         self._deployment_initialized: bool = False
         self._deployment_validation: bool = False
+        # Cooperative cutover can carry an in-flight tool call (a browser task
+        # paused at a step boundary or waiting on approval/auth) across
+        # continue_as_new instead of interrupting it. Only run_agent turns
+        # park; the DAG treats any tool return as that task's completion.
+        self._tool_parking_enabled: bool = False
+        self._active_tool_calls: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        self._pending_tool_resumes: List[Dict[str, Any]] = []
+        self._tool_resume_hints: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _serialized_datetime(value: Optional[datetime]) -> Optional[str]:
@@ -1036,6 +1046,17 @@ class AgentWorkflow:
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        pending_tool_resumes = runtime.get("pending_tool_resumes")
+        if isinstance(pending_tool_resumes, list):
+            self._pending_tool_resumes = [
+                record
+                for record in pending_tool_resumes
+                if isinstance(record, dict)
+                and isinstance(record.get("tool_name"), str)
+                and isinstance(record.get("tool_call_id"), str)
+                and isinstance(record.get("tool_args"), dict)
+                and isinstance(record.get("resume"), dict)
+            ]
 
     def _maybe_arm_cost_limit_wrapup_after_browser(
         self,
@@ -1189,6 +1210,7 @@ class AgentWorkflow:
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
                 "cost_limit_wrapup_consumed": self._cost_limit_wrapup_consumed,
+                "pending_tool_resumes": list(self._pending_tool_resumes),
             },
         }
 
@@ -2029,7 +2051,7 @@ class AgentWorkflow:
             self._disabled_tools = execute_tools
             workflow.logger.info(f"▶ PLAN phase: {len(plan_tools)} tools")
 
-            plan_result = await run_agent(
+            plan_result = await self._run_agent_turns(
                 agent_id=agent_id,
                 user_id=user_id,
                 system_prompt=self.build_system_prompt,
@@ -2216,7 +2238,7 @@ class AgentWorkflow:
         # Refresh compute token before execute phase (may have expired during PLAN)
         await self._refresh_compute_token(user_id)
 
-        execute_result = await run_agent(
+        execute_result = await self._run_agent_turns(
             agent_id=agent_id,
             user_id=user_id,
             system_prompt=self.build_system_prompt,
@@ -2230,7 +2252,7 @@ class AgentWorkflow:
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
-                check_generation_handoff=self._check_generation_handoff,
+            check_generation_handoff=self._check_generation_handoff,
             post_message=self._post_message,
             poll_messages=self._poll_messages,
             execute_tool=self._execute_tool,
@@ -2712,11 +2734,86 @@ class AgentWorkflow:
         live_queue = (pointer or {}).get("task_queue")
         current_queue = workflow.info().task_queue
         if should_handoff_to_generation(current_queue, live_queue):
-            workflow.logger.info(
-                f"Generation handoff required: current={current_queue} live={live_queue}"
-            )
+            workflow.logger.info(f"Generation handoff required: current={current_queue} live={live_queue}")
             return live_queue
         return None
+
+    def _park_pending_tool(self, tool_call_id: str, resume: Dict[str, Any]) -> bool:
+        """Carry one in-flight tool call across the coming generation handoff.
+
+        Called by a tool at the moment it observes the handoff (see
+        ``helpers.generation_handoff.park_pending_tool``). Returns False when
+        the tool must instead close its chip with DEPLOY_INTERRUPTED.
+        """
+        if not self._tool_parking_enabled:
+            return False
+        active = self._active_tool_calls.get(tool_call_id)
+        if active is None:
+            return False
+        tool_name, tool_args = active
+        records = [record for record in self._pending_tool_resumes if record.get("tool_call_id") != tool_call_id]
+        records.append(pending_tool_record(tool_name, tool_args, tool_call_id, resume))
+        if not pending_tool_resumes_fit(records):
+            workflow.logger.warning(f"Parked tool records exceed the handoff budget; interrupting {tool_name}")
+            return False
+        self._pending_tool_resumes = records
+        workflow.logger.info(f"Parked {tool_name} ({tool_call_id}) for generation handoff")
+        return True
+
+    def _take_tool_resume(self, tool_call_id: str) -> Optional[Dict[str, Any]]:
+        """Return (once) the resume payload a previous generation parked for this call."""
+        return self._tool_resume_hints.pop(tool_call_id, None)
+
+    async def _resume_pending_tools(self) -> Optional[str]:
+        """Re-enter tool calls the previous generation parked, before the next LLM turn.
+
+        Each call re-runs through ``_execute_tool`` with its original arguments
+        and tool_call_id, so it posts its own result row exactly as if it had
+        never been interrupted. Returns the live queue when a resumed tool had
+        to hand off again.
+
+        Re-entry repeats the APPROVAL_REQUIRED_TOOLS gate, so a tool in that
+        map must never park; it would ask the user to approve the same call twice.
+        """
+        records, self._pending_tool_resumes = self._pending_tool_resumes, []
+        if not records:
+            return None
+        workflow.logger.info(f"Resuming {len(records)} tool call(s) parked by the previous generation")
+        self._tool_resume_hints = {record["tool_call_id"]: record["resume"] for record in records}
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._execute_tool(record["tool_name"], dict(record["tool_args"]), record["tool_call_id"])
+                    for record in records
+                )
+            )
+        finally:
+            self._tool_resume_hints = {}
+        for result in results:
+            if isinstance(result, dict) and result.get("generation_handoff"):
+                handoff_queue = result.get("handoff_task_queue")
+                if isinstance(handoff_queue, str) and handoff_queue.strip():
+                    return handoff_queue.strip()
+        return None
+
+    async def _run_agent_turns(self, **run_agent_kwargs: Any) -> Dict:
+        """Run the LLM loop for one phase with tool parking enabled.
+
+        Parked tool calls from the previous generation finish first so their
+        results are in the conversation before the next LLM call.
+        """
+        self._tool_parking_enabled = True
+        try:
+            handoff_queue = await self._resume_pending_tools()
+            if handoff_queue:
+                return {
+                    "status": "generation_handoff",
+                    "handoff_task_queue": handoff_queue,
+                    "context": list(self.context),
+                }
+            return await run_agent(**run_agent_kwargs)
+        finally:
+            self._tool_parking_enabled = False
 
     async def _wait_for_unpause_or_handoff(self) -> Optional[str]:
         """Block until unpaused, re-checking generation handoff every 30s.
@@ -3294,6 +3391,7 @@ class AgentWorkflow:
             executor = TOOL_EXECUTORS[tool_name]
             paused_before_tool = self.is_paused
             cost_limit_before_tool = self._cost_limit_reached
+            self._active_tool_calls[tool_call_id] = (tool_name, dict(tool_args))
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
             # These return results and call handle_tool_event internally
@@ -3433,6 +3531,17 @@ class AgentWorkflow:
 
         except GenerationHandoffRequested as exc:
             # In-tool wait yielded so the top-of-loop checkpoint can continue_as_new.
+            if exc.parked:
+                # The tool parked itself with _park_pending_tool; its chip stays
+                # open and the next generation re-enters this exact call.
+                workflow.logger.info(f"Tool {tool_name} parked for generation handoff")
+                return {
+                    "success": True,
+                    "message": "",
+                    "generation_handoff": True,
+                    "handoff_task_queue": exc.task_queue,
+                    "pending_tool_resume": True,
+                }
             # The tool already closed its chip with DEPLOY_INTERRUPTED; do not ERROR.
             workflow.logger.info(f"Tool {tool_name} interrupted for generation handoff")
             return {
@@ -3490,6 +3599,7 @@ class AgentWorkflow:
             )
             return {"error": True, "message": error_msg}
         finally:
+            self._active_tool_calls.pop(tool_call_id, None)
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)
             await self._update_tree_state()

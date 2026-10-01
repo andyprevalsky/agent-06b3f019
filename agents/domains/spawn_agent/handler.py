@@ -34,6 +34,7 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
@@ -43,7 +44,6 @@ from domains.spawn_agent.service import (
     spawn_explore_agent_activity,
     validate_spawn_params,
 )
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.child_results import fetch_child_terminal_result_activity
 from helpers.generation_handoff import (
@@ -1267,8 +1267,9 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
                 await workflow_instance._track_usage(
                     event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
                 )
-    except GenerationHandoffRequested:
-        if last_status != MessageStatus.FINISHED:
+    except GenerationHandoffRequested as exc:
+        # A parked tool keeps its chip open for the next generation to finish.
+        if not exc.parked and last_status != MessageStatus.FINISHED:
             await workflow_instance._handle_tool_event(
                 ToolEvent(
                     type=EventType.POST_MESSAGE,

@@ -80,6 +80,10 @@ HEARTBEAT_KEEPALIVE_SECONDS = 15
 # restart from scratch and can duplicate those writes, so each activity gets one
 # attempt within the full timeout.
 MAX_ACTIVITY_ATTEMPTS = 1
+# Activity return when a deploy drains its worker (graceful shutdown) or
+# supersedes its generation: the browser task checkpointed at a step boundary
+# and the manager restarts it from the same step on a live worker/generation.
+BROWSER_DRAIN_YIELD_STATUS = "yielded_for_deploy_drain"
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 # Terminal disconnect before payment/write-lock return must not block the
 # workflow forever when CDP/session.stop() hangs after a dead Kernel session.

@@ -8706,7 +8706,7 @@ def test_real_browser_path_attributes_every_token_to_its_actual_model():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
     ]
-    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
+    assert len(build_calls) == 5, f"expected 5 build_usage_items call sites, found {len(build_calls)}"
     for build_call in build_calls:
         forwarded = [ast.unparse(a) for a in build_call.args] + [
             *(ast.unparse(k.value) for k in build_call.keywords),
@@ -13809,7 +13809,7 @@ async def test_bounded_browser_cleanup_retains_abandoned_tasks():
 
 
 def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
-    """Completion, approvals, handoffs, cancellation, and errors all capture usage."""
+    """Completion, approvals, handoffs, deploy drains, cancellation, and errors all capture usage."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -13819,20 +13819,23 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     lines = post_injection.splitlines()
     capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
-    assert len(capture_disconnects) == 7
+    assert len(capture_disconnects) == 8
     assert not any("await dom_service.disconnect()" in line for line in lines)
 
+
 def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
-    """Approval and auth handoffs must carry recorded passkey IDs into the next activity."""
+    """Approval, auth handoff, and deploy-drain resumes carry recorded passkey IDs forward."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
+    drain_resume_source = inspect.getsource(handler._drain_resume_state)
 
-    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 3
+    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 4
     assert manager_source.count('"recorded_passkey_credential_ids": result.get(') == 3
+    assert drain_resume_source.count('"recorded_passkey_credential_ids": result.get(') == 1
     assert "(write_lock_resume_state or {}).get(" in activity_source
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
@@ -19022,74 +19025,80 @@ async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     assert "Opt out of all" in message
     assert "Only accepting scheduled orders" in message
 
+
+class _FakeDomSession:
+    async def get_current_page(self):
+        return SimpleNamespace()
+
+
+class _FakeDomService:
+    last_instance = None
+
+    def __init__(self, cdp_url):
+        self.cdp_url = cdp_url
+        self.session = _FakeDomSession()
+        self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
+        self.selector_map = {}
+        self.disconnect = AsyncMock()
+        self._captcha_poll = None
+        _FakeDomService.last_instance = self
+
+    async def connect(self):
+        return None
+
+    async def get_browser_state(self, include_screenshot=False):
+        return {"url": "https://example.com/login", "screenshot": None}
+
+    async def get_current_url(self, *, fallback: str = ""):
+        return fallback or "https://example.com/login"
+
+    async def ensure_browser_overlays_suppressed(self):
+        return None
+
+    def start_captcha_telemetry_indicator(self, poll_phase):
+        self._captcha_poll = poll_phase
+
+
+class _FakeHumanizer:
+    last_instance = None
+
+    def __init__(self, *args, **kwargs):
+        self.cursor_observer = None
+        self.idle_started = False
+        _FakeHumanizer.last_instance = self
+
+    def set_cursor_observer(self, observer):
+        self.cursor_observer = observer
+
+    async def initialize_cursor(self, *args, **kwargs):
+        return None
+
+    def start_idle_movement(self):
+        self.idle_started = True
+        return None
+
+    async def close(self):
+        return None
+
+
+class _FakePlaywright:
+    def __init__(self, browser):
+        self.chromium = SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))
+        self.stop = AsyncMock()
+
+
+class _FakeAsyncPlaywright:
+    def __init__(self, instance):
+        self._instance = instance
+
+    async def start(self):
+        return self._instance
+
+
 async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
-
-    class _FakeDomSession:
-        async def get_current_page(self):
-            return SimpleNamespace()
-
-    class _FakeDomService:
-        last_instance = None
-
-        def __init__(self, cdp_url):
-            self.cdp_url = cdp_url
-            self.session = _FakeDomSession()
-            self._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(side_effect=RuntimeError("skip logo")))
-            self.selector_map = {}
-            self.disconnect = AsyncMock()
-            self._captcha_poll = None
-            _FakeDomService.last_instance = self
-
-        async def connect(self):
-            return None
-
-        async def get_browser_state(self, include_screenshot=False):
-            return {"url": "https://example.com/login", "screenshot": None}
-
-        async def get_current_url(self, *, fallback: str = ""):
-            return fallback or "https://example.com/login"
-
-        async def ensure_browser_overlays_suppressed(self):
-            return None
-
-        def start_captcha_telemetry_indicator(self, poll_phase):
-            self._captcha_poll = poll_phase
-
-    class _FakeHumanizer:
-        last_instance = None
-
-        def __init__(self, *args, **kwargs):
-            self.cursor_observer = None
-            self.idle_started = False
-            _FakeHumanizer.last_instance = self
-
-        def set_cursor_observer(self, observer):
-            self.cursor_observer = observer
-
-        async def initialize_cursor(self, *args, **kwargs):
-            return None
-
-        def start_idle_movement(self):
-            self.idle_started = True
-            return None
-
-        async def close(self):
-            return None
-
-    class _FakePlaywright:
-        def __init__(self, browser):
-            self.chromium = SimpleNamespace(connect_over_cdp=AsyncMock(return_value=browser))
-            self.stop = AsyncMock()
-
-    class _FakeAsyncPlaywright:
-        def __init__(self, instance):
-            self._instance = instance
-
-        async def start(self):
-            return self._instance
 
     fake_browser = SimpleNamespace(
         contexts=[SimpleNamespace(pages=[SimpleNamespace()])],
@@ -19283,6 +19292,118 @@ async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     assert _FakeHumanizer.last_instance is not None
     assert callable(_FakeHumanizer.last_instance.cursor_observer)
     assert _FakeHumanizer.last_instance.idle_started is True
+
+
+async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+    """A deploy SIGTERM mid-step must end the activity at the next step boundary.
+
+    Agent 3efa7cae: a deploy stopped the worker machine while a browser task
+    was mid-run. The activity kept stepping until the process died, Temporal
+    reported a heartbeat timeout, and the single-attempt browser task failed.
+    Graceful shutdown flags running activities instead; the real step loop must
+    finish the in-flight step, keep the Steel session alive, and return the
+    same resume payload a write-lock pause returns so a live worker continues
+    from the next step.
+    """
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+    executed_steps = []
+
+    async def execute_step_while_deploy_lands(*args, **kwargs):
+        executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
+        env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+
+    close_mock = AsyncMock()
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Add the socks to the cart",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://example.com",
+        )
+
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    assert llm_step.await_count == 1, "the activity must not start another step after the drain began"
+    assert len(executed_steps) == 1, executed_steps
+    assert result["step_count"] == 1, result
+    assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
+    assert result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+    assert result["current_url"] == "https://example.com/cart", result
+    assert "https://example.com/cart" in result.get("visited_urls", []), result
+    turn_tool_calls = [
+        call["function"]["name"]
+        for message in result.get("browser_turn_messages", [])
+        for call in message.get("tool_calls") or []
+    ]
+    assert turn_tool_calls == ["scroll"], f"the completed step must ride the resume payload: {turn_tool_calls}"
+    assert result.get("reasoning_messages") == ["Looking for the cart"], result
+    llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
+    assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+
 
 async def test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume():
     from domains.spawn_browser_agent_v3.handler import _restart_after_failed_steel_auth
@@ -19496,6 +19617,152 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id():
         "action_type": "task_complete",
         "task_id": expected_task_id,
     }
+
+
+class _SequencedActivityHandle:
+    def __init__(self, result):
+        self._result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("a finished browser activity must not be cancelled")
+
+    def __await__(self):
+        async def _result():
+            return self._result
+
+        return _result().__await__()
+
+
+def _drained_browser_result(yield_reason: str) -> dict:
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+
+    return {
+        "status": BROWSER_DRAIN_YIELD_STATUS,
+        "yield_reason": yield_reason,
+        "current_url": "https://shop.example.com/cart",
+        "write_lock_approvals": {"shop.example.com": {"approved_at": 1.0}},
+        "step_count": 4,
+        "session_id": "steel-1",
+        "cdp_url": "wss://steel/1",
+        "task_id": "task-1",
+        "auth_realm": "shop.example.com",
+        "recorded_passkey_credential_ids": [],
+        "browser_turn_messages": [{"role": "assistant", "content": "opened cart"}],
+        "visited_urls": ["https://shop.example.com/cart"],
+        "usage_items": [
+            {"type": "llm", "model": "browser-pre-drain", "input_tokens": 700, "output_tokens": 90},
+            {"type": "service", "provider": "Steel.dev Browser", "cost_cents": 1.5},
+        ],
+    }
+
+
+_COMPLETED_BROWSER_RESULT = {
+    "success": True,
+    "status": "completed",
+    "message": "Cart total is $12",
+    "task_id": "task-1",
+    "session_id": "steel-1",
+    "usage_items": [{"type": "llm", "model": "browser-post-drain", "input_tokens": 300, "output_tokens": 40}],
+}
+
+
+async def _run_browser_manager_through_drain(workflow_instance, yield_reason: str):
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    results = [_drained_browser_result(yield_reason), dict(_COMPLETED_BROWSER_RESULT)]
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append(kwargs["args"])
+        return _SequencedActivityHandle(results[len(start_calls) - 1])
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+    ):
+        events = [
+            event
+            async for event in SpawnBrowserAgentManagerV3().execute_tool(
+                workflow_instance,
+                {"goal": "Check the cart total", "start_url": "https://shop.example.com"},
+                "tool-1",
+            )
+        ]
+    return start_calls, events
+
+
+def _assert_restarted_from_drain_checkpoint(start_calls) -> dict:
+    assert len(start_calls) == 2, f"expected the drained task to restart exactly once, got {len(start_calls)}"
+    resumed = start_calls[1]
+    assert resumed[4] == "task-1", "the restart must keep the browser task identity"
+    assert resumed[5] == "steel-1" and resumed[6] == "wss://steel/1", "the restart must reattach the live session"
+    assert resumed[7] is True, "the restart must resume, not start a new browser task"
+    resume_state = resumed[12]
+    assert resume_state["step_count"] == 4, resume_state
+    assert resume_state["pending_action"] is None, resume_state
+    assert resume_state["write_lock_approvals"] == {"shop.example.com": {"approved_at": 1.0}}, resume_state
+    assert resume_state["browser_turn_messages"] == [{"role": "assistant", "content": "opened cart"}], resume_state
+    assert resume_state["visited_urls"] == ["https://shop.example.com/cart"], resume_state
+    return resume_state
+
+
+def _assert_drain_billed_once_and_chip_completed(events) -> None:
+    from helpers.generation_handoff import DEPLOY_INTERRUPTED_TOOL_MESSAGE
+    from tools.base import EventType, MessageStatus
+
+    usage_events = [event for event in events if event.type == EventType.USAGE]
+    assert len(usage_events) == 1, "pre-drain browser usage must be billed exactly once"
+    assert [item["model"] for item in usage_events[0].data["usage"]["llm"]] == ["browser-pre-drain"]
+    assert [item["cost_cents"] for item in usage_events[0].data["usage"]["service"]] == [1.5]
+    titles = [event.title for event in events if event.type == EventType.POST_MESSAGE]
+    assert titles.count("Starting up a browser") == 1, titles
+    assert all(event.message != DEPLOY_INTERRUPTED_TOOL_MESSAGE for event in events), titles
+    final = events[-1]
+    assert final.title == "Browser automation complete" and final.status == MessageStatus.FINISHED, final
+    assert [item["model"] for item in final.data["usage"]["llm"]] == ["browser-post-drain"]
+
+
+async def test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy():
+    """Worker drain without a generation change restarts on a live worker of the same queue."""
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _check_generation_handoff=AsyncMock(return_value=None),
+    )
+    start_calls, events = await _run_browser_manager_through_drain(workflow_instance, WORKER_SHUTDOWN)
+
+    resume_state = _assert_restarted_from_drain_checkpoint(start_calls)
+    assert "generation_yield" not in resume_state, "a rolling-deploy restart may drain again on the next deploy"
+    _assert_drain_billed_once_and_chip_completed(events)
+
+
+async def test_manager_finishes_on_current_generation_when_parking_is_unavailable():
+    """A superseded task that cannot park (DAG turn) finishes here instead of yielding every step."""
+    from helpers.activity_generation_drain import GENERATION_SUPERSEDED
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+        _check_generation_handoff=AsyncMock(return_value="navi-agent-tasks-gen-new"),
+        _park_pending_tool=lambda tool_call_id, resume: False,
+    )
+    start_calls, events = await _run_browser_manager_through_drain(workflow_instance, GENERATION_SUPERSEDED)
+
+    resume_state = _assert_restarted_from_drain_checkpoint(start_calls)
+    assert resume_state.get("generation_yield") is False, resume_state
+    _assert_drain_billed_once_and_chip_completed(events)
+
 
 async def test_manager_passes_fast_mode_cache_for_browser_activity():
     """Browser activities must receive the workflow Fast Mode flag (re-enabled).
@@ -21354,6 +21621,37 @@ async def test_browser_resume_store_preserves_inline_and_external_snapshots():
     ):
         pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=large)
         assert await resume_store.hydrate_resume_context(agent_id="agent", resume_state=pointer) == large | pointer
+
+
+async def test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry():
+    """A parked browser task rides continue_as_new beside the conversation (2MB cap).
+
+    Mid-size snapshots go to the archive so the parked call stays small; when the
+    archive is unreachable they stay inline (still under Temporal's payload cap)
+    rather than failing the pause. Only oversize snapshots fail closed.
+    """
+    from domains.spawn_browser_agent_v3 import resume_store
+
+    def snapshot(content_bytes: int) -> dict:
+        return {"browser_turn_messages": [{"role": "user", "content": "x" * content_bytes}]}
+
+    small = snapshot(resume_store._PREFERRED_INLINE_BYTES - 1_000)
+    mid = snapshot(resume_store._PREFERRED_INLINE_BYTES + 10_000)
+    oversize = snapshot(resume_store._INLINE_LIMIT_BYTES + 10_000)
+
+    stored_paths = []
+    with patch.object(resume_store, "_store_part", side_effect=lambda agent_id, path, body: stored_paths.append(path)):
+        assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=small) == small
+        assert stored_paths == [], "snapshots under the preferred inline size never touch the archive"
+        pointer = await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=mid)
+        assert set(pointer) == {"browser_resume_context_ref"}, pointer
+        assert pointer["browser_resume_context_ref"]["paths"] == stored_paths
+
+    archive_down = resume_store.BrowserResumeStoreError("Browser resume archive write failed")
+    with patch.object(resume_store, "_store_part", side_effect=archive_down):
+        assert await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=mid) == mid
+        with pytest.raises(resume_store.BrowserResumeStoreError, match="archive write failed"):
+            await resume_store.persist_resume_context(agent_id="agent", task_id="task", state=oversize)
 
 
 def test_final_screenshot_fetch_isolated_from_verifier_errors():
@@ -23347,6 +23645,10 @@ async def run_all_tests():
         test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
     )
     await r.record_async(
+        "activity_checkpoints_at_step_boundary_on_worker_shutdown",
+        test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
         "failed_steel_auth_credential_isolated_restart",
         test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume,
     )
@@ -23361,6 +23663,14 @@ async def run_all_tests():
     await r.record_async(
         "manager_cancelled_pause_preserves_task_id",
         test_manager_cancelled_browser_pause_preserves_preallocated_task_id,
+    )
+    await r.record_async(
+        "manager_restarts_drained_task_same_step_rolling_deploy",
+        test_manager_restarts_drained_browser_task_from_same_step_on_rolling_deploy,
+    )
+    await r.record_async(
+        "manager_finishes_here_when_parking_unavailable",
+        test_manager_finishes_on_current_generation_when_parking_is_unavailable,
     )
     await r.record_async(
         "manager_passes_fast_mode_cache",
@@ -23494,6 +23804,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_resume_store_preserves_inline_and_external_snapshots",
         test_browser_resume_store_preserves_inline_and_external_snapshots,
+    )
+    await r.record_async(
+        "browser_resume_store_keeps_parked_snapshots_small",
+        test_browser_resume_store_keeps_parked_snapshots_small_enough_to_carry,
     )
     r.record(
         "final_screenshot_fetch_isolated_from_verifier_errors",

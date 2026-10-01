@@ -33,6 +33,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
+from helpers.activity_generation_drain import GENERATION_SUPERSEDED, activity_drain_reason
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -41,12 +42,15 @@ from helpers.file_resolution import (
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
+    park_pending_tool,
+    take_tool_resume,
 )
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
 from helpers.user_profile import build_user_profile_sections
 from helpers.wait_condition_or_handoff import (
+    live_handoff_queue,
     sleep_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
@@ -79,9 +83,8 @@ from .challenge_recovery import (
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
-    browser_start_to_close_timeout_minutes,
-    skip_browser_network_recording,
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+    BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -95,7 +98,6 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
-    adjust_iteration_after_action,
     NAVIGATE_TO_URL_TIMEOUT_SECONDS,
     SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
     SESSION_INIT_TRANSIENT_RETRY_SECONDS,
@@ -103,6 +105,9 @@ from .config import (
     SESSION_RETRY_INTERVAL_SECONDS,
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
+    adjust_iteration_after_action,
+    browser_start_to_close_timeout_minutes,
+    skip_browser_network_recording,
 )
 from .credential_runtime import build_realm_credential_state
 from .download_persist import BrowserDownloadPersister
@@ -127,8 +132,8 @@ from .repo import (
     init_browser_session,
     mark_steel_session_auth_failed,
     prepare_browser_auth,
-    propagate_browser_run_credentials,
     probe_cookie_variant_ephemeral,
+    propagate_browser_run_credentials,
     recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -137,6 +142,7 @@ from .repo import (
     save_browser_credential_ref_message,
     upload_file_to_session,
 )
+from .resume_store import hydrate_resume_context, persist_resume_context
 from .service import (
     AuthRuntimeState,
     accumulate_model_usage,
@@ -155,22 +161,13 @@ from .service import (
     safe_time,
     select_auth_assistance_current_url,
 )
-from .visible_result_completion import (
-    forced_visible_result_completion_action,
-    should_force_visible_result_completion,
-)
-from .resume_store import hydrate_resume_context, persist_resume_context
-from .verifier_reject_circuit import (
-    next_identical_reject_streak,
-    should_soft_accept_identical_verifier_reject,
-)
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
     _get_base_domain,
+    apply_user_write_lock_grant,
     execute_action,
     get_domain_from_url,
     get_element_description,
-    apply_user_write_lock_grant,
     grant_site_write_lock_approvals,
     resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
@@ -192,6 +189,14 @@ from .service_crypto import (
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
+from .verifier_reject_circuit import (
+    next_identical_reject_streak,
+    should_soft_accept_identical_verifier_reject,
+)
+from .visible_result_completion import (
+    forced_visible_result_completion_action,
+    should_force_visible_result_completion,
+)
 
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
@@ -4832,6 +4837,45 @@ def _copy_browser_resume_continuity_fields(source: Dict[str, Any], target: Dict[
             target[key] = source[key]
 
 
+_BROWSER_PAUSE_STATUSES = frozenset(
+    {
+        "awaiting_write_approval",
+        "awaiting_payment_card_approval",
+        "awaiting_auth_assistance",
+        BROWSER_DRAIN_YIELD_STATUS,
+    }
+)
+_PAYMENT_RESUME_FIELDS = ("payment_card_refs", "payment_card_last4")
+
+
+def _payment_resume_fields(resume_state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Minted-card fields every later resume of the same browser task must keep."""
+    return {key: resume_state[key] for key in _PAYMENT_RESUME_FIELDS if resume_state and resume_state.get(key)}
+
+
+def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resume state that restarts a drained browser task at its next step."""
+    prior = prior_resume or {}
+    resume_state: Dict[str, Any] = {
+        "pending_action": None,
+        "write_lock_approvals": result.get("write_lock_approvals", {}),
+        # Only a payment resume changes activity startup (card refs + merchant
+        # unlock); any other value continues the step loop unchanged.
+        "approval_type": "payment" if prior.get("approval_type") == "payment" else BROWSER_DRAIN_YIELD_STATUS,
+        "step_count": result.get("step_count", 0),
+        "session_id": result.get("session_id"),
+        "cdp_url": result.get("cdp_url"),
+        "task_id": result.get("task_id"),
+        "auth_realm": result.get("auth_realm"),
+        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
+        **_payment_resume_fields(prior),
+    }
+    if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
+        resume_state["generation_yield"] = False
+    _copy_browser_resume_continuity_fields(result, resume_state)
+    return resume_state
+
+
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
     if not source.get("world_model_simulated"):
         return
@@ -7178,7 +7222,79 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         observe_page_state: Dict[str, Any] = {}
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
+        allow_generation_yield = (write_lock_resume_state or {}).get("generation_yield") is not False
+        drain_checkpoint_failed = False
         while iteration < MAX_ITERATIONS:
+            # Deploy drain checkpoint. Between steps, with no approved action
+            # still owed, the task is fully captured by the same resume payload
+            # a write-lock pause returns, so the manager can restart it at this
+            # step on a live worker (rolling deploy) or generation (cutover)
+            # instead of the worker exiting mid-step. Every invocation runs at
+            # least one step before it may yield again.
+            if iteration > resume_step_count and pending_write_lock_action is None and not drain_checkpoint_failed:
+                drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
+                if drain_reason:
+                    try:
+                        drain_continuity = await persist_resume_context(
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            state=_browser_resume_continuity_state(
+                                action_history=action_history,
+                                visited_urls=visited_urls,
+                                verifier_checkpoints=verifier_checkpoints,
+                                browser_turn_messages=browser_turn_messages,
+                                reasoning_messages=reasoning_messages,
+                                action_summary=action_summary,
+                                auth_runtime_state=auth_runtime_state,
+                            ),
+                        )
+                    except Exception as checkpoint_error:
+                        drain_checkpoint_failed = True
+                        logger.warning(
+                            "Browser drain checkpoint failed; continuing on this worker",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            drain_reason=drain_reason,
+                            error=extract_error_message(checkpoint_error),
+                        )
+                    else:
+                        logger.info(
+                            "Browser task yielding at step boundary for deploy drain",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            session_id=session_id,
+                            drain_reason=drain_reason,
+                            step_count=iteration,
+                        )
+                        if dom_service:
+                            try:
+                                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                            except Exception as e:
+                                logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                            dom_service = None
+                        browser_task_paused_for_resume = True
+                        return {
+                            "status": BROWSER_DRAIN_YIELD_STATUS,
+                            "yield_reason": drain_reason,
+                            "current_url": current_url,
+                            "write_lock_approvals": write_lock_approvals,
+                            "step_count": iteration,
+                            "session_id": session_id,
+                            "cdp_url": cdp_url,
+                            "task_id": task_id,
+                            "browser_url": browser_url,
+                            "auth_realm": auth_realm,
+                            "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                            "usage_items": build_usage_items(
+                                total_input_tokens,
+                                total_output_tokens,
+                                model_pricing,
+                                (safe_time() - start_time) * 1000,
+                                usage_by_model,
+                                fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                            ),
+                            **drain_continuity,
+                        }
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
             await _wait_for_browser_user_control(config, task_id)
@@ -10223,21 +10339,27 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 )
                 attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
 
+        # A previous generation parked this exact tool call across a deploy
+        # (continue_as_new). Its chip is still open; resume from the parked
+        # state instead of starting a new browser task.
+        resume_hint = take_tool_resume(workflow_instance, tool_call_id)
 
         logger.info(
             "Browser agent starting (v3)",
             goal=goal,
             has_output_schema=output_schema is not None,
             num_attachments=len(attachments),
+            resumed_phase=(resume_hint or {}).get("phase"),
         )
 
-        yield ToolEvent(
-            type=EventType.POST_MESSAGE,
-            title="Starting up a browser",
-            message="",
-            status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
-        )
+        if resume_hint is None:
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Starting up a browser",
+                message="",
+                status=MessageStatus.IN_PROGRESS,
+                metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
+            )
 
         try:
             write_lock_enabled = getattr(workflow_instance, "write_lock_enabled", True)
@@ -10271,87 +10393,137 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             write_lock_resume_state = None
             current_start_url = start_url
             result = None
+            parked_result = None
+            parked_approval = None
+            if resume_hint is not None:
+                write_lock_resume_state = resume_hint.get("write_lock_resume_state")
+                current_start_url = resume_hint.get("current_start_url") or start_url
+                parked_result = resume_hint.get("parked_result")
+                parked_approval = resume_hint.get("approval")
+
+            def park_browser_task(phase: str, resume_state: Optional[Dict[str, Any]], **parked: Any) -> bool:
+                return park_pending_tool(
+                    workflow_instance,
+                    tool_call_id,
+                    {
+                        "phase": phase,
+                        "write_lock_resume_state": resume_state,
+                        "current_start_url": current_start_url,
+                        **parked,
+                    },
+                )
+
+            def park_browser_approval(phase: str) -> Callable[[Dict[str, str]], bool]:
+                # The approval branches only read the card refs from the prior
+                # resume state; the paused result carries everything else.
+                def park(approval: Dict[str, str]) -> bool:
+                    return park_browser_task(
+                        phase,
+                        _payment_resume_fields(write_lock_resume_state),
+                        parked_result=result,
+                        approval=approval,
+                    )
+
+                return park
 
             while True:
-                known_task_id = (
-                    write_lock_resume_state.get("task_id")
-                    if isinstance(write_lock_resume_state, dict)
-                    else None
-                ) or _stable_browser_task_id(agent_id, tool_call_id)
-                activity_args = [
-                    user_id,
-                    agent_id,
-                    goal,
-                    tool_call_id,
-                    known_task_id,
-                    (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
-                    (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
-                    write_lock_resume_state is not None,
-                    output_schema,
-                    attachments if attachments else None,
-                    write_lock_enabled,
-                    current_start_url,
-                    write_lock_resume_state,
-                    system_name,
-                    bool(active_claude_token) and not bool(active_gpt_token),
-                    active_gpt_token,
-                    active_gpt_account_id,
-                    active_gpt_source,
-                    active_gpt_pool_id,
-                    bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
-                ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
-                async with span(
-                    "browser_activity_wait",
-                    agent_id=agent_id,
-                    tool_call_id=tool_call_id,
-                    tool_name="spawn_browser_agent",
-                    is_resume=write_lock_resume_state is not None,
-                    span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
-                    span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
-                ):
-                    fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-                    browser_timeout_minutes = browser_start_to_close_timeout_minutes(
-                        fast_mode=fm_enabled,
-                        goal=goal,
-                        workflow_instance=workflow_instance,
-                    )
-                    activity_handle = workflow.start_activity(
-                        spawn_browser_agent_activity_v3,
-                        args=activity_args,
-                        start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
-                        heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
-                        cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                        retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
-                    )
-
+                reentered_pause = parked_result is not None
+                if reentered_pause:
+                    # Re-enter the pause branch the previous generation parked in
+                    # (approval / auth wait) without running the activity again.
+                    result, parked_result = parked_result, None
                     was_cancelled = False
-                    # The workflow allocates task_id before starting the activity,
-                    # so TRY_CANCEL cannot erase the ownership key along with the
-                    # activity return value.
-                    # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
-                    await workflow.wait_condition(lambda: activity_handle.done() or workflow_instance.is_paused)  # noqa: B023
-                    if workflow_instance.is_paused and not activity_handle.done():
-                        logger.info("\U0001f534 Cancelling browser agent due to pause")
-                        activity_handle.cancel()
-                        was_cancelled = True
+                    known_task_id = result.get("task_id") or _stable_browser_task_id(agent_id, tool_call_id)
+                else:
+                    known_task_id = (
+                        write_lock_resume_state.get("task_id") if isinstance(write_lock_resume_state, dict) else None
+                    ) or _stable_browser_task_id(agent_id, tool_call_id)
+                    activity_args = [
+                        user_id,
+                        agent_id,
+                        goal,
+                        tool_call_id,
+                        known_task_id,
+                        (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
+                        (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
+                        write_lock_resume_state is not None,
+                        output_schema,
+                        attachments if attachments else None,
+                        write_lock_enabled,
+                        current_start_url,
+                        write_lock_resume_state,
+                        system_name,
+                        bool(active_claude_token) and not bool(active_gpt_token),
+                        active_gpt_token,
+                        active_gpt_account_id,
+                        active_gpt_source,
+                        active_gpt_pool_id,
+                        bool(getattr(workflow_instance, "fast_mode_cache_enabled", False)),
+                    ]
+                    world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                    if world_model_mode != "real":
+                        activity_args.append(world_model_mode)
+                    async with span(
+                        "browser_activity_wait",
+                        agent_id=agent_id,
+                        tool_call_id=tool_call_id,
+                        tool_name="spawn_browser_agent",
+                        is_resume=write_lock_resume_state is not None,
+                        span_source="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
+                        span_key="agents.domains.spawn_browser_agent_v3.handler.SpawnBrowserAgentManagerV3.execute",
+                    ):
+                        fm_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
+                        browser_timeout_minutes = browser_start_to_close_timeout_minutes(
+                            fast_mode=fm_enabled,
+                            goal=goal,
+                            workflow_instance=workflow_instance,
+                        )
+                        activity_handle = workflow.start_activity(
+                            spawn_browser_agent_activity_v3,
+                            args=activity_args,
+                            start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
+                            heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
+                            cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                            retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
+                        )
 
-                    try:
-                        result = await activity_handle
-                    except (asyncio.CancelledError, ActivityError) as e:
-                        if isinstance(e, ActivityError) and not isinstance(
-                            e.cause, (asyncio.CancelledError, TemporalCancelledError)
-                        ):
-                            raise
-                        was_cancelled = True
-                        result = {
-                            "status": "cancelled",
-                            "message": "Browser agent cancelled by user",
-                        }
-                        if known_task_id:
-                            result["task_id"] = known_task_id
+                        was_cancelled = False
+                        # The workflow allocates task_id before starting the activity,
+                        # so TRY_CANCEL cannot erase the ownership key along with the
+                        # activity return value.
+                        # cutover-class: activity-bound — cannot continue_as_new until browser activity ends
+                        await workflow.wait_condition(
+                            lambda handle=activity_handle: handle.done() or workflow_instance.is_paused
+                        )
+                        if workflow_instance.is_paused and not activity_handle.done():
+                            logger.info("\U0001f534 Cancelling browser agent due to pause")
+                            activity_handle.cancel()
+                            was_cancelled = True
+
+                        try:
+                            result = await activity_handle
+                        except (asyncio.CancelledError, ActivityError) as e:
+                            if isinstance(e, ActivityError) and not isinstance(
+                                e.cause, (asyncio.CancelledError, TemporalCancelledError)
+                            ):
+                                raise
+                            was_cancelled = True
+                            result = {
+                                "status": "cancelled",
+                                "message": "Browser agent cancelled by user",
+                            }
+                            if known_task_id:
+                                result["task_id"] = known_task_id
+
+                    pause_usage_items = (result or {}).get("usage_items")
+                    if (result or {}).get("status") in _BROWSER_PAUSE_STATUSES and pause_usage_items:
+                        # Each activity call reports only its own tokens; a paused
+                        # call's usage is billed here because the final result
+                        # will not include it.
+                        yield ToolEvent(
+                            type=EventType.USAGE,
+                            data={"usage": browser_usage_items_to_tool_usage(pause_usage_items)},
+                        )
 
                 if was_cancelled or (result and result.get("status") == "cancelled"):
                     logger.info("\U0001f534 Browser agent cancelled")
@@ -10377,6 +10549,40 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
                     return
 
+                if result and result.get("status") == BROWSER_DRAIN_YIELD_STATUS:
+                    # The activity checkpointed at a step boundary because a deploy
+                    # is draining its worker or superseded its generation. Restart
+                    # it from that step: on a live worker of this queue, or on the
+                    # live generation after continue_as_new carries this tool call.
+                    write_lock_resume_state = _drain_resume_state(result, write_lock_resume_state)
+                    handoff_queue = await live_handoff_queue(workflow_instance)
+                    if handoff_queue:
+                        if park_browser_task(
+                            "activity",
+                            {k: v for k, v in write_lock_resume_state.items() if k != "generation_yield"},
+                        ):
+                            logger.info(
+                                "Browser task parked for generation handoff",
+                                agent_id=agent_id,
+                                task_id=result.get("task_id"),
+                                step_count=result.get("step_count"),
+                                yield_reason=result.get("yield_reason"),
+                                handoff_task_queue=handoff_queue,
+                            )
+                            raise GenerationHandoffRequested(handoff_queue, parked=True)
+                        # Parking is unavailable here (DAG turn or payload budget):
+                        # finish on this generation instead of yielding every step.
+                        write_lock_resume_state["generation_yield"] = False
+                    logger.info(
+                        "Browser task drained at a step boundary; restarting from the same step",
+                        agent_id=agent_id,
+                        task_id=result.get("task_id"),
+                        step_count=result.get("step_count"),
+                        yield_reason=result.get("yield_reason"),
+                        generation_yield=write_lock_resume_state.get("generation_yield", True),
+                    )
+                    continue
+
                 if result and result.get("status") == "awaiting_write_approval":
                     logger.info(
                         "Browser agent needs write lock approval",
@@ -10390,6 +10596,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     )
 
                     try:
+                        approval_resume, parked_approval = parked_approval, None
                         approval_response = await request_user_approval_direct(
                             workflow_instance,
                             question=result["question"],
@@ -10400,6 +10607,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 "writeLockNotification": result.get("write_lock_notification"),
                                 "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             },
+                            park=park_browser_approval("write_approval"),
+                            resume_request=approval_resume,
                         )
 
                         approval_type = result.get("approval_type", "unknown")
@@ -10557,6 +10766,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # write_lock") and H-06 site unlock was never gated on a real
                     # approval. Reuse still applies at mint; this only restores the
                     # approval UX / benchmark contract.
+                    approval_resume, parked_approval = parked_approval, None
                     approval_response = await request_user_approval_direct(
                         workflow_instance,
                         question=build_payment_question(payment_payload),
@@ -10571,6 +10781,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
                             "reusablePurchase": bool(lookup_result.get("reusable")),
                         },
+                        park=park_browser_approval("payment_approval"),
+                        resume_request=approval_resume,
                     )
                     logger.info(
                         "Browser payment approval granted",
@@ -11034,31 +11246,32 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         base_site=base_site,
                     )
 
-                    yield ToolEvent(
-                        type=EventType.POST_MESSAGE,
-                        title=f"Requesting User Assistance for {base_site} Login",
-                        message="",
-                        status=MessageStatus.IN_PROGRESS,
-                        metadata={
-                            "toolName": "spawn_browser_agent",
-                            "action_type": "auth_assistance",
-                            "task_id": result.get("task_id"),
-                            "requestUserAuthentication": {
-                                "requestId": request_id,
-                                "authRealm": result.get("auth_realm"),
-                                "steelSessionId": result.get("session_id"),
-                                "taskId": result.get("task_id"),
-                                "handoffMode": result.get("handoff_mode"),
-                                "browserUrl": result.get("browser_url"),
-                                "liveViewUrl": (
-                                    auth_request.get("liveViewUrl")
-                                    or auth_request.get("live_view_url")
-                                    or auth_handoff.get("liveViewUrl")
-                                    or auth_handoff.get("live_view_url")
-                                ),
+                    if not reentered_pause:
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=f"Requesting User Assistance for {base_site} Login",
+                            message="",
+                            status=MessageStatus.IN_PROGRESS,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "action_type": "auth_assistance",
+                                "task_id": result.get("task_id"),
+                                "requestUserAuthentication": {
+                                    "requestId": request_id,
+                                    "authRealm": result.get("auth_realm"),
+                                    "steelSessionId": result.get("session_id"),
+                                    "taskId": result.get("task_id"),
+                                    "handoffMode": result.get("handoff_mode"),
+                                    "browserUrl": result.get("browser_url"),
+                                    "liveViewUrl": (
+                                        auth_request.get("liveViewUrl")
+                                        or auth_request.get("live_view_url")
+                                        or auth_handoff.get("liveViewUrl")
+                                        or auth_handoff.get("live_view_url")
+                                    ),
+                                },
                             },
-                        },
-                    )
+                        )
 
                     if not request_id:
                         yield ToolEvent(
@@ -11077,14 +11290,26 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     if hasattr(workflow_instance, "_update_tree_state"):
                         await workflow_instance._update_tree_state(status="PAUSED")
 
-                    await wait_condition_or_generation_handoff(
-                        lambda request_id=request_id: (
-                            request_id in getattr(workflow_instance, "_signal_responses", {})
-                            or not workflow_instance.is_paused
-                        ),
-                        workflow_instance,
-                        workflow_mod=workflow,
-                    )
+                    try:
+                        await wait_condition_or_generation_handoff(
+                            lambda request_id=request_id: (
+                                request_id in getattr(workflow_instance, "_signal_responses", {})
+                                or not workflow_instance.is_paused
+                            ),
+                            workflow_instance,
+                            workflow_mod=workflow,
+                        )
+                    except GenerationHandoffRequested as exc:
+                        # The live-view handoff request stays open; the next
+                        # generation re-waits on the same request id (signal
+                        # responses and the paused state ride continue_as_new).
+                        if park_browser_task(
+                            "auth_assistance",
+                            _payment_resume_fields(write_lock_resume_state),
+                            parked_result=result,
+                        ):
+                            raise GenerationHandoffRequested(exc.task_queue, parked=True) from None
+                        raise
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         workflow_instance._signal_responses.pop(request_id, None)
                         workflow_instance.is_paused = False
@@ -11207,14 +11432,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
-        except GenerationHandoffRequested:
-            yield ToolEvent(
-                type=EventType.POST_MESSAGE,
-                title="Browser automation interrupted",
-                message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
-                status=MessageStatus.FINISHED,
-                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
-            )
+        except GenerationHandoffRequested as exc:
+            if not exc.parked:
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Browser automation interrupted",
+                    message=DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+                    status=MessageStatus.FINISHED,
+                    metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
+                )
             raise
         except Exception as e:
             if isinstance(e, asyncio.CancelledError):
