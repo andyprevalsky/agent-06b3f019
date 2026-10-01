@@ -1273,21 +1273,7 @@ fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
-if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
-    echo "🐍 Setting up agents virtualenv..."
-    PYTHON_VERSION=$(cat agents/.python-version 2>/dev/null || echo "3.11")
-    # Try asdf python first, then system python3
-    PYTHON_BIN="$(asdf where python "$PYTHON_VERSION" 2>/dev/null)/bin/python3" || true
-    if [ ! -x "$PYTHON_BIN" ]; then
-        PYTHON_BIN=$(command -v python3)
-    fi
-    echo "   Using: $PYTHON_BIN ($($PYTHON_BIN --version 2>&1))"
-    if [ ! -f agents/venv/bin/activate ]; then
-        (cd agents && "$PYTHON_BIN" -m venv venv)
-    fi
-    (cd agents && source venv/bin/activate && pip install -r requirements.txt)
-    echo "🐍 Agents venv ready"
-fi
+bash "$SCRIPT_DIR/ensure-agents-venv.sh"
 
 # Pre-flight: handle processes on our ports from this worktree.
 # Cloud instances already handled above (aggressive cleanup). This block

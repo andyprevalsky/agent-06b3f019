@@ -222,4 +222,59 @@ if ! grep -q '^# rose-cloud-env$' <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' 
 fi
 echo "PASS: cloud-build.sh writes # rose-cloud-env into .cloud-env"
 
+# ensure-agents-venv.sh must resync an existing venv when requirements.txt
+# changes. The old cloud-build/run.sh probe ("does temporalio import?") kept a
+# browser-use 0.11 venv after main pinned >=0.13 and failed agents coverage.
+venv_root="$TMP_ROOT/venv-sync"
+mkdir -p "$venv_root/agents" "$venv_root/bin"
+printf 'browser-use>=0.11\n' >"$venv_root/agents/requirements.txt"
+cat >"$venv_root/bin/base-python" <<'PY'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1 $2" = "-m venv" ] || exit 2
+mkdir -p "$3/bin"
+cat >"$3/bin/python" <<'VENV'
+#!/usr/bin/env bash
+case "$1" in
+  -c) exit 0 ;;
+  -m) printf '%s\n' "$*" >>"$VENV_SYNC_CALLS"; [ "${VENV_SYNC_FAIL_PIP:-0}" = 0 ] ;;
+  *) exit 2 ;;
+esac
+VENV
+chmod +x "$3/bin/python"
+PY
+chmod +x "$venv_root/bin/base-python"
+venv_calls="$venv_root/pip-calls"
+: >"$venv_calls"
+run_venv_sync() {
+  AGENTS_VENV_ROOT="$venv_root" AGENTS_VENV_PYTHON="$venv_root/bin/base-python" \
+    VENV_SYNC_CALLS="$venv_calls" bash "$ROOT_DIR/scripts/ensure-agents-venv.sh" >/dev/null
+}
+pip_install_count() { grep -c 'pip install -r' "$venv_calls" || true; }
+
+run_venv_sync
+expect_eq "$(pip_install_count)" "1" "missing agents venv is created and installed"
+run_venv_sync
+expect_eq "$(pip_install_count)" "1" "unchanged requirements.txt skips reinstall"
+printf 'browser-use>=0.13.10,<0.14\n' >"$venv_root/agents/requirements.txt"
+run_venv_sync
+expect_eq "$(pip_install_count)" "2" "changed requirements.txt resyncs an importable venv"
+printf 'browser-use>=0.14\n' >"$venv_root/agents/requirements.txt"
+if VENV_SYNC_FAIL_PIP=1 run_venv_sync 2>/dev/null; then
+  echo "FAIL: failed pip install must fail the agents venv preflight" >&2
+  exit 1
+fi
+expect_eq "$(test -e "$venv_root/agents/venv/.requirements.sha256" && echo stamped || echo unstamped)" \
+  "unstamped" "failed pip install leaves the venv unstamped"
+run_venv_sync
+expect_eq "$(pip_install_count)" "4" "venv sync retries after a failed install"
+
+for provisioner in scripts/cloud-build.sh scripts/run.sh; do
+  if ! grep -q 'ensure-agents-venv\.sh' "$ROOT_DIR/$provisioner"; then
+    echo "FAIL: $provisioner must provision agents/venv via ensure-agents-venv.sh" >&2
+    exit 1
+  fi
+  echo "PASS: $provisioner delegates agents venv sync"
+done
+
 echo "All workspace env tests passed."
