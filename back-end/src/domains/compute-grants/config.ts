@@ -48,7 +48,8 @@ export function credentialPublicKeyPem(): string {
  * request onto paid models.
  */
 export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' {
-  const selected = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim() || 'kernel';
+  const configured = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim();
+  const selected = configured === undefined || configured === '' ? 'kernel' : configured;
   if (selected === 'browser-use' && !browserUseEnabled()) {
     return 'kernel';
   }

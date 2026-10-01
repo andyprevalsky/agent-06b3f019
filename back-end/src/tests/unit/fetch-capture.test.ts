@@ -70,7 +70,10 @@ async function readCaptureStatus(
 async function run(): Promise<void> {
   assert.strictEqual(shouldBypassOutboundReplay('https://api.e2b.app/sandboxes'), true);
   assert.strictEqual(shouldBypassOutboundReplay('https://api.onkernel.com/profiles'), true);
-  assert.strictEqual(shouldBypassOutboundReplay('https://api.browser-use.com/api/v4/browsers'), true);
+  assert.strictEqual(
+    shouldBypassOutboundReplay('https://api.browser-use.com/api/v4/browsers'),
+    true
+  );
   assert.strictEqual(
     shouldBypassOutboundReplay('https://api.browser-use.com.example.net/api/v4/browsers'),
     false

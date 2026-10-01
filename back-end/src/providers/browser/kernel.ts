@@ -80,12 +80,11 @@ export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
  * credential injection.
  */
 export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const contexts = browser.contexts();
-  const primaryContext = contexts[0];
+  const primaryContext = browser.contexts()[0];
   if (primaryContext === undefined) {
     throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
   }
-  const pages = contexts.flatMap((context) => context.pages());
+  const pages = browser.contexts().flatMap((context) => context.pages());
   await primaryContext.newPage();
   await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
   return pages.length;

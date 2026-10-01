@@ -22,7 +22,6 @@ import {
   listBrowserUseSessionFiles,
   pressBrowserUseKeys,
   readBrowserUseSessionFile,
-  releaseBrowserUseRemoteSession,
   resumeBrowserUseSession,
   rotateBrowserUseSession,
   uploadBrowserUseSessionFile,

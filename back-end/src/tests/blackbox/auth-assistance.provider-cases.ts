@@ -84,7 +84,7 @@ async function createFixture(label: string, provider: Provider): Promise<Fixture
           ? 'https://proxy.example.onkernel.com/browser/live/auth'
           : provider === 'browser-use'
             ? 'https://live.browser-use.com/session/auth'
-          : 'https://debug.steel.dev/session/auth',
+            : 'https://debug.steel.dev/session/auth',
     },
   });
   return { userId, agentId: agent.id, browserSessionId: session.id, sessionId };
@@ -279,7 +279,10 @@ async function testSteelWithoutProfileFailsClosed(): Promise<void> {
 
 export const authAssistanceProviderCompletionTests: TestCase[] = [
   ['POST /api/auth-assistance/:id/complete resumes Kernel live_view', testKernelCompletion],
-  ['POST /api/auth-assistance/:id/complete resumes Browser Use live_view', testBrowserUseCompletion],
+  [
+    'POST /api/auth-assistance/:id/complete resumes Browser Use live_view',
+    testBrowserUseCompletion,
+  ],
   [
     'POST /api/auth-assistance/:id/complete follows Steel-to-Kernel provider switch',
     testSteelToKernelSwitch,

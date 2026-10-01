@@ -119,7 +119,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
       process.env.BROWSER_USE_API_KEY = 'test-key';
       try {
         withProvider('browser-use', () =>
-          assert(selectedBrowserProvider() === 'kernel', 'disabled Browser Use must fall back to Kernel')
+          assert(
+            selectedBrowserProvider() === 'kernel',
+            'disabled Browser Use must fall back to Kernel'
+          )
         );
       } finally {
         process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
@@ -210,7 +213,10 @@ const tests: Array<[string, () => void | Promise<void>]> = [
       process.env.COMPUTE_GRANT_BROWSER_PROVIDER = 'browser-use';
       process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'false';
       try {
-        assert(computeGrantBrowserProvider() === 'kernel', 'disabled Browser Use must not block compute grants');
+        assert(
+          computeGrantBrowserProvider() === 'kernel',
+          'disabled Browser Use must not block compute grants'
+        );
       } finally {
         process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
         if (previous === undefined) delete process.env.COMPUTE_GRANT_BROWSER_PROVIDER;

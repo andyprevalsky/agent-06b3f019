@@ -20,7 +20,9 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
   const apiKey = process.env.BACKEND_API_KEY;
   const providerKey = process.env.BROWSER_USE_API_KEY;
   if (!base || !apiKey || !providerKey) {
-    throw new Error('Live Browser Use handoff needs TEST_BASE_URL, BACKEND_API_KEY and BROWSER_USE_API_KEY');
+    throw new Error(
+      'Live Browser Use handoff needs TEST_BASE_URL, BACKEND_API_KEY and BROWSER_USE_API_KEY'
+    );
   }
   const userId = `browser-use-handoff-${randomUUID()}`;
   const headers = {
@@ -44,7 +46,12 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
   let viewer: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   await prisma.user.create({ data: { userId } });
   const agent = await prisma.agent.create({
-    data: { userId, goal: 'Verify Browser Use login handoff', status: 'PAUSED', proxyCountry: 'US' },
+    data: {
+      userId,
+      goal: 'Verify Browser Use login handoff',
+      status: 'PAUSED',
+      proxyCountry: 'US',
+    },
   });
   await prisma.browserContext.create({
     data: {
@@ -83,20 +90,33 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
           <button type="submit">Sign in</button>
         `;
         Object.assign(form.style, {
-          position: 'fixed', left: '400px', top: '200px', width: '300px', padding: '12px',
-          zIndex: '2147483647', background: 'white', color: 'black',
+          position: 'fixed',
+          left: '400px',
+          top: '200px',
+          width: '300px',
+          padding: '12px',
+          zIndex: '2147483647',
+          background: 'white',
+          color: 'black',
         });
         for (const element of form.querySelectorAll('label, input, button')) {
           Object.assign((element as HTMLElement).style, {
-            display: 'block', width: '100%', height: '34px', boxSizing: 'border-box',
+            display: 'block',
+            width: '100%',
+            height: '34px',
+            boxSizing: 'border-box',
           });
         }
         for (const label of form.querySelectorAll('label')) label.style.height = '68px';
         form.addEventListener('submit', (event) => {
           event.preventDefault();
           const fields = new FormData(form);
-          if (fields.get('username') !== 'demo-user' ||
-              fields.get('password') !== 'demo-password' || fields.get('code') !== '123456') return;
+          if (
+            fields.get('username') !== 'demo-user' ||
+            fields.get('password') !== 'demo-password' ||
+            fields.get('code') !== '123456'
+          )
+            return;
           document.cookie = 'rose_handoff=signed-in; path=/; max-age=600; SameSite=Lax';
           localStorage.setItem('rose_handoff', 'signed-in');
           form.insertAdjacentHTML('beforeend', '<strong id="rose-signed-in">Signed in</strong>');
@@ -144,8 +164,10 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
       const keypress = await post(`/api/browser-session/${sessionId}/computer/press-key`, {
         keys: ['a'],
       });
-      assert(keypress.supported === true && keypress.pressed === true,
-        'Browser Use keyboard route was not supported');
+      assert(
+        keypress.supported === true && keypress.pressed === true,
+        'Browser Use keyboard route was not supported'
+      );
       await post(`/api/browser-session/${sessionId}/computer/press-key`, {
         keys: ['Backspace'],
       });
@@ -170,8 +192,10 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
     const resumed = await post('/api/browser-session/resume', { task_id: taskId });
     resumedSessionId = String(resumed.session_id);
     assert(resumedSessionId !== sessionId, 'Resume reused the stopped remote browser');
-    assert(asRecord(resumed.browser_session_metadata).profile_id === profileId,
-      'Resume changed the persistent Browser Use profile');
+    assert(
+      asRecord(resumed.browser_session_metadata).profile_id === profileId,
+      'Resume changed the persistent Browser Use profile'
+    );
     const next = await chromium.connectOverCDP(String(resumed.ws_url));
     try {
       const context = next.contexts()[0];
@@ -188,7 +212,9 @@ export async function runLiveBrowserUseHandoff(): Promise<void> {
     } finally {
       await next.close();
     }
-    console.log('PASS live Browser Use iframe handoff, auth completion, and immediate profile reuse');
+    console.log(
+      'PASS live Browser Use iframe handoff, auth completion, and immediate profile reuse'
+    );
   } finally {
     await viewer?.close().catch(() => {});
     for (const id of [sessionId, resumedSessionId]) {

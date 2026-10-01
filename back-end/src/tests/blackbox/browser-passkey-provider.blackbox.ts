@@ -184,6 +184,7 @@ async function run(): Promise<void> {
   let kernel: Awaited<ReturnType<typeof createKernelRecoverySession>> | undefined;
   let steel: Awaited<ReturnType<typeof createSteelRecoverySession>> | undefined;
   let browserUse: Awaited<ReturnType<typeof createBrowserUseRecoverySession>> | undefined;
+  let failure: unknown;
   try {
     kernel = await createKernelRecoverySession(randomUUID(), DEFAULT_GEOLOCATION, {
       omitManagedProxy: true,
@@ -204,6 +205,8 @@ async function run(): Promise<void> {
     assert(browserUse.validationBrowser, 'Browser Use validation browser unavailable');
     await assertTransferredPasskey('Browser Use', browserUse.validationBrowser, key);
     await browserUse.validationBrowser.close();
+  } catch (error) {
+    failure = error;
   } finally {
     const results = await Promise.allSettled([
       kernel?.validationBrowser?.close(),
@@ -214,8 +217,9 @@ async function run(): Promise<void> {
       browserUse && releaseBrowserUseRemoteSession(browserUse.sessionId),
     ]);
     const rejected = results.find((result) => result.status === 'rejected');
-    if (rejected?.status === 'rejected') throw rejected.reason;
+    if (rejected?.status === 'rejected' && failure === undefined) failure = rejected.reason;
   }
+  if (failure !== undefined) throw failure;
 }
 
 if (process.env.RUN_BROWSER_PASSKEY_LIVE === '1') {
