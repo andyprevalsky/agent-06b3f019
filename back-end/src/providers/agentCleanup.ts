@@ -5,12 +5,24 @@ import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
 import { closeSession } from './browser';
+import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 
 const log = createLogger('Cleanup');
 
 export interface BrowserSessionReleaseDependencies {
   findActiveSessions: (agentId: string) => Promise<Array<{ sessionId: string }>>;
   closeSession: (sessionId: string, pause: boolean) => Promise<void>;
+}
+
+interface ActiveCodeSession {
+  id: string;
+  sandboxId: string;
+}
+
+export interface CodeSessionReleaseDependencies {
+  findActiveCodeSessions: (agentId: string) => Promise<ActiveCodeSession[]>;
+  killSandbox: (session: ActiveCodeSession) => Promise<void>;
+  markClosed: (sessionId: string) => Promise<void>;
 }
 
 export interface TerminalBrowserReleaseDependencies {
@@ -58,6 +70,32 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
         select: { sessionId: true },
       }),
     closeSession,
+  };
+}
+
+function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
+  return {
+    findActiveCodeSessions: async (agentId: string) =>
+      prisma.claudeCodeSession.findMany({
+        where: { agentId, status: 'ACTIVE' },
+        select: { id: true, sandboxId: true },
+      }),
+    killSandbox: async (session) => {
+      if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
+        await closeLocalClaudeCodeSession(session.id);
+        return;
+      }
+      const sandbox = await Sandbox.connect(session.sandboxId, {
+        apiKey: process.env.E2B_API_KEY,
+      });
+      await sandbox.kill();
+    },
+    markClosed: async (sessionId: string) => {
+      await prisma.claudeCodeSession.update({
+        where: { id: sessionId },
+        data: { status: 'CLOSED', closedAt: new Date() },
+      });
+    },
   };
 }
 
@@ -282,50 +320,85 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
     });
   }
 
-  // --- E2B Claude Code sessions ---
   try {
-    const activeCodeSessions = await prisma.claudeCodeSession.findMany({
-      where: {
-        agentId,
-        status: 'ACTIVE',
-      },
-      select: { id: true, sandboxId: true },
-    });
-
-    if (activeCodeSessions.length > 0) {
-      log.info(`Killing ${activeCodeSessions.length} E2B sandbox(es) for agent ${agentId}`);
-    }
-
-    for (const session of activeCodeSessions) {
-      try {
-        const sandbox = await Sandbox.connect(session.sandboxId, {
-          apiKey: process.env.E2B_API_KEY,
-        });
-        await sandbox.kill();
-        log.info(`Killed E2B sandbox ${session.sandboxId}`);
-      } catch (error) {
-        log.warn(`Failed to kill E2B sandbox ${session.sandboxId}`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-
-      try {
-        await prisma.claudeCodeSession.update({
-          where: { id: session.id },
-          data: {
-            status: 'CLOSED',
-            closedAt: new Date(),
-          },
-        });
-      } catch (dbError) {
-        log.warn(`Failed to update E2B session DB status ${session.id}`, {
-          error: dbError instanceof Error ? dbError.message : String(dbError),
-        });
-      }
-    }
+    await releaseAgentCodeSessions(agentId);
   } catch (error) {
     log.warn(`Failed to query E2B sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Kill every code sandbox (E2B or local) an agent still holds and close its row.
+ *
+ * The Python code-agent activity closes its own sandbox, but it cannot when its
+ * worker is dead, and a replaced workflow never schedules the retry that would
+ * reattach to it. Without this the old Claude Code CLI keeps working next to the
+ * replacement run until E2B's own timeout.
+ *
+ * A kill failure is logged and the row is still closed: the sandbox's E2B
+ * timeout bounds whatever survives. Throws only when the lookup itself fails.
+ */
+export async function releaseAgentCodeSessions(
+  agentId: string,
+  overrides: Partial<CodeSessionReleaseDependencies> = {}
+): Promise<number> {
+  const dependencies = { ...codeSessionReleaseDependencies(), ...overrides };
+  const activeCodeSessions = await dependencies.findActiveCodeSessions(agentId);
+  if (activeCodeSessions.length > 0) {
+    log.info(`Killing ${activeCodeSessions.length} code sandbox(es) for agent ${agentId}`);
+  }
+
+  let released = 0;
+  for (const session of activeCodeSessions) {
+    try {
+      await dependencies.killSandbox(session);
+      log.info(`Killed code sandbox ${session.sandboxId}`);
+    } catch (error) {
+      log.warn(`Failed to kill code sandbox ${session.sandboxId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      await dependencies.markClosed(session.id);
+      released += 1;
+    } catch (dbError) {
+      log.warn(`Failed to update code session DB status ${session.id}`, {
+        error: dbError instanceof Error ? dbError.message : String(dbError),
+      });
+    }
+  }
+  return released;
+}
+
+/**
+ * Release what a terminated workflow's activities rented for one agent: browser
+ * sessions and code sandboxes. Temporal `terminate()` does not stop in-flight
+ * activities, a dead worker cannot run their own cleanup, and a replacement
+ * never reattaches to them. Callers that terminate a workflow without going
+ * through `updateAgentStatus`'s terminal hook must call this.
+ *
+ * Never throws: a provider outage must not block a cutover. 10k agents: one
+ * query + one release per resource owned by the ONE agent being terminated.
+ */
+export async function releaseTerminatedWorkflowResources(
+  agentId: string,
+  caller: string
+): Promise<void> {
+  const releases = [
+    ['browser', releaseAgentBrowserSessions],
+    ['code sandbox', releaseAgentCodeSessions],
+  ] as const;
+  for (const [resource, release] of releases) {
+    try {
+      await release(agentId);
+    } catch (error) {
+      log.warn(`${caller} ${resource} release unavailable`, {
+        agent_id: agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
