@@ -2013,7 +2013,30 @@ start_public_tunnel() {
             echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
             exit 1
             ;;
-        ngrok) start_ngrok_public_tunnel ;;
+        ngrok)
+            # The worktree domain is account-wide, and cloud VMs booted from one
+            # environment snapshot share the same .cloud-env workspace name, so
+            # a sibling can already hold it. Take an account-less origin for
+            # this stack instead of dying; every other ngrok failure stays fatal.
+            local origins_before_ngrok="$ALLOWED_ORIGINS"
+            NGROK_PUBLIC_TUNNEL_NONFATAL=1
+            if start_ngrok_public_tunnel; then
+                NGROK_PUBLIC_TUNNEL_NONFATAL=0
+                return 0
+            fi
+            NGROK_PUBLIC_TUNNEL_NONFATAL=0
+            ngrok_log_reports_endpoint_online_elsewhere "$RUN_CONTEXT_DIR/ngrok.log" || exit 1
+            echo "⚠️  ${WORKTREE_DOMAIN:-The reserved ngrok domain} is online in another ngrok session; using an account-less tunnel for this stack." >&2
+            reap_failed_ngrok_tunnel
+            unset PUBLIC_BASE_URL WORKTREE_DOMAIN VITE_ALLOWED_HOSTS 2>/dev/null || true
+            export ALLOWED_ORIGINS="$origins_before_ngrok"
+            if command -v cloudflared >/dev/null 2>&1; then
+                start_cloudflare_quick_tunnel && return 0
+            fi
+            start_localtunnel_public_tunnel && return 0
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (reserved ngrok domain held elsewhere; tried cloudflare, localtunnel)." >&2
+            exit 1
+            ;;
         *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
     esac
 }

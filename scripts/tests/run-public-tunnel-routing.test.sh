@@ -170,4 +170,105 @@ fi
   || fail "case 8: start_ngrok_public_tunnel still bare-exits on missing authtoken"
 echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
 
+# --- case 9: ngrok mode survives a reserved domain held by another session ---
+# RCA cement (2026-10-01). Cloud VMs booted from one environment snapshot share
+# .cloud-env's workspace name, so they all derive the same reserved domain. A
+# sibling VM held rose-cloud-44cb5599.ngrok.app, ngrok exited with
+# ERR_NGROK_334, and the fatal ngrok path tore down /deploy's Step 5 stack.
+# Drive the shipped start_public_tunnel with provider stubs; any other ngrok
+# failure must stay fatal.
+{
+  awk '/^ngrok_public_tunnel_fail\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^reap_failed_ngrok_tunnel\(\) \{$/,/^\}$/' "$RUN_SH"
+  awk '/^start_public_tunnel\(\) \{$/,/^\}$/' "$RUN_SH"
+} > "$TMP/ngrok_mode.sh"
+grep -q 'ngrok_log_reports_endpoint_online_elsewhere' "$TMP/ngrok_mode.sh" \
+  || fail "case 9: start_public_tunnel no longer classifies a reserved domain held elsewhere"
+
+mkdir -p "$TMP/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/cloudflared"
+chmod +x "$TMP/bin/cloudflared"
+
+run_ngrok_mode() { # run_ngrok_mode <ngrok_ok> <ngrok_log_line> <cloudflare_ok>
+  mkdir -p "$TMP/ctx"
+  rm -f "$TMP/ctx/ngrok.log" "$TMP/ctx/calls"
+  PATH="$TMP/bin:$PATH" \
+  STUB_NGROK_OK="$1" STUB_NGROK_LOG_LINE="$2" STUB_CLOUDFLARE_OK="$3" \
+    RUN_CONTEXT_DIR="$TMP/ctx" ROOT_DIR="$ROOT_DIR" FN_FILE="$TMP/ngrok_mode.sh" \
+    bash -c '
+      set -euo pipefail
+      source "$ROOT_DIR/scripts/lib/ngrok-tunnel.sh"
+      source "$FN_FILE"
+      NGROK_PUBLIC_TUNNEL_NONFATAL=0
+      BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=0
+      FRONTEND_PORT=3002
+      ALLOWED_ORIGINS="http://localhost:3002"
+      PIDS=(); NAMES=()
+      start_ngrok_public_tunnel() {
+        echo ngrok >> "$RUN_CONTEXT_DIR/calls"
+        WORKTREE_DOMAIN="rose-held.ngrok.app"
+        PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+        ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+        sleep 0 & NGROK_PID=$!
+        PIDS+=("$NGROK_PID"); NAMES+=(ngrok)
+        printf "%s\n" "$STUB_NGROK_LOG_LINE" > "$RUN_CONTEXT_DIR/ngrok.log"
+        [ "$STUB_NGROK_OK" = 1 ] && return 0
+        ngrok_public_tunnel_fail "stub ngrok exited" || return 1
+      }
+      start_cloudflare_quick_tunnel() {
+        echo cloudflare >> "$RUN_CONTEXT_DIR/calls"
+        [ "$STUB_CLOUDFLARE_OK" = 1 ] || return 1
+        public_tunnel_publish_environment "https://stub.trycloudflare.com" "$ALLOWED_ORIGINS"
+        sleep 30 & NGROK_PID=$!
+        PIDS+=("$NGROK_PID"); NAMES+=(cloudflared)
+      }
+      start_localtunnel_public_tunnel() {
+        echo localtunnel >> "$RUN_CONTEXT_DIR/calls"
+        public_tunnel_publish_environment "https://stub.loca.lt" "$ALLOWED_ORIGINS"
+      }
+      start_public_tunnel
+      echo "url=$PUBLIC_BASE_URL"
+      echo "origins=$ALLOWED_ORIGINS"
+      echo "names=${NAMES[*]:-}"
+      [ -z "${NGROK_PID:-}" ] || kill "$NGROK_PID" 2>/dev/null || true
+    ' 2>"$TMP/ngrok_mode.err"
+}
+
+held_line='lvl=crit msg="command failed" err="failed to start tunnel: The endpoint is already online. ERR_NGROK_334"'
+
+out="$(run_ngrok_mode 0 "$held_line" 1)" \
+  || fail "case 9a: a reserved domain held by another session must not tear the stack down ($(cat "$TMP/ngrok_mode.err"))"
+printf '%s\n' "$out" | grep -qx 'url=https://stub.trycloudflare.com' \
+  || fail "case 9a: expected the account-less cloudflare origin, got: $out"
+printf '%s\n' "$out" | grep -q 'rose-held.ngrok.app' \
+  && fail "case 9a: the held domain must not stay in PUBLIC_BASE_URL/ALLOWED_ORIGINS: $out"
+printf '%s\n' "$out" | grep -qx 'names=cloudflared' \
+  || fail "case 9a: the dead ngrok service must be de-registered, got: $out"
+[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare " ] \
+  || fail "case 9a: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
+echo "PASS: ERR_NGROK_334 falls back to an account-less cloudflare origin"
+
+out="$(run_ngrok_mode 0 "$held_line" 0)" \
+  || fail "case 9b: localtunnel must serve when cloudflare also fails ($(cat "$TMP/ngrok_mode.err"))"
+printf '%s\n' "$out" | grep -qx 'url=https://stub.loca.lt' \
+  || fail "case 9b: expected the localtunnel origin, got: $out"
+[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare localtunnel " ] \
+  || fail "case 9b: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
+echo "PASS: ERR_NGROK_334 reaches localtunnel when cloudflare cannot route"
+
+if out="$(run_ngrok_mode 0 'lvl=crit msg="command failed" err="authentication failed ERR_NGROK_107"' 1)"; then
+  fail "case 9c: a non-collision ngrok failure must stay fatal, got: $out"
+fi
+[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok " ] \
+  || fail "case 9c: a fatal ngrok failure must not try other providers: $(tr '\n' ' ' < "$TMP/ctx/calls")"
+echo "PASS: other ngrok failures remain fatal in ngrok mode"
+
+out="$(run_ngrok_mode 1 'lvl=info msg="started tunnel"' 1)" \
+  || fail "case 9d: a healthy ngrok tunnel must succeed ($(cat "$TMP/ngrok_mode.err"))"
+printf '%s\n' "$out" | grep -qx 'url=https://rose-held.ngrok.app' \
+  || fail "case 9d: a healthy reserved domain must stay the public origin, got: $out"
+[ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok " ] \
+  || fail "case 9d: a healthy ngrok tunnel must not try fallbacks: $(tr '\n' ' ' < "$TMP/ctx/calls")"
+echo "PASS: a healthy reserved ngrok domain is used without fallback"
+
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

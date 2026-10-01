@@ -20,6 +20,13 @@ public_tunnel_process_is_required() {
     [ "$process_name" = "cloudflared" ]
 }
 
+# ERR_NGROK_334: the bound domain is already online in a different agent
+# session. That session can belong to another checkout or another VM booted
+# from the same environment snapshot, so it is never this stack's to stop.
+ngrok_log_reports_endpoint_online_elsewhere() {
+  [ -f "${1:-}" ] && grep -q 'ERR_NGROK_334' "$1"
+}
+
 ngrok_configure_endpoint_mode() {
   local ephemeral="$1" domain="${2:-}"
   NGROK_ENDPOINT_ARGS=()
