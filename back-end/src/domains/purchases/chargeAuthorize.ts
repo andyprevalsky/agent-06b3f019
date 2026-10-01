@@ -33,9 +33,13 @@ export async function authorizeStripeHold(
   state: ChargeState,
   purchase: PurchaseSpend,
   input: MintPurchaseInput,
-  stripeCustomerId: string
+  stripeCustomerId: string,
+  stripeSubscriptionId?: string
 ): Promise<StripePaymentIntent> {
-  const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
+  const paymentMethodId = await getCustomerDefaultPaymentMethodId(
+    stripeCustomerId,
+    stripeSubscriptionId
+  );
   const stripeRequest = {
     amount: input.totalCents,
     currency: 'usd',

@@ -7,7 +7,7 @@ must hit live production (same contract as /deploy Step 13c).
 Exit codes:
   0 — every named task exists and is production_only (names printed, one per line)
   1 — valid catalog, but the batch is not an all-production_only set (or empty)
-  2 — catalog unavailable / invalid JSON (must fail closed, never look like 1)
+  2 — catalog unavailable / invalid JSON or unknown task (fail closed)
 """
 
 from __future__ import annotations
@@ -78,8 +78,10 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
-    if any(name not in by_name for name in tasks):
-        return 1
+    unknown = [name for name in tasks if name not in by_name]
+    if unknown:
+        print(f"❌ production-only helper: unknown benchmark task(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
     if not all(by_name[name].get("production_only") is True for name in tasks):
         return 1
     for name in tasks:

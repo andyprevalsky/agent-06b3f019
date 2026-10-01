@@ -48,7 +48,7 @@ assert_rejected_before_fly() { # assert_rejected_before_fly <label> <expected-te
 
 assert_rejected_before_fly public-no-autoscale \
     "Unknown flag: --no-autoscale" \
-    bash "$ROOT_DIR/scripts/run-bench" acceptance-probe --no-autoscale
+    bash "$ROOT_DIR/scripts/run-bench" chat-mode --no-autoscale
 assert_rejected_before_fly fleet-no-autoscale \
     "Unknown flag: --no-autoscale" \
     bash "$ROOT_DIR/scripts/run-bench-fleet" acceptance-probe --no-autoscale

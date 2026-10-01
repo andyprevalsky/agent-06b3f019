@@ -4,6 +4,7 @@
  */
 
 import { config } from 'dotenv';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 
 config();
@@ -62,14 +63,14 @@ async function testInvalidUrlRejected() {
   );
 }
 
-async function testJsonPlaceholderGet() {
+async function testHttpbinGet() {
   const raw = await requestJson('/api/external-http/request', {
     method: 'GET',
-    url: 'https://jsonplaceholder.typicode.com/todos/1',
+    url: 'https://httpbin.org/json',
   });
   const parsed = ResponseSchema.parse(raw);
   if (!parsed.ok || parsed.status !== 200) {
-    throw new Error(`Expected successful JSON placeholder response, got ${JSON.stringify(parsed)}`);
+    throw new Error(`Expected successful httpbin JSON response, got ${JSON.stringify(parsed)}`);
   }
   if (parsed.body_encoding !== 'json' || typeof parsed.body !== 'object') {
     throw new Error(`Expected JSON body, got ${parsed.body_encoding}`);
@@ -77,14 +78,18 @@ async function testJsonPlaceholderGet() {
 }
 
 async function testPostEcho() {
+  const sent = { title: 'rose', body: 'api_request', userId: 1 };
   const raw = await requestJson('/api/external-http/request', {
     method: 'POST',
-    url: 'https://jsonplaceholder.typicode.com/posts',
-    body: { title: 'rose', body: 'api_request', userId: 1 },
+    url: 'https://httpbin.org/post',
+    body: sent,
   });
   const parsed = ResponseSchema.parse(raw);
-  if (parsed.status !== 201 && parsed.status !== 200) {
-    throw new Error(`Unexpected POST status ${parsed.status}`);
+  const echoed = parsed.body as { json?: unknown };
+  if (parsed.status !== 200 || !isDeepStrictEqual(echoed.json, sent)) {
+    throw new Error(
+      `POST echo mismatch: status ${parsed.status}, body ${JSON.stringify(parsed.body)}`
+    );
   }
 }
 
@@ -137,8 +142,8 @@ async function testGithubSearchWhenTokenPresent() {
 const tests = [
   { name: 'auth boundary', fn: testAuthBoundary },
   { name: 'invalid url rejected', fn: testInvalidUrlRejected },
-  { name: 'jsonplaceholder GET', fn: testJsonPlaceholderGet },
-  { name: 'jsonplaceholder POST', fn: testPostEcho },
+  { name: 'httpbin GET', fn: testHttpbinGet },
+  { name: 'httpbin POST echo', fn: testPostEcho },
   { name: 'github search live', fn: testGithubSearchWhenTokenPresent },
 ];
 

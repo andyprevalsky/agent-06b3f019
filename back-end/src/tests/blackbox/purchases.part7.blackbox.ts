@@ -13,6 +13,8 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { stripe } from '../../providers/stripe';
+import { getCustomerDefaultPaymentMethodId } from '../../domains/purchases/stripeCustomer';
 import {
   BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID,
   BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
@@ -432,6 +434,75 @@ async function forceFlagWithoutBenchmarkModeKeepsAdminPath(): Promise<void> {
   console.log('PASS force flag without benchmark mode keeps the admin company-card path');
 }
 
+async function stripeCustomerResolverRejectsInvalidDefaults(): Promise<void> {
+  const customers = stripe.customers as unknown as {
+    retrieve: (id: string) => Promise<unknown>;
+  };
+  const subscriptions = stripe.subscriptions as unknown as {
+    retrieve: (id: string) => Promise<unknown>;
+  };
+  const originals = { customer: customers.retrieve, subscription: subscriptions.retrieve };
+  const expectResolverError = async (
+    customerId: string,
+    subscriptionId?: string
+  ): Promise<string> => {
+    try {
+      await getCustomerDefaultPaymentMethodId(customerId, subscriptionId);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error('expected the resolver to throw');
+  };
+  try {
+    customers.retrieve = async (id: string) => ({ id, deleted: true });
+    assert((await expectResolverError('cus_deleted')).includes('deleted'), 'deleted customer');
+
+    customers.retrieve = async (id: string) => ({
+      id,
+      invoice_settings: { default_payment_method: { id: 'pm_object_default' } },
+    });
+    const objectPm = await getCustomerDefaultPaymentMethodId('cus_object');
+    assert(objectPm === 'pm_object_default', `expanded PM: ${objectPm}`);
+
+    customers.retrieve = async (id: string) => ({ id, invoice_settings: {} });
+    assert(
+      (await expectResolverError('cus_none')).includes('default Stripe payment method'),
+      'missing PM'
+    );
+
+    subscriptions.retrieve = async (id: string) => ({
+      id,
+      customer: 'cus_checkout',
+      status: 'active',
+      default_payment_method: 'pm_checkout',
+    });
+    const checkoutPm = await getCustomerDefaultPaymentMethodId('cus_checkout', 'sub_checkout');
+    assert(checkoutPm === 'pm_checkout', `Checkout PM: ${checkoutPm}`);
+    assert(
+      (await expectResolverError('cus_other', 'sub_checkout')).includes(
+        'default Stripe payment method'
+      ),
+      'foreign subscription PM'
+    );
+    subscriptions.retrieve = async (id: string) => ({
+      id,
+      customer: 'cus_checkout',
+      status: 'canceled',
+      default_payment_method: 'pm_checkout',
+    });
+    assert(
+      (await expectResolverError('cus_checkout', 'sub_checkout')).includes(
+        'default Stripe payment method'
+      ),
+      'inactive subscription PM'
+    );
+  } finally {
+    customers.retrieve = originals.customer;
+    subscriptions.retrieve = originals.subscription;
+  }
+  console.log('PASS stripe customer resolver rejects invalid payment defaults');
+}
+
 async function main(): Promise<void> {
   try {
     await adminMintIssuesCompanyCardWithoutCharge();
@@ -439,6 +510,7 @@ async function main(): Promise<void> {
     await benchmarkPaymentIdentityProducesTheAssertedStripeHold();
     await adminWithForcedCustomerPathProducesStripeHold();
     await forceFlagWithoutBenchmarkModeKeepsAdminPath();
+    await stripeCustomerResolverRejectsInvalidDefaults();
   } finally {
     await prisma.$disconnect();
   }

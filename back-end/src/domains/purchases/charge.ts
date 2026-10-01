@@ -275,7 +275,8 @@ export async function chargeAndIssueCard(
   input: MintPurchaseInput,
   stripeCustomerId: string,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
+  walletFundingProvider?: WalletFundingProvider,
+  stripeSubscriptionId?: string
 ): Promise<MintPurchaseResult> {
   const fundingRetryClaimed = purchase.cardId === null && purchase.stripePaymentIntentId !== null;
   const state: ChargeState = {
@@ -297,7 +298,13 @@ export async function chargeAndIssueCard(
     state.walletWasFunded =
       preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
       preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
-    const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
+    const paymentIntent = await authorizeStripeHold(
+      state,
+      purchase,
+      input,
+      stripeCustomerId,
+      stripeSubscriptionId
+    );
     return await mintCaptureAndIssue(
       state,
       purchase,

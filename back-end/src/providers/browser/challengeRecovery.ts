@@ -17,6 +17,7 @@ import {
 import { createKernelRecoverySession, releaseKernelRemoteSession } from './kernel';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import { raceProbeAbort, sameSiteNavigationUrl } from './challengeRecoveryShared';
+import { restoredTunnelCandidate } from './challengeRecoveryTransport';
 import type { BrowserProviderName } from './types';
 
 export { recoveryConfigKeyForSession, sameSiteNavigationUrl } from './challengeRecoveryShared';
@@ -208,6 +209,10 @@ export async function probeCandidateBrowser(
     // Tool-parity classifier inputs: accumulate network like BrowserNetworkRecorder
     // / read_network_requests (status + truncated bodies), not perf timings alone.
     const networkEntries: NetworkSummaryEntry[] = [];
+    const failedRequestUrls: string[] = [];
+    const onRequestFailed = (request: import('playwright').Request) => {
+      failedRequestUrls.push(request.url());
+    };
     const pendingResponses = new Set<Promise<void>>();
     const onResponse = async (res: import('playwright').Response) => {
       const task = (async () => {
@@ -250,6 +255,7 @@ export async function probeCandidateBrowser(
     };
     if (typeof (page as { on?: unknown }).on === 'function') {
       page.on('response', onResponse);
+      page.on('requestfailed', onRequestFailed);
     }
     const response = await raceProbeAbort(
       page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => null),
@@ -317,11 +323,38 @@ export async function probeCandidateBrowser(
     );
     if (typeof (page as { off?: unknown }).off === 'function') {
       page.off('response', onResponse);
+      page.off('requestfailed', onRequestFailed);
     }
     if (attempt.usage) classifierLlmUsage.push(attempt.usage);
-    classifierChallenged = !attempt.clean;
-    classifierReason = attempt.reason ?? undefined;
-    if (!attempt.clean) {
+    const transportRestored =
+      !attempt.clean &&
+      restoredTunnelCandidate({
+        recoveryReason,
+        classifierReason: attempt.reason ?? '',
+        targetUrl,
+        blockedResourceUrl: logContext.blockedResourceUrl,
+        pageUrl: page.url(),
+        documentUrl: response?.url() ?? '',
+        documentStatus: response?.status() ?? null,
+        documentMethod: response?.request().method() ?? '',
+        cleanedDom: agentDomTree,
+        networkEntries,
+        failedRequestUrls,
+      });
+    if (transportRestored) {
+      log.info('Challenge recovery candidate restored same-origin proxy tunnel', {
+        ...logContext,
+        targetUrl,
+        documentStatus: response?.status(),
+        classifierReason: attempt.reason,
+      });
+    }
+    const clean = attempt.clean || transportRestored;
+    classifierChallenged = !clean;
+    classifierReason = transportRestored
+      ? 'Same-origin proxy tunnel restored'
+      : (attempt.reason ?? undefined);
+    if (!clean) {
       log.info('Challenge recovery candidate probe attempt still challenged', {
         ...logContext,
         attempt: 1,

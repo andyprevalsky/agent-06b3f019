@@ -320,10 +320,27 @@ require_text "$PREFLIGHT" 'hydrate_seed_cache' "deploy-worktree prep must hydrat
 mkdir -p "$deploy_system/node_modules" "$deploy_system/agents/venv/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_system/agents/venv/bin/python"
 chmod +x "$deploy_system/agents/venv/bin/python"
-if ! command -v pg_isready >/dev/null 2>&1 || ! pg_isready -h localhost -p 5432 -U postgres -q 2>/dev/null; then
-  fail "system Postgres on localhost:5432 is required to cement ROSE_USE_SYSTEM_PG deploy-worktree prep"
-fi
-ROSE_USE_SYSTEM_PG=true PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+cat >"$fake_bin/pg_isready" <<'PG_ISREADY'
+#!/usr/bin/env bash
+exit 0
+PG_ISREADY
+cat >"$fake_bin/psql" <<'PSQL'
+#!/usr/bin/env bash
+set -euo pipefail
+query="${*: -1}"
+db="${query#*datname = \'}"
+db="${db%%\'*}"
+[ -f "${FAKE_SYSTEM_PG_STATE:?}/$db" ] && printf '1\n'
+PSQL
+cat >"$fake_bin/createdb" <<'CREATEDB'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${FAKE_SYSTEM_PG_STATE:?}"
+touch "$FAKE_SYSTEM_PG_STATE/${*: -1}"
+CREATEDB
+chmod +x "$fake_bin/pg_isready" "$fake_bin/psql" "$fake_bin/createdb"
+fake_system_pg_state="$TMP_ROOT/system-pg"
+ROSE_USE_SYSTEM_PG=true PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" FAKE_SYSTEM_PG_STATE="$fake_system_pg_state" \
   bash "$PREFLIGHT" \
     --worktree "$deploy_system" \
     --source "$controller" \
@@ -335,18 +352,17 @@ system_name="$(
   printf '%s' "$CONDUCTOR_WORKSPACE_NAME"
 )"
 system_db="victoria_deploy_$(printf '%s' "$system_name" | tr -c '[:alnum:]' '_' | cut -c1-48)"
-trap 'PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$system_db" >/dev/null 2>&1 || true; rm -rf "$TMP_ROOT"' EXIT
 grep -Eq '^export ROSE_USE_SYSTEM_PG=true[[:space:]]*$' \
   "$deploy_system/.context/deploy-worktree.env" \
   || fail "system Postgres prepare must persist ROSE_USE_SYSTEM_PG into deploy-worktree.env"
 expect_eq "$(cat "$deploy_system/.context/deploy-system-pg.db")" "$system_db" \
   "system Postgres prepare writes the isolated database marker"
-PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -tAc \
+PATH="$fake_bin:$PATH" FAKE_SYSTEM_PG_STATE="$fake_system_pg_state" PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -tAc \
   "SELECT 1 FROM pg_database WHERE datname = '$system_db'" | grep -q '^1$' \
   || fail "system Postgres prepare must create the isolated database"
 # Clean-shell --check: only the persisted env file, no ambient ROSE_USE_SYSTEM_PG.
 env -u ROSE_USE_SYSTEM_PG \
-  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" FAKE_SYSTEM_PG_STATE="$fake_system_pg_state" \
   bash -c "
     cd \"$deploy_system\"
     # shellcheck disable=SC1091
@@ -358,7 +374,7 @@ rm -f "$deploy_system/.context/deploy-system-pg.db"
 set +e
 missing_marker_output="$(
   env -u ROSE_USE_SYSTEM_PG \
-    PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" FAKE_SYSTEM_PG_STATE="$fake_system_pg_state" \
     bash -c "
       cd \"$deploy_system\"
       # shellcheck disable=SC1091

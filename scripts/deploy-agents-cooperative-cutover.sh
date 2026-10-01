@@ -65,6 +65,29 @@ machine_ids_for_hash() {
   '
 }
 
+# A prior clone can succeed on Fly while flyctl times out waiting for it to
+# start. It may still carry the template's old env, or it may already carry
+# this generation's hash but be stopped with an earlier deployment token.
+candidate_ids_for_hash() {
+  local hash="$1"
+  flyctl machines list -a "$APP" --json | jq -r --arg h "$hash" '
+    .[]
+    | select((.name // "") | startswith("gen-" + $h + "-"))
+    | .id
+  '
+}
+
+configure_new_machine() {
+  local id="$1"
+  flyctl machine update "$id" -a "$APP" --image "$IMAGE_REF" --yes \
+    --skip-start --skip-health-checks \
+    --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
+    --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
+    --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
+    --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"
+  flyctl machines start "$id" -a "$APP" || true
+}
+
 all_started_ids() {
   flyctl machines list -a "$APP" --json | jq -r '.[] | select(.state=="started") | .id'
 }
@@ -133,15 +156,22 @@ if [ -z "$TEMPLATE_ID" ]; then
   exit 1
 fi
 
+for ID in $(candidate_ids_for_hash "$SURFACE_HASH"); do
+  echo "Adopting previously cloned machine $ID for generation $SURFACE_HASH"
+  configure_new_machine "$ID"
+done
+
 EXISTING_NEW="$(machine_ids_for_hash "$SURFACE_HASH" | wc -l | tr -d ' ')"
 NEED=$((MIN - EXISTING_NEW))
 if [ "$NEED" -lt 0 ]; then NEED=0; fi
 echo "New-gen machines present=$EXISTING_NEW need_create=$NEED (min=$MIN)"
 
-for i in $(seq 1 "$NEED"); do
+for ((i = 1; i <= NEED; i++)); do
   NAME="gen-${SURFACE_HASH}-$(date +%s)-$i"
   echo "Cloning template $TEMPLATE_ID -> $NAME"
-  CLONE_OUT="$(flyctl machine clone "$TEMPLATE_ID" -a "$APP" --name "$NAME" 2>&1)" || {
+  # clone --detach returns once the Machine exists. The cloned old image may
+  # start and stop before flyctl's default five-minute state wait completes.
+  CLONE_OUT="$(flyctl machine clone "$TEMPLATE_ID" -a "$APP" --name "$NAME" --detach 2>&1)" || {
     echo "❌ machine clone failed: $CLONE_OUT" >&2
     exit 1
   }
@@ -155,12 +185,7 @@ for i in $(seq 1 "$NEED"); do
     echo "❌ machine clone failed (no id): $CLONE_OUT" >&2
     exit 1
   fi
-  flyctl machine update "$NEW_ID" -a "$APP" --image "$IMAGE_REF" --yes \
-    --env "TEMPORAL_WORKER_BUILD_ID=$BUILD_ID" \
-    --env "TEMPORAL_WORKER_SURFACE_HASH=$SURFACE_HASH" \
-    --env "TEMPORAL_WORKER_DEPLOYMENT_TOKEN=$DEPLOYMENT_TOKEN" \
-    --env "TEMPORAL_WORKER_REQUIRE_ACTIVATION=0"
-  flyctl machines start "$NEW_ID" -a "$APP" || true
+  configure_new_machine "$NEW_ID"
 done
 
 echo "Waiting for new-gen machines to pass /health..."
@@ -178,6 +203,11 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   fi
   sleep 5
 done
+
+if [ "$healthy" -lt "$MIN" ]; then
+  echo "❌ only $healthy / $MIN new-generation machines started; refusing to flip the queue pointer" >&2
+  exit 1
+fi
 
 cd "$ROOT/back-end"
 echo "Flipping AgentQueuePointer to $GENERATION_QUEUE"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import os
 import re
@@ -11,9 +12,11 @@ import socket
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 
 SAFE_BARRIER = re.compile(r"[A-Za-z0-9._-]+")
+MAX_LOG_CHUNK_BYTES = 262_144
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,6 +64,19 @@ def main() -> int:
             self.end_headers()
 
         def do_GET(self) -> None:
+            request = urlsplit(self.path)
+            log_path = root / "bench.log"
+            translated = Path(self.translate_path(self.path))
+            try:
+                aliases_log = log_path.is_file() and translated.samefile(log_path)
+            except OSError:
+                aliases_log = False
+            if request.path == "/bench.log":
+                self._serve_log_chunk(request.query)
+                return
+            if aliases_log:
+                self.send_error(400, "bench.log requires a bounded exact-path request")
+                return
             if self.path != "/driver-health":
                 super().do_GET()
                 return
@@ -79,11 +95,78 @@ def main() -> int:
                 return
             try:
                 pid = int((root / "cloudbench-driver.pid").read_text().strip())
-                os.kill(pid, 0)
             except (OSError, ValueError):
+                # The boot supervisor can reap the child before sealing the
+                # final log and state. A missing PID is still nonterminal.
+                self.send_error(503, "driver finalization is pending")
+                return
+            try:
+                os.kill(pid, 0)
+            except OSError:
                 self.send_error(410, "driver is not running")
                 return
             self.send_response(204)
+            self.end_headers()
+
+        def _serve_log_chunk(self, query: str) -> None:
+            params = parse_qs(query, keep_blank_values=True)
+            if set(params) != {"offset", "limit"} or any(len(values) != 1 for values in params.values()):
+                self.send_error(400, "offset and limit are required")
+                return
+            raw_offset, raw_limit = params["offset"][0], params["limit"][0]
+            if not re.fullmatch(r"0|[1-9][0-9]*", raw_offset) or not re.fullmatch(r"[1-9][0-9]*", raw_limit):
+                self.send_error(400, "invalid log range")
+                return
+            offset, limit = int(raw_offset), int(raw_limit)
+            if limit > MAX_LOG_CHUNK_BYTES:
+                self.send_error(400, "log range exceeds maximum chunk size")
+                return
+            try:
+                with (root / "bench.log").open("rb") as handle:
+                    stat = os.fstat(handle.fileno())
+                    size = stat.st_size
+                    generation = hashlib.blake2s(
+                        f"{stat.st_dev}:{stat.st_ino}".encode(), digest_size=16
+                    ).hexdigest()
+                    supplied_generation = self.headers.get("X-Cloudbench-Log-Generation", "")
+                    supplied_anchor = self.headers.get("X-Cloudbench-Log-Anchor", "")
+                    reset = offset > size or bool(supplied_generation and supplied_generation != generation)
+                    if supplied_anchor:
+                        if not re.fullmatch(r"[0-9a-f]{64}", supplied_anchor):
+                            self.send_error(400, "invalid log anchor")
+                            return
+                        if offset <= size:
+                            handle.seek(max(0, offset - 4096))
+                            anchor = hashlib.sha256(handle.read(min(offset, 4096))).hexdigest()
+                            reset = reset or not hmac.compare_digest(supplied_anchor, anchor)
+                    if reset:
+                        self._send_log_headers(409, size, generation, 0)
+                        return
+                    if offset == size:
+                        self._send_log_headers(204, size, generation, 0)
+                        return
+                    handle.seek(offset)
+                    body = handle.read(min(limit, size - offset))
+                    if not body:
+                        self._send_log_headers(409, os.fstat(handle.fileno()).st_size, generation, 0)
+                        return
+            except OSError:
+                self.send_error(404, "bench.log is unavailable")
+                return
+            self._send_log_headers(206, size, generation, len(body), offset=offset)
+            self.wfile.write(body)
+
+        def _send_log_headers(
+            self, status: int, size: int, generation: str, length: int, *, offset: int = 0
+        ) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(length))
+            self.send_header("X-Cloudbench-Log-Size", str(size))
+            self.send_header("X-Cloudbench-Log-Generation", generation)
+            self.send_header("X-Cloudbench-Log-Continuity", "1")
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {offset}-{offset + length - 1}/{size}")
             self.end_headers()
 
         def log_message(self, _format: str, *args: object) -> None:

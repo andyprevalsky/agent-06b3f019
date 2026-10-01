@@ -24,6 +24,30 @@ export const RouterDecisionSchema = z.discriminatedUnion('action', [
 export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 
 const DEADLINE_REASONING = 'Route selected before the provider stream finished.';
+const ACTION_SYNTAX_REASONING = 'Route selected from a provider action response.';
+
+/** Some providers return a closed action call despite a strict JSON schema. */
+function parseProviderActionSyntax(value: string): RouterDecision | null {
+  const match =
+    /^start_superintelligence\(\s*goal\s*=\s*("(?:\\.|[^"\\])*")\s*,\s*mode\s*=\s*("(?:\\.|[^"\\])*")\s*\)$/.exec(
+      value.trim()
+    );
+  if (!match) return null;
+  try {
+    const goal: unknown = JSON.parse(match[1]);
+    const mode: unknown = JSON.parse(match[2]);
+    if (typeof goal !== 'string' || !goal.trim()) return null;
+    if (mode !== 'plan' && mode !== 'execute') return null;
+    return {
+      action: 'start_superintelligence',
+      reasoning: ACTION_SYNTAX_REASONING,
+      goal,
+      mode,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Provider JSON always includes unused fields as "". Legacy cache may omit mode. */
 function normalizeRouterDecisionInput(value: unknown): unknown {
@@ -48,6 +72,8 @@ export function parseRouterDecisionJson(json: string): RouterDecision {
   try {
     parsed = JSON.parse(json);
   } catch (error) {
+    const providerAction = parseProviderActionSyntax(json);
+    if (providerAction) return providerAction;
     throw new Error(`Failed to parse router response as JSON: ${json.substring(0, 200)}`, {
       cause: error,
     });

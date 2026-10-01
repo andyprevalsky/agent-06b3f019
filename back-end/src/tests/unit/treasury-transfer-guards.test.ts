@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 /**
  * Unit tests for the two treasury transfer clients that actually move money:
@@ -18,6 +17,13 @@
  */
 
 import assert from 'node:assert';
+
+const report = (message: string): void => {
+  process.stdout.write(`${message}\n`);
+};
+const reportError = (message: string): void => {
+  process.stderr.write(`${message}\n`);
+};
 import {
   createBrexTreasury,
   railsAreCompatible,
@@ -35,10 +41,10 @@ const failures: string[] = [];
 async function check(name: string, fn: () => void | Promise<void>): Promise<void> {
   try {
     await fn();
-    console.log(`  ✓ ${name}`);
+    report(`  ✓ ${name}`);
   } catch (error) {
     failures.push(name);
-    console.error(`  ✗ ${name}: ${error instanceof Error ? error.message : String(error)}`);
+    reportError(`  ✗ ${name}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -91,7 +97,27 @@ const vendorsWith = (type: string): unknown => ({
 });
 
 async function testBrexRailGuards(): Promise<void> {
-  console.log('\nBrex rail guards');
+  report('\nBrex rail guards');
+
+  await check('repeated transfer cursor cannot undercount a pending Coinbase wire', async () => {
+    await withFetch(
+      () => json({ items: [], next_cursor: 'same-page' }),
+      async () => {
+        const brex = createBrexTreasury(BREX_CONFIG);
+        await assert.rejects(brex.pendingToCoinbaseCents(), /repeated.*cursor/i);
+      }
+    );
+  });
+
+  await check('malformed Brex transfer page cannot look like zero pending wires', async () => {
+    await withFetch(
+      () => json({ message: 'temporarily unavailable' }),
+      async () => {
+        const brex = createBrexTreasury(BREX_CONFIG);
+        await assert.rejects(brex.pendingToCoinbaseCents(), /invalid.*transfer/i);
+      }
+    );
+  });
 
   await check('WIRE transfer through a DOMESTIC_WIRE instrument is allowed', () => {
     assert.strictEqual(railsAreCompatible('DOMESTIC_WIRE', 'WIRE'), true);
@@ -256,7 +282,7 @@ const USDC_ACCOUNTS = {
 };
 
 async function testCoinbaseGuards(): Promise<void> {
-  console.log('\nCoinbase transfer guards');
+  report('\nCoinbase transfer guards');
 
   await check('decimalToCents is exact where float math is not', () => {
     // parseFloat('0.29') * 100 === 28.999999999999996, which floors to 28.
@@ -470,7 +496,7 @@ async function testCoinbaseGuards(): Promise<void> {
  * spends real money against a healthy balance).
  */
 async function testReviewRegressions(): Promise<void> {
-  console.log('\nReview regressions');
+  report('\nReview regressions');
 
   await check('a non-JSON Brex body still carries possiblySent on POST', async () => {
     await withFetch(
@@ -614,15 +640,15 @@ async function testReviewRegressions(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  console.log('Treasury transfer guards (Brex wire + Coinbase USDC send)');
+  report('Treasury transfer guards (Brex wire + Coinbase USDC send)');
   await testBrexRailGuards();
   await testCoinbaseGuards();
   await testReviewRegressions();
   if (failures.length > 0) {
-    console.error(`\n${failures.length} test(s) FAILED:\n  - ${failures.join('\n  - ')}`);
+    reportError(`\n${failures.length} test(s) FAILED:\n  - ${failures.join('\n  - ')}`);
     process.exit(1);
   }
-  console.log('\nAll treasury transfer guard tests passed.');
+  report('\nAll treasury transfer guard tests passed.');
 }
 
 void main();

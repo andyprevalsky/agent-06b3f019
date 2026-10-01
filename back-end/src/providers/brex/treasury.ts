@@ -70,6 +70,13 @@ export interface BrexTreasury {
   getAvailableCents(): Promise<number>;
   /** Rail the configured Coinbase payment instrument was created for, e.g. "ACH". */
   getCounterpartyRail(): Promise<string | undefined>;
+  /**
+   * Total of transfers to the Coinbase instrument that have left Brex but not yet settled.
+   *
+   * This is the in-flight term the top-up planner subtracts. Without it, every mint during a
+   * wire's multi-hour settlement window would see the same low balance and stack another wire.
+   */
+  pendingToCoinbaseCents(): Promise<number>;
   transferToCoinbase(params: {
     cents: number;
     idempotencyKey: string;
@@ -255,6 +262,61 @@ export function createBrexTreasury(config: BrexConfig): BrexTreasury {
   return {
     listCashAccounts,
     getCounterpartyRail,
+
+    async pendingToCoinbaseCents() {
+      if (config.coinbaseCounterpartyId === undefined) return 0;
+      // Anything not yet terminal is still on its way to Coinbase. PROCESSED means it landed
+      // (and is therefore already visible as a Coinbase balance, so counting it would double-count);
+      // FAILED/CANCELED money never left.
+      const settled = new Set(['PROCESSED', 'FAILED', 'CANCELED', 'CANCELLED', 'RETURNED']);
+      // MUST page. A single `limit=100` read silently reports 0 in-flight once the account has
+      // more than 100 recent transfers, and the caller then wires a duplicate. Same failure this
+      // file already guards in `getCounterpartyRail` — under-reporting in-flight is the dangerous
+      // direction because it authorises an irreversible bank wire.
+      let cursor: string | undefined;
+      const seen = new Set<string>();
+      let total = 0;
+      do {
+        const path =
+          cursor === undefined
+            ? '/v1/transfers?limit=100'
+            : `/v1/transfers?limit=100&cursor=${encodeURIComponent(cursor)}`;
+        const body = await request<{
+          items?: Array<{
+            status?: string;
+            amount?: { amount?: number };
+            counterparty?: { payment_instrument_id?: string };
+          }>;
+          next_cursor?: string | null;
+        }>('GET', path);
+        if (!Array.isArray(body.items)) {
+          throw new BrexApiError(
+            'Invalid Brex transfer page: missing items',
+            502,
+            'brex_invalid_transfer_page',
+            false
+          );
+        }
+        total += body.items
+          .filter(
+            (item) =>
+              item.counterparty?.payment_instrument_id === config.coinbaseCounterpartyId &&
+              !settled.has((item.status ?? '').toUpperCase())
+          )
+          .reduce((sum, item) => sum + Math.max(0, item.amount?.amount ?? 0), 0);
+        cursor = body.next_cursor ?? undefined;
+        if (cursor !== undefined && seen.has(cursor)) {
+          throw new BrexApiError(
+            'Repeated Brex transfer cursor',
+            502,
+            'brex_repeated_transfer_cursor',
+            false
+          );
+        }
+        if (cursor !== undefined) seen.add(cursor);
+      } while (cursor !== undefined);
+      return total;
+    },
 
     async getAvailableCents() {
       const accounts = await listCashAccounts();
