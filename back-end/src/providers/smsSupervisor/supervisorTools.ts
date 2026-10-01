@@ -23,6 +23,7 @@ import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
+import { resumePausedAgentForUserMessage } from '../agentResume';
 import {
   resolveAgentPrefix,
   smsIntendsAgentReply,
@@ -530,6 +531,7 @@ async function commitReplyToAgent(
       });
       // Don't fail — message is in DB, workflow will poll
     }
+    await resumePausedAgentForUserMessage(agent.id);
   }
 
   // 3. If resolving an attention request, mark it in DB

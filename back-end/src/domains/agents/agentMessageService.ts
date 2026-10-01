@@ -3,6 +3,7 @@
  */
 
 import { getTemporalClient } from '../../providers/temporal';
+import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
@@ -128,6 +129,18 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
   }
 }
 
+/** Signal the workflow (or run chat mode) for a USER row, then lift a user pause. */
+async function deliverUserMessage(
+  agentId: string,
+  body: PostMessageBody,
+  isInternal: boolean
+): Promise<void> {
+  await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata));
+  // Internal USER rows (OTP relays, response-schema context) are not the user
+  // asking to continue, so only user-authenticated sends lift a pause.
+  if (!isInternal) await resumePausedAgentForUserMessage(agentId);
+}
+
 // ---------------------------------------------------------------------------
 // Post message
 // ---------------------------------------------------------------------------
@@ -240,10 +253,7 @@ export async function postMessage(
     }
   }
 
-  // If this is a USER message, either signal workflow or run chat handler
-  if (role === 'USER') {
-    await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata));
-  }
+  if (role === 'USER') await deliverUserMessage(agentId, body, isInternal);
 
   return {
     message_id: message.id,

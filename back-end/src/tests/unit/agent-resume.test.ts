@@ -2,7 +2,10 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { resumeAgentWorkflow } from '../../providers/agentResume';
+import {
+  resumeAgentWorkflow,
+  resumePausedAgentForUserMessage,
+} from '../../providers/agentResume';
 import { prisma } from '../../providers/database';
 import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
 import { createTestHarness } from './trace-archive-test-utils';
@@ -11,7 +14,7 @@ const { test, finish } = createTestHarness('agent resume unit tests');
 
 async function createAgent(overrides: {
   temporalWorkflowId?: string | null;
-  status?: 'PAUSED' | 'COST_LIMIT_REACHED' | 'OUT_OF_CREDITS';
+  status?: 'PAUSED' | 'ACTIVE' | 'COST_LIMIT_REACHED' | 'OUT_OF_CREDITS';
 }) {
   const id = randomUUID();
   await prisma.agent.create({
@@ -187,6 +190,62 @@ async function main(): Promise<void> {
       const resumeState = stored.workflowReplacementState as { prior_status?: string };
       assert.strictEqual(stored.status, 'STARTING_UP');
       assert.strictEqual(resumeState.prior_status, 'ACTIVE');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
+  });
+
+  await test('a user message lifts a user pause', async () => {
+    const workflowId = `wf-${randomUUID()}`;
+    const agentId = await createAgent({ temporalWorkflowId: workflowId });
+    const signals: string[] = [];
+    try {
+      const resumed = await resumePausedAgentForUserMessage(agentId, {
+        signalResume: async (signaledWorkflowId) => {
+          signals.push(signaledWorkflowId);
+        },
+      });
+      assert.strictEqual(resumed, true);
+      assert.deepStrictEqual(signals, [workflowId]);
+      const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(agent.status, 'ACTIVE');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
+  });
+
+  await test('a user message never signals resume outside a user pause', async () => {
+    for (const status of ['ACTIVE', 'COST_LIMIT_REACHED', 'OUT_OF_CREDITS'] as const) {
+      const agentId = await createAgent({ temporalWorkflowId: `wf-${randomUUID()}`, status });
+      let signaled = false;
+      try {
+        const resumed = await resumePausedAgentForUserMessage(agentId, {
+          signalResume: async () => {
+            signaled = true;
+          },
+        });
+        assert.strictEqual(resumed, false, status);
+        assert.strictEqual(signaled, false, status);
+        const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+        assert.strictEqual(agent.status, status);
+      } finally {
+        await prisma.agent.deleteMany({ where: { id: agentId } });
+      }
+    }
+    assert.strictEqual(await resumePausedAgentForUserMessage(randomUUID()), false);
+  });
+
+  await test('a user message keeps the pause when the resume signal fails', async () => {
+    const agentId = await createAgent({ temporalWorkflowId: `wf-${randomUUID()}` });
+    try {
+      const resumed = await resumePausedAgentForUserMessage(agentId, {
+        signalResume: async () => {
+          throw new Error('synthetic signal outage');
+        },
+      });
+      assert.strictEqual(resumed, false);
+      const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(agent.status, 'PAUSED');
     } finally {
       await prisma.agent.deleteMany({ where: { id: agentId } });
     }
