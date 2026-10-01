@@ -39,9 +39,7 @@ export function canonicalAuthRealm(input: string): string {
       const allowQueryOverride =
         hostname === 'localhost' ||
         hostname === '127.0.0.1' ||
-        ['.ngrok-free.dev', '.ngrok.app', '.ngrok.io'].some((suffix) =>
-          hostname.endsWith(suffix)
-        );
+        ['.ngrok-free.dev', '.ngrok.app', '.ngrok.io'].some((suffix) => hostname.endsWith(suffix));
       const override =
         url.searchParams.get('authRealm') ?? url.searchParams.get('auth_realm') ?? '';
       if (allowQueryOverride && override !== '') {
