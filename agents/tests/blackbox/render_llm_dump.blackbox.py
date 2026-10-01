@@ -338,6 +338,24 @@ def test_message_renderer_compacts_structured_response_values():
     assert "added_to_cart: True" in html
 
 
+def test_unparseable_json_values_render_as_text():
+    """Values json.loads rejects without a JSONDecodeError still render as text."""
+    renderer = _load_renderer()
+    too_deep = "[" * 200_000
+    too_long_int = "1" * 5_000
+
+    assert renderer.maybe_parse_json_string(too_deep) == too_deep
+    assert renderer.maybe_parse_json_string(f"[{too_long_int}]") == f"[{too_long_int}]"
+    assert renderer.parse_json_maybe(too_long_int) == too_long_int
+    html = renderer.render_message_content(
+        f"done\n\nStructured Response: {too_deep}",
+        Path("/tmp/rendered.html"),
+        1,
+    )
+    assert "done" in html
+    assert "Structured Response" in html
+
+
 def test_publish_dump_https_uploads_and_returns_presigned_url():
     """HTTPS publish must return a clickable URL (not a local artifact path)."""
     renderer = _load_renderer()
@@ -555,6 +573,10 @@ async def run_all_tests():
     r.record(
         "message_renderer_compacts_structured_response_values",
         test_message_renderer_compacts_structured_response_values,
+    )
+    r.record(
+        "unparseable_json_values_render_as_text",
+        test_unparseable_json_values_render_as_text,
     )
     r.record(
         "publish_rendered_dump_copies_html_and_assets",

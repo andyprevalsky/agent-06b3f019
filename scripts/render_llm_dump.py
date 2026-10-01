@@ -444,7 +444,7 @@ def normalize_inline_structured_sections(text: str) -> str:
 
         try:
             parsed = json.loads(raw_value)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             if matched_marker == "Structured Response:":
                 lines.append(line)
             continue
@@ -500,7 +500,7 @@ def maybe_parse_json_string(value: Any) -> Any:
         return value
     try:
         return json.loads(stripped)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return value
 
 
@@ -1659,7 +1659,7 @@ def parse_json_maybe(value: Any) -> Any:
         return value
     try:
         return json.loads(stripped)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return value
 
 
