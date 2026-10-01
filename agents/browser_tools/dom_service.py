@@ -49,6 +49,25 @@ def normalize_action_coordinates(coordinates: Optional[Any]) -> Optional[Dict[st
     )
 
 
+async def _no_pending_network_requests(self: Any) -> list:
+    return []
+
+
+def disable_browser_use_pending_request_probe() -> None:
+    """Drop browser-use's per-observe "pending network requests" evaluate.
+
+    It reads ``performance.getEntriesByType('resource')`` and keeps entries with
+    ``responseEnd === 0``, but resource-timing entries are only recorded once a
+    resource finishes, so the list is practically always empty and its 0.3s
+    stability sleep never fires. The probe still costs one Runtime.evaluate
+    over every resource entry before each DOM build (Amazon: ~50ms p50, ~0.5s
+    p90), and nothing here reads ``pending_network_requests``.
+    """
+    from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
+
+    DOMWatchdog._get_pending_network_requests = _no_pending_network_requests
+
+
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
     """Return the CDP download directory for the active browser provider.
 
@@ -577,6 +596,8 @@ class DOMService:
         try:
             from browser_use.browser.profile import BrowserProfile
             from browser_use.browser.session import BrowserSession
+
+            disable_browser_use_pending_request_probe()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
