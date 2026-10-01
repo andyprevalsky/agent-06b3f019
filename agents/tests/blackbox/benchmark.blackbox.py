@@ -19612,7 +19612,7 @@ async def run_all_tests():
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
     )
-    r.record(
+    await r.record_async(
         "sibling_cleanup_cannot_revert_run_identity",
         test_sibling_task_cleanup_cannot_revert_a_concurrent_run_identity,
     )
