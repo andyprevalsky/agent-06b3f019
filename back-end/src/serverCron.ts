@@ -200,6 +200,10 @@ function scheduleGmailSync(): void {
 }
 
 function scheduleGoogleDataPurge(): void {
+  if (process.env.DISABLE_GOOGLE_DATA_PURGE === '1') {
+    createLogger('Cron').info('Google data purge disabled by DISABLE_GOOGLE_DATA_PURGE');
+    return;
+  }
   const cronLog = createLogger('Cron');
   let running = false;
   const run = () => {
