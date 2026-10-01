@@ -60,6 +60,7 @@ from providers.fast_cache.browser_use_cache import cached_browser_decision
 from providers.fast_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
+from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
 from utils.payment_card import (
@@ -2139,7 +2140,11 @@ def _browser_prompt_cache_namespace(task_id: Optional[str], call_site: str) -> O
     return f"browser-task:{task_id}:{logical_lane}"
 
 
-async def _call_browser_use_with_rotation(  # noqa: C901
+def _compute_token_source(source: Optional[str]) -> ComputeTokenSource:
+    return "pool" if source == "pool" else "user"
+
+
+async def _call_browser_use_with_rotation(
     *,
     rose_client: RoseClient,
     task: str,
@@ -2195,7 +2200,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     claude_auth = (
         ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(token_state.source),
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,  # activity drives rotation; client does one attempt
@@ -2206,7 +2211,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_auth = (
         GptAuthContext(
             token=gpt_token or "",
-            source=gpt_token_source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(gpt_token_source),
             user_id=user_id,
             account_id=gpt_account_id,
             pool_token_id=gpt_token_pool_id,
@@ -2275,7 +2280,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         activity.heartbeat(f"Step {iteration} - retrying Rose API (rotation {rotations})")
         rotated_auth = ClaudeAuthContext(
             token=token_state.access_token or "",
-            source=token_state.source or "user",  # type: ignore[arg-type]
+            source=_compute_token_source(token_state.source),
             user_id=user_id,
             pool_token_id=token_state.pool_token_id,
             max_rotations=0,
@@ -3737,7 +3742,7 @@ async def _install_fast_mode_network_cache(
 
 async def _finalize_kernel_replay_for_fe(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: str,
     user_id: Optional[str],
@@ -3782,7 +3787,7 @@ async def _finalize_kernel_replay_for_fe(
                     filename=f"browser-recording-{task_id}.mp4",
                     mime_type="video/mp4",
                 )
-        except Exception as exc:  # noqa: BLE001 — stitch/upload is best-effort
+        except Exception as exc:  # stitch/upload is best-effort
             logger.warning(
                 "Replay stitch/upload failed; falling back to segment URLs",
                 agent_id=agent_id,
@@ -3825,7 +3830,7 @@ async def _finalize_kernel_replay_for_fe(
 
 async def _finalize_browser_recording_for_fe(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: Optional[str],
     user_id: str,
@@ -3884,7 +3889,7 @@ async def _finalize_browser_recording_for_fe(
                     bytes=len(html_bytes),
                     has_pointer=bool(recording_file_pointer),
                 )
-        except Exception as exc:  # noqa: BLE001 — recording upload is best-effort
+        except Exception as exc:  # recording upload is best-effort
             logger.warning(
                 "Browser recording upload failed",
                 agent_id=agent_id,
@@ -3929,7 +3934,7 @@ async def _finalize_browser_recording_for_fe(
 
 async def _finalize_browser_recording_for_fe_resilient(
     *,
-    browser_recorder: BrowserAgentRecorder,
+    browser_recorder: BrowserAgentRecorder | SimulatedBrowserRecorder,
     agent_id: str,
     task_id: Optional[str],
     user_id: str,
@@ -3972,7 +3977,7 @@ async def _finalize_browser_recording_for_fe_resilient(
                 timeout_seconds=timeout_seconds,
             )
             return None
-        except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+        except Exception as exc:  # final cleanup should not mask the activity result
             logger.warning(
                 "Browser recording finalization failed after cancellation",
                 agent_id=agent_id,
@@ -3989,7 +3994,7 @@ async def _finalize_browser_recording_for_fe_resilient(
             timeout_seconds=timeout_seconds,
         )
         return None
-    except Exception as exc:  # noqa: BLE001 — final cleanup should not mask the activity result
+    except Exception as exc:  # final cleanup should not mask the activity result
         logger.warning(
             "Browser recording finalization failed",
             agent_id=agent_id,
@@ -4235,7 +4240,7 @@ def _schedule_browser_cleanup(
                 agent_id,
                 driver_pid=playwright_driver_pid,
             )
-        except Exception as exc:  # noqa: BLE001 - background cleanup must never crash the worker loop
+        except Exception as exc:  # background cleanup must never crash the worker loop
             logger.warning(
                 "Browser cleanup failed in background",
                 agent_id=agent_id,
@@ -4317,7 +4322,7 @@ async def drain_background_browser_cleanups(
 
 @activity.defn
 @traced("spawn_browser_agent_activity_v3")
-async def spawn_browser_agent_activity_v3(  # noqa: C901
+async def spawn_browser_agent_activity_v3(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -5123,7 +5128,7 @@ def _simulated_browser_usage_items(
     return items
 
 
-async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
+async def _spawn_browser_agent_activity_v3_simulated(
     *,
     user_id: str,
     agent_id: str,
@@ -5274,7 +5279,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     async def finalize_recording() -> None:
         if recorder:
             await _finalize_browser_recording_for_fe_resilient(
-                browser_recorder=recorder,  # type: ignore[arg-type]
+                browser_recorder=recorder,
                 agent_id=agent_id,
                 task_id=task_id,
                 user_id=user_id,
@@ -5767,7 +5772,7 @@ async def _publish_browser_session_metadata_message(
     raise RuntimeError("Backend did not acknowledge required browser session metadata after 3 attempts")
 
 
-async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
+async def _spawn_browser_agent_activity_v3_real(
     user_id: str,
     agent_id: str,
     goal: str,
@@ -10334,7 +10339,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
     tool_name = "spawn_browser_agent"
 
-    async def execute_tool(  # noqa: C901
+    async def execute_tool(
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
@@ -11538,7 +11543,7 @@ _manager: Optional[SpawnBrowserAgentManagerV3] = None
 
 def get_manager() -> SpawnBrowserAgentManagerV3:
     """Get or create spawn_browser_agent manager singleton."""
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = SpawnBrowserAgentManagerV3()
     return _manager

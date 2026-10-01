@@ -524,7 +524,7 @@ class SpawnAgentManager(ToolManager):
             async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
                 yield event
 
-    async def _spawn_explore(  # noqa: C901
+    async def _spawn_explore(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
@@ -961,7 +961,7 @@ class SpawnAgentManager(ToolManager):
         ):
             yield event
 
-    async def _spawn_for_each(  # noqa: C901
+    async def _spawn_for_each(
         self,
         workflow_instance,
         tool_call: Dict[str, Any],
