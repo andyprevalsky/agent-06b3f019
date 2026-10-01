@@ -91,6 +91,38 @@ describe('backend URL resolution', () => {
     ).toBe('');
   });
 
+  it('keeps a same-origin bundle on its own origin when its public tunnel is gone', () => {
+    expect(
+      resolveBackendBaseUrl(
+        'https://expired-tunnel.loca.lt',
+        {
+          protocol: 'http:',
+          hostname: 'localhost',
+          port: '3002',
+        },
+        true,
+        false,
+        true,
+      ),
+    ).toBe('');
+  });
+
+  it('keeps the explicit backend URL in Electron even for a same-origin build', () => {
+    expect(
+      resolveBackendBaseUrl(
+        'https://navi-j9a9.onrender.com',
+        {
+          protocol: 'http:',
+          hostname: 'localhost',
+          port: '5174',
+        },
+        true,
+        true,
+        true,
+      ),
+    ).toBe('https://navi-j9a9.onrender.com');
+  });
+
   it('infers the paired backend port for local Vite dev servers', () => {
     expect(
       resolveBackendBaseUrl(

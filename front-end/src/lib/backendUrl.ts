@@ -8,9 +8,14 @@ export function resolveBackendBaseUrl(
   allowDynamicLocalInference = !import.meta.env.VITEST,
   electronRenderer = typeof window !== 'undefined' &&
     (window as typeof window & { api?: { isElectron?: boolean } }).api?.isElectron === true,
+  // Bundles served by a server that proxies /api (the benchmark `vite preview`)
+  // reach the backend through whichever origin loaded them: localhost for local
+  // browsers, the public tunnel for cloud browsers.
+  sameOrigin = import.meta.env.VITE_BACKEND_SAME_ORIGIN === 'true',
 ): string {
   const explicit = explicitUrl ? explicitUrl.replace(/\/$/, '') : '';
   if (electronRenderer) return explicit || 'http://localhost:3001';
+  if (sameOrigin) return '';
 
   if (import.meta.env.DEV && allowDynamicLocalInference && locationLike) {
     const frontendPort = Number(locationLike.port);

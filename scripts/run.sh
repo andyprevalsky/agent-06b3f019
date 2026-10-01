@@ -2608,8 +2608,11 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
             FRONTEND_BUILD_NODE_OPTIONS="${FRONTEND_BUILD_NODE_OPTIONS:+$FRONTEND_BUILD_NODE_OPTIONS }--max-old-space-size=${BENCHMARK_FRONTEND_BUILD_OLD_SPACE_MB:-3584}"
             ;;
     esac
+    # The preview server proxies /api to the backend, so the bundle calls the
+    # origin that served it. Baking the public tunnel in would route every local
+    # browser request through the tunnel and break the stack when it drops.
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" \
+        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
         npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi

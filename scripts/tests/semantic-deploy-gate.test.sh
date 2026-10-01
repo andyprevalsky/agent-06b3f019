@@ -69,6 +69,8 @@ require_text "$RUN_SH" 'export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-e
 require_text "$RUN_SH" 'export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"' "semantic stack must retain frontend evidence"
 require_text "$RUN_SH" 'Building bundled frontend before starting runtime services' "bundled frontend must build before memory-heavy runtime services start"
 require_text "$RUN_SH" 'npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir' "each bundled frontend build must own its output directory"
+require_text "$RUN_SH" 'NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_SAME_ORIGIN=true \' "bundled frontends must call the backend through the origin that served them"
+require_count "$RUN_SH" 'VITE_BACKEND_API_URL="$PUBLIC_BASE_URL"' "0" "bundled frontends must not bake the public tunnel in as their backend origin"
 require_text "$RUN_SH" 'npx vite preview --outDir "$FRONTEND_DIST_DIR" --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve its completed production build"
 require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
 require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
