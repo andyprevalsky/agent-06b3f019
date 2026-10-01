@@ -505,6 +505,11 @@ healthy Cerebras, and the GLM failover.
     6,007ms (Together, first content 1,707ms after the GLM request),
     4,796ms (CoreWeave, 2,237ms), and 3,785ms (Together, 856ms), each with
     a goal near 88 Harlow St.
+  - 15s code merged with `main` (`41a721495`), 15:09Z: escalated on router
+    attempt 1 at 5,985ms (Together, first content 2,108ms after the GLM
+    request) with a goal near 88 Harlow St. On the same snapshot, setting
+    the three defaults back to 1.2s / 2s / 3s makes the offline exact-prod
+    case end in the apology after 6,051ms.
 
 **Cemented in `/deploy`.**
 
