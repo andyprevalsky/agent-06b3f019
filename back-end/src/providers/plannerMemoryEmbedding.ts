@@ -187,20 +187,31 @@ export async function embedPendingPlannerMemories(
   const groups = [...byHash.entries()];
   for (let start = 0; start < groups.length; start += PLANNER_MEMORY_EMBED_BATCH) {
     const batch = groups.slice(start, start + PLANNER_MEMORY_EMBED_BATCH);
+    let vectors: number[][];
     try {
-      const vectors = await embedTexts(batch.map(([, group]) => group.goal));
-      for (const [index, [hash, group]] of batch.entries()) {
-        for (const id of group.ids) {
-          await upsertEmbedding(id, hash, vectors[index]);
-          result.embedded += 1;
-        }
-      }
+      vectors = await embedTexts(batch.map(([, group]) => group.goal));
     } catch (error) {
+      // Provider failure: nothing in this batch was written.
       result.failed += batch.reduce((sum, [, group]) => sum + group.ids.length, 0);
       log.warn('pending embed batch failed', {
         rows: batch.length,
         error: error instanceof Error ? error.message.slice(0, 200) : String(error),
       });
+      continue;
+    }
+    for (const [index, [hash, group]] of batch.entries()) {
+      for (const id of group.ids) {
+        try {
+          await upsertEmbedding(id, hash, vectors[index]);
+          result.embedded += 1;
+        } catch (error) {
+          result.failed += 1;
+          log.warn('pending embed upsert failed', {
+            root_agent_id: id,
+            error: error instanceof Error ? error.message.slice(0, 200) : String(error),
+          });
+        }
+      }
     }
   }
   result.remaining = (await pendingPlannerMemories(1)).length;

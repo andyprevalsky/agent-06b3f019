@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from './database';
 import {
   embedTexts,
+  plannerMemoryGoalHash,
   PLANNER_MEMORY_INDEX_VERSION,
   toVectorLiteral,
 } from './plannerMemoryEmbedding';
@@ -111,6 +112,10 @@ export async function upsertPlannerMemoryFromRun(input: PlannerMemoryRunInput): 
       compressionLeaseId: null,
       compressionLeaseUntil: null,
     },
+  });
+  // A re-finalized goal invalidates its vector; the pending drain re-embeds it.
+  await prisma.plannerMemoryEmbedding.deleteMany({
+    where: { plannerMemoryId: input.rootAgentId, goalHash: { not: plannerMemoryGoalHash(goal) } },
   });
 }
 

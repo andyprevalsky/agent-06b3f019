@@ -17,6 +17,7 @@ import {
   plannerMemoryGoalHash,
 } from '../../providers/plannerMemoryEmbedding';
 import { retryWithBackoff } from '../../providers/retry';
+import { upsertPlannerMemoryFromRun } from '../../providers/plannerMemoryStore';
 import { readArchivedArtifact } from '../../providers/traceArchive';
 
 config();
@@ -436,6 +437,17 @@ export async function runTests(): Promise<boolean> {
             });
             assert(changed);
             assert.notStrictEqual(changed.goalHash, first.goalHash, 'goal change must re-embed');
+            // Finalize path (no synchronous embed): a changed goal drops the stale vector.
+            await upsertPlannerMemoryFromRun({
+              rootAgentId: id,
+              userId: null,
+              goal: `Renew my passport downtown ${RUN_ID}`,
+              benchmarkTaskName: TASK,
+            });
+            const stale = await prisma.plannerMemoryEmbedding.findUnique({
+              where: { plannerMemoryId: id },
+            });
+            assert.strictEqual(stale, null, 'a re-finalized goal must not keep its old vector');
             await prisma.plannerMemory.delete({ where: { id } });
             const gone = await prisma.plannerMemoryEmbedding.findUnique({
               where: { plannerMemoryId: id },
