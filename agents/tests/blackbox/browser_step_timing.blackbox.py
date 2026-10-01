@@ -104,13 +104,12 @@ def test_browser_loop_marks_every_core_phase():
         "user_control_wait",
         "tab_rebind",
         "overlay_suppress",
+        "otp_poll",
         "observe_state",
-        "otp_wait",
         "record_observation",
         "thinking_stream_start",
         "llm_decision",
         "thinking_stream_finish",
-        "evidence_join",
         "pre_action_bookkeeping",
         "execute_action",
         "post_action_bookkeeping",
@@ -215,29 +214,8 @@ async def test_tab_focus_without_cache_always_resolves_and_foregrounds():
     assert page_a.front_calls == 3
 
 
-async def test_prefetched_observe_state_only_reused_on_same_url():
-    from types import SimpleNamespace
-
-    from domains.spawn_browser_agent_v3.handler import _take_prefetched_observe_state
-
-    def dom(url=None, error=None):
-        async def get_current_page_url():
-            if error:
-                raise error
-            return url
-
-        return SimpleNamespace(session=SimpleNamespace(get_current_page_url=get_current_page_url))
-
-    state = {"url": "https://shop.example/s?k=tv", "dom_text": "[1]<button>"}
-    assert await _take_prefetched_observe_state(dom("https://shop.example/s?k=tv"), state) is state
-    assert await _take_prefetched_observe_state(dom("https://shop.example/cart"), state) is None
-    assert await _take_prefetched_observe_state(dom(error=RuntimeError("cdp gone")), state) is None
-    assert await _take_prefetched_observe_state(dom("https://shop.example/s?k=tv"), None) is None
-    assert await _take_prefetched_observe_state(None, state) is None
-
-
-async def test_otp_fetch_failure_never_fails_step():
-    from domains.spawn_browser_agent_v3.handler import _settle_otp_fetch
+async def test_otp_poll_harvest_never_waits_or_fails_step():
+    from domains.spawn_browser_agent_v3.handler import _harvest_otp_poll
 
     async def ok():
         return 2
@@ -245,8 +223,84 @@ async def test_otp_fetch_failure_never_fails_step():
     async def boom():
         raise RuntimeError("backend 502")
 
-    assert await _settle_otp_fetch(asyncio.create_task(ok())) == 2
-    assert await _settle_otp_fetch(asyncio.create_task(boom())) == 0
+    release = asyncio.Event()
+
+    async def slow():
+        await release.wait()
+        return 0
+
+    assert _harvest_otp_poll(None) is None
+    pending = asyncio.create_task(slow())
+    assert _harvest_otp_poll(pending) is pending
+    release.set()
+    await pending
+    assert _harvest_otp_poll(pending) is None
+    for coro in (ok(), boom()):
+        task = asyncio.create_task(coro)
+        await asyncio.wait([task])
+        assert _harvest_otp_poll(task) is None
+    cancelled = asyncio.create_task(slow())
+    cancelled.cancel()
+    await asyncio.wait([cancelled])
+    assert _harvest_otp_poll(cancelled) is None
+
+
+async def test_slow_otp_poll_does_not_block_steps_and_codes_land_later():
+    """Mirrors the loop's per-step OTP block: a backend poll slower than a step
+    never delays the step, and its codes join the transcript on a later step."""
+    from domains.spawn_browser_agent_v3.handler import _harvest_otp_poll
+
+    release = asyncio.Event()
+    otp_user_messages: list = []
+    polls_started = 0
+
+    async def slow_fetch():
+        nonlocal polls_started
+        polls_started += 1
+        await release.wait()
+        otp_user_messages.append({"role": "user", "content": "Code 481516 arrived"})
+        return 1
+
+    transcript: list = []
+    otp_history_count = 0
+    otp_poll_task = None
+
+    async def step():
+        nonlocal otp_poll_task, otp_history_count
+        otp_poll_task = _harvest_otp_poll(otp_poll_task)
+        if len(otp_user_messages) > otp_history_count:
+            transcript.extend(otp_user_messages[otp_history_count:])
+            otp_history_count = len(otp_user_messages)
+        if otp_poll_task is None:
+            otp_poll_task = asyncio.create_task(slow_fetch())
+
+    for _ in range(3):
+        await asyncio.wait_for(step(), timeout=0.05)
+    assert polls_started == 1, "an in-flight poll is never duplicated"
+    assert transcript == []
+
+    release.set()
+    await asyncio.sleep(0)
+    await asyncio.wait_for(step(), timeout=0.05)
+    assert transcript == [{"role": "user", "content": "Code 481516 arrived"}]
+    assert polls_started == 2
+    otp_poll_task.cancel()
+
+
+def test_browser_loop_never_awaits_otp_poll():
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    assert "await otp_poll_task" not in source
+    assert "_fetch_and_append_recent_otp_user_messages(" in source
+    loop = source[source.index("while iteration < MAX_ITERATIONS:") :]
+    harvest = loop.index("otp_poll_task = _harvest_otp_poll(otp_poll_task)")
+    assert harvest < loop.index("browser_turn_messages.extend(otp_user_messages[otp_history_count:])")
+    assert harvest < loop.index('step_timer.mark("llm_decision")')
+    teardown = source[source.rindex("finally:") :]
+    assert "otp_poll_task.cancel()" in teardown
 
 
 async def test_otp_sources_fetched_concurrently():
@@ -366,48 +420,6 @@ async def test_page_identity_reads_cached_target_info():
         raise AssertionError("a session with no focused tab must surface as an observe error")
 
 
-async def test_evidence_capture_join_returns_state_and_swallows_failures():
-    from domains.spawn_browser_agent_v3.handler import _join_evidence_capture
-
-    async def captured():
-        await asyncio.sleep(0.01)
-        return {"url": "https://shop.example/", "dom_tree": "[1]<b>$9</b>"}
-
-    async def broken():
-        raise RuntimeError("renderer frozen")
-
-    assert await _join_evidence_capture(None) is None
-    assert (await _join_evidence_capture(asyncio.create_task(captured())))["dom_tree"] == "[1]<b>$9</b>"
-    assert await _join_evidence_capture(asyncio.create_task(broken())) is None
-
-
-def test_deferred_evaluate_evidence_joined_before_any_consumer():
-    """Post-evaluate DOM capture overlaps the next LLM call but must land in
-    verifier_checkpoints before the next action, verifier, or resume payload."""
-    import inspect
-
-    from domains.spawn_browser_agent_v3.handler import _spawn_browser_agent_activity_v3_real
-
-    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
-    loop = source[source.index("while iteration < MAX_ITERATIONS:") :]
-    created = loop.index("evidence_capture_task = asyncio.create_task(")
-    join_after_llm = loop.index('step_timer.mark("evidence_join")')
-    first_action_use = loop.index("# 4. Extract action from response")
-    assert join_after_llm < first_action_use
-    for consumer in ("verifier_checkpoints=verifier_checkpoints", "browser_checkpoints=verifier_checkpoints"):
-        position = loop.find(consumer)
-        while position != -1:
-            assert position > join_after_llm, f"{consumer} read before the evidence join"
-            position = loop.find(consumer, position + 1)
-    pending_write = loop.index("if pending_write_lock_action:")
-    assert "await _join_evidence_capture(evidence_capture_task)" in loop[pending_write : pending_write + 200]
-    after_loop = loop[loop.index('step_timer.mark("post_action_bookkeeping")') :]
-    assert after_loop.index("await _join_evidence_capture(evidence_capture_task)") < after_loop.index(
-        "step_timer.finish()"
-    )
-    assert created > join_after_llm
-
-
 async def test_browser_use_pending_request_probe_disabled():
     from browser_use.browser.watchdogs.dom_watchdog import DOMWatchdog
 
@@ -434,8 +446,11 @@ async def run_all_tests():
         "tab_focus_cache_skips_repeat_calls", test_tab_focus_cache_skips_repeat_cdp_and_foreground_calls
     )
     await r.record_async("tab_focus_without_cache", test_tab_focus_without_cache_always_resolves_and_foregrounds)
-    await r.record_async("prefetched_observe_same_url_only", test_prefetched_observe_state_only_reused_on_same_url)
-    await r.record_async("otp_fetch_failure_never_fails_step", test_otp_fetch_failure_never_fails_step)
+    await r.record_async("otp_poll_harvest_never_waits", test_otp_poll_harvest_never_waits_or_fails_step)
+    await r.record_async(
+        "slow_otp_poll_does_not_block_steps", test_slow_otp_poll_does_not_block_steps_and_codes_land_later
+    )
+    r.record("browser_loop_never_awaits_otp_poll", test_browser_loop_never_awaits_otp_poll)
     await r.record_async("otp_sources_fetched_concurrently", test_otp_sources_fetched_concurrently)
     await r.record_async("pending_request_probe_disabled", test_browser_use_pending_request_probe_disabled)
     r.record("step_observe_dom_only_for_consumers", test_step_observe_builds_dom_only_for_dom_consumers)
@@ -444,8 +459,6 @@ async def run_all_tests():
         test_light_step_observe_skips_dom_and_read_browser_state_builds_it,
     )
     await r.record_async("page_identity_cached_target_info", test_page_identity_reads_cached_target_info)
-    await r.record_async("evidence_join_semantics", test_evidence_capture_join_returns_state_and_swallows_failures)
-    r.record("evidence_joined_before_consumers", test_deferred_evaluate_evidence_joined_before_any_consumer)
     teardown_mock()
     return r.all_passed
 

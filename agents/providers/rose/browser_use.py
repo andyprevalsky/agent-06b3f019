@@ -23,6 +23,16 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from providers.rose.schema import build_anthropic_tools_from_response_model
+from tools.prompts import attempt_completion_prompt
+
+# Single source of truth for verifier rules. The browser prompt embeds the
+# same grading block as the main agent so attempt_completion semantics do not
+# drift between agent types.
+from utils.prompts import VERIFICATION_RULES
+
+logger = structlog.get_logger()
+
 
 def recover_from_challenge_enabled() -> bool:
     """Temp kill-switch for challenge recovery (bench A/B).
@@ -32,17 +42,6 @@ def recover_from_challenge_enabled() -> bool:
     """
     raw = (os.environ.get("BROWSER_DISABLE_RECOVER_FROM_CHALLENGE") or "").strip().lower()
     return raw not in {"1", "true", "yes", "on"}
-
-from providers.rose.schema import build_anthropic_tools_from_response_model
-from tools.prompts import attempt_completion_prompt
-
-# Single source of truth for verifier rules. The browser prompt embeds the
-# same grading block as the main agent so attempt_completion semantics do not
-# drift between agent types.
-from utils.prompts import VERIFICATION_RULES
-from utils.user_facing_writing_prompt import user_facing_text_description
-
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -176,9 +175,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
             "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
-            "facts before navigating away. Wrap in IIFE with try-catch. Every successful evaluate also "
-            "retains a bounded browser-extracted DOM snapshot for the verifier (no flag); the JS return "
-            "value is not trusted as proof. Prefer evaluate over inventing page content."
+            "facts before navigating away. Wrap in IIFE with try-catch. Prefer evaluate over inventing "
+            "page content."
         ),
         "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
     },
@@ -827,8 +825,7 @@ action envelope in text; use the provided tool call.
 
 # Evidence Retention
 
-- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and DOM snapshots captured after each successful `evaluate`, not arbitrary historical DOM.
-- Before navigating away from a page with load-bearing facts required by the goal (product name, size, price, quantity, wattage, model, etc.), call `evaluate` while those facts are still visible. The runtime always snapshots the live browser-extracted DOM after a successful evaluate; you do not pass a preserve flag.
+- Completion verification retains action results, the final DOM, and bounded pre-write DOM checkpoints, not arbitrary historical DOM.
 
 # Safety Rules
 

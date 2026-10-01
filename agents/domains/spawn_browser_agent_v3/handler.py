@@ -741,57 +741,6 @@ def _append_bounded_verifier_checkpoint(
     return appended
 
 
-async def _capture_preserved_evidence_after_evaluate(
-    *,
-    dom_service: Any,
-    verifier_checkpoints: List[Dict[str, Any]],
-    current_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Always-on: snapshot live DOM after a successful evaluate for the verifier.
-
-    No model flag. The JS return value is not trusted as proof; only the
-    browser-extracted DOM checkpoint is.
-    """
-    if dom_service is None:
-        return None
-    # Bound + one retry: a frozen renderer must not stall the activity past the
-    # supervisor step budget, and a single transient CDP blip should not drop
-    # the only DOM proof the verifier will see after navigation.
-    last_error: Optional[BaseException] = None
-    state: Any = None
-    for attempt in range(2):
-        try:
-            state = await asyncio.wait_for(
-                dom_service.get_browser_state(include_screenshot=False),
-                timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-            last_error = None
-            break
-        except asyncio.TimeoutError as exc:
-            last_error = exc
-            logger.warning(
-                "Timed out refreshing browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                timeout_s=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            last_error = exc
-            logger.warning(
-                "Failed to refresh browser state for preserved evaluate evidence",
-                attempt=attempt + 1,
-                error=str(exc)[:200],
-            )
-    if last_error is not None or not isinstance(state, dict):
-        return None
-    checkpoint = _browser_ground_truth_checkpoint(
-        state,
-        str(state.get("url") or current_url or ""),
-        kind="preserved_evidence",
-    )
-    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
-    return state
-
-
 def _replace_resume_image_blocks(value: Any) -> Any:
     """Replace image payloads with valid text blocks in simulated resume history."""
     if isinstance(value, dict):
@@ -1847,13 +1796,23 @@ async def _replace_browser_humanizer(
     return rebound_humanizer
 
 
-async def _settle_otp_fetch(task: "asyncio.Task[int]") -> int:
-    """Await the step's concurrent OTP poll; a failed poll never fails the step."""
-    try:
-        return await task
-    except Exception as e:
-        logger.warning("Failed to fetch OTPs", error=str(e))
-        return 0
+def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.Task[int]"]:
+    """Collect a finished background OTP poll without ever waiting on it.
+
+    Returns the task while it is still in flight, ``None`` once it has been
+    harvested (or never started) so the caller can start the next poll. A
+    failed poll never fails the step.
+    """
+    if task is None or not task.done():
+        return task
+    if task.cancelled():
+        return None
+    error = task.exception()
+    if error is not None:
+        logger.warning("Failed to fetch OTPs", error=str(error)[:200])
+    elif task.result():
+        logger.info("Appended OTP user messages", count=task.result())
+    return None
 
 
 def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) -> bool:
@@ -1875,39 +1834,6 @@ async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, 
     if needs_dom:
         return await dom_service.get_browser_state(include_screenshot=False)
     return await dom_service.get_page_identity()
-
-
-async def _join_evidence_capture(
-    task: Optional["asyncio.Task[Optional[Dict[str, Any]]]"],
-) -> Optional[Dict[str, Any]]:
-    """Wait for a deferred post-evaluate DOM capture; its checkpoint is appended by then."""
-    if task is None:
-        return None
-    try:
-        return await task
-    except Exception as e:
-        logger.warning("Preserved evaluate evidence capture failed", error=str(e)[:200])
-        return None
-
-
-async def _take_prefetched_observe_state(
-    dom_service: Any,
-    state: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """Reuse a state captured right after the last action instead of re-extracting the DOM.
-
-    Only valid while the page is still on the captured URL; anything else
-    (navigation, errors) falls back to a fresh observe.
-    """
-    if not state or dom_service is None:
-        return None
-    try:
-        live_url = await dom_service.session.get_current_page_url()
-    except Exception:
-        return None
-    if not live_url or live_url != state.get("url"):
-        return None
-    return state
 
 
 async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
@@ -6177,7 +6103,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # ``finally`` teardown, but must NOT emit task_complete — the browser task
     # resumes in a later activity call and the FE chip must stay open.
     browser_task_paused_for_resume = False
-    evidence_capture_task: Optional["asyncio.Task[Optional[Dict[str, Any]]]"] = None
+    otp_poll_task: Optional["asyncio.Task[int]"] = None
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -7285,8 +7211,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             step_timer.start_step(iteration)
             activity.heartbeat(f"Step {iteration}")
             if await _wait_for_browser_user_control(config, task_id):
-                await _join_evidence_capture(evidence_capture_task)
-                evidence_capture_task = None
                 tab_focus_cache.foreground = None
             step_timer.mark("user_control_wait")
 
@@ -7309,8 +7233,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             # Handle pending write lock action
             if pending_write_lock_action:
-                await _join_evidence_capture(evidence_capture_task)
-                evidence_capture_task = None
                 if await _wait_for_browser_user_control(config, task_id):
                     # The approved target may have changed under user control;
                     # retain it and re-resolve against a fresh DOM next step.
@@ -7387,20 +7309,27 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 continue
 
-            # 0. Poll recent OTPs (backend HTTP) while the browser is observed;
-            # unseen codes are appended as USER messages once both finish.
-            otp_fetch_task = asyncio.create_task(
-                _fetch_and_append_recent_otp_user_messages(
-                    user_id=user_id,
-                    api_url=config.backend.api_url,
-                    api_key=config.backend.api_key,
-                    seen_otp_codes=seen_otp_codes,
-                    otp_user_messages=otp_user_messages,
-                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                    agent_id=agent_id,
-                    task_id=task_id,
+            # 0. Recent OTPs are polled in the background (backend HTTP); the
+            # step never waits on it. Codes a finished poll found are appended
+            # as USER messages here, at a turn boundary, and the next poll starts.
+            otp_poll_task = _harvest_otp_poll(otp_poll_task)
+            if len(otp_user_messages) > otp_history_count:
+                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
+                otp_history_count = len(otp_user_messages)
+            if otp_poll_task is None:
+                otp_poll_task = asyncio.create_task(
+                    _fetch_and_append_recent_otp_user_messages(
+                        user_id=user_id,
+                        api_url=config.backend.api_url,
+                        api_key=config.backend.api_key,
+                        seen_otp_codes=seen_otp_codes,
+                        otp_user_messages=otp_user_messages,
+                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                    )
                 )
-            )
+            step_timer.mark("otp_poll")
 
             # One guarded state fetch supplies URL + observe text (avoid double DOM).
             activity.heartbeat(f"Step {iteration} - resolving page state")
@@ -7423,21 +7352,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     fast_mode_replay=bool(fast_mode_cache_enabled),
                     browser_recorder=browser_recorder,
                 )
-                reused_observe_state = None
-                if observe_needs_dom and evidence_capture_task is not None:
-                    reused_observe_state = await _take_prefetched_observe_state(
-                        dom_service, await _join_evidence_capture(evidence_capture_task)
-                    )
-                    evidence_capture_task = None
-                if reused_observe_state is not None:
-                    observe_page_state = reused_observe_state
-                    step_timer.annotate(observe_reused=True)
-                else:
-                    observe_page_state = await asyncio.wait_for(
-                        _observe_step_page(dom_service, needs_dom=observe_needs_dom),
-                        timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
-                    )
-                    step_timer.annotate(observe_dom=observe_needs_dom)
+                observe_page_state = await asyncio.wait_for(
+                    _observe_step_page(dom_service, needs_dom=observe_needs_dom),
+                    timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+                )
+                step_timer.annotate(observe_dom=observe_needs_dom)
                 current_url = str(observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:
@@ -7456,14 +7375,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if recovered:
                     continue
                 raise
-            finally:
-                new_otp_count = await _settle_otp_fetch(otp_fetch_task)
-            if new_otp_count:
-                logger.info("Appended OTP user messages", count=new_otp_count)
-            if len(otp_user_messages) > otp_history_count:
-                browser_turn_messages.extend(otp_user_messages[otp_history_count:])
-                otp_history_count = len(otp_user_messages)
-            step_timer.mark("otp_wait")
             await record_passkey_usage_once()
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
@@ -7942,9 +7853,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             consecutive_api_failures = 0
 
             _rose_request_id = llm_result.get("request_id", "unknown")
-            await _join_evidence_capture(evidence_capture_task)
-            evidence_capture_task = None
-            step_timer.mark("evidence_join")
 
             if await _wait_for_browser_user_control(config, task_id):
                 # Never execute an action planned against the pre-handoff DOM.
@@ -9813,17 +9721,6 @@ Based on this feedback, I need to continue working on the task and address the i
                     title=title_done,
                     task_id=task_id,
                 )
-                if action_name == "evaluate":
-                    # The DOM build runs behind the next observe + LLM decision;
-                    # it is joined before anything acts on or reads checkpoints.
-                    await _join_evidence_capture(evidence_capture_task)
-                    evidence_capture_task = asyncio.create_task(
-                        _capture_preserved_evidence_after_evaluate(
-                            dom_service=dom_service,
-                            verifier_checkpoints=verifier_checkpoints,
-                            current_url=current_url,
-                        )
-                    )
                 if input_page and _botsigged_diagnostics_enabled(start_url):
                     with contextlib.suppress(Exception):
                         await _capture_botsigged_diagnostics(
@@ -9933,8 +9830,6 @@ Based on this feedback, I need to continue working on the task and address the i
 
             step_timer.mark("post_action_bookkeeping")
 
-        await _join_evidence_capture(evidence_capture_task)
-        evidence_capture_task = None
         step_timer.finish()
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
@@ -10222,8 +10117,8 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
-        if evidence_capture_task is not None and not evidence_capture_task.done():
-            evidence_capture_task.cancel()
+        if otp_poll_task is not None and not otp_poll_task.done():
+            otp_poll_task.cancel()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
             try:

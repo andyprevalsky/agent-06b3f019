@@ -1157,36 +1157,27 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
 
 
-async def test_evaluate_always_preserves_browser_evidence_checkpoint():
-    """Every successful evaluate snapshots live DOM for the verifier — no flag."""
-    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
-    from domains.spawn_browser_agent_v3.handler import (
-        _append_bounded_verifier_checkpoint,
-        _capture_preserved_evidence_after_evaluate,
-    )
+def test_evaluate_does_not_snapshot_dom_behind_the_model():
+    """The browser LLM owns its context: evaluate returns only its JS result."""
+    import inspect
 
-    class _FakeDom:
-        async def get_browser_state(self, include_screenshot=False):
-            assert include_screenshot is False
-            return {
-                "url": "https://shop.example/item/cable",
-                "title": "Cable",
-                "dom_tree": "<main>Six-foot cable; supports 100 watts; $19.99</main>",
-            }
+    from domains.spawn_browser_agent_v3 import handler
+
+    assert not hasattr(handler, "_capture_preserved_evidence_after_evaluate")
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert 'kind="preserved_evidence"' not in source
+    after_action = source[source.index('step_timer.mark("execute_action")') :]
+    success_branch = after_action[after_action.index('if result.get("success", True):') :]
+    success_branch = success_branch[: success_branch.index('step_timer.mark("post_action_bookkeeping")')]
+    assert 'action_name == "evaluate"' not in success_branch
+    assert "get_browser_state" not in success_branch
+
+
+def test_verifier_checkpoints_stay_bounded():
+    from domains.spawn_browser_agent_v3.config import VERIFIER_CHECKPOINT_MAX
+    from domains.spawn_browser_agent_v3.handler import _append_bounded_verifier_checkpoint
 
     checkpoints: list = []
-    state = await _capture_preserved_evidence_after_evaluate(
-        dom_service=_FakeDom(),
-        verifier_checkpoints=checkpoints,
-        current_url="https://shop.example/item/cable",
-    )
-    assert state is not None
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["kind"] == "preserved_evidence"
-    assert "100 watts" in checkpoints[0]["dom_tree"]
-    assert "preserve_evidence" not in str(checkpoints)
-
-    # Cap retains the most recent VERIFIER_CHECKPOINT_MAX distinct snapshots.
     for i in range(VERIFIER_CHECKPOINT_MAX + 5):
         _append_bounded_verifier_checkpoint(
             checkpoints,
@@ -1208,24 +1199,26 @@ def test_evaluate_tool_schema_has_no_preserve_evidence_flag():
 
     fields = EvaluateTool.model_fields
     assert "preserve_evidence" not in fields
-    assert "always retains" in fields["code"].description.lower() or "snapshot" in fields["code"].description.lower()
+    assert "snapshot" not in (EvaluateTool.__doc__ or "").lower()
+    assert "snapshot" not in fields["code"].description.lower()
 
     evaluate_desc = BROWSER_USE_TOOLS["evaluate"]["description"]
     assert "preserve_evidence" not in evaluate_desc
-    assert "bounded browser-extracted DOM snapshot" in evaluate_desc
+    assert "snapshot" not in evaluate_desc.lower()
     assert "use `extract`" not in evaluate_desc
     assert "NOT for extracting visible content" not in evaluate_desc
 
     tools = build_browser_use_tools(["evaluate"])
     assert len(tools) == 1
     assert "preserve_evidence" not in tools[0]["input_schema"].get("properties", {})
-    assert "bounded browser-extracted DOM snapshot" in tools[0]["description"]
+    assert "snapshot" not in tools[0]["description"].lower()
     assert "use `extract`" not in tools[0]["description"]
 
     prompt = build_browser_use_system_prompt([])
     assert "# Evidence Retention" in prompt
-    assert "preserve flag" in prompt.lower() or "do not pass a preserve flag" in prompt
+    assert "preserve flag" not in prompt.lower()
     assert "preserve_evidence=true" not in prompt
+    assert "after a successful `evaluate`" not in prompt
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -21660,10 +21653,8 @@ async def run_all_tests():
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
-    await r.record_async(
-        "evaluate_always_preserves_browser_evidence_checkpoint",
-        test_evaluate_always_preserves_browser_evidence_checkpoint,
-    )
+    r.record("evaluate_does_not_snapshot_dom", test_evaluate_does_not_snapshot_dom_behind_the_model)
+    r.record("verifier_checkpoints_stay_bounded", test_verifier_checkpoints_stay_bounded)
     r.record(
         "evaluate_tool_schema_has_no_preserve_evidence_flag",
         test_evaluate_tool_schema_has_no_preserve_evidence_flag,
