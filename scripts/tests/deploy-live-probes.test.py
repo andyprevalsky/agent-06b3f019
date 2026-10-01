@@ -75,6 +75,59 @@ class DeployLiveProbeTests(unittest.TestCase):
             self.assertEqual(results, {"failed": 7, "slow": 0})
             self.assertEqual(marker.read_text(), "done")
 
+    def test_dependent_probe_starts_after_prerequisite_exits_even_on_failure(self) -> None:
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            finished = Path(temporary) / "prerequisite-finished"
+            started = Path(temporary) / "dependent-started"
+            commands = (
+                module.Command(
+                    "dependent",
+                    (
+                        sys.executable,
+                        "-c",
+                        f"import time; open({str(started)!r}, 'w').write(repr(time.time()))",
+                    ),
+                    ROOT,
+                    after="prerequisite",
+                ),
+                module.Command(
+                    "prerequisite",
+                    (
+                        sys.executable,
+                        "-c",
+                        "import time; time.sleep(.15); "
+                        f"open({str(finished)!r}, 'w').write(repr(time.time())); "
+                        "raise SystemExit(7)",
+                    ),
+                    ROOT,
+                ),
+            )
+            results = module.run_commands(commands)
+
+            self.assertEqual(results, {"dependent": 0, "prerequisite": 7})
+            self.assertGreaterEqual(float(started.read_text()), float(finished.read_text()))
+
+    def test_unknown_or_cyclic_prerequisites_are_rejected(self) -> None:
+        module = _load_module()
+        with self.assertRaises(ValueError):
+            module.run_commands((module.Command("orphan", ("true",), ROOT, after="missing"),))
+        with self.assertRaises(ValueError):
+            module.run_commands((module.Command("self", ("true",), ROOT, after="self"),))
+
+    def test_chat_router_failover_live_probe_runs_after_amplitude(self) -> None:
+        module = _load_module()
+        commands = {command.name: command for command in module.deploy_commands()}
+
+        self.assertEqual(
+            set(commands), {"credential-health", "amplitude-live", "chat-router-failover-live"}
+        )
+        probe = commands["chat-router-failover-live"]
+        self.assertEqual(probe.after, "amplitude-live")
+        self.assertIn("CHAT_ROUTER_FAILOVER_LIVE=1", probe.argv)
+        self.assertEqual(probe.argv[-2:], ("scripts/run-blackbox-tests.sh", "chat-router-failover"))
+        self.assertEqual(probe.cwd, ROOT / "back-end")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -249,6 +249,8 @@ require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WO
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$FRONTEND_COVERAGE_WORKERS"' "/deploy must apply the computed frontend worker budget"
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$MAC_COVERAGE_WORKERS"' "/deploy must apply the computed Mac worker budget"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"amplitude-live"' "/deploy must retain the focused live Amplitude probe"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"chat-router-failover-live"' "/deploy must replay the e8f2279b chat follow-up through the real OpenRouter failover"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"CHAT_ROUTER_FAILOVER_LIVE=1"' "/deploy chat router failover probe must run the live case"
 require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"

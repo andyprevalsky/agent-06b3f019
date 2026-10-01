@@ -833,6 +833,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "research-fix": "research-fix",
         "credential-health": "credential-health",
         "amplitude-live": "credential-health",
+        "chat-router-failover-live": "credential-health",
         "backend-blackbox": "backend-blackbox",
         "smoke": "smoke",
         "semantic": "semantic",

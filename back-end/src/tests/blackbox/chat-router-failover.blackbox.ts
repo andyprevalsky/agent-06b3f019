@@ -39,6 +39,7 @@ import { prisma } from '../../providers/database';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
+import { DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS } from '../../providers/chat/routerCompletionDeadline';
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
@@ -438,12 +439,17 @@ async function testHealthyCerebrasPathUnchanged(): Promise<void> {
     assertExactProdRouterContext(network);
     assert.equal(outcome.kind, 'escalated');
     assertHealthyTurn(network);
+    assert.equal(network.routerRequests('cerebras').length, 1, 'no regenerate on a healthy turn');
     assert.equal(
       network.routerRequests('openrouter').length,
       0,
       'healthy Cerebras must not arm the OpenRouter hedge'
     );
-    assert.ok(outcome.atMs < 3_000, `healthy router turn took ${outcome.atMs}ms`);
+    assert.ok(
+      outcome.atMs < DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS,
+      `healthy router turn took ${outcome.atMs}ms — no router bound may be involved`
+    );
+    process.stdout.write(`  healthy Cerebras escalated at ${outcome.atMs}ms\n`);
   } finally {
     await cleanup(seeded);
   }
