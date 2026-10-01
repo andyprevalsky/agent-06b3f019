@@ -433,15 +433,15 @@ class ActionHistory:
             if element:
                 tag = getattr(element, "tag_name", None) or getattr(element, "node_name", "unknown")
                 element_description = f"[{index}] {tag}"
-                text = getattr(element, "text_content", "") or ""
-                # Browser-use often stores a button's label in child text while
-                # text_content is empty. Preserve the visible label so the
-                # browser transcript can identify a Submit click reliably.
-                if not text and action == "click" and str(tag).lower() == "button":
-                    try:
-                        text = element.get_all_children_text() or ""
-                    except Exception:
-                        text = ""
+                # Browser DOM nodes often keep a button's visible label in
+                # children while text_content on the button itself is empty.
+                # Preserve that label so later decisions can identify the
+                # control that was actually clicked.
+                try:
+                    text = element.get_all_children_text() or ""
+                except Exception:
+                    text = ""
+                text = str(text or getattr(element, "text_content", "") or "").strip()
                 if text:
                     element_description += f" '{text[:50]}'"
 
