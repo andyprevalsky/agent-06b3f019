@@ -172,6 +172,8 @@ trap 'rm -f "$JS_LOG" "$PY_LOG"' EXIT
 JS_PID=$!
 
 (
+    # Snapshot VMs reuse an old venv; reinstall whenever an installed release no
+    # longer satisfies requirements.txt so pin bumps on main are applied.
     if [ ! -f agents/venv/bin/activate ] \
         || ! agents/venv/bin/python scripts/lib/agents_venv_satisfied.py agents/requirements.txt; then
         echo "🐍 Setting up agents venv..."
