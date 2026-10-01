@@ -13216,9 +13216,7 @@ def test_local_start_services_reaps_only_its_real_process_group():
                 ],
                 **kwargs,
             )
-            # Two nested interpreter starts under coverage on a loaded host can
-            # exceed a few seconds; the wait only bounds the fixture's own startup.
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + 5
             while not child_pid_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert child_pid_path.exists(), "owned process did not launch its child"

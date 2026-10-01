@@ -1724,9 +1724,7 @@ port = int(sys.argv[1])
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", port))
-# The listener never accepts, so every probe connection stays queued; a backlog
-# of 1 fills after the first probe on macOS and later probes see EAGAIN.
-s.listen(16)
+s.listen(1)
 time.sleep(2)
 s.close()
 PY
