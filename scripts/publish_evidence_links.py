@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -102,7 +103,7 @@ def durable_fe_url(agent_id: str, run_id: str, token: str) -> str:
 
 def upload_run_json(run_json: Path) -> str:
     sys.path.insert(0, str(REPO_ROOT / "agents"))
-    from benchmarks.hub_upload import upload_run_bundle  # type: ignore
+    from benchmarks.hub_upload import upload_run_bundle
 
     bundle = json.loads(run_json.read_text(encoding="utf-8"))
     os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB)
@@ -151,7 +152,7 @@ def _probe_recording_view_url(url: str, *, timeout: float = 20.0) -> bool:
     try:
         with _opener().open(request, timeout=timeout) as response:
             return int(response.status) < 400
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
         return False
 
 
@@ -173,7 +174,7 @@ def _probe_recording_file_pointer(
     try:
         with _opener().open(request, timeout=timeout) as response:
             payload = json.loads(response.read() or b"{}")
-    except Exception:
+    except (OSError, ValueError, http.client.HTTPException):
         return False
     signed = payload.get("signed_url") or payload.get("signedUrl") or payload.get("url")
     if not isinstance(signed, str) or not signed:
@@ -244,10 +245,13 @@ def validate_browser_agents_terminated_with_recording(
         recording_ok = False
         for meta in recording_candidates.get(task_id, []):
             view_url = meta.get("recording_view_url")
-            if isinstance(view_url, str) and view_url.strip():
-                if _probe_recording_view_url(view_url.strip()):
-                    recording_ok = True
-                    break
+            if (
+                isinstance(view_url, str)
+                and view_url.strip()
+                and _probe_recording_view_url(view_url.strip())
+            ):
+                recording_ok = True
+                break
             pointer = meta.get("recording_file_pointer")
             if isinstance(pointer, dict) and _probe_recording_file_pointer(
                 agent_id, pointer
@@ -272,10 +276,11 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             continue
         role = message.get("role")
         content = str(message.get("text") or "")
-        if (
-            role not in ("USER", "ASSISTANT")
-            or _message_metadata(message).get("hidden")
-        ):
+        meta = _message_metadata(message)
+        # Mirrors the FE root filter (filterMessagesForSubAgent): sub-agent rows
+        # render inside their collapsed card, except explore-agent rows.
+        nested = meta.get("subAgentId") is not None and meta.get("agentType") != "explore"
+        if role not in ("USER", "ASSISTANT") or meta.get("hidden") or nested:
             continue
         for line in content.splitlines():
             # React renders Markdown markers as formatting, so match the text
@@ -352,6 +357,7 @@ def verify_agent_reachable(
         capture_output=True,
         timeout=90,
         cwd=str(REPO_ROOT),
+        check=False,
     )
     if browser.returncode != 0:
         raise SystemExit(f"FE browser verification failed: {browser.stderr.strip()[:500]}")

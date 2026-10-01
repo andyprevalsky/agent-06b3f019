@@ -20,8 +20,8 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 
 # Avoid network probes in unit checks: stub URL/pointer reachability.
-mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")  # type: ignore[assignment]
-mod._probe_recording_file_pointer = (  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: url.startswith("https://ok/")
+mod._probe_recording_file_pointer = (
     lambda agent_id, pointer, timeout=30.0: isinstance(pointer, dict)
     and pointer.get("id") == "fp-ok"
 )
@@ -72,6 +72,28 @@ assert list_snippets == {
     "user": ["Open the benchmark link"],
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
+
+# The root FE transcript folds sub-agent rows (browser-use step thoughts) into
+# their collapsed card; only explore-agent rows stay on the root transcript.
+sub_agent_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Sign in to my members account please"},
+        {
+            "role": "ASSISTANT",
+            "text": "First, let me start by understanding the browser state",
+            "metadata": {"subAgentId": "child-1", "streamId": "browser-use-child-1-1"},
+        },
+        {
+            "role": "ASSISTANT",
+            "text": "Searching the web for the members portal",
+            "metadata": {"subAgentId": "child-2", "agentType": "explore"},
+        },
+    ]
+)
+assert sub_agent_snippets == {
+    "user": ["Sign in to my members account please"],
+    "assistant": ["Searching the web for the members portal"],
+}, sub_agent_snippets
 
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
@@ -150,7 +172,7 @@ failures = mod.validate_browser_agents_terminated_with_recording(
 assert failures == [], failures
 
 # Dead view URL → fail recording
-mod._probe_recording_view_url = lambda url, timeout=20.0: False  # type: ignore[assignment]
+mod._probe_recording_view_url = lambda url, timeout=20.0: False
 failures = mod.validate_browser_agents_terminated_with_recording(
     agent,
     [
