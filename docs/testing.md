@@ -147,6 +147,13 @@ review. The independent 1800-second cancellation cutoff remains unchanged. A cod
 change starts a new ten-slice streak; do not shorten or change task evaluation to
 make this proof pass.
 
+The existing `scripts/tests/publish_evidence_links_browser_validation.test.sh`
+also covers transcript ownership, literal versus Markdown bubbles, adjacent
+delimiter runs, inline code, entities, links, escapes and line boundaries. Run it
+with the agents venv active so it uses the existing `markdown-it-py` dependency.
+These compact offline controls complement the real fresh-browser publication
+check; they do not supply fleet acceptance credit.
+
 End-to-end tests that spawn real agents against a running backend. Requires all services (back-end + agents + research) to be running.
 
 ```bash

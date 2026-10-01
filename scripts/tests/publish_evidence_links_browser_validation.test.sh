@@ -94,6 +94,39 @@ assert literal_snippets == {
     "assistant": ["Inspect foo_bar before retrying"],
 }, literal_snippets
 
+# Adjacent Markdown delimiter runs can be literal text inside emphasis. The
+# verifier must preserve what the browser renders, not concatenate across them.
+for source, rendered in (
+    ("**Inspect the completed run****before recording evidence**",
+     "Inspect the completed run****before recording evidence"),
+    ("**Inspect the completed run** and **record the evidence**",
+     "Inspect the completed run and record the evidence"),
+    ("`Inspect **literal** delimiters` before recording evidence",
+     "Inspect **literal** delimiters before recording evidence"),
+    ("Inspect the &amp; symbol before recording evidence",
+     "Inspect the & symbol before recording evidence"),
+    (r"\*\*Inspect the escaped heading\*\*\nNext visible line",
+     "Inspect the escaped heading"),
+    ("~~Inspect the old evidence~~ before [checking](https://example.com)",
+     "Inspect the old evidence before checking"),
+    ("Short line\nA complete visible phrase on the next line",
+     "A complete visible phrase on the next line"),
+    ("![Invisible image description](https://example.com/image.png)\n\n"
+     "Visible text after the image", "Visible text after the image"),
+):
+    assert mod.visible_transcript_snippets([
+        {"role": "ASSISTANT", "text": source},
+    ]) == {"user": [], "assistant": [rendered[:60]]}
+
+# USER and assistant attachment bubbles render literal text, not Markdown.
+literal = r"**Inspect the &amp; symbol** before retrying\nKeep this text"
+for role, attachment in (("USER", None), ("ASSISTANT", {"id": "fixture"})):
+    expected = {"user": [], "assistant": []}
+    expected[role.lower()] = [literal[:60]]
+    assert mod.visible_transcript_snippets([
+        {"role": role, "text": literal, "file_pointer": attachment},
+    ]) == expected
+
 fe_url = mod.durable_fe_url(agent, agent, "run.signature")
 assert "?agent-id=" in fe_url and "#benchmark-share=run.signature" in fe_url, fe_url
 assert "benchmark-share=" not in fe_url.split("#", 1)[0], fe_url
@@ -105,7 +138,7 @@ list_snippets = mod.visible_transcript_snippets(
     ]
 )
 assert list_snippets == {
-    "user": ["Open the benchmark link"],
+    "user": ["1. Open the benchmark link"],
     "assistant": ["Inspect the run before retrying"],
 }, list_snippets
 

@@ -1,12 +1,12 @@
 ---
 id: 2026-10-01-shared-evidence-verifier-used-nested-transcript
 date: 2026-10-01
-title: Durable evidence verification selected nested browser reasoning for the root transcript
+title: Durable evidence verification diverged from transcript ownership and rendering
 surface: harness
 component: durable-evidence-publisher
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: visible_transcript_snippets included subAgentId messages that the root MessageList excludes
+first_bad_boundary: visible_transcript_snippets disagreed with the root transcript's ownership and literal-versus-Markdown renderer
 symptoms:
   - "FE browser verification failed"
   - "page.waitForFunction: Timeout 30000ms exceeded"
@@ -15,14 +15,16 @@ tags:
   - transcript-scope
   - signed-share
   - transport-timeout
+  - markdown
 sources:
   - PR #1299
   - commit 6758652dc5e66bb7071fd5cfcd25f9c15706db19
+  - commit e09d3c7c78fbe4a249f5b04dfcc8ef2276eaf681
 repro: scripts/tests/publish_evidence_links_browser_validation.test.sh
 status: fixed
 ---
 
-## Problem and runtime evidence
+## Problem
 
 The first ten-task slice on source `6758652` passed its native runner checks but
 failed durable publication for five roots. Four failed the same browser
@@ -38,6 +40,8 @@ eight selected assistant phrases were absent, and no root Thought control was
 present. The captured API contained 21 nonempty assistant rows, all scoped to a
 nested browser task. The root assistant row contained only a tool call.
 
+## Diagnosis
+
 `filterMessagesForSubAgent` in the existing frontend excludes those nested
 browser rows from the root transcript. The publisher selected them without
 applying that ownership boundary. Their absence from the root page was expected;
@@ -52,7 +56,7 @@ owns UUID and package resolution, while the
 retains a different, unlocalized original failure. Neither establishes this
 scope mismatch.
 
-## Repair and unchanged reproduction
+## Solution
 
 Snippet selection now follows the root scope for USER/ASSISTANT rows. It excludes
 nested browser messages while retaining null/unset root scope, root-visible
@@ -118,7 +122,77 @@ Independent source review found no blocker in the scope selection or bounded GET
 retry and verified preservation of the old fixture statements. Its private receipt
 binds the reviewed source, unchanged browser verifier and RED/GREEN artifacts.
 
+## Human feedback
+
 The user requested compact regression coverage and waived routine speedup
 reviews below 20 minutes E2E. Correctness, durable evidence and exact teardown
 remain required. Verify the visible transcript's actual ownership scope, and
 distinguish replay-safe reads from ambiguous writes.
+
+## Reusable lesson
+
+Derive evidence predicates from the transcript's actual ownership and renderer,
+and test them against the visible page before changing timeouts.
+
+## October 1 recurrence: literal Markdown delimiters
+
+The next slice on `e09d3c7` reached genuine evaluation for all ten tasks
+(two passed, eight failed), but three durable publications failed the same
+30-second browser predicate. Those task failures are permitted; the publication
+errors reject the entire slice. Searches for `page.waitForFunction Timeout
+30000ms` and `Markdown literal transcript browser verification` returned this
+case. The ownership repair held: every selected phrase belonged to the visible
+root scope. The earlier regex-based rendering assumption was still wrong.
+
+An instrumented replay captured the exact second wait: USER matched, neither
+ASSISTANT candidate matched, and the first Thought was expanded. Its rendered
+paragraph preserved four literal asterisks inside emphasis. The publisher's
+regex removed those characters and concatenated text across them. All three
+failed roots had this delimiter shape. Increasing the wait cannot make that
+nonexistent phrase appear.
+
+The publisher now uses the already-declared agents `markdown-it-py` parser for
+assistant Thoughts, including inline code, entities and strikethrough. It applies
+the frontend's escape normalization and preserves block/line boundaries. USER
+and assistant attachment bubbles retain literal text, matching their actual
+renderers. Image alt text and link destinations are not transcript innerText.
+Independent review caught the literal-bubble distinction before sealing the fix.
+No new dependency, suite, model call, task/evaluator change, browser assertion or
+timeout was introduced.
+
+The unchanged private owning fixture reads the original sealed API payload and
+signed URL, derives snippets from the publisher under test, and invokes the real
+unchanged fresh-browser verifier. It failed on the original source in 33.779
+seconds and passed on the final source in 6.199 seconds. The fixture digest is
+`4719aa7ef0bb47803af2a96935787b518addc48b37fe0a695ec635d217a79801`;
+the API digest is
+`bd69133f4539d26ea1a4c5dab3c7c195c2246f445aeb738ae04eb60c86b515ce`.
+The Node verifier stayed
+`327b7334b2113fa29d4a02b5941a3bdf43e9377d225a6719b8b85a356dd56d71`.
+Full `verify_agent_reachable` checks for all three originally rejected roots
+also passed on the final publisher in 8.437, 6.428 and 5.784 seconds, including
+API, terminal/recording and initial/reload browser checks. Their diagnostic
+processes exited normally; none was a new benchmark execution.
+
+The existing permanent blackbox adds a small table of Markdown cases and two
+literal-renderer controls. Its identical final bytes
+(`5f0a9eed5b3358816163f709fc48f7098d033d02e0f6686b164a70d71680409c`)
+fail on the original publisher in 1.166 seconds and pass on the final publisher
+in 2.068 seconds. The old USER list expectation now includes its literal list
+prefix; this strengthens agreement with UserBubble rather than stripping text
+the browser displays. An initial isolated fixture copy lacked the agents import
+root; that setup failure is retained separately and supplies no causal credit.
+
+The original rejected slice is privately sealed at
+`/data/proof92-rejected-original-20261001/slice-0.private.tar.gz`, digest
+`670cd2429c5643491117444b6a59a41e7af78a3b386bdc405e8c22a43dee087d`,
+with zero changing files. Native verification found ten stopped pool Machines,
+zero claims and no owner registry. Diagnostic replays remain zero-credit;
+fresh consecutive fleet proof is still required.
+
+The 24m17s slice also exceeded the user's 20-minute speed-review waiver.
+Two late worker clones waited 225 and 352 seconds before the storage-readiness
+barrier released provisioning. Existing evidence does not distinguish actual
+snapshot restoration time from inventory delay. No speculative speed change or
+timeout reduction was made; this rendering repair does not establish the cause
+of that delay or the earlier live backend OOM.

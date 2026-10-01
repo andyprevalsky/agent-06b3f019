@@ -405,6 +405,7 @@ def validate_browser_agents_terminated_with_recording(
 
 def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
     """Extract short, rendered phrases from each visible transcript role."""
+    markdown = None
     snippets: dict[str, list[str]] = {"user": [], "assistant": []}
     for message in messages:
         if not isinstance(message, dict):
@@ -427,23 +428,39 @@ def visible_transcript_snippets(messages: list[dict]) -> dict[str, list[str]]:
             )
         ):
             continue
-        for line in content.splitlines():
-            # React renders Markdown markers as formatting, so match the text
-            # the signed-out visitor sees instead of the raw Markdown source.
-            visible_line = re.sub(
-                r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)", "", line
+        if role == "USER" or message.get("file_pointer"):
+            # UserBubble and AssistantAttachmentBubble render literal text.
+            lines = content.splitlines()
+        else:
+            # Use the existing agents dependency rather than approximating
+            # CommonMark: adjacent emphasis delimiters may remain literal text.
+            if markdown is None:
+                from markdown_it import MarkdownIt
+
+                markdown = MarkdownIt("commonmark", {"html": False}).enable(
+                    "strikethrough"
+                )
+            # Match the FE's normalizeMarkdownText before parsing. Keep block
+            # and line boundaries; image alt/link destinations are not innerText.
+            content = re.sub(
+                r"\\([nt*_`#\[\]()])",
+                lambda match: {"n": "\n", "t": "\t"}.get(match[1], match[1]),
+                content,
             )
-            visible_line = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", visible_line)
-            visible_line = re.sub(r"`([^`]+)`", r"\1", visible_line)
-            visible_line = re.sub(
-                r"\*\*([^*]+)\*\*|__([^_]+)__", lambda m: m[1] or m[2], visible_line
-            )
-            visible_line = re.sub(
-                r"(?<!\w)\*([^*]+)\*(?!\w)|(?<!\w)_([^_]+)_(?!\w)",
-                lambda m: m[1] or m[2],
-                visible_line,
-            )
-            visible_line = re.sub(r"~~([^~]+)~~", r"\1", visible_line).strip()
+            lines: list[str] = []
+            for token in markdown.parse(content):
+                if token.type == "inline":
+                    rendered = "".join(
+                        child.content
+                        if child.type in {"text", "code_inline"}
+                        else "\n" if child.type in {"softbreak", "hardbreak"} else ""
+                        for child in token.children or []
+                    )
+                    lines.extend(rendered.splitlines())
+                elif token.type in {"fence", "code_block"}:
+                    lines.extend(token.content.splitlines())
+        for line in lines:
+            visible_line = line.strip()
             if len(visible_line) >= 12:
                 snippets[str(role).lower()].append(visible_line[:60])
                 break

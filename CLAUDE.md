@@ -368,6 +368,15 @@ isolation. Both are discovered by the backend blackbox runner in `/deploy`.
 These causal tests do not prove that an earlier live OOM had the same allocation
 source; retain its evidence and verify fresh fleet outcomes separately.
 
+Run durable publication with the agents environment, for example
+`agents/venv/bin/python scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`.
+Transcript verification must follow both root-message ownership and the actual
+renderer: user/attachment text is literal; assistant Thoughts use Markdown.
+Use the existing CommonMark parser for rendered snippets, preserving literal
+delimiter runs and line boundaries. A fresh-browser timeout can mean the verifier
+expected text the UI never renders; capture that exact predicate before changing
+timeouts. The existing publisher browser-validation blackbox owns these cases.
+
 PR #1299's infrastructure acceptance requires **ten consecutive slices of ten
 benchmarks**, with **at least three successful LLM queries per benchmark's own
 agent tree**. Verify completed provider responses with correlated, nonduplicated
