@@ -1313,6 +1313,40 @@ async def test_handler_explore_cancel_grace_wraps_up_without_awaiting_handle():
     assert 3 * (LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE) <= timedelta(seconds=540)
 
 
+def test_live_explore_settles_within_worker_shutdown_grace():
+    """A rolling deploy never kills a live explore before its parent settles it.
+
+    SIGTERM stops the worker's polling and gives running activities
+    WORKER_SHUTDOWN_GRACE_PERIOD before it exits. A live parent stops waiting
+    after LIVE_EXPLORE_PARENT_WAIT and cancels with EXPLORE_CANCEL_GRACE, so
+    when both fit inside the grace every explore in flight at SIGTERM returns
+    (or is cancelled into evidence recovery) before the machine goes away.
+    """
+    import tomllib
+    from datetime import timedelta
+    from pathlib import Path
+
+    from domains.spawn_agent.config import (
+        EXPLORE_CANCEL_GRACE,
+        EXPLORE_DEPTH_LIMITS,
+        LIVE_EXPLORE_PARENT_WAIT,
+        explore_parent_wait_timeout,
+    )
+    from helpers.generation_handoff import parse_shutdown_grace_seconds
+
+    fly = tomllib.loads((Path(__file__).resolve().parents[2] / "fly.toml").read_text())
+    grace = timedelta(seconds=parse_shutdown_grace_seconds(fly["env"]["WORKER_SHUTDOWN_GRACE_PERIOD"]))
+    kill_timeout = timedelta(seconds=parse_shutdown_grace_seconds(fly["kill_timeout"]))
+    assert grace <= kill_timeout, f"Fly kills the machine at {kill_timeout} before the {grace} worker grace"
+    for depth, (_turns, activity_timeout) in EXPLORE_DEPTH_LIMITS.items():
+        parent_wait = explore_parent_wait_timeout(activity_timeout, oai_demo=False)
+        assert parent_wait + EXPLORE_CANCEL_GRACE < grace, (
+            f"live {depth} explore can outlive the {grace} shutdown grace "
+            f"(parent wait {parent_wait} + cancel grace {EXPLORE_CANCEL_GRACE})"
+        )
+    assert LIVE_EXPLORE_PARENT_WAIT + EXPLORE_CANCEL_GRACE < grace
+
+
 async def test_handler_explore_empty_recovery_stays_error_in_fast_mode():
     """Fast Mode must not turn an evidence-free cancellation into a success."""
     from domains.spawn_agent.handler import SpawnAgentManager
@@ -4730,6 +4764,7 @@ async def run_all_tests():
         "tagged_execute_activity_injects", test_tagged_execute_activity_injects_taskid_for_post_agent_message
     )
     r.record("user_facing_explore_result_keeps_prod_summaries", test_user_facing_explore_result_keeps_prod_summaries)
+    r.record("live_explore_settles_within_worker_shutdown_grace", test_live_explore_settles_within_worker_shutdown_grace)
     teardown_mock()
     return r.all_passed
 
