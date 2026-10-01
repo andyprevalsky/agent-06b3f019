@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
-from providers.fast_cache.normalize import GOOGLE_OAUTH_DEMO_PROMPT_PREFIX, goal_hash
+from providers.fast_cache.normalize import (
+    GOOGLE_OAUTH_DEMO_GOAL_HASH,
+    GOOGLE_OAUTH_DEMO_PROMPT_PREFIX,
+    goal_hash,
+)
 
 DEMO_URL = "https://google-oauth-demo.invalid/run"
 DEMO_LABEL = "DEMO fixture, no live Google data changed"
@@ -16,10 +18,7 @@ DEMO_LABEL = "DEMO fixture, no live Google data changed"
 def matches_demo_goal(goal: str | None) -> bool:
     if not goal or not goal.startswith(GOOGLE_OAUTH_DEMO_PROMPT_PREFIX):
         return False
-    catalog = Path(__file__).resolve().parents[2] / "benchmarks" / "tasks.json"
-    tasks = json.loads(catalog.read_text(encoding="utf-8"))
-    prompt = next(task["prompt"] for task in tasks if task["name"] == "google-oauth")
-    return goal_hash(goal) == goal_hash(prompt)
+    return goal_hash(goal) == GOOGLE_OAUTH_DEMO_GOAL_HASH
 
 
 def normalize_completion_notice(

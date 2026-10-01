@@ -57,7 +57,11 @@ def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
         normalize_completion_notice,
         run_fixture,
     )
-    from providers.fast_cache.normalize import demo_cache_allowed
+    from providers.fast_cache.normalize import (
+        demo_cache_allowed,
+        goal_hash,
+        google_oauth_demo_goal_hash,
+    )
 
     task = get_task_by_name("google-oauth")
     assert task.title == "Google OAuth"
@@ -78,6 +82,7 @@ def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
     }
     goal = _benchmark_goal_for_task(task, "https://navi-j9a9.onrender.com")
     assert goal == task.prompt
+    assert google_oauth_demo_goal_hash() == goal_hash(goal)
     assert demo_cache_allowed(goal)
     assert matches_demo_goal(goal)
     rows = run_fixture()["rows"]
@@ -90,6 +95,22 @@ def test_google_oauth_demo_uses_cached_fixture_without_browser_or_code_agent():
     assert summary.startswith(DEMO_LABEL)
     other, unchanged = normalize_completion_notice("other task", {"demo_notice": "Other"}, "Completed")
     assert other["demo_notice"] == "Other" and unchanged == "Completed"
+
+
+def test_google_oauth_demo_cache_is_available_without_catalog_in_worker_image():
+    from unittest.mock import patch
+
+    from domains.api_request.google_oauth_demo_fixture import matches_demo_goal
+    from providers.fast_cache.normalize import demo_cache_goal_hashes, google_oauth_demo_goal_hash
+
+    goal = get_task_by_name("google-oauth").prompt
+    demo_cache_goal_hashes.cache_clear()
+    try:
+        with patch("providers.fast_cache.normalize.Path.open", side_effect=FileNotFoundError):
+            assert google_oauth_demo_goal_hash() in demo_cache_goal_hashes()
+            assert matches_demo_goal(goal)
+    finally:
+        demo_cache_goal_hashes.cache_clear()
 
 
 def test_agentcard_idempotency_task_terminates_after_reporting_results():
