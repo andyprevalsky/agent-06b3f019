@@ -86,8 +86,9 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
   {
     file: 'providers/credits.ts',
     scope: 'ensureInviteMonthlyCredit',
-    fingerprint: '8dec868e4c7e03d6',
-    reason: 'serializable isolation is not exposed by the canonical wrapper',
+    fingerprint: '6f0b5e98a466dcd2',
+    reason:
+      'serializable isolation and whole-transaction retry are not exposed by the canonical wrapper',
   },
   {
     file: 'providers/database.ts',

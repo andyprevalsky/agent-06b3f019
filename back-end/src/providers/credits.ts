@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 
 const log = createLogger('Credits');
 
@@ -78,39 +79,54 @@ export async function ensureInviteMonthlyCredit(userId: string): Promise<void> {
   // and every worker credit check hit, so concurrent requests can otherwise all
   // observe "not granted" and each insert their own $30. Serializable isolation
   // makes the losers abort with a serialization failure (P2034 / 40001) instead
-  // of duplicating the grant — no schema change or unique index required.
+  // of duplicating the grant. Retry the entire transaction so a failed commit
+  // cannot make the following usage read report a missing allowance.
   try {
-    await prisma.$transaction(
-      async (tx) => {
-        const alreadyGranted = await tx.credit.findFirst({
-          where: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
-          select: { id: true },
-        });
-        if (alreadyGranted !== null) return;
+    const granted = await retryWithBackoff(
+      () =>
+        prisma.$transaction(
+          async (tx) => {
+            const alreadyGranted = await tx.credit.findFirst({
+              where: {
+                userId,
+                amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+                expirationDate: periodEnd,
+              },
+              select: { id: true },
+            });
+            if (alreadyGranted !== null) return false;
 
-        await tx.credit.create({
-          data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
-        });
-        log.info('Granted invite-code monthly credit', {
-          userId,
-          amountCents: INVITE_MONTHLY_CREDIT_CENTS,
-          expiresAt: periodEnd.toISOString(),
-        });
-      },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+            await tx.credit.create({
+              data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+            });
+            return true;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+        ),
+      {
+        maxRetries: 5,
+        initialBackoffMs: 10,
+        component: 'Invite monthly credit',
+        isRetryable: (error) => {
+          const code = (error as { code?: string }).code;
+          return code === 'P2034' || code === 'P2002';
+        },
+      }
     );
+    if (granted) {
+      log.info('Granted invite-code monthly credit', {
+        userId,
+        amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+        expiresAt: periodEnd.toISOString(),
+      });
+    }
   } catch (error) {
-    // A serialization failure means a concurrent request granted this period
-    // first — the desired end state, so it is a no-op rather than an error. The
-    // allowance is also self-healing: the next usage read retries.
-    const code = (error as { code?: string }).code;
-    if (code === 'P2034' || code === 'P2002') return;
     log.error('Failed to grant invite-code monthly credit', {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });
-    // Any OTHER failure must not be swallowed. Returning here would let
-    // getUsageSummary report a balance MISSING this user's allowance, which can
+    // Even an exhausted conflict must not be swallowed. Returning here would let
+    // getUsageSummary report a balance missing this user's allowance, which can
     // send an eligible invited user through the credit gate — the exact outcome
     // the allowance exists to prevent. Failing loudly is the safer mode: the
     // worker's usage check treats a non-200 as "don't override cache" (returns
