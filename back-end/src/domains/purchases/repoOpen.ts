@@ -1,5 +1,6 @@
 import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
 import { runTransactionWithRetry } from '../../providers/database';
+import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 
 const PURCHASE_OPEN_LOCK_SEED = 4_951_887;
 const ACTIVE_PURCHASE_STATUSES = [
@@ -58,6 +59,33 @@ export async function createPendingPurchaseWithLock(data: {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
     if (existing !== null) return { created: false as const, purchase: existing };
+    // Canonicalization can improve between deployments while a card is still open. Recompute
+    // active receipts under the same lock so a new spelling cannot mint a second live card.
+    const candidates = await transaction.purchaseSpend.findMany({
+      where: {
+        userId: data.userId,
+        totalCents: data.totalCents,
+        status: { in: ACTIVE_PURCHASE_STATUSES },
+        ...(agentId !== undefined ? { OR: [{ agentId }, { agentId: null }] } : {}),
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    const recanonicalized = candidates.find(
+      (candidate) =>
+        canonicalStoredPurchaseFingerprint({
+          userId: candidate.userId,
+          merchant: candidate.merchant,
+          lineItemsJson: candidate.lineItemsJson,
+          totalCents: candidate.totalCents,
+        }) === data.canonicalFingerprint
+    );
+    if (recanonicalized !== undefined) {
+      const purchase = await transaction.purchaseSpend.update({
+        where: { id: recanonicalized.id },
+        data: { canonicalFingerprint: data.canonicalFingerprint },
+      });
+      return { created: false as const, purchase };
+    }
     const purchase = await transaction.purchaseSpend.create({
       data: {
         userId: data.userId,
