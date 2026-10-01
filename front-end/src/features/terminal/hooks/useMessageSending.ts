@@ -83,6 +83,7 @@ export function useMessageSending({
   const fastModeUserOverrideRef = useRef(false);
   const resolvedUser = user ?? (userId != null && userId !== '' ? { id: userId } : null);
   const userCanUseFastMode = canUseFastMode(resolvedUser);
+  const userDefaultsFastModeOn = defaultsFastModeOn(resolvedUser);
   const userCanUseSimulator =
     userId != null && userId !== '' && SIMULATOR_USER_IDS.includes(userId);
 
@@ -125,7 +126,7 @@ export function useMessageSending({
       setFastModeState(sessionOverride);
       return;
     }
-    setFastModeState(defaultsFastModeOn(resolvedUser));
+    setFastModeState(userDefaultsFastModeOn);
   }, [
     agentDetail?.agent_id,
     agentDetail?.fast_mode_cache_enabled,
@@ -134,6 +135,7 @@ export function useMessageSending({
     user?.id,
     user?.phone,
     userCanUseFastMode,
+    userDefaultsFastModeOn,
     userId,
   ]);
 
@@ -243,7 +245,7 @@ export function useMessageSending({
         }
 
         // The backend lifts a user pause after delivering the message, so the
-        // woken workflow always reads it. Resuming first raced the message.
+        // woken workflow always has it; resuming here first would not.
         await postMessage(selectedAgentId, messageInput, attachments);
         setMessageInput('');
         if (agentDetail?.status === 'PAUSED') {
