@@ -154,8 +154,10 @@ Archive searches: `Chat router completion expired` and the apology string.
 This is a recurrence of this case. Relatives:
 
 - `2026-09-28-chat-mode-sent-subagent-rows-estimator-skipped`: same apology on
-  a post-completion follow-up, ruled out. This context was 88,440 chars and
-  both providers returned HTTP 200, so there was no window overflow.
+  a post-completion follow-up, ruled out. The projected router request is
+  88,440 chars (82,649 transcript plus a 5,791-char system prompt; 24,382 GLM
+  prompt tokens locally), well inside both models' windows, and prod logged
+  no invalid-request or context-length error.
 - `2026-07-16-chat-pinned-to-cerebras-with-same-provider-failover`: a Cerebras
   stall is the trigger, but the cross-provider hedge now exists and started on
   time.
@@ -232,8 +234,10 @@ preferences and no `session_id`.
   conversation and lands on the same host.
 
 It is not proven that the prod turn hit a slow pinned host, because prod
-logged no host. That gap is now closed by `openrouter_fast_chat.upstream_provider`.
-Locally it was observed. A live probe on the bound fix with default routing
+logged no host. Prod now logs one `openrouter_fast_chat.end` record per GLM
+request (HTTP status and header time, host and first-event time, first
+content, and how it ended, including the caller's abort reason) and
+`openrouter.headers` for every OpenRouter stream. Locally it was observed. A live probe on the bound fix with default routing
 stuck to InferenceNet (the host comes from the probe output; the capture
 file was not retained):
 
@@ -249,7 +253,10 @@ are in the RCA evidence bundle
 - Prod proves direct Cerebras produced no content within 1.2s and did not
   429: the primary error at 03:46:47.233Z is `RoseStallError`. Locally on the
   exact context, the stall shape (HTTP 200, a role-only delta at about 417ms,
-  then silence) appears in 1 of the 8 saved direct-Cerebras probes.
+  then silence) was seen on 3 of 15 real-route runs while the replay fixture
+  was recorded (its note records the count). Those raw traces were not
+  retained; the three retained direct-Cerebras traces are healthy (HTTP 200
+  with 99, 75, and 58 events). The fix does not depend on the stall rate.
 - Render sets none of the five chat bound variables (`render-env.ts` reports
   each as NOT SET), so prod runs the code defaults.
 - Failover profile, n=24, exact context, Cerebras stalled, real OpenRouter,
@@ -314,10 +321,22 @@ are in the RCA evidence bundle
   - GLM requests carry
     `provider: { sort: 'throughput', require_parameters: true }`.
   - Each GLM request names its own session (`rose-fast-chat-<requestId>`),
-    so every router attempt is routed afresh by throughput and a regenerate
-    cannot inherit a slow host's pin.
-  - The route logs `openrouter_fast_chat.upstream_provider` (host and
-    first-event ms) once per stream, from OpenRouter's `provider` field.
+    so a regenerate does not inherit the conversation-derived pin from the
+    first attempt. With `sort`, OpenRouter still picks the current
+    throughput leader, so attempt 2 can land on the same host as attempt 1;
+    the session removes only the pin, not that correlation.
+  - The route logs one `openrouter_fast_chat.end` record per request: HTTP
+    status and header time, the serving host and first-event time (from
+    OpenRouter's `provider` field), first output and first content, and the
+    end (`completed`, `caller_aborted`, `consumer_closed`,
+    `no_output_timeout`, or `failed`) with the caller's abort reason.
+    `postOpenRouterStream` logs `openrouter.headers` for every OpenRouter
+    stream.
+- `exclusiveCerebrasChatRoute.ts`: once the caller aborts (the router's
+  stall bound), a failed hedge rethrows instead of falling through to the
+  generic waterfall. The waterfall already refused to start on an aborted
+  signal, so no request leaked, but the route logged a false
+  `pre_content_failover_to_waterfall`.
 - `hedgedStream.ts`: added `onBranchFailure`. Both chat races now log
   `cerebras_chat.hedge_branch_failed` (race, branch, error) unless the
   caller aborted. The Qwen spill branch is renamed from `openrouter-glm` to
@@ -368,30 +387,60 @@ healthy Cerebras, and the GLM failover.
     the apology after 20,077ms over 2 attempts.
   - Throughput routing, before the per-request session: 5 of 5 escalated on
     router attempt 1, at 3254–3842ms, served by CoreWeave.
-  - Final code: 10 of 11 runs served.
-    - Ten escalated on router attempt 1 at 2885–4524ms (Parasail 8, BaseTen
-      2), with first content 640–1829ms after the GLM request.
-    - One run at 07:06:36Z got no GLM event within 4.2s on either attempt
-      and apologized at 10.06s.
-    - An identical direct request 40s later served 4 of 4 at 1.2–1.7s, and
-      the next 44 throughput-sorted requests (live and direct) all served.
-    - The miss's HTTP status was not recorded then. The probe now records
-      status and header time.
+  - Final code, 35 samples over two sessions (07:06–07:11Z and
+    08:02–08:09Z): 32 escalated on router attempt 1 (Parasail 18, BaseTen 6,
+    CoreWeave 6, Modal 1, Friendli 1), 2 escalated on the regenerate, and 1
+    apologized. Attempt-1 escalations landed at 2.7–9.8s, with first content
+    0.6–3.7s after the GLM request.
+    - 07:06:36Z: both attempts' GLM requests (5s apart) got no event within
+      4.2s, and the turn apologized at 10.06s. Status was not recorded then.
+    - 07:07:21Z: attempt 1 got no event within 4.2s, and the regenerate
+      served via Parasail (first content 1221ms), so the user would have
+      seen the escalation 8.16s into the turn.
+    - 08:04:30Z: attempt 1 got no response headers in 4,196ms
+      (`openrouter_fast_chat.end` with `end=caller_aborted`, no status), and
+      the regenerate served via CoreWeave at 9.34s. The probe's re-probe 60s
+      later served on attempt 1.
+    - The misses are short and per-request, not an outage: a live run at
+      07:07:06Z served between the first two, and four direct requests
+      started about 07:07:32Z all served at 1.2–1.7s.
+    - One further 08:07:52Z run is excluded: local Postgres stopped accepting
+      connections before any provider request (see the runner leak below).
 
 **Cemented in `/deploy`.**
 
 - Step 4a, backend coverage: auto-discovers the offline cases.
+  - `chat-router-failover.blackbox.ts` (4 offline cases above).
+  - `openrouter-fast-chat.blackbox.ts`: throughput routing with
+    `require_parameters`, no fixed host list, and a distinct session per
+    request; the host is reported once; the `openrouter_fast_chat.end`
+    record for an abort before headers, an abort after headers with no
+    event, a served stream, and the route's own guard; and a caller abort
+    stops the direct-Cerebras route with no further OpenRouter request and
+    no `pre_content_failover_to_waterfall` log.
+  - `chat-router-options.test.ts` pins the bounds and the GLM-guard
+    invariant; `hedged-stream.test.ts` pins branch-failure reporting.
+  - `chat-router-failover-live-verdict.test.ts` pins the live probe's
+    verdict on the recorded live shapes: served first, the 07:07:21Z shape
+    (re-probe), two misses (fail), late first content (re-probe), and
+    fail-at-once for HTTP 402, content without a decision, a wrong address,
+    events without a host, and a timeout.
 - Step 4p, `scripts/run_deploy_live_probes.py`: runs the live probe as
   `chat-router-failover-live`, after `amplitude-live` because both boot the
-  runner's db push and trigger hooks. It fails unless the real GLM failover
-  serves this exact context on router attempt 1, and it prints the serving
-  host and its timing. With a fresh session per request, each deploy samples
-  OpenRouter's current routing rather than one pinned host.
-- `chat-router-options.test.ts` pins the bounds and the GLM-guard invariant.
-  `hedged-stream.test.ts` pins branch-failure reporting.
-- `rose.blackbox.ts` pins throughput routing with `require_parameters`, no
-  fixed host list, and a distinct session per request. It also pins
-  once-per-stream reporting of the upstream host.
+  runner's db push and trigger hooks.
+  - It first checks that the OpenRouter key it will use is the one
+    `back-end/.env` configures (account settings decide which GLM hosts a
+    request may reach) and prints its fingerprint.
+  - It sends the exact e8f2279b follow-up with direct Cerebras and every
+    other OpenRouter route stalled, so only the real GLM failover can serve.
+  - It passes when the turn escalates on router attempt 1 with no error
+    alert and the re-plan goal carries the corrected address (`88 Harlow`,
+    the fixture's same-length stand-in for the user's street).
+  - An OpenRouter-side miss (no response headers, or HTTP 200 with no
+    first content inside the 4.2s budget) is re-probed once, 60s later. A
+    second miss, or any other failure, blocks the deploy.
+  - It prints the serving host and its header, first-event, and
+    first-content times for every attempt.
 - What the probe does not cover: this scenario escalates, so the speculative
   generator is discarded and the router is the only serving path. The probe
   does not cover direct-answer turns that the generator serves during a
@@ -418,7 +467,10 @@ until it errors, and then OpenRouter moves the request to the next host
 keeps the traffic until OpenRouter's rolling throughput ranking changes. The
 leader moved from CoreWeave to Parasail within an hour. BaseTen already
 returned 429s when pinned. The other shared point is our OpenRouter account
-rate limit, which this raises in stream-seconds, not in request count.
+rate limit. Failover streams are held longer (up to 15s per attempt instead
+of 3s), and a regenerate sends a second round of Cerebras, Qwen-spill, and
+GLM requests, so both stream-seconds and request count rise during a
+Cerebras stall.
 
 The leaders list $0.15/M prompt against $0.05/M for InferenceNet. An
 uncached 24k-token failover call costs about $0.004 instead of $0.0015, and
@@ -427,11 +479,27 @@ that lets a repeat turn read the prompt cache ($0.03/M on Parasail).
 
 **Residual risks, not fixed here.**
 
-- Correlated OpenRouter windows. In the 07:06 run, two attempts 5s apart
-  both got nothing within 4.2s, so a regenerate cannot escape a window that
-  covers both attempts. That was 1 of 11 live runs and 0 of 62 direct
-  requests. Prod logs now identify it (`cerebras_chat.hedge_branch_failed`,
-  `openrouter_fast_chat.upstream_provider`).
+- Short OpenRouter misses, accepted at the measured rate (needs approval).
+  4 of 38 live router GLM requests got no first content inside the 4.2s
+  budget. Direct throughput-sorted requests missed 1 of 86 (0 of the 62
+  profiled above, 1 of 24 sent each from a fresh process). Per turn: 1
+  apology and 2 regenerate escalations (8.2s
+  and 9.3s) in 35 live samples.
+  - The shape is decided after the request leaves. In the fresh-process
+    miss, connect finished at 64ms and the request was sent at 64ms, but
+    OpenRouter's headers arrived at 4,627ms (BaseTen; first content
+    5,031ms). OpenRouter often holds headers until the host streams its
+    first event (10 of 24 within 2ms), so "no headers" means no host
+    started within the budget.
+  - Which host was trying is unknown for every miss, because no event
+    arrived. The regenerate's request is routed by the same `sort`, so a
+    window covering both attempts (07:06:36Z) still apologizes.
+  - Prod cannot yet say which host failed, but every miss is now recorded:
+    prod logs `openrouter_fast_chat.end` per GLM request, and the deploy
+    probe prints connect, header, first-event, and first-content times per
+    attempt.
+  - Not done here, because both change bounds or routing: a third router
+    attempt, or routing attempt 2 away from attempt 1's host.
 - The generator path. Neither the speculative nor the canonical generator
   has a completion deadline, and the Qwen spill branch has no pre-token
   guard (only the 60s SSE idle default). On a direct-answer turn during a
@@ -457,7 +525,8 @@ every failover decision.
 (5s ratchet) runs in every `/deploy` (semantic stage, alone on one worker)
 and in the prod `chat-lifecycle-ratchet.yml` workflow. It measures the
 healthy path. While Cerebras is stalled, it now measures the real failover
-(2.9–4.5s to escalation in the live probe), and it fails honestly when a
+(2.7–9.8s to an attempt-1 escalation in the live probe), and it fails
+honestly when a
 turn lands on a slow host or regenerates. Previously the keyword fallback
 masked that.
 
@@ -465,3 +534,19 @@ masked that.
 `OPENROUTER_FAST_CHAT_IDLE_TIMEOUT_MS=20000`, which is not in any repo file
 and not on Render. It must be removed from the Cursor Cloud Agents secrets,
 or any test that does not strip it proves a configuration prod does not run.
+
+**Test-runner leak found while verifying.** `run-blackbox-tests.sh`
+backgrounded `npx tsx src/bootstrap.ts`, and cleanup sent SIGTERM to `$!`,
+which is npx. npx exits without forwarding the signal, so tsx and the server
+were reparented to PID 1 after every run. Fifty-four leaked backends (about
+300MB each) left 275MB free on the 16GB VM, and local Postgres stopped
+accepting the 08:07:52Z probe's connection.
+
+- Cleanup now stops the backend's whole descendant tree (TERM, then KILL
+  after 5s), and the trap is installed before the backend starts.
+- The backend stays in the runner's process group, so the group signal from
+  `run_deploy_live_probes.py` still reaches it.
+- `blackbox-backend-process-tree.test.ts` (Step 4a) fails on the old
+  `kill $!` with tsx and its node child surviving, and passes on the fix.
+- The real runner left no backend after a normal exit, a group SIGTERM, or a
+  group SIGKILL.
