@@ -6,9 +6,6 @@ Activities that perform HTTP calls to the backend or LLM providers.
 from __future__ import annotations
 
 import asyncio
-import os
-import re
-import time
 from typing import Any
 
 import httpx
@@ -22,90 +19,6 @@ logger = structlog.get_logger()
 
 IMESSAGE_ACK_POLL_ATTEMPTS = 30
 IMESSAGE_ACK_POLL_INTERVAL_SECONDS = 2
-ECHO_CHAT_COMPLETIONS_URL = "https://echo.fulcrum.inc/api/v1/chat/completions"
-ECHO_TIMEOUT_SECONDS = 75.0
-
-
-def _outbound_voice_samples(context: str, system_name: str) -> str:
-    """Keep only the user's messages from the formatted mixed-direction history."""
-    headers = list(re.finditer(r"(?m)^\[[^\]\n]+\][^\n]*? \| ([^\n]*?) → ", context))
-    if not headers:
-        return context
-    first_name = system_name.split()[0].casefold()
-    outgoing = []
-    for index, header in enumerate(headers):
-        sender = header.group(1).strip().casefold()
-        if sender == "me" or sender == system_name.casefold() or sender.startswith(first_name + "@"):
-            end = headers[index + 1].start() if index + 1 < len(headers) else len(context)
-            outgoing.append(context[header.start() : end].strip())
-    return "\n".join(outgoing)
-
-
-async def _call_echo_message(
-    api_key: str,
-    system_name: str,
-    channel_label: str,
-    channel: str,
-    person_name: str,
-    intent: str,
-    messages_context: str,
-    general_messages_context: str,
-    conversation_context: str,
-    exa_context: str,
-) -> dict[str, Any]:
-    """Draft through Echo's persona API. An invalid draft raises for fallback."""
-    output_instruction = (
-        "Start with 'Subject: ' on the first line, then the email body with a greeting and sign-off."
-        if channel == "email"
-        else "Write only the message text, without a subject line. Keep it brief and conversational."
-    )
-    voice_samples = _outbound_voice_samples(general_messages_context, system_name)
-    prompt = (
-        f"Write a {channel_label} from {system_name} to {person_name}.\n"
-        f"Goal and facts to convey: {intent}\n"
-        f"{output_instruction}\n\n"
-        f"Writing samples from recent messages sent by {system_name} "
-        f"(the sender 'me' is {system_name}):\n"
-        f"{voice_samples or 'No recent messages available.'}\n\n"
-        f"Previous messages with {person_name}:\n{messages_context}\n\n"
-        f"Other relevant facts about {person_name}:\n{exa_context or 'None.'}\n\n"
-        f"Current conversation with the user:\n{conversation_context}\n\n"
-        f"Write the {channel_label} now. Do not add facts beyond the goal and context."
-    )
-    async with asyncio.timeout(ECHO_TIMEOUT_SECONDS):
-        async with httpx.AsyncClient(timeout=httpx.Timeout(ECHO_TIMEOUT_SECONDS, connect=5.0)) as client:
-            response = await client.post(
-                ECHO_CHAT_COMPLETIONS_URL,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "echo",
-                    "persona": system_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "reasoning_effort": "low",
-                    "max_tokens": 4096,
-                },
-            )
-    response.raise_for_status()
-    data = response.json()
-    choice = data["choices"][0]
-    content = choice["message"]["content"]
-    if not isinstance(content, str) or not content.strip():
-        raise ValueError("Echo returned an empty draft")
-    content = content.strip()
-    if choice.get("finish_reason") == "length":
-        raise ValueError("Echo returned a truncated draft")
-    if channel == "email" and (not content.startswith("Subject:") or "\n" not in content):
-        raise ValueError("Echo returned an email without a subject and body")
-    usage = data.get("usage") or {}
-    return {
-        "content": content,
-        "usage": {
-            "prompt_tokens": usage.get("prompt_tokens") or 0,
-            "completion_tokens": usage.get("completion_tokens") or 0,
-            "actual_model": "echo",
-        },
-        "finish_reason": choice.get("finish_reason"),
-    }
 
 
 @activity.defn
@@ -535,7 +448,7 @@ async def generate_message_activity(
     gpt_token_pool_id: str | None = None,
     gpt_token_user_id: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a message with Echo, falling back to the inherited LLM model.
+    """Generate a message for a person using the inherited LLM model.
 
     Returns: {"message": str, "subject": Optional[str]}
     """
@@ -643,64 +556,32 @@ async def generate_message_activity(
     # (incident eab955b6 — approval SMS ended at "Please share the"). call_llm
     # also escalates once on finish_reason=length; this floor keeps the common
     # path from needing that retry.
-    result = None
-    echo_key = os.getenv("ECHO_API_KEY", "").strip()
-    if echo_key and os.getenv("ECHO_MESSAGE_PERSON_ENABLED", "1") != "0":
-        started = time.monotonic()
-        try:
-            result = await _call_echo_message(
-                echo_key,
-                system_name,
-                channel_label,
-                channel,
-                person_name,
-                intent,
-                messages_context,
-                general_messages_context,
-                conversation_context,
-                exa_context,
-            )
-            logger.info(
-                "Echo message draft succeeded",
-                agent_id=agent_id,
-                duration_ms=round((time.monotonic() - started) * 1000),
-            )
-        except Exception as exc:
-            logger.warning(
-                "Echo message draft failed; using inherited model",
-                agent_id=agent_id,
-                error_type=type(exc).__name__,
-                status_code=getattr(getattr(exc, "response", None), "status_code", None),
-                duration_ms=round((time.monotonic() - started) * 1000),
-            )
-
-    if result is None:
-        result = await call_llm(
-            messages=[
-                {
-                    "role": "system",
-                    "content": [
-                        {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
-                        {"type": "text", "text": voice_system, "cache_control": {"type": "ephemeral"}},
-                    ],
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            model=model,
-            temperature=0.7,
-            max_tokens=4096,
-            call_site="message_person",
-            agent_id=agent_id,
-            claude_token=claude_token,
-            claude_token_source=claude_token_source,
-            claude_token_pool_id=claude_token_pool_id,
-            claude_token_user_id=claude_token_user_id,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=gpt_token_user_id,
-        )
+    result = await call_llm(
+        messages=[
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": static_system, "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": voice_system, "cache_control": {"type": "ephemeral"}},
+                ],
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+        model=model,
+        temperature=0.7,
+        max_tokens=4096,
+        call_site="message_person",
+        agent_id=agent_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        claude_token_user_id=claude_token_user_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        gpt_token_user_id=gpt_token_user_id,
+    )
 
     content = result.get("content", "").strip()
     usage = result.get("usage", {})
