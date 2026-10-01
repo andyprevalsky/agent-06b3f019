@@ -290,6 +290,74 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('passes the requested amount through an MCP error before starting wallet funding', async () => {
+    const calls: Call[] = [];
+    const provider = new AgentCardUserMcpProvider(
+      'user-wallet-error',
+      async (userId, name, args) => {
+        calls.push({ userId, name, args });
+        if (name === 'create_card') {
+          const payload = { code: 'issuing_balance_insufficient' };
+          return {
+            isError: true,
+            content: [{ type: 'text', text: JSON.stringify(payload) }],
+            structuredContent: payload,
+          };
+        }
+        if (name === 'add_funds') {
+          return toolResult({ checkoutUrl: 'https://pay.coinbase.test/onr-error' });
+        }
+        throw new Error(`unexpected tool ${name}`);
+      }
+    );
+
+    await assert.rejects(
+      () => provider.mintCard({ amountCents: 4396 }),
+      (err: unknown) =>
+        err instanceof Error &&
+        'details' in err &&
+        (err as { details: Record<string, unknown> }).details.setupUrl ===
+          'https://pay.coinbase.test/onr-error'
+    );
+    assert.deepStrictEqual(
+      calls.map((call) => [call.userId, call.name, call.args]),
+      [
+        ['user-wallet-error', 'create_card', { amount_cents: 4396 }],
+        ['user-wallet-error', 'add_funds', { amount_cents: 4396 }],
+      ]
+    );
+  });
+
+  await test('reports required funding without invoking add_funds when no amount is known', async () => {
+    const calls: Call[] = [];
+    const provider = new AgentCardUserMcpProvider(
+      'user-details-error',
+      async (userId, name, args) => {
+        calls.push({ userId, name, args });
+        const payload = { code: 'wallet_funding_required' };
+        return {
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify(payload) }],
+          structuredContent: payload,
+        };
+      }
+    );
+
+    await assert.rejects(
+      () => provider.getDetails('card-needs-funds'),
+      (err: unknown) =>
+        err instanceof Error &&
+        'details' in err &&
+        (err as { details: Record<string, unknown> }).details.agentcardStatus ===
+          'wallet_funding_required' &&
+        (err as { details: Record<string, unknown> }).details.setupTool === 'add_funds'
+    );
+    assert.deepStrictEqual(
+      calls.map((call) => [call.userId, call.name, call.args]),
+      [['user-details-error', 'get_card_details', { card_id: 'card-needs-funds' }]]
+    );
+  });
+
   await test('maps live text wallet funding response to setup required', async () => {
     const calls: Call[] = [];
     const provider = new AgentCardUserMcpProvider(

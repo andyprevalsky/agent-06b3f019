@@ -306,6 +306,10 @@ async function maybeStartSetup(
   const setupTool = setupToolForCode(agentcardStatus);
   if (setupTool === undefined) return {};
 
+  if (setupTool === 'add_funds' && (!Number.isSafeInteger(amountCents) || amountCents <= 0)) {
+    return { setupTool };
+  }
+
   const setupArgs = setupTool === 'add_funds' ? { amount_cents: amountCents } : {};
   const setupResult = await toolCaller(userId, setupTool, setupArgs);
   let setupRecord: Record<string, unknown>;
@@ -535,7 +539,8 @@ export class AgentCardUserMcpProvider implements CardProvider {
       const result = await this.toolCaller(this.userId, name, args);
       if (typeof result === 'object' && result !== null && (result as McpResult).isError === true) {
         const record = firstRecord(result);
-        await throwIfSetupRequired(this.userId, this.toolCaller, record, 0);
+        const amountCents = typeof args.amount_cents === 'number' ? args.amount_cents : 0;
+        await throwIfSetupRequired(this.userId, this.toolCaller, record, amountCents);
         throw new AgentCardProviderError(`AgentCard MCP ${name} failed: ${failureMessage(result)}`);
       }
       return result;
