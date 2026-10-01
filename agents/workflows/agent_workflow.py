@@ -3671,9 +3671,10 @@ class AgentWorkflow:
         # Calculate cost from tokens using stored pricing (fractional cents)
         cost_cents = 0.0
         model_for_usage = _resolve_usage_model(actual_model, self.model)
-        if from_fast_cache:
+        zero_user_charge = model_for_usage.endswith(("-claude", "-gpt", "-foundry"))
+        if from_fast_cache or zero_user_charge:
             workflow.logger.info(
-                f"💰 $0 cost (fast cache replay): actual_model={model_for_usage}, "
+                f"💰 $0 user charge: actual_model={model_for_usage}, "
                 f"in={tokens_in}, out={tokens_out}, cache_read={cache_read_input_tokens}, call_site={call_site}"
             )
             try:
@@ -3693,7 +3694,7 @@ class AgentWorkflow:
                                 "model": model_for_usage,
                                 "cache_read_input_tokens": cache_read_input_tokens,
                                 "cache_creation_input_tokens": cache_creation_input_tokens,
-                                "from_fast_cache": True,
+                                "from_fast_cache": from_fast_cache,
                             }
                         ],
                         self._usage_checkpoint(),
@@ -3805,9 +3806,12 @@ class AgentWorkflow:
                 )
                 continue
 
-            if isinstance(model, str) and (model.endswith("-claude") or model.endswith("-gpt")):
+            # own_cost_cents and price_limit_cents are the user's charge ledger.
+            # Foundry's separate Azure bill is monitored through Azure billing;
+            # it must not consume a user's $0 compute-token limit.
+            if isinstance(model, str) and model.endswith(("-claude", "-gpt", "-foundry")):
                 workflow.logger.info(
-                    f"💰 $0 cost (direct compute token): actual_model={model}, "
+                    f"💰 $0 user charge: actual_model={model}, "
                     f"in={tokens_in}, out={tokens_out}, call_site={effective_call_site}"
                 )
                 usage_items_for_db.append(
@@ -4248,7 +4252,7 @@ class AgentWorkflow:
                 output_rate = actual_pricing["output_cents_per_1k"]
                 if input_rate == 0 and output_rate == 0:
                     workflow.logger.info(
-                        f"💰 $0 cost (direct compute token): actual_model={actual_model}, "
+                        f"💰 $0 user charge: actual_model={actual_model}, "
                         f"in={tokens_in_delta}, out={tokens_out_delta}"
                     )
 

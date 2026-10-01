@@ -3154,6 +3154,31 @@ async def test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost():
         _restore_workflow(original)
 
 
+async def test_workflow_track_llm_cost_foundry_is_zero_user_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_llm_cost(
+            tokens_in=10_000,
+            tokens_out=1_000,
+            call_site="verifier_browser",
+            actual_model="gpt-6-sol-foundry",
+        )
+        assert wf.own_cost_cents == 0.0
+        saved_item = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "gpt-6-sol-foundry"
+        assert saved_item["from_fast_cache"] is False
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_track_usage_empty_is_no_op():
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
@@ -3212,6 +3237,32 @@ async def test_workflow_track_usage_direct_compute_token_is_zero_cost():
         assert saved_item["model"] == "gpt-5.4-gpt"
         assert saved_item["cache_read_input_tokens"] == 8576
         assert saved_item["cache_creation_input_tokens"] == 7984
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_usage_foundry_is_zero_user_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        usage = {
+            "llm": [
+                {
+                    "tokens_in": 10_000,
+                    "tokens_out": 1_000,
+                    "model": "gpt-6-sol-foundry",
+                    "provider": "Explore Agent",
+                }
+            ]
+        }
+        await wf._track_usage(usage, tool_name="spawn_sub_agent", call_site="explore_agent")
+        assert wf.own_cost_cents == 0.0
+        saved_item = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "gpt-6-sol-foundry"
     finally:
         _restore_workflow(original)
 
@@ -7822,6 +7873,10 @@ async def run_all_tests():
     await r.record_async("wf_track_llm_cost", test_workflow_track_llm_cost_calculates_and_persists)
     await r.record_async("wf_track_llm_cost_no_pricing", test_workflow_track_llm_cost_zero_when_no_pricing)
     await r.record_async(
+        "wf_track_llm_cost_foundry_zero_user_cost",
+        test_workflow_track_llm_cost_foundry_is_zero_user_cost,
+    )
+    await r.record_async(
         "wf_track_llm_cost_fast_cache_replay",
         test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost,
     )
@@ -7830,6 +7885,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_track_usage_direct_compute_token",
         test_workflow_track_usage_direct_compute_token_is_zero_cost,
+    )
+    await r.record_async(
+        "wf_track_usage_foundry",
+        test_workflow_track_usage_foundry_is_zero_user_cost,
     )
     await r.record_async(
         "wf_track_usage_fast_cache_replay",

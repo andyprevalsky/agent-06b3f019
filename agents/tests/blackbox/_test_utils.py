@@ -27,6 +27,8 @@ os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
 # let a developer's funded GPT fallback key from agents/.env alter route order
 # process-wide; tests that cover that route set GPT_API_KEY explicitly.
 os.environ["GPT_API_KEY"] = ""
+# Likewise, only Foundry-specific tests opt into the funded Azure route.
+os.environ["AZURE_FOUNDRY_API_KEY"] = ""
 
 import httpx
 from helpers.httpx_capture import (

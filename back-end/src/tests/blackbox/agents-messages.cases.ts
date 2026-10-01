@@ -19,6 +19,98 @@ import {
   randomUUID,
 } from './agents-blackbox-harness';
 
+test('GET /:id/explore-tool-evidence recovers bounded attributed evidence for one task', async () => {
+  const session = await createAnonymousSession('explore-evidence-recovery');
+  const agentId = await createTestAgent(session.user.id, 'Explore evidence recovery');
+  const taskId = randomUUID();
+  const official =
+    '**Params Passed:**\n- **url**: https://www.toukei.metro.tokyo.lg.jp/\n' +
+    `- **objective**: ${'long query context '.repeat(100)}\n\n` +
+    '**Result:**\nSource: https://www.toukei.metro.tokyo.lg.jp/ — August 1, 2026: 14,303,513';
+  const rows = Array.from({ length: 12 }, (_, index) => ({
+    agentId,
+    role: 'TOOL' as const,
+    timestamp: new Date(Date.UTC(2026, 8, 29, 12, 0, index)),
+    text:
+      index === 0
+        ? '**Params Passed:**\n- **url**: https://www.toukei.metro.tokyo.lg.jp/jsuikei/404\n\n**Result:**\nThe URL https://www.toukei.metro.tokyo.lg.jp/jsuikei/404 returned a Page not found / 404 error page.'
+        : index === 1
+          ? official
+          : index === 2
+            ? '**Result:**\nThis valid page discusses 404 responses in its documentation.'
+            : `Result ${index}`,
+    metadata: {
+      taskId,
+      toolName: 'web_fetch',
+      toolStatus: 'FINISHED',
+      toolCallId: randomUUID(),
+    },
+  }));
+  await prisma.message.createMany({ data: rows });
+  await prisma.message.createMany({
+    data: [
+      {
+        agentId,
+        role: 'TOOL',
+        text: 'Wrong task',
+        metadata: { taskId: randomUUID(), toolName: 'web_fetch', toolStatus: 'FINISHED' },
+      },
+      {
+        agentId,
+        role: 'TOOL',
+        text: 'Pending',
+        metadata: { taskId, toolName: 'web_fetch', toolStatus: 'IN_PROGRESS' },
+      },
+      {
+        agentId,
+        role: 'TOOL',
+        text: 'Research finished with the evidence gathered so far.',
+        metadata: { taskId, toolName: 'spawn_agent', toolStatus: 'FINISHED' },
+      },
+    ],
+  });
+
+  const url = `${BASE_URL}/api/agents/${agentId}/explore-tool-evidence?taskId=${taskId}`;
+  const external = await request(url, { headers: authHeaders(session.session.access_token) });
+  assertStatus(external.status, 403, external.data);
+  const otherUser = await createAnonymousSession('explore-evidence-other-user');
+  const crossUser = await request(url, { headers: apiKeyHeaders(otherUser.user.id) });
+  assertStatus(crossUser.status, 200, crossUser.data);
+  assert(JSON.stringify(crossUser.data) === '{"results":[]}', 'cross-user recovery must be empty');
+
+  const recovered = await request(url, { headers: apiKeyHeaders(session.user.id) });
+  assertStatus(recovered.status, 200, recovered.data);
+  const results = (recovered.data as { results: string[] }).results;
+  assert(results.length === 8, `expected eight bounded results, got ${results.length}`);
+  assert(
+    results.some(
+      (text) => text.includes('14,303,513') && text.includes('toukei.metro.tokyo.lg.jp')
+    ),
+    'official early web result must survive later retries'
+  );
+  assert(
+    results.every((text) => !text.includes('long query context')),
+    'recovery excerpt must start at Result, not Params Passed'
+  );
+  assert(
+    results.every((text) => !text.includes('Page not found')),
+    'direct failed fetches must not count as recovery evidence'
+  );
+  assert(
+    results.some((text) => text.includes('valid page discusses 404')),
+    'pages discussing 404 must remain usable'
+  );
+  assert(
+    results.every((text) => text.startsWith('[web_fetch] ')),
+    'tool attribution must be preserved'
+  );
+  assert(
+    results.every((text) => text.length <= 1212),
+    'each result must be text bounded'
+  );
+  await deleteTestAgent(agentId);
+});
+
 test('POST /:id/messages — deployment fence preserves success and blocks stale writes', async () => {
   const session = await createAnonymousSession('msg-tool-terminal-sticky');
   const agentId = await createTestAgent(session.user.id, 'Tool terminal race test');
