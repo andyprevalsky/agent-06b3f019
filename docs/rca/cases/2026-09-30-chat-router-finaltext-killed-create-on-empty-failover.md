@@ -408,10 +408,11 @@ healthy Cerebras, and the GLM failover.
       started about 07:07:32Z all served at 1.2–1.7s.
     - One further 08:07:52Z run is excluded: local Postgres stopped accepting
       connections before any provider request (see the runner leak below).
-  - Final probe code (connect timing, then the goal-anchor check): 08:35Z
-    and 09:21Z both escalated on router attempt 1 via CoreWeave (connected
-    in 46ms and 44ms; the 09:21Z run had first content at 2,713ms and
-    escalated at 5,640ms with a goal "near 88 Harlow St, … San Francisco").
+  - Final probe code (connect timing, then the goal-anchor check): 08:35Z,
+    09:21Z, and 09:33Z all escalated on router attempt 1, via CoreWeave,
+    CoreWeave, and BaseTen (connected in 46ms, 44ms, and 58ms). The 09:33Z
+    run, on the final goal rule, had first content at 1,419ms and escalated
+    at 3,679ms with a goal "near 88 Harlow St, … San Francisco".
 
 **Cemented in `/deploy`.**
 
@@ -432,9 +433,11 @@ healthy Cerebras, and the GLM failover.
     fail-at-once for HTTP 402, content without a decision, a wrong address,
     a goal that keeps the rejected anchor, a connect that never completed,
     events without a host, and a timeout. It also pins the goal-anchor check
-    on four accepted goals (two recorded live, plus "within 2 miles of" and
-    "not in Irving" phrasings) and five rejected ones, such as "near Irving,
-    TX 75063; do not anchor on 88 Harlow St".
+    on ten accepted goals (two recorded live, plus phrasings such as "within
+    2 miles from", "near the 88 Harlow St address", and a recap of the
+    earlier Irving search) and ten rejected ones, including "near Irving, TX
+    75063; do not anchor on 88 Harlow St" and goals that echo the context's
+    own sentences about the delivery address.
 - Step 4p, `scripts/run_deploy_live_probes.py`: runs the live probe as
   `chat-router-failover-live`, after `amplitude-live` because both boot the
   runner's db push and trigger hooks.
@@ -448,9 +451,9 @@ healthy Cerebras, and the GLM failover.
     the fixture's same-length stand-in for the user's street) and not on the
     rejected Irving home. Mentioning the address is not enough: the replayed
     context still says "Do NOT anchor on 88 Harlow St" and names the Irving
-    home, so the check needs a locative phrase ("near", "within 2 miles
-    of", ...) on the corrected address that is not negated, and none on the
-    rejected one.
+    home. So in the goal's first sentence, which states what the run does,
+    the first mention of either place that is not negated must be the
+    corrected address. Later recaps of the earlier search do not count.
   - An OpenRouter-side miss (the connection opened but no response headers
     came, or HTTP 200 with no first content inside the 4.2s budget) is
     re-probed once, 60s later. A connect that never completed is not one. A
