@@ -457,9 +457,19 @@ async def wait_for_navigation_ready(
     return second
 
 
+# Generic second-level labels under two-letter country TLDs (co.uk, com.au,
+# co.jp, org.uk, …). Under these the registrable domain has three labels;
+# taking the last two would make every merchant on .co.uk one "site".
+_CCTLD_GENERIC_SECOND_LEVEL_LABELS = frozenset(
+    "co com net org edu gov ac or ne go gob govt mil nom ltd plc sch gen firm ind".split()
+)
+
+
 def _get_base_domain(domain: str) -> str:
-    """Get base domain (e.g., 'amazon.com' from 'auth.amazon.com')."""
+    """Get the registrable domain ('amazon.com' from 'auth.amazon.com', 'argos.co.uk' from 'www.argos.co.uk')."""
     parts = domain.split(".")
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CCTLD_GENERIC_SECOND_LEVEL_LABELS:
+        return ".".join(parts[-3:])
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return domain
@@ -468,6 +478,11 @@ def _get_base_domain(domain: str) -> str:
 # Ephemeral site-wide unlock after payment-card approval for this browser-agent
 # session only. Never copied into a newly spawned browser agent.
 SITE_WRITE_LOCK_APPROVAL_KEY = "site"
+
+# The site unlock authorizes finishing a checkout on that merchant. A return or
+# refund is a separate irreversible transaction, so it always needs its own
+# typed approval even on a site the user already approved a purchase on.
+_SITE_UNLOCK_EXCLUDED_APPROVAL_TYPES = frozenset({"return"})
 
 # Browser live-view / provider hosts must not become the site-unlock domain —
 # Place order is checked against the real merchant page (e.g. roselabs.ai).
@@ -578,14 +593,14 @@ def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url
     for the merchant's registrable domain and all of its subdomains / paths / queries
     for the rest of THIS browser activity. That unlock lives only in this browser
     activity's ``write_lock_approvals`` / resume state — a newly spawned browser
-    agent starts empty and does not inherit it.
+    agent starts empty and does not inherit it. It never covers ``return``.
     """
     if not approvals:
         return False
 
     current_domain = get_domain_from_url(current_url)
     # Site unlock from payment-card approval: base-domain wildcard, no 120s timeout.
-    if _approval_entry_still_valid(
+    if approval_type not in _SITE_UNLOCK_EXCLUDED_APPROVAL_TYPES and _approval_entry_still_valid(
         approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY),
         current_domain,
         enforce_timeout=False,
