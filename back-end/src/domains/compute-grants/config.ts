@@ -12,7 +12,6 @@
  */
 
 import { createPrivateKey, createPublicKey } from 'node:crypto';
-import { browserUseEnabled } from '../../providers/browser/config';
 
 /**
  * Base64-encoded RSA private key PEM used for credential envelopes.
@@ -50,7 +49,13 @@ export function credentialPublicKeyPem(): string {
 export function computeGrantBrowserProvider(): 'kernel' | 'steel' | 'browser-use' {
   const configured = process.env.COMPUTE_GRANT_BROWSER_PROVIDER?.trim();
   const selected = configured === undefined || configured === '' ? 'kernel' : configured;
-  if (selected === 'browser-use' && !browserUseEnabled()) {
+  // Domain config cannot import the browser provider layer. Match its rollout
+  // flag parser so disabling Browser Use also returns compute grants to Kernel.
+  const flag = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  const browserUseEnabled =
+    flag !== undefined &&
+    !['0', 'false', 'no', 'off', 'disabled'].includes(flag.trim().toLowerCase());
+  if (selected === 'browser-use' && !browserUseEnabled) {
     return 'kernel';
   }
   if (selected === 'kernel' || selected === 'steel' || selected === 'browser-use') return selected;

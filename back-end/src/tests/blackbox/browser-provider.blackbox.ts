@@ -29,6 +29,7 @@ import {
 } from '../../providers/browser/browserUse';
 
 const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+const browserUseFlagBeforeContractTests = process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
 process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 
 const tests: Array<[string, () => void | Promise<void>]> = [
@@ -558,6 +559,11 @@ async function main(): Promise<void> {
     }
   }
 
+  // Contract cases enable Browser Use inside this process. The live ladder must
+  // use the backend's original rollout setting or its expected next step drifts.
+  if (browserUseFlagBeforeContractTests === undefined)
+    delete process.env.BROWSER_AGENT_BROWSER_USE_ENABLED;
+  else process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = browserUseFlagBeforeContractTests;
   try {
     await runLiveProviderParity();
     if (process.env.TEST_BASE_URL) console.log('PASS live Kernel provider parity');

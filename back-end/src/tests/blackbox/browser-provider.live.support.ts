@@ -7,6 +7,7 @@ import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
 import { prisma } from '../../providers/database';
+import { browserUseEnabled } from '../../providers/browser/config';
 import { retryWithBackoff } from '../../providers/retry';
 import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
@@ -27,10 +28,11 @@ export async function runLiveProviderParity(): Promise<void> {
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
   const steelApiKey = process.env.STEEL_API_KEY?.trim();
-  const browserUseApiKey = process.env.BROWSER_USE_API_KEY?.trim();
-  if (!apiKey || !kernelApiKey || !steelApiKey || !browserUseApiKey) {
+  const browserUseApiKey = process.env.BROWSER_USE_API_KEY?.trim() ?? '';
+  const browserUseAvailable = browserUseEnabled();
+  if (!apiKey || !kernelApiKey || !steelApiKey || (browserUseAvailable && !browserUseApiKey)) {
     throw new Error(
-      'BACKEND_API_KEY, KERNEL_API_KEY, STEEL_API_KEY, and BROWSER_USE_API_KEY are required for live provider parity'
+      'BACKEND_API_KEY, KERNEL_API_KEY, STEEL_API_KEY, and (when enabled) BROWSER_USE_API_KEY are required for live provider parity'
     );
   }
 
@@ -471,13 +473,17 @@ export async function runLiveProviderParity(): Promise<void> {
         assert(response.ok, `Browser Use session retrieve failed: HTTP ${response.status}`);
         return response.json() as Promise<{ status: string }>;
       },
+      browserUseAvailable,
       allocatedSessionIds,
     });
     if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
 
     console.log(
-      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}; browser-use=${crossProvider.browserUseIp}`
+      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}` +
+        (crossProvider.browserUseIp === null
+          ? '; Browser Use disabled, final provider=Steel'
+          : `; browser-use=${crossProvider.browserUseIp}`)
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
