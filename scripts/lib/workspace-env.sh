@@ -56,6 +56,26 @@ normalize_conductor_workspace_env() {
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
 }
 
+# VMs booted from one snapshot share /etc/machine-id and any baked .cloud-env,
+# so a synthetic cloud identity must be keyed to the running instance: the
+# sandbox pod named in the cgroup path when present, plus this boot.
+cloud_instance_id() {
+  local cgroup_file="${1:-/proc/self/cgroup}"
+  local boot_id_file="${2:-/proc/sys/kernel/random/boot_id}"
+  local pod boot
+  pod="$(grep -oE 'pod-[A-Za-z0-9-]+' "$cgroup_file" 2>/dev/null | head -1 || true)"
+  boot="$(cat "$boot_id_file" 2>/dev/null || true)"
+  [ -n "$pod$boot" ] || return 1
+  printf '%s|%s' "$pod" "$boot" | sha256sum | cut -c1-8
+}
+
+cloud_env_is_current() {
+  local cloud_env="$1" instance_id="$2"
+  [ -f "$cloud_env" ] || return 1
+  [ -n "$instance_id" ] || return 0
+  grep -qx "export ROSE_CLOUD_INSTANCE_ID=$instance_id" "$cloud_env"
+}
+
 resolve_temporal_task_queue() {
   local workspace_name="$1"
   printf '%s\n' "${TEMPORAL_TASK_QUEUE:-navi-agent-tasks-$workspace_name}"

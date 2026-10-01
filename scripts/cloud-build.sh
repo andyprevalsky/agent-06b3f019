@@ -38,13 +38,17 @@ git config user.email "andyprevalsky@yahoo.com"
 echo "✅ Git identity: Andy Prevalsky <andyprevalsky@yahoo.com>"
 
 # ── 1. Conductor-compatible env vars ─────────────────────────────────────
-if [ -f .cloud-env ]; then
+. "$ROOT/scripts/lib/workspace-env.sh"
+INSTANCE_ID="$(cloud_instance_id || true)"
+if cloud_env_is_current .cloud-env "$INSTANCE_ID"; then
     echo "✅ .cloud-env exists — keeping existing workspace id"
-elif [ -n "${CONDUCTOR_PORT:-}" ] && [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
+elif [ ! -f .cloud-env ] && [ -n "${CONDUCTOR_PORT:-}" ] && [ -n "${CONDUCTOR_WORKSPACE_NAME:-}" ]; then
     echo "✅ Native Conductor env detected — no .cloud-env needed"
 else
-    WS_ID=""
-    [ -r /etc/machine-id ] && WS_ID="$(cut -c1-8 /etc/machine-id)"
+    # A .cloud-env from another instance (baked into the snapshot this VM booted
+    # from) would share its ngrok domain, Temporal queue, and DB names.
+    [ -f .cloud-env ] && echo "♻️  .cloud-env belongs to another instance — minting a new workspace id"
+    WS_ID="$INSTANCE_ID"
     [ -z "$WS_ID" ] && WS_ID="$(openssl rand -hex 4 2>/dev/null || date +%s%N | tail -c 9)"
     WORKSPACE_NAME="cloud-${WS_ID}"
     PORT="${CONDUCTOR_PORT:-3001}"
@@ -58,6 +62,7 @@ else
 export CONDUCTOR_PORT=${PORT}
 export CONDUCTOR_WORKSPACE_NAME=${WORKSPACE_NAME}
 export CONDUCTOR_ROOT_PATH=${ROOT}
+export ROSE_CLOUD_INSTANCE_ID=${INSTANCE_ID}
 EOF
     ENV_MARKER="# rose-cloud-env"
     SOURCE_LINE="[ -f ${ROOT}/.cloud-env ] && . ${ROOT}/.cloud-env"

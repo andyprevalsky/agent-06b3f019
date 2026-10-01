@@ -222,4 +222,60 @@ if ! grep -q '^# rose-cloud-env$' <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' 
 fi
 echo "PASS: cloud-build.sh writes # rose-cloud-env into .cloud-env"
 
+# Cloud VMs booted from one snapshot share /etc/machine-id and the baked
+# .cloud-env. Two such instances once both claimed cloud-44cb5599, so the second
+# deploy stack died on ERR_NGROK_334 (its reserved domain was already online).
+instance_dir="$TMP_ROOT/instances"
+mkdir -p "$instance_dir"
+printf '0::/system.slice/pod-aaa111-x1/cursor-agent/workload\n' >"$instance_dir/cgroup-a"
+printf '0::/system.slice/pod-bbb222-x2/cursor-agent/workload\n' >"$instance_dir/cgroup-b"
+printf '0::/init.scope\n' >"$instance_dir/cgroup-none"
+printf 'boot-1\n' >"$instance_dir/boot-1"
+printf 'boot-2\n' >"$instance_dir/boot-2"
+instance_id() {
+  bash -c ". '$HELPER_SRC'; cloud_instance_id \"\$1\" \"\$2\"" _ "$1" "$2"
+}
+id_a="$(instance_id "$instance_dir/cgroup-a" "$instance_dir/boot-1")"
+id_b="$(instance_id "$instance_dir/cgroup-b" "$instance_dir/boot-1")"
+id_a_again="$(instance_id "$instance_dir/cgroup-a" "$instance_dir/boot-1")"
+id_no_pod_1="$(instance_id "$instance_dir/cgroup-none" "$instance_dir/boot-1")"
+id_no_pod_2="$(instance_id "$instance_dir/cgroup-none" "$instance_dir/boot-2")"
+[[ "$id_a" =~ ^[0-9a-f]{8}$ ]] || { echo "FAIL: cloud instance id is not 8 hex chars: $id_a" >&2; exit 1; }
+[ "$id_a" != "$id_b" ] || { echo "FAIL: sibling pods on one image share a cloud identity" >&2; exit 1; }
+[ "$id_no_pod_1" != "$id_no_pod_2" ] || { echo "FAIL: separate boots share a cloud identity" >&2; exit 1; }
+expect_eq "$id_a_again" "$id_a" "cloud identity is stable within one instance"
+if instance_id "$instance_dir/missing" "$instance_dir/missing" >/dev/null; then
+  echo "FAIL: cloud instance id must fail without any instance signal" >&2
+  exit 1
+fi
+echo "PASS: cloud instance id fails closed without an instance signal"
+
+cloud_env_state() {
+  if bash -c ". '$HELPER_SRC'; cloud_env_is_current \"\$1\" \"\$2\"" _ "$1" "$2"; then
+    echo current
+  else
+    echo stale
+  fi
+}
+baked_env="$instance_dir/baked.cloud-env"
+printf '# rose-cloud-env\nexport CONDUCTOR_WORKSPACE_NAME=cloud-%s\nexport ROSE_CLOUD_INSTANCE_ID=%s\n' \
+  "$id_a" "$id_a" >"$baked_env"
+legacy_env="$instance_dir/legacy.cloud-env"
+printf '# rose-cloud-env\nexport CONDUCTOR_WORKSPACE_NAME=cloud-44cb5599\n' >"$legacy_env"
+expect_eq "$(cloud_env_state "$baked_env" "$id_a")" "current" "the instance that wrote .cloud-env keeps it"
+expect_eq "$(cloud_env_state "$baked_env" "$id_b")" "stale" "a snapshot sibling replaces the baked .cloud-env"
+expect_eq "$(cloud_env_state "$legacy_env" "$id_a")" "stale" "a legacy machine-id .cloud-env is replaced"
+expect_eq "$(cloud_env_state "$instance_dir/absent" "$id_a")" "stale" "a missing .cloud-env is written"
+expect_eq "$(cloud_env_state "$legacy_env" "")" "current" "without an instance signal the existing .cloud-env stays"
+if grep -q '/etc/machine-id' "$cloud_build_script"; then
+  echo "FAIL: cloud-build.sh must not derive the workspace id from the image-wide machine-id" >&2
+  exit 1
+fi
+if ! grep -q '^export ROSE_CLOUD_INSTANCE_ID=\${INSTANCE_ID}$' \
+  <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' "$cloud_build_script"); then
+  echo "FAIL: cloud-build.sh must record the instance that owns .cloud-env" >&2
+  exit 1
+fi
+echo "PASS: cloud-build.sh keys .cloud-env to the running instance"
+
 echo "All workspace env tests passed."
