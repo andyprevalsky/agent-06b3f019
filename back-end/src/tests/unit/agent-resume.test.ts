@@ -2,10 +2,7 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import {
-  resumeAgentWorkflow,
-  resumePausedAgentForUserMessage,
-} from '../../providers/agentResume';
+import { resumeAgentWorkflow, resumePausedAgentForUserMessage } from '../../providers/agentResume';
 import { prisma } from '../../providers/database';
 import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
 import { createTestHarness } from './trace-archive-test-utils';
@@ -15,6 +12,7 @@ const { test, finish } = createTestHarness('agent resume unit tests');
 async function createAgent(overrides: {
   temporalWorkflowId?: string | null;
   status?: 'PAUSED' | 'ACTIVE' | 'COST_LIMIT_REACHED' | 'OUT_OF_CREDITS';
+  parent?: { id: string; workflowId: string };
 }) {
   const id = randomUUID();
   await prisma.agent.create({
@@ -25,6 +23,8 @@ async function createAgent(overrides: {
       status: overrides.status ?? 'PAUSED',
       busId: id,
       temporalWorkflowId: overrides.temporalWorkflowId,
+      parentAgentId: overrides.parent?.id,
+      parentWorkflowId: overrides.parent?.workflowId,
     },
   });
   return id;
@@ -233,6 +233,71 @@ async function main(): Promise<void> {
       }
     }
     assert.strictEqual(await resumePausedAgentForUserMessage(randomUUID()), false);
+  });
+
+  await test('a user message to a child leaves it paused while its parent is held', async () => {
+    for (const parentStatus of ['PAUSED', 'COST_LIMIT_REACHED'] as const) {
+      const parentWorkflowId = `wf-${randomUUID()}`;
+      const parentId = await createAgent({
+        status: parentStatus,
+        temporalWorkflowId: parentWorkflowId,
+      });
+      const childId = await createAgent({
+        temporalWorkflowId: `wf-${randomUUID()}`,
+        parent: { id: parentId, workflowId: parentWorkflowId },
+      });
+      let signaled = false;
+      try {
+        const resumed = await resumePausedAgentForUserMessage(childId, {
+          signalResume: async () => {
+            signaled = true;
+          },
+        });
+        assert.strictEqual(resumed, false, parentStatus);
+        assert.strictEqual(signaled, false, parentStatus);
+        const child = await prisma.agent.findUniqueOrThrow({ where: { id: childId } });
+        assert.strictEqual(child.status, 'PAUSED');
+      } finally {
+        await prisma.agent.deleteMany({ where: { id: { in: [childId, parentId] } } });
+      }
+    }
+  });
+
+  await test('a user message resumes a child whose parent is running', async () => {
+    const parentWorkflowId = `wf-${randomUUID()}`;
+    const parentId = await createAgent({ status: 'ACTIVE', temporalWorkflowId: parentWorkflowId });
+    const childId = await createAgent({
+      temporalWorkflowId: `wf-${randomUUID()}`,
+      parent: { id: parentId, workflowId: parentWorkflowId },
+    });
+    try {
+      const resumed = await resumePausedAgentForUserMessage(childId, {
+        signalResume: async () => undefined,
+      });
+      assert.strictEqual(resumed, true);
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: { in: [childId, parentId] } } });
+    }
+  });
+
+  await test('a user message during a replacement lifts the saved pause', async () => {
+    const agentId = await createAgent({ temporalWorkflowId: `wf-${randomUUID()}` });
+    try {
+      await claimWorkflowReplacement(agentId);
+      let signaled = false;
+      const resumed = await resumePausedAgentForUserMessage(agentId, {
+        signalResume: async () => {
+          signaled = true;
+        },
+      });
+      assert.strictEqual(resumed, true);
+      assert.strictEqual(signaled, false);
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      const resumeState = stored.workflowReplacementState as { prior_status?: string };
+      assert.strictEqual(resumeState.prior_status, 'ACTIVE');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
   });
 
   await test('a user message keeps the pause when the resume signal fails', async () => {

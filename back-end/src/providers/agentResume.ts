@@ -2,6 +2,7 @@
  * Shared agent resume primitive for domain services that need to unblock a workflow.
  */
 
+import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { getUserUsage } from './credits';
@@ -82,6 +83,29 @@ export async function resumeAgentWorkflow(
 }
 
 /**
+ * Unlocked pre-check so the common ACTIVE case never takes the generation lock.
+ * A replacement-owned row can hide a pause in its saved prior status, so the
+ * locked intent makes the final call. A child under a paused or cost-limited
+ * parent is refused exactly like the /resume route, because its workflow would
+ * reject the signal and leave the row claiming a resume that never happened.
+ */
+async function mayHoldLiftablePause(agentId: string): Promise<boolean> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      status: true,
+      workflowReplacementToken: true,
+      parent: { select: { status: true, deletedAt: true } },
+    },
+  });
+  if (agent === null) return false;
+  if (agent.status !== 'PAUSED' && agent.workflowReplacementToken === null) return false;
+  const parent = agent.parent;
+  if (parent === null || parent.deletedAt !== null) return true;
+  return parent.status !== 'PAUSED' && parent.status !== 'COST_LIMIT_REACHED';
+}
+
+/**
  * A user's message to an agent they paused is their instruction to continue.
  * Call only after the USER row is durable and `receive_user_response` has been
  * signaled, so the woken workflow reads the message on its next turn. Cost
@@ -94,6 +118,7 @@ export async function resumePausedAgentForUserMessage(
   dependencies: Pick<ResumeAgentWorkflowDependencies, 'signalResume'> = {}
 ): Promise<boolean> {
   try {
+    if (!(await mayHoldLiftablePause(agentId))) return false;
     const intent = await recordWorkflowResumeIntent(agentId);
     if (intent.outcome !== 'ready' || !intent.persistedActiveIntent) return false;
     const result = await deliverResumeSignal(

@@ -12,7 +12,16 @@ import {
 const REDIRECT =
   'Skip DoorDash entirely. Buy the newest AirPods Pro from Apple.com or Amazon.com instead.';
 
-async function commitReplyToAgentWithStatus(prisma: PrismaClient, status: AgentStatus) {
+async function cleanupPausedReplyRun(prisma: PrismaClient, userId: string) {
+  await prisma.agentAttentionRequest.deleteMany({ where: { userId } });
+  await cleanupAgentScopedUser(prisma, userId);
+}
+
+async function commitReplyToAgentWithStatus(
+  prisma: PrismaClient,
+  status: AgentStatus,
+  options: { asAttentionApproval?: boolean } = {}
+) {
   const userId = await provisionUserWithPhone(prisma, uniqueSmsPhone());
   const temporal = await getTemporalClient();
   const agent = await prisma.agent.create({
@@ -29,12 +38,26 @@ async function commitReplyToAgentWithStatus(prisma: PrismaClient, status: AgentS
     args: [],
   });
   await prisma.agent.update({ where: { id: agent.id }, data: { temporalWorkflowId: agent.id } });
+  const attention = options.asAttentionApproval
+    ? await prisma.agentAttentionRequest.create({
+        data: {
+          userId,
+          agentId: agent.id,
+          workflowId: agent.id,
+          question: 'Place the AirPods Pro order for $249?',
+        },
+      })
+    : null;
 
   const [result] = await commitPendingWrites(
     [
       {
         kind: 'reply_to_agent',
-        args: { agent_id_or_prefix: agent.id.substring(0, 6), message: REDIRECT },
+        args: {
+          agent_id_or_prefix: agent.id.substring(0, 6),
+          message: REDIRECT,
+          ...(attention ? { attention_request_id: attention.id } : {}),
+        },
         agentId: agent.id,
       },
     ],
@@ -65,10 +88,14 @@ export async function testReplyToAgent_resumesPausedAgentAfterDeliveringMessage(
   const run = await commitReplyToAgentWithStatus(prisma, 'PAUSED');
   try {
     if (run.result?.success !== true) {
-      throw new Error(`Expected reply_to_agent commit to succeed, got ${JSON.stringify(run.result)}`);
+      throw new Error(
+        `Expected reply_to_agent commit to succeed, got ${JSON.stringify(run.result)}`
+      );
     }
     if (run.delivered !== 1) {
-      throw new Error(`Expected the reply to be posted once as a USER message, got ${run.delivered}`);
+      throw new Error(
+        `Expected the reply to be posted once as a USER message, got ${run.delivered}`
+      );
     }
     if (run.stored.status !== 'ACTIVE') {
       throw new Error(
@@ -82,7 +109,7 @@ export async function testReplyToAgent_resumesPausedAgentAfterDeliveringMessage(
       );
     }
   } finally {
-    await cleanupAgentScopedUser(prisma, run.userId);
+    await cleanupPausedReplyRun(prisma, run.userId);
   }
 }
 
@@ -103,7 +130,28 @@ export async function testReplyToAgent_leavesCostLimitedAgentForBudgetIncrease(
       );
     }
   } finally {
-    await cleanupAgentScopedUser(prisma, run.userId);
+    await cleanupPausedReplyRun(prisma, run.userId);
+  }
+}
+
+export async function testReplyToAgent_attentionDecisionLeavesPauseAlone(prisma: PrismaClient) {
+  const run = await commitReplyToAgentWithStatus(prisma, 'PAUSED', { asAttentionApproval: true });
+  try {
+    if (run.result?.success !== true) {
+      throw new Error(`Expected the approval to be delivered, got ${JSON.stringify(run.result)}`);
+    }
+    if (run.stored.status !== 'PAUSED') {
+      throw new Error(
+        `An attention decision must not lift a pause (the web approval path does not); status became ${run.stored.status}`
+      );
+    }
+    if (JSON.stringify(run.signals) !== JSON.stringify(['receive_user_response'])) {
+      throw new Error(
+        `An attention decision must only be signaled, got ${JSON.stringify(run.signals)}`
+      );
+    }
+  } finally {
+    await cleanupPausedReplyRun(prisma, run.userId);
   }
 }
 
@@ -116,6 +164,10 @@ export function smsPausedReplyBehaviorCases(prisma: PrismaClient) {
     {
       name: 'reply_to_agent -- leaves a cost-limited agent for increase_budget',
       fn: () => testReplyToAgent_leavesCostLimitedAgentForBudgetIncrease(prisma),
+    },
+    {
+      name: 'reply_to_agent -- an attention decision leaves a PAUSED agent paused',
+      fn: () => testReplyToAgent_attentionDecisionLeavesPauseAlone(prisma),
     },
   ];
 }

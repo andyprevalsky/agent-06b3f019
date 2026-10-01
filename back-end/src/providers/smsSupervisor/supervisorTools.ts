@@ -523,6 +523,9 @@ async function commitReplyToAgent(
         agentId: agent.id,
         reject: !!reject,
       });
+      // A plain reply is the user telling a paused agent to continue. Attention
+      // decisions leave the pause alone, matching the web approval path.
+      if (!attention_request_id) await resumePausedAgentForUserMessage(agent.id);
     } catch (error) {
       log.error('Failed to signal workflow', {
         phase: 'reply',
@@ -531,7 +534,6 @@ async function commitReplyToAgent(
       });
       // Don't fail — message is in DB, workflow will poll
     }
-    await resumePausedAgentForUserMessage(agent.id);
   }
 
   // 3. If resolving an attention request, mark it in DB
