@@ -203,7 +203,7 @@ of truth; do not duplicate them into other files.
 
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
-- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
+- Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `auth`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
 - Set `deploy_canary: true` if this task should be preferred as the one-per-category floor/path pick (otherwise shortest ready `pipeline-e2e` wins)
 - Tag `smoke` **only** for must-run harness plumbing (always on the floor; counts toward the cap; no history gate)
 - New category? Add it to `FLOOR_CATEGORIES` and/or `PATH_TRIGGERS` in `select_predeploy_benches.py` and to `KNOWN_DEPLOY_CATEGORIES`

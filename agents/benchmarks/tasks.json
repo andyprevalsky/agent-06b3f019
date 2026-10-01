@@ -2748,6 +2748,251 @@
     "enforce_declared_evaluators": true
   },
   {
+    "name": "browser-auth-saved-password-retry",
+    "title": "Hosted Sign-In: Retry Saved Passwords",
+    "description": "Three saved Larkspur Members logins where only the oldest works; the browser agent must keep trying saved logins until one signs in.",
+    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "deploy_canary": true,
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "password_retry"
+      },
+      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm larkspur-<siteId>.test: the most recently used one has a stale password for a real member, the next is a login with no account, and the oldest is correct. The site records every sign-in attempt and session; auth_test_site_outcome grades those records."
+    },
+    "evaluators": [
+      {
+        "id": "saved-password-retry-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "saved-password-retry-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded a password attempt for every saved login",
+          "The site recorded a password session for the one saved login that works",
+          "The final answer reports that account's member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "password",
+            "require_all_saved_passwords_attempted": true,
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-all-options-fail-assistance",
+    "title": "Hosted Sign-In: Every Option Fails",
+    "description": "Three saved Larkspur Members logins that all fail and no sign-up path; the browser agent must try each and then ask the user for sign-in help.",
+    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "auth_assistance",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "attention_requests"],
+      "secrets": [],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "all_fail"
+      },
+      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. The fixture seeds three saved passwords for a per-run realm larkspur-<siteId>.test and none of them works: two are stale passwords for real members and one is a login with no account. The site has no sign-up and only emails sign-in codes to member addresses it can deliver to, so the correct end state is an auth_assistance request after every saved login was tried."
+    },
+    "evaluators": [
+      {
+        "id": "all-options-fail-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          }
+        ]
+      },
+      {
+        "id": "all-options-fail-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded a password attempt for every saved login",
+          "No session was ever signed in"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "no_session",
+            "require_all_saved_passwords_attempted": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
+    "name": "browser-auth-minted-email-otp",
+    "title": "Hosted Sign-In: Minted Identity Email Code",
+    "description": "No saved Larkspur Members credentials; the browser agent signs in with the user's minted agent identity using an emailed one-time code.",
+    "prompt": "Sign in to my Larkspur Members account at {auth_test_site_url} and tell me my member number.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "tags": ["browser", "auth"],
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "harness": "rose",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "deploy_category": "auth",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [],
+      "services": ["browser_agent", "auth_test_site", "auth_options", "minted_identity", "primitive_email"],
+      "secrets": ["PRIMITIVE_API_KEY"],
+      "live_targets": [],
+      "auth_test_site": {
+        "scenario": "minted_otp"
+      },
+      "context_notes": "Larkspur Members is a CAPTCHA-free members site served by the local backend (back-end/src/domains/auth-test-site) and reached through the public frontend proxy. No credentials are saved for the per-run realm larkspur-<siteId>.test, so auth options offer only the user's minted agent identity, which has a passwordless Larkspur account. The site emails a 6-digit sign-in code through Primitive to the minted inbox, where the browser agent's one-time-code polling picks it up."
+    },
+    "evaluators": [
+      {
+        "id": "minted-email-otp-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "minted-email-otp-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The site recorded an email-code session for the minted identity",
+          "The final answer reports that account's member number"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "email_code",
+            "deliverable_contains_member_number": true
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user-request:auth-critical-path-e2e"]
+  },
+  {
     "name": "browser-indeed-account-create",
     "title": "Browser Indeed Account Creation",
     "description": "Use the browser agent to create a benchmark-safe Indeed job-seeker account.",

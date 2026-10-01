@@ -61,6 +61,7 @@ KNOWN_DEPLOY_CATEGORIES: frozenset[str] = frozenset(
         *FLOOR_CATEGORIES,
         "harness",
         "browser",
+        "auth",
         "plaid",
         "phone",
         "attachment",
@@ -96,6 +97,12 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"(^|/)agents/domains/browser", ("browser", "browser_stateful")),
     (r"(^|/)agents/.*cookie", ("browser_stateful", "browser")),
     (r"(^|/)agents/.*auth_session", ("browser_stateful", "browser")),
+    (
+        r"(^|/)agents/domains/spawn_browser_agent|(^|/)agents/benchmarks/auth_test_site"
+        r"|(^|/)back-end/src/domains/(auth-test-site|auth-options|auth-assistance|credential-propagation)/"
+        r"|(^|/)back-end/src/providers/(authOptions|authRealm|credentialEnvelope|benchmarkBrowserAuth|primitive)",
+        ("auth",),
+    ),
     (
         r"request_payment_card|agentcard|agent_card|/purchases?/|wallet-funding|test-payment",
         ("payment",),
