@@ -1672,9 +1672,10 @@ def test_planner_routes_retrieval_before_stateful_execution():
 
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
     assert (
-        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution."
+        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution, unless a delegated general_purpose agent owns that research."
         in prompt
     )
+    assert "A general_purpose agent can launch explore for research it owns." in prompt
     assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
     assert (
         "Step 0 spawn_explore_agent retrieves the public target or route; "

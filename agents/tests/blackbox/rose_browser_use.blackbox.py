@@ -177,6 +177,8 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
     assert "Relatively expensive recovery to forcefully open" in description
     assert "Do not use when an alternate path can complete the goal" in description
+    assert "first-party proxy/tunnel failure" in description
+    assert "load failure without that evidence" in description
     assert "Do not drag sliders" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
@@ -193,6 +195,7 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     reason = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["reason"]["description"]
     assert "force-opened" in reason
     assert "alternate goal path" in reason
+    assert "failed first-party URL and error" in reason
     preserve_flag = BROWSER_USE_TOOLS["recover_from_challenge"]["params"][
         "auth_cookies_are_preserved"
     ]
