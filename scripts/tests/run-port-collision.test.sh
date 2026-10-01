@@ -238,6 +238,26 @@ finally:
     exit 1
 }
 
+wait_for_port_free() {
+    local port="$1"
+    local attempt
+    for attempt in $(seq 1 50); do
+        if ! python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.05)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "FAIL: listener on port $port survived its fixture's kill" >&2
+    exit 1
+}
+
 wait_for_connection() {
     local port="$1"
     local attempt
@@ -259,7 +279,7 @@ printf '%s\n' 'ready' > "$wait_for_frontend_test_root/test_payment"
 (
     sleep 0.4
     cd "$wait_for_frontend_test_root"
-    python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
+    exec python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
         >"$wait_for_frontend_test_log" 2>&1
 ) &
 frontend_test_pid=$!
@@ -314,7 +334,7 @@ mkdir -p "$foreign_dir"
 foreign_port="$(find_free_port)"
 (
     cd "$foreign_dir"
-    python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$foreign_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
 wait_for_port "$foreign_port"
@@ -330,11 +350,13 @@ last_pid="${PIDS[$last_index]}"
 kill "$last_pid" 2>/dev/null || true
 wait "$last_pid" 2>/dev/null || true
 unset "PIDS[$last_index]"
+wait_for_port_free "$foreign_port"
+echo "PASS: killing a listener fixture frees its port"
 
 own_port="$(find_free_port)"
 (
     cd "$ROOT_DIR"
-    python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
+    exec python3 -m http.server "$own_port" --bind 127.0.0.1 >/dev/null 2>&1
 ) &
 PIDS+=("$!")
 wait_for_port "$own_port"
