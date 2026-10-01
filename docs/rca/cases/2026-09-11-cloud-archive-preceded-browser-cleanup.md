@@ -494,3 +494,44 @@ rule, or benchmark timeout changed.
 This causal test does not establish the exact benchmark outcome or a ten-slice
 cloud acceptance. A fresh unchanged cloud fleet run from the repaired source
 remains required, so the case stays open.
+
+## Recurrence: premature operator stack cancellation, October 1
+
+The invalid local AgentCard gate `98db495d-3941-4c31-ab68-06416ec5a4a9`
+inherited the trace-disable setting documented in
+`2026-09-30-semantic-trace-disable-inherited-by-local-benchmark`. Two completed
+payment tasks failed durable finalization. During cancellation, the operator
+sent TERM to the owned stack supervisor before signalling the benchmark owner.
+That bypassed the benchmark owner's drain order. Normal stack cleanup removed
+the owned PostgreSQL container and volume before the third task's canonical
+root/payment cleanup could finish. This recurrence is an operator sequencing
+error; it does not establish a regression in the normal owner shutdown path.
+
+Two archive searches covered payment cleanup after database removal and lost
+isolated-database card reclaim/refund ownership. They identified this existing
+writer/stack-ordering case. Retained run records, sealed backend/worker logs,
+the exact native stack receipt, and fresh process/container/volume observations
+confirm the original resources and their loss. No original SQL fence succeeded,
+and the interrupted task's missing lifecycle snapshot cannot establish one.
+
+Recovery used only recorded root and provider identifiers. Fresh Temporal
+descriptions bound each captured workflow/run to the original task queue: two
+were completed, and the remaining exact running execution was terminated and
+then verified terminal. Exact GETs for all three recorded Kernel sessions
+returned 404 before and after recovery. Both completed purchases' exact sandbox
+Stripe intents were succeeded with zero capturable funds and matching root and
+purchase metadata; both exact AgentCard cards were closed with zero balance.
+Their retained, linked transfer records were consumed. AgentCard capability
+discovery exposes only `list_transfers(status, limit)`, so no fresh exact transfer
+read was available; recovery did not substitute a broad organization inventory.
+The interrupted root had no payment operation in its retained correlated logs
+and zero intents in a complete exact-root Stripe metadata query. Those provider
+observations do not replace the lost SQL fence.
+
+Private receipt `.context/acceptance/payment84-exact-recovery/recovery.receipt.private.json`
+binds the source artifacts and all observations by SHA-256. No card, transfer,
+or payment mutation was required. The original gate remains rejected with zero
+credit, and provider recovery does not reconstruct missing durable traces.
+Independent receipt review and fresh complete payment gates are required;
+the existing case remains open. Future cancellation must target the sealed
+benchmark owner first and let that owner keep services available through drain.

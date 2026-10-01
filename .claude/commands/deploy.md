@@ -1093,6 +1093,8 @@ billing state.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   BENCHMARK_SKIP_WMH_BUILD=1 \
+  BENCHMARK_ATTEMPT_SUITE=predeploy \
+  BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```

@@ -437,6 +437,14 @@ change that can reduce the slice's end-to-end wall clock by more than 5% without
 changing benchmark tasks, prompts, model behavior, scoring, evidence standards,
 or result classification. A source change or INFRA failure restarts the ten-slice
 streak on a clean commit; forensic recovery never retroactively grants credit.
+Local benchmark launchers require normal trace capture: use
+`TRACE_ARCHIVE_ENABLED=1` for `run-bench --local` and predeploy smoke. The CLI
+rejects explicit disabled values before allocating a stack; semantic latency
+stacks may still disable capture. Do not copy their environment into benchmarks.
+To interrupt a local benchmark, cancel its owning benchmark launcher first and
+wait for the benchmark cleanup receipt before stopping its dependent stack.
+`local-benchmark-owner.json` names the benchmark child; `local-stack-owner.json`
+names the service stack. Verify native process birth before signaling either.
 For the current campaign, draw 100 distinct tasks from the canonical `daily`
 and `polar-bench` selectors. Reset the task pool whenever the streak restarts
 at slice zero; exclude successful names only within that active campaign.
@@ -641,6 +649,9 @@ TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
   Its permanent `cloudbench-fake-volume-contract.test.py` runs the actual fake
   provider writers through real snapshot admission; keep positive volume sizes
   consistent with their Machine mounts before exercising ownership scenarios.
+  Activate the agents venv and prepend the installed Node 22 bin directory when
+  launching this gate through Machine exec; its default PATH can select Node 20,
+  which cannot execute the hermetic TypeScript seed fixture.
   Keep Linux `TMPDIR`
   outside the checkout (for example `/var/tmp`): production archive guards
   intentionally redirect paths under the repository.

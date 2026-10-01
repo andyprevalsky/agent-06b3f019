@@ -72,12 +72,12 @@ def _dotenv_fast_mode_cache_database_url() -> str:
         if key not in {"FAST_MODE_CACHE_DATABASE_URL", "DATABASE_URL"}:
             continue
         value = value.strip()
-        if (value.startswith('"') and value.endswith('"')) or (
-            value.startswith("'") and value.endswith("'")
-        ):
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
         found[key] = value
     return found.get("FAST_MODE_CACHE_DATABASE_URL") or found.get("DATABASE_URL") or ""
+
+
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
@@ -209,10 +209,16 @@ def _signal_owned_process(process: subprocess.Popen, native_identity: str, signu
     if process.poll() is not None:
         return
     tools = _process_identity_tools()
-    code = tools["main"]([
-        "process-identity", "--expect", native_identity,
-        "--signal", signal.Signals(signum).name, str(process.pid),
-    ])
+    code = tools["main"](
+        [
+            "process-identity",
+            "--expect",
+            native_identity,
+            "--signal",
+            signal.Signals(signum).name,
+            str(process.pid),
+        ]
+    )
     if code != 0 and process.poll() is None:
         raise RuntimeError("owned process identity could not be verified before signalling")
 
@@ -221,7 +227,10 @@ def _owned_shutdown_timeout() -> int:
     """Use the stack owner's existing activity/recording deadline, not another grace."""
     result = subprocess.run(
         [_benchmark_python(), str(AGENTS_DIR / "scripts/local_worker_supervisor.py"), "--shutdown-timeout"],
-        capture_output=True, text=True, timeout=5, check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=True,
     )
     seconds = int(result.stdout.strip())
     if seconds <= 0:
@@ -233,14 +242,24 @@ def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, 
     native_identity = _process_identity_tools()["current_identity"](process.pid)
     birth = subprocess.run(
         ["ps", "-p", str(process.pid), "-o", "lstart="],
-        capture_output=True, text=True, timeout=3, check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=True,
     ).stdout.strip()
     if not birth:
         raise RuntimeError("owned stack birth could not be captured")
-    _write_owner_record(stack.context_dir / "local-stack-owner.json", {
-        "version": 1, "run_id": stack.run_id, "token": token,
-        "pid": process.pid, "native_identity": native_identity, "birth": birth,
-    })
+    _write_owner_record(
+        stack.context_dir / "local-stack-owner.json",
+        {
+            "version": 1,
+            "run_id": stack.run_id,
+            "token": token,
+            "pid": process.pid,
+            "native_identity": native_identity,
+            "birth": birth,
+        },
+    )
 
 
 def _read_cleanup_receipt(path: Path, token: str) -> dict[str, str]:
@@ -286,8 +305,11 @@ class LocalBenchmarkOwner:
             "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(self.receipt.resolve()),
             "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": self.token,
             "BENCHMARK_DELETE_CANCELLED_AGENTS_ON_INTERRUPT": "true",
-            **({"BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true"}
-               if self.stack.isolated else {}),
+            **(
+                {"BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true"}
+                if self.stack.isolated
+                else {}
+            ),
         }
 
     def bind(self, process: subprocess.Popen) -> None:
@@ -302,12 +324,19 @@ class LocalBenchmarkOwner:
             self.interrupt(self.signum)
 
     def record(self, state: str) -> None:
-        _write_owner_record(self.stack.context_dir / "local-benchmark-owner.json", {
-            "version": 1, "run_id": self.stack.run_id, "state": state,
-            "pid": self.process.pid if self.process else None,
-            "native_identity": self.native_identity, "token": self.token,
-            "receipt": str(self.receipt), "signal": self.signum,
-        })
+        _write_owner_record(
+            self.stack.context_dir / "local-benchmark-owner.json",
+            {
+                "version": 1,
+                "run_id": self.stack.run_id,
+                "state": state,
+                "pid": self.process.pid if self.process else None,
+                "native_identity": self.native_identity,
+                "token": self.token,
+                "receipt": str(self.receipt),
+                "signal": self.signum,
+            },
+        )
 
     def interrupt(self, signum: int) -> None:
         if self.signum is None:
@@ -647,10 +676,7 @@ def services_manifest_anon_enabled(manifest: dict) -> bool:
     env = manifest.get("env") if isinstance(manifest, dict) else None
     if not isinstance(env, dict):
         return False
-    return (
-        env.get("benchmark_anon_steel_profile") is True
-        and env.get("benchmark_disable_saved_browser_auth") is True
-    )
+    return env.get("benchmark_anon_steel_profile") is True and env.get("benchmark_disable_saved_browser_auth") is True
 
 
 def http_ok(url: str, timeout: float = 1.0) -> bool:
@@ -741,15 +767,24 @@ def start_imessage_relay(port: int, run_timeout_seconds: int, heartbeat_wait_sec
     log = open(log_path, "w")
     process = subprocess.Popen(
         [
-            str(tsx), str(entry),
-            "--base-url", f"http://localhost:{port}",
-            "--expected-user-id", IMESSAGE_RELAY_USER_ID,
-            "--expected-phone", IMESSAGE_RELAY_EXPECTED_PHONE,
-            "--expected-message", IMESSAGE_RELAY_EXPECTED_MESSAGE,
-            "--marker-file", str(marker),
-            "--timeout-seconds", str(run_timeout_seconds),
-            "--auto-login-phone", IMESSAGE_RELAY_EXPECTED_PHONE,
-            "--auto-login-otp", IMESSAGE_RELAY_AUTOLOGIN_OTP,
+            str(tsx),
+            str(entry),
+            "--base-url",
+            f"http://localhost:{port}",
+            "--expected-user-id",
+            IMESSAGE_RELAY_USER_ID,
+            "--expected-phone",
+            IMESSAGE_RELAY_EXPECTED_PHONE,
+            "--expected-message",
+            IMESSAGE_RELAY_EXPECTED_MESSAGE,
+            "--marker-file",
+            str(marker),
+            "--timeout-seconds",
+            str(run_timeout_seconds),
+            "--auto-login-phone",
+            IMESSAGE_RELAY_EXPECTED_PHONE,
+            "--auto-login-otp",
+            IMESSAGE_RELAY_AUTOLOGIN_OTP,
         ],
         cwd=str(REPO_ROOT / "mac-app"),
         stdout=log,
@@ -844,7 +879,7 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
-            volume = f"victoria-pgdata-{container[len('victoria-db-'):]}"
+            volume = f"victoria-pgdata-{container[len('victoria-db-') :]}"
     if isinstance(volume, str) and volume:
         try:
             subprocess.run(
@@ -990,9 +1025,7 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
 
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
-    return bool(TEST_PAYMENT_FRONTEND_TASK_NAMES & set(tasks)) and not os.environ.get(
-        "BENCHMARK_FRONTEND_URL"
-    )
+    return bool(TEST_PAYMENT_FRONTEND_TASK_NAMES & set(tasks)) and not os.environ.get("BENCHMARK_FRONTEND_URL")
 
 
 def sms_web_search_fixture_path(stack: "ServiceStack") -> str:
@@ -1097,6 +1130,22 @@ def validate_agentcard_org_credentials(
     )
 
 
+def validate_benchmark_archive_environment() -> None:
+    """Reject a capture-disabled environment before creating benchmark resources."""
+    # Match the backend's JavaScript String.trim(): Python's default strip()
+    # omits BOM and additionally removes control characters JavaScript retains.
+    trim_characters = (
+        "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+        "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+    )
+    configured = os.environ.get("TRACE_ARCHIVE_ENABLED", "").strip(trim_characters).lower()
+    if configured in {"0", "false", "no", "off", "disabled"}:
+        raise RuntimeError(
+            "Local benchmarks require trace capture; TRACE_ARCHIVE_ENABLED is disabled. "
+            "Set TRACE_ARCHIVE_ENABLED=1 before running benchmarks."
+        )
+
+
 def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
     # The local runner owns both the isolated stack and the later benchmark
     # subprocesses. Keep their isolation view aligned so credential refreshes
@@ -1149,11 +1198,7 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         # ran as an ordinary user and silently exercised the charged path instead of the bypass.
         # Additive by construction: it grants admin ONLY to the synthetic id, never to a real one,
         # and only on this local isolated stack.
-        configured = [
-            entry.strip()
-            for entry in os.environ.get("ADMIN_USER_IDS_EXTRA", "").split(",")
-            if entry.strip()
-        ]
+        configured = [entry.strip() for entry in os.environ.get("ADMIN_USER_IDS_EXTRA", "").split(",") if entry.strip()]
         if ADMIN_BYPASS_USER_ID not in configured:
             configured.append(ADMIN_BYPASS_USER_ID)
         os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
@@ -1213,18 +1258,14 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         return False
 
     selected_tasks = [task for task in all_tasks() if task.name in selected]
-    gpa_forbidden_by_any = any(
-        _GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks
-    )
+    gpa_forbidden_by_any = any(_GPA_FORBIDDEN.intersection(task.forbidden_tools or []) for task in selected_tasks)
     gpa_required_by_any = any(_task_requires_general_purpose_agent(task) for task in selected_tasks)
     # Concurrent predeploy batches mix GPA-forbidden tasks (parallel-tool-calls)
     # with GPA-required tasks (spawn-sub-agents). A global env disable would strip
     # spawn_general_purpose_agent from the whole stack and false-fail the latter.
     if gpa_required_by_any:
         os.environ["ROSE_DISABLE_GENERAL_PURPOSE_AGENT"] = "0"
-    elif gpa_forbidden_by_any and os.environ.get(
-        "ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1"
-    ).strip().lower() not in {
+    elif gpa_forbidden_by_any and os.environ.get("ROSE_DISABLE_GENERAL_PURPOSE_AGENT", "1").strip().lower() not in {
         "0",
         "false",
         "no",
@@ -1255,10 +1296,7 @@ def seed_payment_fixture(manifest: dict) -> None:
     # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV. Prefer that, else the dedicated
     # synthetic lifecycle id — never BENCHMARK_USER_ID / the admin operator,
     # which would seed the no-charge admin path instead of the customer fixture.
-    payment_user_id = (
-        os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
-        or AGENT_PAYMENT_LIFECYCLE_USER_ID
-    )
+    payment_user_id = os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_LIFECYCLE_USER_ID
     print(f"Seeding Stripe test billing fixture for the payment-lifecycle user {payment_user_id}")
     subprocess.run(
         [
@@ -1419,11 +1457,7 @@ def _promote_previous_utc_day_seed_dump(
         return False
 
     match = re.fullmatch(r"([0-9a-f]{40})-(\d{8})\.dump", seed_dump.name)
-    if (
-        match is None
-        or match.group(1) != schema_hash
-        or match.group(2) != current_time.strftime("%Y%m%d")
-    ):
+    if match is None or match.group(1) != schema_hash or match.group(2) != current_time.strftime("%Y%m%d"):
         return False
     previous_day = (current_time - timedelta(days=1)).strftime("%Y%m%d")
     previous_dump = seed_dump.with_name(f"{schema_hash}-{previous_day}.dump")
@@ -1436,10 +1470,7 @@ def _promote_previous_utc_day_seed_dump(
         with _benchmark_seed_publish_lock(previous_dump):
             try:
                 previous_stat = previous_dump.stat()
-                if (
-                    previous_stat.st_size <= 0
-                    or previous_sidecar.read_text().strip() != schema_hash
-                ):
+                if previous_stat.st_size <= 0 or previous_sidecar.read_text().strip() != schema_hash:
                     return False
             except OSError:
                 return False
@@ -1498,9 +1529,7 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
             backend_port = ports.get("backend")
             if not backend_port or not http_ok(f"http://localhost:{backend_port}/health"):
                 return False
-            database = (
-                manifest.get("database") if isinstance(manifest.get("database"), dict) else {}
-            )
+            database = manifest.get("database") if isinstance(manifest.get("database"), dict) else {}
             database_name = database.get("name")
             database_port = database.get("port") or ports.get("local_db")
             if not database_name or not database_port:
@@ -1593,7 +1622,9 @@ def start_services(
         # fast_cache:on tasks (test-mass-agent-run-0) must read the July cache,
         # so those batches keep FAST_MODE_CACHE_DATABASE_URL and disable writes.
         if selected_tasks_need_shared_fast_cache(tasks):
-            shared_url = (env.get("FAST_MODE_CACHE_DATABASE_URL") or "").strip() or _dotenv_fast_mode_cache_database_url()
+            shared_url = (
+                env.get("FAST_MODE_CACHE_DATABASE_URL") or ""
+            ).strip() or _dotenv_fast_mode_cache_database_url()
             if not shared_url:
                 raise RuntimeError(
                     "fast_cache:on isolated benches require FAST_MODE_CACHE_DATABASE_URL "
@@ -1728,11 +1759,16 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
         raise RuntimeError(f"stack ownership is unverified; retaining recovery authority: {owner_path}")
     owner = json.loads(owner_path.read_text())
     if (
-        owner.get("version") != 1 or owner.get("run_id") != stack.run_id
-        or not isinstance(owner.get("pid"), int) or owner["pid"] <= 0
-        or not isinstance(owner.get("token"), str) or not owner["token"]
-        or not isinstance(owner.get("native_identity"), str) or not owner["native_identity"]
-        or not isinstance(owner.get("birth"), str) or not owner["birth"]
+        owner.get("version") != 1
+        or owner.get("run_id") != stack.run_id
+        or not isinstance(owner.get("pid"), int)
+        or owner["pid"] <= 0
+        or not isinstance(owner.get("token"), str)
+        or not owner["token"]
+        or not isinstance(owner.get("native_identity"), str)
+        or not owner["native_identity"]
+        or not isinstance(owner.get("birth"), str)
+        or not owner["birth"]
         or (process is not None and process.pid != owner["pid"])
     ):
         raise RuntimeError("stack cleanup owner does not match this invocation")
@@ -1751,10 +1787,16 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
         if current is not None:
             if current != owner["native_identity"]:
                 raise RuntimeError("stack PID was replaced; refusing cleanup")
-            code = tools["main"]([
-                "process-identity", "--expect", owner["native_identity"],
-                "--signal", "TERM", str(owner["pid"]),
-            ])
+            code = tools["main"](
+                [
+                    "process-identity",
+                    "--expect",
+                    owner["native_identity"],
+                    "--signal",
+                    "TERM",
+                    str(owner["pid"]),
+                ]
+            )
             if code != 0 or not _wait_for_pid_exit(owner["pid"], timeout):
                 raise RuntimeError("owned stack shutdown remains unverified")
     receipt = _read_cleanup_receipt(stack.context_dir / "local-stack-cleanup.status", owner["token"])
@@ -1782,9 +1824,7 @@ def apply_manifest_environment(manifest: dict) -> None:
         # Must stay above the 50-child mass-agent fan-out (see run.sh
         # LOCAL_DB_CONNECTION_LIMIT:-80). A 50-conn pool P2028s under
         # concurrent post_agent_message interactive txs and the tree stalls.
-        os.environ["DATABASE_URL"] = (
-            f"{database_url}?connection_limit={BENCHMARK_DB_CONNECTION_LIMIT}&pool_timeout=30"
-        )
+        os.environ["DATABASE_URL"] = f"{database_url}?connection_limit={BENCHMARK_DB_CONNECTION_LIMIT}&pool_timeout=30"
         os.environ["DIRECT_URL"] = database_url
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
@@ -2072,7 +2112,12 @@ def run_diagnostics(
             outfile = open(task_dir / f"{label}.txt", "w")
             outfile.write(f"$ {' '.join(command)}\n\n")
             outfile.flush()
-            processes.append((subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT, env=diag_env), outfile))
+            processes.append(
+                (
+                    subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT, env=diag_env),
+                    outfile,
+                )
+            )
         for process, outfile in processes:
             try:
                 process.wait(timeout=timeout_seconds)
@@ -2091,7 +2136,9 @@ def checkpoint_out_path(stack: ServiceStack, task_name: str, args: argparse.Name
     return root / f"{slugify(task_name)}.json"
 
 
-def checkpoint_source_out_paths(stack: ServiceStack, task_name: str, args: argparse.Namespace) -> tuple[Path, Path | None]:
+def checkpoint_source_out_paths(
+    stack: ServiceStack, task_name: str, args: argparse.Namespace
+) -> tuple[Path, Path | None]:
     root = stack.context_dir / "checkpoint-source" if stack.isolated else CHECKPOINT_ROOT / "sources"
     source_json = root / f"{slugify(task_name)}-source.json"
     tree_json = None if args.checkpoint_no_tree else root / f"{slugify(task_name)}-tree.json"
@@ -2376,9 +2423,7 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner in RUNNABLE_TASK_RUNNERS
-                and task.status == "ready"
-                and not is_polar_bench_task(task)
+                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and not is_polar_bench_task(task)
             ]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             selected = [
@@ -2412,7 +2457,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("tasks", nargs="*", help="Benchmark task names, e.g. browser-agent cache-coverage")
     parser.add_argument("--suite", help="Benchmark suite/tag to run, e.g. smoke, rose-bench, pipeline-e2e, all")
     parser.add_argument("--full", action="store_true", help="Run every benchmark")
-    parser.add_argument("--eval-suite", action="store_true", help="Run benchmarks/run_eval_suite.py against isolated services")
+    parser.add_argument(
+        "--eval-suite", action="store_true", help="Run benchmarks/run_eval_suite.py against isolated services"
+    )
     parser.add_argument("--rerun-failed", metavar="RUN", help="Rerun failed tasks from a result JSON or 'latest'")
     parser.add_argument("--only", help="Comma-separated eval task names for --eval-suite")
     parser.add_argument(
@@ -2460,8 +2507,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         type=int,
         metavar="TURN_N",
         help=(
-            "Run one benchmark until root message index TURN_N, pause/export it, "
-            "clone the checkpoint, and resume it"
+            "Run one benchmark until root message index TURN_N, pause/export it, clone the checkpoint, and resume it"
         ),
     )
     parser.add_argument(
@@ -2555,7 +2601,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         parser.error("--checkpoint is only supported for benchmark task selections, not --eval-suite")
     if checkpoint_requested(args) and args.checkpoint_no_start and args.checkpoint_start_agent_id:
         parser.error("--checkpoint-no-start cannot be combined with --checkpoint-start-agent-id")
-    if (args.checkpoint_source_json or args.checkpoint_tree_json or args.checkpoint_no_tree) and not checkpoint_requested(args):
+    if (
+        args.checkpoint_source_json or args.checkpoint_tree_json or args.checkpoint_no_tree
+    ) and not checkpoint_requested(args):
         parser.error("checkpoint source/tree options require --checkpoint or --checkpoint-start-agent-id")
     if args.checkpoint_price_limit_cents <= 0:
         parser.error("--checkpoint-price-limit-cents must be positive")
@@ -2593,6 +2641,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             os.close(world_ready_fd)
     selected_tasks = tasks_from_args(args)
+    validate_benchmark_archive_environment()
     validate_agentcard_org_credentials(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
@@ -2603,6 +2652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError("a child world must select one task from its original cohort")
     elif len(selected_tasks) > 1 and not args.eval_suite:
         from benchmarks.local_worlds import needs_independent_worlds, run_task_worlds
+
         if needs_independent_worlds(selected_tasks, args.max_concurrency):
             return run_task_worlds(sys.modules[__name__], args, selected_tasks)
     stack = build_service_stack(args)
@@ -2701,9 +2751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # the file there. Exporting it to the backend alone leaves the runner
             # writing somewhere the backend never reads — the fixture no-ops and
             # the run scores live search. Both sides get the same string.
-            os.environ["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(
-                stack
-            )
+            os.environ["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(stack)
             ports = manifest.get("ports", {})
             print(
                 "Isolated benchmark stack: "
@@ -2768,16 +2816,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 benchmark_owner.starting = False
             result_paths.append(result_path)
-            _write_owner_record(stack.context_dir / "local-benchmark-results.json", {
-                "version": 1, "run_id": stack.run_id,
-                "results": [{"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                            for path in result_paths],
-            })
+            _write_owner_record(
+                stack.context_dir / "local-benchmark-results.json",
+                {
+                    "version": 1,
+                    "run_id": stack.run_id,
+                    "results": [
+                        {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                        for path in result_paths
+                    ],
+                },
+            )
             failures = failed_tasks_from_run(result_path)
             if failures:
-                diag_dir = run_diagnostics(
-                    failures, port=port, result_path=result_path, stack=stack
-                )
+                diag_dir = run_diagnostics(failures, port=port, result_path=result_path, stack=stack)
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]
@@ -2798,7 +2850,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if benchmark_owner.started and not benchmark_owner.verified:
                 benchmark_owner.record("failed_retained")
-                print(f"Owned cleanup is unverified; retaining services and database: {stack.context_dir}", file=sys.stderr)
+                print(
+                    f"Owned cleanup is unverified; retaining services and database: {stack.context_dir}",
+                    file=sys.stderr,
+                )
             else:
                 stop_imessage_relay(imessage_relay)
                 stop_frontend_tunnel(frontend_tunnel)

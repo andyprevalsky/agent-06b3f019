@@ -19,7 +19,7 @@ sources:
   - PR #1299
   - commit f10d13fdb42507028fcab0a1550f06ea474bd37b
 repro: scripts/tests/cloudbench-fake-volume-contract.test.py
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -65,11 +65,13 @@ existing scenario 9 assertion remain unchanged. This prevents the same preclaim
 failure in the warm source, primary clone, worker clone, and added-Machine paths;
 it adds no production work at 10,000 agents.
 
-The focused regression and shell syntax checks passed. The full mandatory Linux
-suite, including actual stop attempts and retained claim/volume/incomplete-audit
-assertions, remains required and pending. This case stays mitigated until that
-unchanged outcome gate passes; the focused test supplies no fleet acceptance
-credit and does not close the separate live browser-injection OOM case.
+The focused regression, shell syntax checks, independent review, and full
+mandatory native Linux suite passed. The unchanged suite completed in 1233.56
+seconds on `05a722cc77a232b4699d92bc6542df7966ff5fd6`, including actual stop
+attempts and retained claim/volume/incomplete-audit assertions. Its SHA256 is
+`c38abb956827a961349f090e87d2ea30fcd30fff2dd7bd7f6fa02fa93c4bcb9d`.
+These fixture outcomes supply no fleet acceptance credit and do not close the
+separate live browser-injection OOM case.
 
 ## Human feedback
 
