@@ -83,6 +83,54 @@ asserts `False`, with `alt-action-send` asserting `True`.
 
 10k-agent behavior: O(signal length) regex per click, no shared state.
 
+### Follow-up: real-browser misfire corpus (21 distinct mistakes)
+
+The resend bug was one instance of a wider problem: the gate classified
+whatever text it could scrape near the action, not the control the action
+actually commits. `agents/tests/blackbox/write_lock_misfire.blackbox.py`
+drives the real `_execute_*` gate paths against headless Chromium pages from
+`agents/tests/fixtures/write_lock_misfire_corpus.json`. Each of the 21 cases
+exposes a different mistake, and all 21 misfired before the fix. Fixes, grouped
+by root cause:
+
+- **Resolve the committed control, not nearby text**
+  (`browser_tools/write_lock_probe.py`).
+  - Index clicks use Chrome's accessible name, so hidden descendants, inline
+    markup and machine ids no longer change the label.
+  - Coordinate clicks and Enter run a live CDP probe that hit-tests through
+    shadow roots.
+  - Clicking into an editable field never commits. A hyperlink cannot post
+    or send, but it still gates purchase and return, because page script can
+    turn a link click into a charge. A nameless control reads its own ids and
+    wrapper only, not a neighbour's label.
+  - Enter follows HTML implicit submission: an input inside a form submits
+    the form's default button, and a textarea or contenteditable never
+    submits.
+  - A typed `\n` in `input_text` is gated the same way as pressing Enter.
+- **Grammar** (`browser_tools/write_lock.py`).
+  - Purchase phrases and submit verbs match whole words, so
+    `Marketplace orders` and `Show 12 posts` stay unlocked.
+  - `Pay <amount>` counts as a purchase commit.
+  - `Cancel send` / `Undo send` are not sends.
+  - Auth-flow URLs are detected by word, so `r/AuthorsGuild` is not `auth`.
+- **Payment fields**: matched on card tokens plus the accessible label.
+  Billing-address fields and non-card expirations are no longer treated as
+  card fields; a card field named only by its `<label>` now is.
+- **Approval scope** (`service_actions.py`).
+  - Registrable domains are ccTLD-aware, so a grant on `argos.co.uk` does
+    not unlock `sainsburys.co.uk`.
+  - A site purchase unlock never covers `return`.
+
+The suite also runs guard cases that must still lock (link-styled purchase
+and return commits, a nameless icon button, Enter into a field whose form's
+default button is `Place order`). It checks held-out grammar and domain
+probes, and fails if any corpus label or id appears in classifier source code.
+
+The full agents blackbox run also exposed a cross-suite leak. A benchmark
+test exported `ROSE_DISABLE_CODE_AGENT_VERIFIER=1` and never restored it, so
+`spawn-claude-code-agent` failed only when run after it. The runner now
+restores `os.environ` after each domain (`agents/tests/unit/test_blackbox_runner.py`).
+
 ## Human feedback
 
 User reported the resend-verification-code approval as a false trigger, and
