@@ -1538,15 +1538,14 @@ async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
             )
             recorder.frames_dir.mkdir(parents=True)
             recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
-            await asyncio.wait_for(
-                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
-                timeout=0.5,
-            )
-            await asyncio.wait_for(
-                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
-                timeout=0.5,
-            )
-            assert page.screenshot_calls == 2
+            for label, phase in (("Submit started", "start"), ("Submit finished", "finish")):
+                started = time_module.monotonic()
+                await recorder.mark(label, action="click", metadata={"step": 1, "phase": phase})
+                # Marks run twice per step; the bounded 200ms capture must not
+                # be on the step's critical path.
+                assert time_module.monotonic() - started < 0.05
+            await recorder.flush_marks()
+            assert page.screenshot_calls >= 1
             assert recorder.frames == []
             await recorder.record_observation(
                 iteration=1,
@@ -1797,6 +1796,7 @@ async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
 
             # Must not raise — this is the Place-order finish mark path.
             await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+            await recorder.flush_marks()
 
             assert recorder.frames_dir.exists()
             assert len(recorder.frames) == frames_before_wipe + 1
@@ -2184,6 +2184,7 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                     session_metadata={"provider": "steel"},
                 )
                 await recorder.mark("post-recovery checkout", action="recovery")
+                await recorder.flush_marks()
 
                 assert any(frame["label"] == "post-recovery checkout" for frame in recorder.frames), (
                     "the promoted Steel half of the recording was dropped"
