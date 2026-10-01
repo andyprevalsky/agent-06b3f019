@@ -83,6 +83,10 @@ GATES = (
         ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
     ),
     Gate(
+        "deploy-agent-clone-recovery",
+        ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),
+    ),
+    Gate(
         "agent-surface-hash",
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
