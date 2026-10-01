@@ -6,6 +6,8 @@ import {
   isKernelProxyAvailabilityError,
   KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
+  kernelRecreateProxySelection,
+  managedKernelProxyFromSource,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
@@ -129,6 +131,40 @@ const tests: Array<[string, () => void]> = [
       assert(candidates.length === 2, 'expected city and country candidates');
       assert(candidates[0]?.proxyKey === 'residential:GB:st_johns_wood', 'bad non-US city key');
       assert(candidates[0]?.config.state === undefined, 'non-US state should be omitted');
+    },
+  ],
+  [
+    'Kernel resume keeps the resolved proxy tier and fallback location',
+    () => {
+      const resolved = managedKernelProxyFromSource('kernel_mobile_state');
+      assert(
+        resolved?.type === 'mobile' && resolved.specificity === 'state',
+        'lost mobile state fallback'
+      );
+      assert(
+        managedKernelProxyFromSource('kernel_configured') === undefined,
+        'configured proxy must keep its configured selection'
+      );
+      const resume = kernelRecreateProxySelection('kernel_mobile_state', 'mobile');
+      assert(
+        resume.exactManagedProxy?.type === 'mobile' &&
+          resume.exactManagedProxy.specificity === 'state',
+        'resume must select the recorded mobile state proxy'
+      );
+      assert(
+        kernelRecreateProxySelection(null, 'mobile').forceManagedProxyType === 'mobile',
+        'legacy rotated sessions must stay on mobile'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_configured', 'mobile').forceManagedProxyType ===
+          undefined,
+        'configured proxy must not switch to managed mobile'
+      );
+      assert(
+        kernelRecreateProxySelection('kernel_mobile_state', 'mobile', 'residential')
+          .forceManagedProxyType === 'residential',
+        'a new rotation must override the recorded proxy choice'
+      );
     },
   ],
   [
