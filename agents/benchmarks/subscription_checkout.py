@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, expect
 
 
 _SESSION_ID = re.compile(r"\bcs_test_[A-Za-z0-9]+\b")
@@ -94,7 +94,8 @@ async def complete_test_subscription_checkout(
             await page.get_by_text("Card", exact=True).last.click(force=True, timeout=10000)
             link_save = page.locator('input[name="enableStripePass"]')
             if await link_save.count() and await link_save.is_checked():
-                await link_save.uncheck(force=True)
+                await page.locator('label[for="enableStripePass"]').click(timeout=10000)
+                await expect(link_save).not_to_be_checked(timeout=5000)
             await _fill_checkout_field(page, ('input[autocomplete="cc-number"]', 'input[name="cardNumber"]',
                                               'input[name="number"]', 'input[placeholder*="1234"]'),
                                        "4242424242424242", "card number")

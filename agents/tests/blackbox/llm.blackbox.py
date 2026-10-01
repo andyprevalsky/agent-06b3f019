@@ -4749,6 +4749,7 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
 async def test_call_planner_llm_activity_happy_path():
     """call_planner_llm_activity builds system prompt, streams a plan, returns result+usage."""
     import httpx
+    from datetime import datetime, timezone
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_planner_llm_activity
 
@@ -4785,17 +4786,19 @@ async def test_call_planner_llm_activity_happy_path():
 
     set_mock_handler(handler)
 
+    date_before = datetime.now(timezone.utc).date().isoformat()
     with patch("temporalio.activity.heartbeat"):
         result = await call_planner_llm_activity(
             messages=[{"role": "user", "content": f"plan me this @ref:message:{pointer_id}"}],
             model="rose",
             tools_description="web_search: search the web",
-            user_context="user is testing",
+            user_context="Recent Communications: [WHATSAPP] 2026-07-29 | From: me",
             claude_max_token="ct-planner-123",
             agent_id="agent-planner",
             tool_call_id="tc-planner",
             claude_token_user_id="planner-user",
         )
+    date_after = datetime.now(timezone.utc).date().isoformat()
 
     assert result["result"]["title"] == "Test Plan"
     assert len(result["result"]["tasks"]) == 1
@@ -4804,6 +4807,9 @@ async def test_call_planner_llm_activity_happy_path():
     anthropic_calls = [c for c in captured["calls"] if "api.anthropic.com" in c["url"] and c["body"]]
     assert len(anthropic_calls) >= 1, f"No Anthropic call captured; got {[c['url'] for c in captured['calls']]}"
     planner_body = anthropic_calls[0]["body"]
+    planner_system_text = "\n".join(block["text"] for block in planner_body["system"])
+    assert any(f"Current UTC date: {day}." in planner_system_text for day in {date_before, date_after})
+    assert "Recent Communications: [WHATSAPP] 2026-07-29" in planner_system_text
     # Planner uses skip_cache_write → system blocks KEEP cache_control for reads.
     user_system_blocks = [b for b in planner_body.get("system", []) if "cache_control" in b]
     assert len(user_system_blocks) > 0, "skip_cache_write should keep system cache markers for reads"
