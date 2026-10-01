@@ -40,6 +40,7 @@ from providers.rose.browser_use import (
     normalize_browser_use_response,
     normalize_browser_use_tool_calls,
 )
+from providers.rose.cerebras import cerebras_complete
 from providers.rose.claude_auth import (
     DEFAULT_REASONING_EFFORT,
     anthropic_api_key_complete,
@@ -74,7 +75,6 @@ from providers.rose.types import (
     RoseResponse,
     StreamChunk,
 )
-from providers.rose.cerebras import cerebras_complete
 from providers.rose.waterfall import waterfall_complete
 
 logger = structlog.get_logger()
@@ -1905,6 +1905,7 @@ class RoseClient:
             "claude_token_error": response.claude_token_error,
             "gpt_token_error": response.gpt_token_error,
             "mode": mode,
+            "timing": response.timing,
         }
 
     async def collect(
