@@ -407,6 +407,24 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ shared-cache miss left state behind or reported success (status=$MISS_STATUS)"
 fi
 
+# measure-seed-memory.sh runs the fetch as `DUMP="$(...)" || DUMP=""`, which
+# disables errexit inside it: a sidecar that cannot be written must still fail
+# the fetch instead of handing back an unpublished pair.
+rm -rf "$FETCH_CACHE"
+mkdir -p "${FETCH_EXPECTED}.schemahash"
+if PUBLISH_PATH="$(FAKE_NPX_LOG="$FETCH_LOG" PATH="$FETCH_BIN:$PATH" \
+    fetch_canonical_seed_dump "$SCHEMA_FILE" "$FETCH_CACHE" 16 "$FETCH_BACKEND" 2>/dev/null)"; then
+    PUBLISH_STATUS=0
+else
+    PUBLISH_STATUS=$?
+fi
+if [ "$PUBLISH_STATUS" -ne 0 ] && [ -z "$PUBLISH_PATH" ] && [ ! -L "${FETCH_EXPECTED}.publish.lock" ]; then
+    PASS=$((PASS+1)); echo "  ✅ a failed sidecar write fails the fetch even under a conditional caller"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ unpublished canonical pair reported as fetched (status=$PUBLISH_STATUS path='$PUBLISH_PATH')"
+fi
+rm -rf "$FETCH_CACHE"
+
 # setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
 SETUP_DB="$ROOT_DIR/scripts/setup-db.sh"
 if grep -q 'ROSE_USE_SYSTEM_PG' "$SETUP_DB" \

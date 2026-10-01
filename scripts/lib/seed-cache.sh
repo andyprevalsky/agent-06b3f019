@@ -211,9 +211,9 @@ materialize_benchmark_seed_dump() (
         return 1
     fi
 
-    printf '%s' "$schema_hash" > "$temp_hash"
-    mv "$temp_dump" "$target_dump"
-    mv "$temp_hash" "${target_dump}.schemahash"
+    printf '%s' "$schema_hash" > "$temp_hash" || return 1
+    mv "$temp_dump" "$target_dump" || return 1
+    mv "$temp_hash" "${target_dump}.schemahash" || return 1
     release_benchmark_seed_lock "$target_dump"
     trap - EXIT INT TERM
     printf '%s\n' "$target_dump"
@@ -254,9 +254,11 @@ fetch_canonical_seed_dump() (
             echo "shared seed cache returned an empty dump for $token" >&2
             return 1
         }
-        mv "$temp_dump" "$target_dump"
-        printf '%s' "$schema_hash" > "${target_dump}.schemahash"
-        printf '%s' "$token" > "${target_dump}.cachetoken"
+        # measure-seed-memory.sh calls this as `DUMP="$(...)" || DUMP=""`,
+        # which disables errexit in here.
+        mv "$temp_dump" "$target_dump" || return 1
+        printf '%s' "$schema_hash" > "${target_dump}.schemahash" || return 1
+        printf '%s' "$token" > "${target_dump}.cachetoken" || return 1
     fi
     printf '%s\n' "$target_dump"
 )
