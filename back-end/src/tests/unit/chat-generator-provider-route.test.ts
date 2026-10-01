@@ -9,8 +9,6 @@ import {
 import { GENERATOR_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
-import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
-import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 const GENERATOR_SSE = [
