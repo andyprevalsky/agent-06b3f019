@@ -24,8 +24,11 @@ import { useLocation } from 'react-router-dom';
 
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { useInviteCode as redeemInviteCode } from '@/lib/api';
+import { getBenchmarkSharedAgent } from '@/lib/api/agents';
 import { getImpersonatedAccount, IMPERSONATION_CHANGED_EVENT } from '@/lib/impersonation';
 import { AUTH_SESSION_CHANGED_EVENT } from '@/lib/supabase';
+import { benchmarkShareToken } from '@/lib/benchmarkShare';
+import { getQueryParams } from '@/lib/url';
 
 import { useAuth } from '../hooks';
 
@@ -70,6 +73,25 @@ const WaitlistGate = () => {
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const sharedAgentId = pathname === '/' ? getQueryParams().get('agent-id') : null;
+  const shareToken = benchmarkShareToken();
+  const shareKey = sharedAgentId && shareToken ? `${sharedAgentId}:${shareToken}` : null;
+  const [verifiedShareKey, setVerifiedShareKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (shareKey === null || sharedAgentId === null) return;
+    let active = true;
+    void getBenchmarkSharedAgent(sharedAgentId)
+      .then(() => {
+        if (active) setVerifiedShareKey(shareKey);
+      })
+      .catch(() => {
+        if (active) setVerifiedShareKey(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [shareKey, sharedAgentId]);
 
   // An admin inspecting someone else's account is not a user signing up. Without
   // this, switching into any account that has not redeemed an invite code opens
@@ -89,7 +111,8 @@ const WaitlistGate = () => {
     !isAnonymous &&
     !isFullySignedIn &&
     !impersonating &&
-    !isBenchmarkMerchant;
+    !isBenchmarkMerchant &&
+    !(shareKey !== null && verifiedShareKey === shareKey);
   if (!open) return null;
 
   const handleSubmit = (e: React.FormEvent) => {

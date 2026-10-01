@@ -47,6 +47,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-service-readiness.sh"
 . "$SCRIPT_DIR/lib/seed-cache.sh"
 . "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
+. "$SCRIPT_DIR/lib/local-pg-image.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -745,6 +746,26 @@ if $DOCKER_OK && ! docker_can_create_container; then
     DOCKER_OK=false
 fi
 
+# A local benchmark must keep its own Postgres server. Under parallel deploy
+# load Docker Desktop can miss the short probe budget even while healthy; two
+# such fallbacks exhaust the shared system Postgres connection limit and make
+# independent benchmark agents fail. Cloud/Linux may explicitly choose system
+# Postgres, but on macOS retry Docker and fail clearly if it stays unavailable.
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ "$(uname -s)" = "Darwin" ] && \
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && ! $DOCKER_OK; then
+    for attempt in 1 2 3 4 5 6; do
+        if docker_available_for_workspace_db "$DB_CONTAINER" true && docker_can_create_container; then
+            DOCKER_OK=true
+            break
+        fi
+        [ "$attempt" -eq 6 ] || sleep 1
+    done
+    if ! $DOCKER_OK; then
+        echo "❌ Isolated macOS benchmark requires Docker Postgres; Docker did not recover" >&2
+        exit 1
+    fi
+fi
+
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
@@ -808,8 +829,10 @@ elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
             -e POSTGRES_DB=victoria \
             -p "$LOCAL_DB_PORT:5432" \
             -v "$DB_VOLUME:/var/lib/postgresql/data" \
-            postgres:16-alpine >/dev/null
+            "$LOCAL_PG_IMAGE" >/dev/null
     }
+
+    recreate_if_stale_pg_image "$DB_CONTAINER" "$DB_VOLUME"
 
     if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
         ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | grep -o '[0-9]*$' || true)
@@ -965,21 +988,24 @@ if ! ensure_fast_mode_cache_schema bash -c \
     exit 1
 fi
 
-# Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
-# sub-agent fan-out competes with the agent's own writes for the connection pool
-# (the known P2024 timeout signature). A bigger local pool absorbs the burst.
-# Isolated --benchmark stacks also share system Postgres with the Step 5 stack
-# on Cloud. Keep the non-benchmark default at 50; size --benchmark above the
-# 50-child mass-agent for_each fan-out so concurrent post_agent_message
-# interactive txs do not P2028 ("Unable to start a transaction") and stall
-# the tree. 80 covers 50 children + parent + overlapping status/tool-usage.
-if $BENCHMARK_MODE; then
-    export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"
-else
-    export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"
-fi
-export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${LOCAL_DB_CONNECTION_LIMIT}&pool_timeout=30"
-export DIRECT_URL="$LOCAL_DB_URL"
+# Local macOS system Postgres is shared by all workspaces and defaults to 100
+# connections. Keep each local stack small so other stacks can connect. Cloud
+# benchmark stacks retain their larger pool for 50-child Fast Mode fan-out;
+# dedicated Docker benchmark databases can use that pool as well.
+configure_local_db_url() {
+    local supplied_limit="${LOCAL_DB_CONNECTION_LIMIT:-}"
+    if $BENCHMARK_MODE; then
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-80}"
+    else
+        export LOCAL_DB_CONNECTION_LIMIT="${LOCAL_DB_CONNECTION_LIMIT:-50}"
+    fi
+    if $USE_SYSTEM_PG && ! $IS_CLOUD && [ -z "$supplied_limit" ]; then
+        export LOCAL_DB_CONNECTION_LIMIT=12
+    fi
+    export DATABASE_URL="${LOCAL_DB_URL}?connection_limit=${LOCAL_DB_CONNECTION_LIMIT}&pool_timeout=30"
+    export DIRECT_URL="$LOCAL_DB_URL"
+}
+configure_local_db_url
 
 # Fast DB warm-start (cloud pool): the schema push + 10k-people seed cost ~50s and
 # run on EVERY boot because the box DB lives on ephemeral rootfs (resets on Fly

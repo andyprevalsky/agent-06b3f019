@@ -2814,7 +2814,7 @@
   {
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
-    "prompt": "Use a browser agent to go to https://example.com and tell me what the document title is (the browser tab / <title> text).",
+    "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": ["spawn_agent"],
@@ -2830,7 +2830,28 @@
     "start_phase": "execute",
     "bench": "pipeline-e2e",
     "group": "pre-deploy",
-    "deploy_category": "harness"
+    "deploy_category": "harness",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": ["roselabs.ai"],
+      "secrets": [],
+      "live_targets": ["https://www.roselabs.ai"],
+      "context_notes": "Live first-party website. Judge the palette from browser-visible page evidence, allowing visual descriptions rather than requiring exact CSS values."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "visible-color-palette",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The browser agent visits roselabs.ai and inspects the visible page",
+          "The root answer reports at least three distinct prominent colors in the site's palette"
+        ],
+        "judge_prompt": "Pass only if browser evidence shows the agent inspected roselabs.ai and the root answer names at least three distinct, plausible colors in the page's main palette. Accept ordinary color names or approximate shades; do not require exact hex codes or locations. Fail if the answer only says 'a color palette' without naming colors, or if it is ungrounded in the browser visit."
+      }
+    ]
   },
   {
     "name": "browser-google-search-single-result",
@@ -3037,6 +3058,188 @@
     }
   },
   {
+    "name": "agent-payment-new-user-journey",
+    "title": "New User Subscription To Confirmed Agent Payment",
+    "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "subscription",
+      "new-user",
+      "agentcard-lifecycle-sandbox"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kinds": [
+      "gate:subscription",
+      "payment_approval"
+    ],
+    "require_attention_order": true,
+    "expected_gate": {
+      "type": "subscription",
+      "gateKey": "subscription",
+      "severity": "blocking",
+      "action": {
+        "kind": "link"
+      }
+    },
+    "complete_subscription_checkout": true,
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 297
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 4396
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 4396
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 4396,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 4396
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 4396,
+        "transferredCents": 4396,
+        "releasedCents": 0,
+        "livemode": false
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "exhausted_new_user_without_subscription_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "STRIPE_WEBHOOK_SECRET",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Isolated local stack. A dedicated non-admin user starts with exhausted free credit and no subscription. The harness fills hosted Stripe Checkout with a test card, retrieves the paid session from Stripe, and delivers that verified session to the local signed webhook. Org AgentCard is seeded only so the real purchase can issue a card. No subscription or customer payment method is preseeded."
+    },
+    "evaluators": [
+      {
+        "id": "new-user-payment-ordered-contract",
+        "method": "static_check",
+        "criteria": [
+          "Subscription gate precedes the payment approval request",
+          "Stripe test Checkout is paid and its real session activates the local subscription",
+          "The payment receipt matches the test portal basket",
+          "The backend purchase, Stripe hold, wallet funding, and AgentCard transfer settle for the exact amount",
+          "The browser reports a test portal confirmation order ID"
+        ],
+        "checks": [
+          {
+            "type": "expected_gate"
+          },
+          {
+            "type": "attention_kind_sequence",
+            "value": [
+              "gate:subscription",
+              "payment_approval"
+            ]
+          },
+          {
+            "type": "subscription_checkout_completed"
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "expected_payment_lifecycle"
+          },
+          {
+            "type": "no_browser_agent_failures"
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "agent-payment-test-shop",
+      "gate-subscription-free-credit",
+      "user-request:new-user-subscription-to-payment"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "world_model_mode": "real",
+    "deploy_category": "payment",
+    "deploy_canary": true,
+    "fast_cache": "off",
+    "min_steps": {
+      "browser": 3
+    }
+  },
+  {
     "name": "agent-payment-setup-resume",
     "title": "Agent Payment Setup And Auto Resume",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
@@ -3218,6 +3421,11 @@
       ]
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1
+      },
       "purchase": {
         "status": "CLEARED",
         "merchant": "Rose Labs Test Payment",

@@ -95,7 +95,11 @@ async function testPlanning(): Promise<void> {
       floatCents: 100_000,
       dailySpentCents: 0,
     });
-    assert.deepStrictEqual(plan, { action: 'transfer', transferCents: 26_000 });
+    assert.deepStrictEqual(plan, {
+      action: 'transfer',
+      transferCents: 26_000,
+      fiatShortfallCents: 0,
+    });
   });
 
   await check('transfer is clamped by per-transfer max', () => {
@@ -105,7 +109,11 @@ async function testPlanning(): Promise<void> {
       floatCents: 100_000,
       dailySpentCents: 0,
     });
-    assert.deepStrictEqual(plan, { action: 'transfer', transferCents: 5_000 });
+    assert.deepStrictEqual(plan, {
+      action: 'transfer',
+      transferCents: 5_000,
+      fiatShortfallCents: 0,
+    });
   });
 
   await check('transfer is clamped by remaining daily cap', () => {
@@ -115,7 +123,11 @@ async function testPlanning(): Promise<void> {
       floatCents: 100_000,
       dailySpentCents: 197_000,
     });
-    assert.deepStrictEqual(plan, { action: 'transfer', transferCents: 3_000 });
+    assert.deepStrictEqual(plan, {
+      action: 'transfer',
+      transferCents: 3_000,
+      fiatShortfallCents: 0,
+    });
   });
 
   await check('exhausted daily cap skips entirely', () => {
@@ -135,7 +147,12 @@ async function testPlanning(): Promise<void> {
       floatCents: 12_345,
       dailySpentCents: 0,
     });
-    assert.deepStrictEqual(plan, { action: 'transfer', transferCents: 12_345 });
+    // Float-limited: the remainder must be reported so the caller can wire it from Brex.
+    assert.deepStrictEqual(plan, {
+      action: 'transfer',
+      transferCents: 12_345,
+      fiatShortfallCents: 37_655,
+    });
   });
 
   await check('dry float reports insufficient_float (actionable), not a silent skip', () => {
@@ -201,6 +218,8 @@ interface Recorded {
 function harness(options: {
   availableCentsSequence: number[];
   floatCents?: number;
+  /** Unconverted USD in Coinbase — counted as in-flight toward the org wallet. */
+  unconvertedUsdCents?: number;
   claimed?: boolean;
   transferImpl?: () => Promise<{ transactionHash: string }>;
 }): { deps: Parameters<typeof runOrgWalletTopUp>[0]; recorded: Recorded } {
@@ -222,6 +241,15 @@ function harness(options: {
     async releaseClaim() {
       recorded.releases += 1;
     },
+    async claimFiatPull() {
+      return { claimed: true, claimId: 'fiat-claim-1' };
+    },
+    async recordFiatSuccess() {
+      /* no-op */
+    },
+    async releaseFiatClaim() {
+      /* no-op */
+    },
   };
 
   return {
@@ -232,6 +260,11 @@ function harness(options: {
       treasury: {
         async getUsdcBalanceCents() {
           return options.floatCents ?? 100_000;
+        },
+        // Unconverted USD sitting in Coinbase counts as in-flight toward the org wallet.
+        // Default 0 so these executor cases exercise the no-in-flight path unless stated.
+        async getUsdBalanceCents() {
+          return options.unconvertedUsdCents ?? 0;
         },
         async transferUsdcCents(params) {
           recorded.transfers.push(params);
@@ -341,6 +374,29 @@ async function testOrchestration(): Promise<void> {
     assert.strictEqual(result.status, 'insufficient_float');
     assert.strictEqual(recorded.transfers.length, 0);
     assert.ok(recorded.alerts.some((a) => a.includes('float is too low')));
+  });
+
+  await check('partial USDC top-up never wires over unconverted Coinbase USD', async () => {
+    const { deps, recorded } = harness({
+      availableCentsSequence: [10_000, 10_000],
+      floatCents: 10_000,
+      unconvertedUsdCents: 5_000,
+    });
+    let wireCalls = 0;
+    deps.fiatSource = {
+      async pendingToCoinbaseCents() {
+        return 0;
+      },
+      async wireToCoinbase() {
+        wireCalls += 1;
+        return { transferId: 'unexpected-wire' };
+      },
+    };
+    const result = await runOrgWalletTopUp(deps);
+    assert.strictEqual(result.status, 'transferred');
+    assert.strictEqual(recorded.transfers.length, 1);
+    assert.strictEqual(wireCalls, 0);
+    assert.ok(recorded.alerts.some((a) => a.includes('unconverted in Coinbase')));
   });
 
   await check('sandbox org wallet short-circuits before any treasury I/O', async () => {

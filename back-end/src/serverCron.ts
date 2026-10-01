@@ -317,18 +317,11 @@ function scheduleAgentCardOrgWalletMonitor(): void {
   cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
 }
 
-/**
- * Replenish the Coinbase USDC float from Brex. Hourly, not per-minute: the transfer is an ACH that
- * settles over days, and the job's own settlement-window lock already prevents stacking.
- *
- * HARD-DISABLED 2026-08-24: Brex→Coinbase transfers were broken and burning cash. Do not
- * re-schedule until the rail is fixed and the hard kill in `floatReplenishPolicyFromEnvironment`
- * is deliberately removed.
- */
-function scheduleCoinbaseFloatReplenish(): void {
+/** Surface the Brex→Coinbase hard kill at startup without scheduling a deposit job. */
+function reportCoinbaseFiatRailDisabled(): void {
   const cronLog = createLogger('Cron');
   cronLog.info(
-    'Coinbase float replenish HARD-DISABLED (Brex→Coinbase rail broken; ignore COINBASE_FLOAT_REPLENISH_ENABLED)'
+    'Brex→Coinbase fiat rail HARD-DISABLED after broken transfers; on-demand fiat pulls are also disabled'
   );
 }
 
@@ -377,6 +370,6 @@ export function registerCronJobs(isProduction: boolean): void {
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
-  scheduleCoinbaseFloatReplenish();
+  reportCoinbaseFiatRailDisabled();
   scheduleProactiveSmsOutreach(isProduction);
 }

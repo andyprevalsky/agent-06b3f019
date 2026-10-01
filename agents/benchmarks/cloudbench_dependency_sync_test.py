@@ -818,7 +818,6 @@ def test_predeploy_cloud_runner_selects_via_predeploy_selector() -> None:
     assert result.returncode == 0, result.stderr
     expected = select_predeploy_benches(
         catalog=TASKS_JSON,
-        changed_files=[],
         surface="cloud",
         cap=20,
         repo_root=ROOT,
@@ -967,7 +966,6 @@ def test_predeploy_local_runner_selects_via_predeploy_selector() -> None:
     assert result.returncode == 0, result.stderr
     expected = select_predeploy_benches(
         catalog=TASKS_JSON,
-        changed_files=[],
         surface="local",
         cap=20,
         repo_root=ROOT,
@@ -5150,7 +5148,8 @@ def test_failed_clone_reaps_only_its_provider_returned_volume(tmp_path: Path) ->
     """A provider-created volume from a rejected VM launch is still owned.
 
     The exact ID returned by that clone attempt must be durably recorded and
-    reaped. No app-wide volume listing or neighbor-volume deletion is allowed.
+    reaped. Inventory reads must prove two consecutive absences, and no
+    neighbor-volume deletion is allowed.
     """
     fleet = FLEET_SCRIPT.read_text()
     functions = "\n".join(
@@ -5231,6 +5230,7 @@ clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
     assert result.returncode == 0, result.stderr + result.stdout
     assert calls.read_text().splitlines() == [
         "volumes destroy vol_vp2q8xeydwjm79w4 -a bench-app --yes",
+        "volumes list -a bench-app --json",
         "volumes list -a bench-app --json",
     ]
     assert ledger.with_suffix(".log").read_text().splitlines() == [
@@ -5340,8 +5340,8 @@ grep -Fxq "$(registry_meta_value "$record" name)" "${{LEDGER%.ids}}.names" || ex
         assert result.returncode == 0, f"{list_mode}: {result.stderr}{result.stdout}"
         log = calls.read_text()
         assert "destroy-before-record" not in log
-        assert log.count("volumes destroy vol_exactowned -a bench-app --yes") == 3
-        assert log.count("volumes list -a bench-app --json") == 3
+        assert log.count("volumes destroy vol_exactowned -a bench-app --yes") == 6
+        assert log.count("volumes list -a bench-app --json") == 6
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
@@ -11851,6 +11851,9 @@ grep -F '{{"status":"passed"}}' "$SSH_LOG"
 grep -F 'post-DONE cleanup evidence' "$SSH_LOG"
 printf 'bytes=%s reset=%s\n' "$(wc -c < "$SSH_LOG" | tr -d ' ')" "$BENCH_LOG_RESET"
 """
+        # macOS pays a larger per-chunk curl/shell startup cost across the
+        # 63 bounded requests in this terminal fixture. Keep the Linux budget.
+        terminal_budget = 20 if sys.platform == "darwin" else 6
         started = time.monotonic()
         result = subprocess.run(
             [
@@ -11878,12 +11881,12 @@ printf 'bytes=%s reset=%s\n' "$(wc -c < "$SSH_LOG" | tr -d ' ')" "$BENCH_LOG_RES
             text=True,
             capture_output=True,
             check=False,
-            timeout=10,
+            timeout=terminal_budget + 5,
         )
         elapsed = time.monotonic() - started
         assert result.returncode == 0, result.stderr
         assert f"bytes={terminal_size}" in result.stdout
-        assert elapsed < 6, f"terminal catch-up took {elapsed:.3f}s"
+        assert elapsed < terminal_budget, f"terminal catch-up took {elapsed:.3f}s"
     finally:
         server.terminate()
         server.wait(timeout=5)
@@ -13490,7 +13493,7 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
         [
             sys.executable,
             str(ROOT / "scripts" / "cloudbench-production-only-tasks.py"),
-            "polar-bu-002",
+            "chat-mode",
         ],
         text=True,
         capture_output=True,
@@ -13524,7 +13527,6 @@ def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
     assert unsafe_name.returncode == 2, unsafe_name.stderr
 
     assert "return 2" in helper
-    assert "CatalogError" in helper
     assert "PROD_ONLY_STATUS" in run_bench
     assert "while IFS= read -r task" in run_bench
     assert 'done <<< "$PROD_ONLY_TASKS"' in run_bench

@@ -92,6 +92,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   options: CompletionOptions;
   requestId: string;
   callSite?: string;
+  hedgeDelayMs?: number;
 }): AsyncIterable<RoseStreamChunk> {
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (!openrouterKey) {
@@ -122,9 +123,9 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
           callSite: params.callSite,
         }),
     },
-    // Both branches are already delayed behind the outer Cerebras hedge. Start
-    // them together so neither provider's long tail becomes the chat deadline.
-    hedgeAfter: () => Promise.resolve(),
+    // The silent-stream path starts both together. A fast direct 429 uses a
+    // short delay so the same-model spill can win without an extra request.
+    hedgeAfter: () => (params.hedgeDelayMs ? sleep(params.hedgeDelayMs) : Promise.resolve()),
     isContent: (chunk) => clearsChatStallGuard(chunk.kind),
     onWinner: (name) => {
       winnerName = name;
@@ -269,10 +270,10 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     }
   }
 
-  // Cerebras is capped at the org level. On quota/rate errors, race the
-  // same-model OpenRouter spill with the fast alternate model. A serial
-  // same-model attempt can consume the chat router's entire 3s deadline before
-  // the generic waterfall starts, leaving a turn with no output.
+  // A direct 402/429 first tries the same model via OpenRouter. If that host
+  // remains silent, start the measured fast model too. A fast quota error can
+  // otherwise bypass the outer hedge and serialize an unbounded OpenRouter
+  // wait (55.8s in production) before the chat has shown any answer.
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   if (
     openrouterKey &&
@@ -288,11 +289,12 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
             options: params.options,
             requestId: params.requestId,
             callSite: params.callSite,
+            hedgeDelayMs: 500,
           }),
         emit,
       });
       if (emittedAny) {
-        log.info('cerebras_chat.openrouter_rate_fallover_done', {
+        log.info('cerebras_chat.rate_cap_fallback_done', {
           request_id: params.requestId,
           pool: params.pool,
           elapsed_ms: Date.now() - params.startedAt,

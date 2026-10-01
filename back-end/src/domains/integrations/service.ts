@@ -10,6 +10,7 @@ import {
   getAdminPhone,
   isAnthropicApiKeyConfigured,
   isEmailProviderSlug,
+  isGptApiKeyConfigured,
   isOpenRouterApiKeyConfigured,
 } from './config';
 import {
@@ -23,7 +24,9 @@ import {
   fetchComputeTokenForUser,
   heartbeatComputeTokenLineage,
   isAnthropicApiKeyOnCooldown,
+  isGptApiKeyOnCooldown,
   markAnthropicApiKeyOnCooldown,
+  markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
 import {
@@ -775,7 +778,18 @@ export async function markComputeTokenRateLimited(
     await markAnthropicApiKeyOnCooldown(params.failureReason ?? 'rate_limit');
     return { ok: true, type, rateLimitedUntil: null };
   }
-  throw new Error('Invalid type. Must be "claude", "gpt", or "anthropic".');
+  if (type === 'gpt_api_key') {
+    await markGptApiKeyOnCooldown(params.failureReason ?? 'out_of_credits');
+    return { ok: true, type, rateLimitedUntil: null };
+  }
+  throw new Error('Invalid type. Must be "claude", "gpt", "anthropic", or "gpt_api_key".');
+}
+
+export async function getGptApiKeyCooldown() {
+  return {
+    configured: isGptApiKeyConfigured(),
+    onCooldown: await isGptApiKeyOnCooldown(),
+  };
 }
 
 /** Read the running backend's shared ANTHROPIC_API_KEY availability.

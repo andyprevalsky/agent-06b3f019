@@ -31,7 +31,7 @@ function resolveOpenDescriptorPath(descriptor: number): string {
   }
   if (process.platform === 'darwin') {
     // realpath(/dev/fd/N) can return /dev/fd/<basename> on macOS, which is
-    // not the opened vnode. lsof resolves the descriptor's actual file path.
+    // unrelated to the opened file and falsely fails the root containment check.
     const output = execFileSync(
       '/usr/sbin/lsof',
       ['-a', '-p', String(process.pid), '-d', String(descriptor), '-Fn'],

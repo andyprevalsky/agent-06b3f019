@@ -47,6 +47,10 @@ export function isOpenRouterApiKeyConfigured(): boolean {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim());
 }
 
+export function isGptApiKeyConfigured(): boolean {
+  return Boolean(process.env.GPT_API_KEY?.trim());
+}
+
 export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfig> = {
   gmail: {
     provider: EmailProvider.GMAIL,

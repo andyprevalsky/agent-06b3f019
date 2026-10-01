@@ -6,6 +6,7 @@ import {
   plannerMemoryCompressionClaimSchema,
   plannerMemoryCompressionReleaseSchema,
   plannerMemoryCriticalPathSchema,
+  plannerMemoryEmbedPendingSchema,
   plannerMemorySearchSchema,
   plannerMemoryUpsertSchema,
 } from './types';
@@ -29,7 +30,7 @@ function serialize(row: NonNullable<Awaited<ReturnType<typeof service.get>>>) {
   };
 }
 
-/** Lexical retrieval over the finalized-run history for one planner call. */
+/** Semantic retrieval over the finalized-run history for one planner call. */
 router.post(
   '/search',
   authenticate,
@@ -45,6 +46,24 @@ router.post(
       body.user_id = req.user?.id;
     }
     res.json(await service.search(body));
+  })
+);
+
+/** Internal only: embed rows that lack a current-model embedding (backfill / repair). */
+router.post(
+  '/embed-pending',
+  authenticate,
+  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Planner memory writes are internal only' });
+      return;
+    }
+    const parsed = plannerMemoryEmbedPendingSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid embed body', details: parsed.error.flatten() });
+      return;
+    }
+    res.json(await service.embedPending(parsed.data));
   })
 );
 

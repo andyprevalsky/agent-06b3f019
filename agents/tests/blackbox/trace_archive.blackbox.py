@@ -1237,6 +1237,15 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
             assert pending.exists()
             assert pending.with_suffix(pending.suffix + ".meta.json").exists()
 
+            stale_path = "llm/stale.json.gz.enc"
+            stale_pair = trace_archive.encrypt_artifact(
+                b'{"stale": true}', path=stale_path, content_type="application/json"
+            )
+            assert stale_pair is not None
+            trace_archive._write_outbox("agent-stale", stale_path, *stale_pair)
+            stale_pending = archive_root.parent / "trace-archive-outbox" / "agent-stale" / stale_path
+            assert stale_pending.exists()
+
             os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
             current = archive_json(root_agent_id="agent-outbox", path="llm/current.json.gz.enc", payload={"n": 2})
             assert current is not None
@@ -1245,6 +1254,7 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
                     break
                 await asyncio.sleep(0.05)
             assert not pending.exists(), "successful async archive job did not drain pending outbox artifact"
+            assert stale_pending.exists(), "current agent archive write drained an unrelated root's outbox"
             assert posts == ["llm/failed.json.gz.enc", "llm/current.json.gz.enc", "llm/failed.json.gz.enc"]
         finally:
             trace_archive.httpx.Client = old_client

@@ -981,7 +981,11 @@ def _submit_archive_job(
                 compress=compress,
             )
             if result is not None and drain_backend_outbox_after_success:
-                _drain_backend_outbox_periodically()
+                # A completed write may help this agent's pending artifacts,
+                # but old roots can carry permanent archive errors. Replaying
+                # their outboxes here amplifies every new agent write into a
+                # cross-agent retry storm.
+                _drain_backend_outbox(root_agent_id=safe_root)
         except Exception as exc:
             logger.warning(
                 "trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200]

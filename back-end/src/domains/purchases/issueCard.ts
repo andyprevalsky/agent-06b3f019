@@ -53,7 +53,14 @@ export async function resolveAndIssuePurchaseCard(
   if (resumedPurchase === null) {
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
   }
-  return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
+  return chargeAndIssueCard(
+    purchase,
+    input,
+    stripeCustomerId,
+    cardProvider,
+    walletFundingProvider,
+    subscription?.stripeSubscriptionId ?? undefined
+  );
 }
 
 /**

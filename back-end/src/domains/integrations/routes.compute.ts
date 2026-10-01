@@ -116,6 +116,15 @@ router.get(
   })
 );
 
+/** Shared GPT_API_KEY status for agents, which cannot read the backend DB. */
+router.get(
+  '/compute-code/gpt-key/cooldown',
+  authenticate,
+  asyncHandler(async (_req: AuthRequest, res: Response) => {
+    return res.json(await service.getGptApiKeyCooldown());
+  })
+);
+
 /** POST /api/integrations/compute-code/token/rate-limited */
 router.post(
   '/compute-code/token/rate-limited',

@@ -32,6 +32,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
+# This synthetic suite starts many independent controllers. Exercise reserve
+# ownership and release with the minimum real allocation; the focused reserve
+# tests cover sizing and low-space behavior separately.
+export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
+
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
 fleet_bench_app() {
@@ -106,7 +111,15 @@ fail() {
         echo "── $log (tail) ──" >&2
         # Bound each dump: a wedged filesystem or special file must not
         # prevent EXIT cleanup from reaping hubs and releasing ports.
-        timeout 5 tail -30 "$log" >&2 || true
+        python3 - "$log" <<'PY' >&2 || true
+import subprocess
+import sys
+
+try:
+    subprocess.run(["tail", "-30", sys.argv[1]], timeout=5, check=False)
+except subprocess.TimeoutExpired:
+    print("(log tail timed out)", file=sys.stderr)
+PY
     done
     exit 1
 }
@@ -474,9 +487,13 @@ def run_fake_driver(mdir):
         os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
         or os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down"))
     ):
-        # A busy local host can spend more than 30s on two fake SSH staging
-        # attempts before the failed worker reaches its cleanup marker.
-        deadline = time.time() + 90
+        # These fixtures wait for real fake-provider launch and teardown work.
+        # The oscillation case retries a failed stage twice; concurrent-ready
+        # launches two workers before scaling one down. Both can finish after
+        # 30 seconds on a loaded host despite correct fleet behavior.
+        deadline = time.time() + (
+            90 if os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired")) else 120
+        )
         scaled_down = os.path.join(MARKERS, "worker-scale-down-complete")
         while not os.path.exists(scaled_down):
             if time.time() >= deadline:
@@ -538,7 +555,9 @@ def run_fake_driver(mdir):
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
-        deadline = time.time() + 30
+        # Worker cloning and staging precede this readiness marker. Allow the
+        # fixture to observe that work within the controller's 240s bound.
+        deadline = time.time() + 120
         held = False
         while time.time() < deadline:
             hold_files = glob.glob(

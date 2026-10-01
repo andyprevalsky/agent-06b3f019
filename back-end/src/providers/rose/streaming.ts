@@ -11,6 +11,7 @@ import { createLogger } from '../logger';
 import {
   RoseAuthError,
   RoseInvalidRequest,
+  RosePaymentRequiredError,
   RoseRateLimitError,
   RoseRefusalError,
   RoseServerError,
@@ -37,9 +38,15 @@ function responsesErrorToException(errorPayload: unknown, requestId: string): Er
       ? (errorPayload as Record<string, unknown>)
       : {};
   const code = String(payload.code ?? payload.type ?? '').toLowerCase();
-  const message =
-    typeof payload.message === 'string' ? payload.message : JSON.stringify(errorPayload ?? {});
+  const message = String(payload.message ?? JSON.stringify(errorPayload ?? {}));
   const details = `Responses stream failed (request_id=${requestId}, code=${code || 'unknown'}): ${message.substring(0, 1000)}`;
+  if (
+    /^(insufficient_quota|credit_balance_exhausted|organization_(usage|spend)_limit_exceeded|project_spend_limit_exceeded)$/.test(
+      code
+    ) ||
+    String(payload.type ?? '').toLowerCase() === 'insufficient_quota'
+  )
+    return new RosePaymentRequiredError(details);
   if (['invalid_request_error', 'context_length_exceeded', 'bad_request'].includes(code)) {
     return new RoseInvalidRequest(details);
   }

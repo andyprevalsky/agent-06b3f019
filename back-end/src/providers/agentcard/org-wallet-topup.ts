@@ -20,24 +20,34 @@
  *  5. Sandbox org wallets are never topped up with live funds.
  *  6. Bounded by per-transfer max and a rolling 24h cap.
  *  7. Disabled by default. Requires AGENTCARD_ORG_WALLET_AUTO_TOPUP_ENABLED=1.
- *  8. Idle cardholder residual is RECOVERED into the pool before any treasury spend. Unspent card
- *     value otherwise sits as one user's headroom where no other user can draw on it.
+ *  8. Active cardholders keep residual headroom so AgentCard can net it against their next mint.
+ *     Recovery is for users we will not fund again, per the current MCP contract.
  */
 
-import { randomUUID } from 'node:crypto';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { sendSms as sendSmsProvider } from '../smsQueue';
 import { createCoinbaseTreasury, type CoinbaseTreasury } from '../coinbase/treasury';
 import { loadCoinbaseTreasuryConfig } from '../coinbase/config';
 import { callOrgTool as callOrgToolProvider, type AgentCardOrgToolCaller } from './org-runtime';
-import { recoverAllCardholderResiduals } from './fund-recovery';
-import { extractAgentCardOrgWallet, type AgentCardOrgWallet } from './org-wallet-monitor';
+import { readAgentCardOrgWallet, type AgentCardOrgWallet } from './org-wallet-monitor';
+import {
+  resolveInFlight,
+  wireFiat,
+  topUpFiatShortfall,
+  resolveFiatSource,
+  type FiatSource,
+} from './org-wallet-fiat';
+export { fiatPullEnabled } from './org-wallet-fiat';
 
 const log = createLogger('AgentCardOrgWalletTopUp');
 
 const INFLIGHT_OPERATION_KEY = 'agentcard-org-wallet-topup:inflight';
 export const TOPUP_OPERATION_TYPE = 'AGENTCARD_ORG_WALLET_TOPUP';
+
+/** Separate single-flight key for the irreversible bank leg. */
+const FIAT_INFLIGHT_OPERATION_KEY = 'agentcard-org-wallet-topup:fiat-inflight';
+export const FIAT_PULL_OPERATION_TYPE = 'AGENTCARD_ORG_WALLET_FIAT_PULL';
 
 const DEFAULT_THRESHOLD_CENTS = 25_000; // $250
 const DEFAULT_TARGET_CENTS = 50_000; // $500
@@ -93,10 +103,26 @@ export interface OrgWalletTopUpPolicy {
 export type TopUpDecision =
   | { action: 'skip'; reason: TopUpSkipReason }
   | { action: 'insufficient_float'; neededCents: number; floatCents: number }
-  | { action: 'transfer'; transferCents: number };
+  | {
+      action: 'transfer';
+      transferCents: number;
+      /**
+       * The part of the gap the USDC float could NOT cover, so the caller can wire it from Brex.
+       *
+       * Without this, a float-limited transfer silently under-funds: we would send the $50 we had
+       * against a $300 gap and never ask the bank for the missing $250, leaving the pool short.
+       */
+      fiatShortfallCents: number;
+    };
 
 export type TopUpSkipReason =
-  'disabled' | 'sandbox_wallet' | 'above_threshold' | 'daily_cap_reached' | 'below_min_transfer';
+  | 'disabled'
+  | 'sandbox_wallet'
+  | 'above_threshold'
+  | 'daily_cap_reached'
+  | 'below_min_transfer'
+  /** Deposits already on their way cover the gap to target; asking for more would over-fund. */
+  | 'covered_by_inflight';
 
 export interface OrgWalletTopUpClaim {
   claimed: boolean;
@@ -115,6 +141,19 @@ export interface OrgWalletTopUpStore {
   recordSuccess(params: { transactionHash: string; transferCents: number }): Promise<void>;
   /** Release the claim so a later mint can retry. ONLY for definitively-not-sent failures. */
   releaseClaim(): Promise<void>;
+  /**
+   * Single-flight claim for the BANK leg, separate from the USDC claim above.
+   *
+   * A bank wire is irreversible, so it needs its own guard rather than trusting `inFlightCents`.
+   * In-flight is an ESTIMATE read from providers: it can be stale, mis-paged, or simply not yet
+   * reflect a wire we sent seconds ago. Two concurrent card issuances would each compute the same
+   * shortfall and each wire it. The claim id also becomes the Brex idempotency key, so even a
+   * retry of the SAME claim is de-duplicated provider-side.
+   */
+  claimFiatPull(planned: { wireCents: number }): Promise<OrgWalletTopUpClaim>;
+  recordFiatSuccess(params: { transferId: string; wireCents: number }): Promise<void>;
+  /** Release the fiat claim. ONLY for definitively-not-wired failures. */
+  releaseFiatClaim(): Promise<void>;
 }
 
 /**
@@ -128,16 +167,30 @@ export function planOrgWalletTopUp(params: {
   wallet: Pick<AgentCardOrgWallet, 'livemode' | 'availableCents'>;
   floatCents: number;
   dailySpentCents: number;
+  /**
+   * Money that has already left Brex but has not yet landed in the org wallet: wires still
+   * settling, plus USD sitting in Coinbase awaiting conversion. Counting it is what lets this be
+   * the ONLY check in the system — without it, every mint during the multi-hour settlement window
+   * would re-request the full gap and stack duplicate deposits.
+   */
+  inFlightCents?: number;
 }): TopUpDecision {
   const { policy, wallet, floatCents, dailySpentCents } = params;
+  const inFlightCents = Math.max(0, params.inFlightCents ?? 0);
 
   if (!policy.enabled) return { action: 'skip', reason: 'disabled' };
   if (!wallet.livemode) return { action: 'skip', reason: 'sandbox_wallet' };
+  // The TRIGGER is the balance we actually hold. In-flight money cannot fund a mint that happens
+  // before it lands, so it must not suppress the trigger — it only shrinks the amount we ask for.
   if (wallet.availableCents >= policy.thresholdCents) {
     return { action: 'skip', reason: 'above_threshold' };
   }
 
-  const need = policy.targetCents - wallet.availableCents;
+  // Only ever request the DIFFERENCE between target and what we will have once everything
+  // already inbound arrives. Wallet $200 + $200 inbound against a $500 target asks for $100.
+  const need = policy.targetCents - wallet.availableCents - inFlightCents;
+  if (need <= 0) return { action: 'skip', reason: 'covered_by_inflight' };
+
   const dailyRemaining = policy.dailyCapCents - dailySpentCents;
   if (dailyRemaining <= 0) return { action: 'skip', reason: 'daily_cap_reached' };
 
@@ -145,13 +198,17 @@ export function planOrgWalletTopUp(params: {
   const affordable = Math.min(wanted, floatCents);
 
   if (affordable < policy.minTransferCents) {
-    // Distinguish "the float is dry" (actionable — refill Coinbase) from "the gap is tiny"
+    // Distinguish "the float is dry" (actionable — pull fiat from Brex) from "the gap is tiny"
     // (benign — wait for the next mint to widen it).
     return floatCents < policy.minTransferCents
       ? { action: 'insufficient_float', neededCents: wanted, floatCents }
       : { action: 'skip', reason: 'below_min_transfer' };
   }
-  return { action: 'transfer', transferCents: affordable };
+  return {
+    action: 'transfer',
+    transferCents: affordable,
+    fiatShortfallCents: Math.max(0, wanted - affordable),
+  };
 }
 
 export function policyFromEnvironment(): OrgWalletTopUpPolicy {
@@ -249,6 +306,47 @@ export function createOrgWalletTopUpStore(): OrgWalletTopUpStore {
         where: { operationKey: INFLIGHT_OPERATION_KEY, status: 'STARTED' },
       });
     },
+
+    async claimFiatPull(planned) {
+      try {
+        const row = await prisma.toolSideEffect.create({
+          data: {
+            operationKey: FIAT_INFLIGHT_OPERATION_KEY,
+            operationType: FIAT_PULL_OPERATION_TYPE,
+            status: 'STARTED',
+            request: { wireCents: planned.wireCents },
+          },
+          select: { id: true },
+        });
+        return { claimed: true, claimId: row.id };
+      } catch (error) {
+        if ((error as { code?: string }).code !== 'P2002') throw error;
+        // Same reasoning as the USDC claim: never stale-clear. A held fiat claim may represent a
+        // wire Brex already accepted, and auto-expiring it would wire the same money twice.
+        const existing = await prisma.toolSideEffect.findUnique({
+          where: { operationKey: FIAT_INFLIGHT_OPERATION_KEY },
+          select: { createdAt: true },
+        });
+        return { claimed: false, ...(existing ? { heldSince: existing.createdAt } : {}) };
+      }
+    },
+
+    async recordFiatSuccess({ transferId, wireCents }) {
+      await prisma.toolSideEffect.update({
+        where: { operationKey: FIAT_INFLIGHT_OPERATION_KEY },
+        data: {
+          operationKey: `${FIAT_INFLIGHT_OPERATION_KEY}:${transferId}`,
+          status: 'SUCCEEDED',
+          response: { transferId, wireCents },
+        },
+      });
+    },
+
+    async releaseFiatClaim() {
+      await prisma.toolSideEffect.deleteMany({
+        where: { operationKey: FIAT_INFLIGHT_OPERATION_KEY, status: 'STARTED' },
+      });
+    },
   };
 }
 
@@ -259,15 +357,25 @@ export type TopUpResult =
   | { status: 'recovered'; recoveredCents: number; availableCents: number }
   | { status: 'recovery_pending'; pendingCents: number }
   | { status: 'insufficient_float'; neededCents: number; floatCents: number }
+  /** The USDC float was dry, so fiat was wired from Brex; it lands after wire settlement. */
+  | { status: 'fiat_pull_started'; wiredCents: number; transferId: string }
   | { status: 'transferred'; transferCents: number; transactionHash: string }
   | { status: 'halted'; error: string };
 
+/**
+ * The fiat leg, invoked on demand rather than on a schedule when deliberately re-enabled.
+ *
+ * Optional so the pure-treasury tests and any caller without Brex configured behave exactly as
+ * before: no Brex, no fiat pull, and the existing `insufficient_float` alert still fires.
+ */
 interface TopUpDependencies {
   policy: OrgWalletTopUpPolicy;
   treasury: CoinbaseTreasury;
   callOrgTool: AgentCardOrgToolCaller;
   store: OrgWalletTopUpStore;
   alert: (message: string) => Promise<void>;
+  /** When present, a dry USDC float pulls fiat from Brex instead of only alerting. */
+  fiatSource?: FiatSource;
   /**
    * Pull idle cardholder residual back into the pool, returning cents recovered. Attempted BEFORE
    * any treasury spend: recovering capital we already own is free. Optional so callers that only
@@ -283,7 +391,7 @@ interface TopUpDependencies {
 export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpResult> {
   if (!deps.policy.enabled) return { status: 'skipped', reason: 'disabled' };
 
-  const wallet = extractAgentCardOrgWallet(await deps.callOrgTool('get_company_wallet', {}));
+  const wallet = await readAgentCardOrgWallet(deps.callOrgTool);
   if (!wallet.livemode) return { status: 'skipped', reason: 'sandbox_wallet' };
   if (wallet.availableCents >= deps.policy.thresholdCents) {
     return { status: 'skipped', reason: 'above_threshold' };
@@ -331,7 +439,7 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
       });
     }
     if (recoveredCents > 0) {
-      current = extractAgentCardOrgWallet(await deps.callOrgTool('get_company_wallet', {}));
+      current = await readAgentCardOrgWallet(deps.callOrgTool);
       if (current.availableCents >= deps.policy.thresholdCents) {
         log.info('Residual recovery alone restored the org wallet; no treasury spend needed', {
           recovered_cents: recoveredCents,
@@ -342,19 +450,85 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
     }
   }
 
-  const [floatCents, dailySpentCents] = await Promise.all([
-    deps.treasury.getUsdcBalanceCents(),
-    deps.store.dailySpentCents(),
-  ]);
+  // In-flight = money that has left Brex but has not yet landed in the org wallet: wires still
+  // settling, plus USD sitting in Coinbase awaiting conversion. Subtracting it is what makes this
+  // check safe to run on EVERY mint — otherwise each mint inside a wire's settlement window would
+  // see the same low balance and stack another deposit.
+  let floatCents: number;
+  let dailySpentCents: number;
+  let flight: Awaited<ReturnType<typeof resolveInFlight>>;
+  try {
+    [floatCents, dailySpentCents, flight] = await Promise.all([
+      deps.treasury.getUsdcBalanceCents(),
+      deps.store.dailySpentCents(),
+      resolveInFlight(deps),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.error('Cannot establish treasury state; halting top-up to prevent duplicate funds', {
+      error: message,
+    });
+    await deps
+      .alert(`Rose AgentCard top-up halted: treasury state is unavailable (${message}).`)
+      .catch(() => undefined);
+    return { status: 'halted', error: message };
+  }
+  const { inFlightCents, strandedUsdCents } = flight;
+  // Stranded USD blocks a NEW wire (piling more cash on top helps nobody) but never suppresses
+  // the top-up decision or its alert, so the operator always learns the rail needs a conversion.
+  if (strandedUsdCents > 0) {
+    log.warn('Unconverted USD is sitting in Coinbase; it cannot fund a mint until converted', {
+      stranded_usd_cents: strandedUsdCents,
+      float_cents: floatCents,
+    });
+  }
   const plan = planOrgWalletTopUp({
     policy: deps.policy,
     wallet: current,
     floatCents,
     dailySpentCents,
+    inFlightCents,
   });
 
   if (plan.action === 'skip') return { status: 'skipped', reason: plan.reason };
   if (plan.action === 'insufficient_float') {
+    // The USDC float cannot cover the gap. The optional Brex source is hard-disabled in
+    // production until the rail is repaired. If re-enabled, only mint-time demand can pull it;
+    // `inFlightCents` keeps settling transfers from causing duplicate deposits.
+    const shortfallCents = plan.neededCents - plan.floatCents;
+    // Never wire fresh fiat on top of cash that is already stranded at Coinbase awaiting
+    // conversion — that compounds the stuck balance instead of fixing it. Alert with the exact
+    // action instead, so the rail's blocker is always visible rather than silent.
+    if (strandedUsdCents > 0) {
+      await deps.alert(
+        `Rose AgentCard org wallet needs $${(shortfallCents / 100).toFixed(2)} but ` +
+          `$${(strandedUsdCents / 100).toFixed(2)} USD is already sitting UNCONVERTED in Coinbase. ` +
+          `Convert it to USDC at https://www.coinbase.com/assets — no new wire was sent.`
+      );
+      return {
+        status: 'insufficient_float',
+        neededCents: plan.neededCents,
+        floatCents: plan.floatCents,
+      };
+    }
+    if (deps.fiatSource !== undefined && shortfallCents > 0) {
+      const wire = await wireFiat(deps, shortfallCents, 'to refill');
+      if (wire.status === 'wired') {
+        return {
+          status: 'fiat_pull_started',
+          wiredCents: shortfallCents,
+          transferId: wire.transferId,
+        };
+      }
+      if (wire.status === 'contended') {
+        return { status: 'contended' };
+      }
+      await deps.alert(
+        `Rose could NOT pull fiat from Brex to refill the AgentCard org wallet: ${wire.error}. ` +
+          `Org wallet is at $${(current.availableCents / 100).toFixed(2)}.`
+      );
+      return { status: 'halted', error: wire.error };
+    }
     await deps.alert(
       `Rose Coinbase treasury float is too low to auto-refill the AgentCard org wallet: ` +
         `$${(plan.floatCents / 100).toFixed(2)} available, needs $${(plan.neededCents / 100).toFixed(2)}. ` +
@@ -392,6 +566,10 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
     }
     return { status: 'contended', ...(claim.heldSince ? { heldSince: claim.heldSince } : {}) };
   }
+  if (!claim.claimId) {
+    await deps.store.releaseClaim();
+    return { status: 'halted', error: 'USDC claim has no idempotency key' };
+  }
 
   // Re-read UNDER the claim. If we queued behind a concurrent top-up that already landed, the
   // wallet is now healthy and this send must not happen.
@@ -404,17 +582,21 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
   let confirmed: AgentCardOrgWallet;
   let confirmedDailySpentCents: number;
   try {
-    confirmed = extractAgentCardOrgWallet(await deps.callOrgTool('get_company_wallet', {}));
+    confirmed = await readAgentCardOrgWallet(deps.callOrgTool);
     confirmedDailySpentCents = await deps.store.dailySpentCents();
   } catch (error) {
     await deps.store.releaseClaim();
     throw error;
   }
+  // `inFlightCents` MUST be threaded here too. Without it the re-plan sizes `fiatShortfallCents`
+  // against the FULL gap and wires money that is already on its way — the exact duplicate-deposit
+  // the in-flight term exists to prevent, reintroduced at the second planning site.
   const replan = planOrgWalletTopUp({
     policy: deps.policy,
     wallet: confirmed,
     floatCents,
     dailySpentCents: confirmedDailySpentCents,
+    inFlightCents,
   });
   if (replan.action !== 'transfer') {
     await deps.store.releaseClaim();
@@ -443,7 +625,7 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
       cents: replan.transferCents,
       // MUST be a bare UUID — Coinbase rejects prefixed keys outright. The claim row id is
       // already a uuid and is stable per top-up episode, so a replay reuses the same key.
-      idempotencyKey: claim.claimId ?? randomUUID(),
+      idempotencyKey: claim.claimId,
     });
     await deps.store.recordSuccess({ transactionHash, transferCents: replan.transferCents });
     log.info('AgentCard org wallet topped up', {
@@ -451,6 +633,20 @@ export async function runOrgWalletTopUp(deps: TopUpDependencies): Promise<TopUpR
       transfer_cents: replan.transferCents,
       available_before_cents: confirmed.availableCents,
     });
+    // The USDC we held may not have covered the whole gap. When the bank rail is deliberately
+    // re-enabled, wire the remainder in this detached purchase trigger and await its result.
+    if (replan.fiatShortfallCents > 0) {
+      if (strandedUsdCents > 0) {
+        await deps
+          .alert(
+            `Rose AgentCard top-up remains $${(replan.fiatShortfallCents / 100).toFixed(2)} short; ` +
+              `$${(strandedUsdCents / 100).toFixed(2)} USD is unconverted in Coinbase. No new wire was sent.`
+          )
+          .catch(() => undefined);
+      } else {
+        await topUpFiatShortfall(deps, replan.fiatShortfallCents);
+      }
+    }
     return { status: 'transferred', transferCents: replan.transferCents, transactionHash };
   } catch (error) {
     // Claim is intentionally retained — see invariant 4. Auto top-up stays halted until a human
@@ -504,7 +700,8 @@ export function triggerOrgWalletTopUp(context: { purchaseId: string; debitedCent
         callOrgTool: callOrgToolProvider,
         store: createOrgWalletTopUpStore(),
         alert: createAlerter(),
-        recoverResidual: () => recoverAllCardholderResiduals(callOrgToolProvider),
+        // The bank leg is currently hard-disabled after broken Brex transfers. A dry float alerts.
+        ...(resolveFiatSource() ?? {}),
       });
       log.info('AgentCard org-wallet auto top-up evaluated', {
         purchase_id: context.purchaseId,

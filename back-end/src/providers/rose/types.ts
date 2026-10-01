@@ -61,6 +61,8 @@ export interface CompletionOptions {
   tool_choice?: unknown;
   effort?: string;
   provider_fast_mode?: boolean;
+  /** Stable agent or user identity for distributing Foundry requests. */
+  route_key?: string;
   /**
    * Selects an exclusive provider path. Omitted requests keep the normal
    * OAuth -> shared keys -> OpenRouter Rose routing contract.

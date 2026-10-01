@@ -14,6 +14,7 @@ import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
+import exploreEvidenceRoutes from './routes.exploreEvidence';
 import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
 import statusRoutes from './routes.status';
@@ -111,6 +112,8 @@ router.get(
     }
   })
 );
+
+router.use('/', exploreEvidenceRoutes);
 
 router.get(
   '/:id/ancestors',
