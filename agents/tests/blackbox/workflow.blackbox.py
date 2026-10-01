@@ -2402,6 +2402,24 @@ async def test_workflow_signal_receive_user_response_plain_string():
         _restore_workflow(original)
 
 
+async def test_workflow_user_message_alone_never_lifts_a_pause():
+    """The backend must follow a user's message with `resume` (prod agent 5c8b0ca4)."""
+    wf = _bare_workflow_instance()
+    wf.goal = "g"
+    wf.is_paused = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf.receive_user_response("Skip DoorDash entirely. Buy from Amazon instead.")
+        assert wf.is_paused is True
+        assert wf._has_new_messages is True
+        await wf.resume()
+        assert wf.is_paused is False
+        assert wf._has_new_messages is True
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_signal_receive_user_response_with_request_id():
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
@@ -7869,6 +7887,10 @@ async def run_all_tests():
         test_workflow_out_of_credits_resume_requires_fresh_credits,
     )
     await r.record_async("wf_signal_recv_user_plain", test_workflow_signal_receive_user_response_plain_string)
+    await r.record_async(
+        "wf_user_message_alone_never_lifts_pause",
+        test_workflow_user_message_alone_never_lifts_a_pause,
+    )
     await r.record_async("wf_signal_recv_user_req_id", test_workflow_signal_receive_user_response_with_request_id)
     await r.record_async(
         "wf_signal_recv_user_json_no_req", test_workflow_signal_receive_user_response_json_without_request_id
