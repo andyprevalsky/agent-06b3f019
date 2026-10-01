@@ -134,20 +134,20 @@ export async function testReplyToAgent_leavesCostLimitedAgentForBudgetIncrease(
   }
 }
 
-export async function testReplyToAgent_attentionDecisionLeavesPauseAlone(prisma: PrismaClient) {
+export async function testReplyToAgent_attentionDecisionResumesPausedAgent(prisma: PrismaClient) {
   const run = await commitReplyToAgentWithStatus(prisma, 'PAUSED', { asAttentionApproval: true });
   try {
     if (run.result?.success !== true) {
       throw new Error(`Expected the approval to be delivered, got ${JSON.stringify(run.result)}`);
     }
-    if (run.stored.status !== 'PAUSED') {
+    if (run.stored.status !== 'ACTIVE') {
       throw new Error(
-        `An attention decision must not lift a pause (the web approval path does not); status became ${run.stored.status}`
+        `An approval texted to a PAUSED agent must resume it, status is still ${run.stored.status}`
       );
     }
-    if (JSON.stringify(run.signals) !== JSON.stringify(['receive_user_response'])) {
+    if (JSON.stringify(run.signals) !== JSON.stringify(['receive_user_response', 'resume'])) {
       throw new Error(
-        `An attention decision must only be signaled, got ${JSON.stringify(run.signals)}`
+        `Expected the decision signal before the resume signal, got ${JSON.stringify(run.signals)}`
       );
     }
   } finally {
@@ -166,8 +166,8 @@ export function smsPausedReplyBehaviorCases(prisma: PrismaClient) {
       fn: () => testReplyToAgent_leavesCostLimitedAgentForBudgetIncrease(prisma),
     },
     {
-      name: 'reply_to_agent -- an attention decision leaves a PAUSED agent paused',
-      fn: () => testReplyToAgent_attentionDecisionLeavesPauseAlone(prisma),
+      name: 'reply_to_agent -- an attention decision resumes a PAUSED agent',
+      fn: () => testReplyToAgent_attentionDecisionResumesPausedAgent(prisma),
     },
   ];
 }

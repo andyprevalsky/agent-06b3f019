@@ -2,7 +2,11 @@
 
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
-import { resumeAgentWorkflow, resumePausedAgentForUserMessage } from '../../providers/agentResume';
+import {
+  deliverUserMessageToWorkflow,
+  resumeAgentWorkflow,
+  resumePausedAgentForUserMessage,
+} from '../../providers/agentResume';
 import { prisma } from '../../providers/database';
 import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
 import { createTestHarness } from './trace-archive-test-utils';
@@ -311,6 +315,49 @@ async function main(): Promise<void> {
       assert.strictEqual(resumed, false);
       const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
       assert.strictEqual(agent.status, 'PAUSED');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
+  });
+
+  await test('delivering a message signals it, then lifts the pause', async () => {
+    const workflowId = `wf-${randomUUID()}`;
+    const agentId = await createAgent({ temporalWorkflowId: workflowId });
+    const signals: string[] = [];
+    try {
+      const delivered = await deliverUserMessageToWorkflow(agentId, workflowId, 'Use Amazon', {
+        signalUserResponse: async (id, value) => {
+          signals.push(`receive_user_response:${id}:${value}`);
+        },
+        signalResume: async (id) => {
+          signals.push(`resume:${id}`);
+        },
+      });
+      assert.deepStrictEqual(delivered, { signaled: true, resumed: true });
+      assert.deepStrictEqual(signals, [
+        `receive_user_response:${workflowId}:Use Amazon`,
+        `resume:${workflowId}`,
+      ]);
+      const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(agent.status, 'ACTIVE');
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
+  });
+
+  await test('a lost message signal still lifts the pause; the loop polls the row', async () => {
+    const workflowId = `wf-${randomUUID()}`;
+    const agentId = await createAgent({ temporalWorkflowId: workflowId });
+    try {
+      const delivered = await deliverUserMessageToWorkflow(agentId, workflowId, 'Use Amazon', {
+        signalUserResponse: async () => {
+          throw new Error('synthetic signal outage');
+        },
+        signalResume: async () => undefined,
+      });
+      assert.deepStrictEqual(delivered, { signaled: false, resumed: true });
+      const agent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(agent.status, 'ACTIVE');
     } finally {
       await prisma.agent.deleteMany({ where: { id: agentId } });
     }

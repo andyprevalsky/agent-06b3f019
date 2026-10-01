@@ -23,7 +23,7 @@ import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
-import { resumePausedAgentForUserMessage } from '../agentResume';
+import { deliverUserMessageToWorkflow } from '../agentResume';
 import {
   resolveAgentPrefix,
   smsIntendsAgentReply,
@@ -506,33 +506,25 @@ async function commitReplyToAgent(
   // A deployment-sealed id is a tombstone, not a running execution — the
   // Temporal signal can only 404 (prod agent 3eb6da5a, late approve 13:00Z).
   if (agent.temporalWorkflowId && !isDeploymentSealedWorkflowId(agent.temporalWorkflowId)) {
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      const signalValue = attention_request_id
-        ? JSON.stringify({
-            request_id: attention_request_id,
-            response: canonicalUserResponse,
-          })
-        : message;
-      await handle.signal('receive_user_response', signalValue);
-
+    const signalValue = attention_request_id
+      ? JSON.stringify({
+          request_id: attention_request_id,
+          response: canonicalUserResponse,
+        })
+      : message;
+    // Never fails the reply: the message is in DB and the workflow polls for it.
+    const { signaled } = await deliverUserMessageToWorkflow(
+      agent.id,
+      agent.temporalWorkflowId,
+      signalValue
+    );
+    if (signaled) {
       log.info('Signaled workflow', {
         phase: 'reply',
         workflowId: agent.temporalWorkflowId,
         agentId: agent.id,
         reject: !!reject,
       });
-      // A plain reply is the user telling a paused agent to continue. Attention
-      // decisions leave the pause alone, matching the web approval path.
-      if (!attention_request_id) await resumePausedAgentForUserMessage(agent.id);
-    } catch (error) {
-      log.error('Failed to signal workflow', {
-        phase: 'reply',
-        workflowId: agent.temporalWorkflowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // Don't fail — message is in DB, workflow will poll
     }
   }
 

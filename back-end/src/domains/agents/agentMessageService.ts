@@ -2,8 +2,7 @@
  * Agent message service — post messages, handle user responses, file uploads.
  */
 
-import { getTemporalClient } from '../../providers/temporal';
-import { resumePausedAgentForUserMessage } from '../../providers/agentResume';
+import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
@@ -70,7 +69,11 @@ export function buildUserMessageSignalValue(
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
-async function routeUserMessage(agentId: string, messageText: string): Promise<void> {
+async function routeUserMessage(
+  agentId: string,
+  messageText: string,
+  authoredByWorkflow: boolean
+): Promise<void> {
   const agentForChat = await repo.findAgentUnique(agentId);
 
   // If the agent's workflow has already ended (any terminal status), clear the
@@ -102,18 +105,11 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
   }
 
   if (agentForChat?.temporalWorkflowId !== undefined && agentForChat?.temporalWorkflowId !== null) {
-    // Agent mode: signal Temporal workflow
-    try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agentForChat.temporalWorkflowId);
-      await handle.signal('receive_user_response', messageText);
-    } catch (error) {
-      // Don't fail the request if signaling fails - workflow will eventually poll
-      log.error('Failed to signal workflow', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    // A failed signal never fails the request: the row is durable and the
+    // workflow polls for it.
+    const workflowId = agentForChat.temporalWorkflowId;
+    if (authoredByWorkflow) await signalUserResponse(agentId, workflowId, messageText);
+    else await deliverUserMessageToWorkflow(agentId, workflowId, messageText);
   } else if (agentForChat !== null && agentForChat !== undefined) {
     handleChatMessage({
       agentId,
@@ -129,16 +125,19 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
   }
 }
 
-/** Signal the workflow (or run chat mode) for a USER row, then lift a user pause. */
+/**
+ * Every USER message sent to an agent lifts a user pause, whoever sends it.
+ * Only rows the agent's own workflow writes (internal writes stamped with its
+ * generation: response-schema context, OTP relays, sub-agent auto-replies)
+ * leave the pause alone, because they can land after the user paused.
+ */
 async function deliverUserMessage(
   agentId: string,
   body: PostMessageBody,
-  isInternal: boolean
+  authoredByWorkflow: boolean
 ): Promise<void> {
-  await routeUserMessage(agentId, buildUserMessageSignalValue(body.message, body.metadata));
-  // Internal USER rows (OTP relays, response-schema context) are not the user
-  // asking to continue, so only user-authenticated sends lift a pause.
-  if (!isInternal) await resumePausedAgentForUserMessage(agentId);
+  const signalValue = buildUserMessageSignalValue(body.message, body.metadata);
+  await routeUserMessage(agentId, signalValue, authoredByWorkflow);
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +252,9 @@ export async function postMessage(
     }
   }
 
-  if (role === 'USER') await deliverUserMessage(agentId, body, isInternal);
+  if (role === 'USER') {
+    await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
+  }
 
   return {
     message_id: message.id,

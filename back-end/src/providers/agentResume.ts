@@ -107,11 +107,10 @@ async function mayHoldLiftablePause(agentId: string): Promise<boolean> {
 
 /**
  * A user's message to an agent they paused is their instruction to continue.
- * Call only after the USER row is durable and `receive_user_response` has been
- * signaled, so the woken workflow reads the message on its next turn. Cost
- * limits and credit stops are untouched; they keep their own unblock paths.
- * Never throws: the message is already delivered, so a failed resume must not
- * fail the send. Returns whether a pause was lifted.
+ * Call only after what they sent is durable, so the woken workflow reads it on
+ * its next turn. Cost limits and credit stops are untouched; they keep their
+ * own unblock paths. Never throws: the send already succeeded, so a failed
+ * resume must not fail it. Returns whether a pause was lifted.
  */
 export async function resumePausedAgentForUserMessage(
   agentId: string,
@@ -136,4 +135,54 @@ export async function resumePausedAgentForUserMessage(
     });
     return false;
   }
+}
+
+interface UserMessageDeliveryDependencies extends Pick<
+  ResumeAgentWorkflowDependencies,
+  'signalResume'
+> {
+  signalUserResponse?: (workflowId: string, signalValue: string) => Promise<void>;
+}
+
+async function sendUserResponseSignal(workflowId: string, signalValue: string): Promise<void> {
+  const client = await getTemporalClient();
+  await client.workflow.getHandle(workflowId).signal('receive_user_response', signalValue);
+}
+
+/** Best-effort `receive_user_response` signal. Returns whether it was delivered. */
+export async function signalUserResponse(
+  agentId: string,
+  workflowId: string,
+  signalValue: string,
+  dependencies: Pick<UserMessageDeliveryDependencies, 'signalUserResponse'> = {}
+): Promise<boolean> {
+  try {
+    await (dependencies.signalUserResponse ?? sendUserResponseSignal)(workflowId, signalValue);
+    return true;
+  } catch (error) {
+    log.error('Failed to signal workflow', {
+      agent_id: agentId,
+      workflow_id: workflowId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+/**
+ * Deliver what the user sent (a message, reply, or approval decision) to the
+ * agent's workflow and lift a pause they set: sending is the instruction to
+ * continue, so no channel has to follow a send with its own /resume. The pause
+ * is lifted even if the signal is lost, because the resumed loop polls the
+ * database for new rows before every LLM turn.
+ */
+export async function deliverUserMessageToWorkflow(
+  agentId: string,
+  workflowId: string,
+  signalValue: string,
+  dependencies: UserMessageDeliveryDependencies = {}
+): Promise<{ signaled: boolean; resumed: boolean }> {
+  const signaled = await signalUserResponse(agentId, workflowId, signalValue, dependencies);
+  const resumed = await resumePausedAgentForUserMessage(agentId, dependencies);
+  return { signaled, resumed };
 }
