@@ -21,6 +21,7 @@ interface ActiveCodeSession {
 
 export interface CodeSessionReleaseDependencies {
   findActiveCodeSessions: (agentId: string) => Promise<ActiveCodeSession[]>;
+  /** Resolves once the sandbox is gone, including when it was already absent; throws when that is unknown. */
   killSandbox: (session: ActiveCodeSession) => Promise<void>;
   markClosed: (sessionId: string) => Promise<void>;
 }
@@ -85,10 +86,8 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
         await closeLocalClaudeCodeSession(session.id);
         return;
       }
-      const sandbox = await Sandbox.connect(session.sandboxId, {
-        apiKey: process.env.E2B_API_KEY,
-      });
-      await sandbox.kill();
+      // false means E2B no longer has the sandbox, which is as released as a kill.
+      await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });
     },
     markClosed: async (sessionId: string) => {
       await prisma.claudeCodeSession.update({
@@ -337,8 +336,9 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
  * reattach to it. Without this the old Claude Code CLI keeps working next to the
  * replacement run until E2B's own timeout.
  *
- * A kill failure is logged and the row is still closed: the sandbox's E2B
- * timeout bounds whatever survives. Throws only when the lookup itself fails.
+ * A failed kill leaves the row ACTIVE so the next release of this agent (another
+ * cutover, descendant cleanup, deletion) retries it. Throws only when the lookup
+ * itself fails.
  */
 export async function releaseAgentCodeSessions(
   agentId: string,
@@ -356,9 +356,10 @@ export async function releaseAgentCodeSessions(
       await dependencies.killSandbox(session);
       log.info(`Killed code sandbox ${session.sandboxId}`);
     } catch (error) {
-      log.warn(`Failed to kill code sandbox ${session.sandboxId}`, {
+      log.warn(`Failed to kill code sandbox ${session.sandboxId}; leaving it ACTIVE for retry`, {
         error: error instanceof Error ? error.message : String(error),
       });
+      continue;
     }
 
     try {
