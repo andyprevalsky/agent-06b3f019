@@ -61,31 +61,35 @@ Archive searches for pause, resume, and SMS reply found no prior case at this bo
 1. An unlocked pre-read skips the common ACTIVE case and refuses a child whose parent is PAUSED or COST_LIMIT_REACHED. The `/resume` route already refuses that case; without the check, the child's row would read ACTIVE while its workflow rejected the signal.
 2. The locked `recordWorkflowResumeIntent` transition then acts only when it durably moved a user pause (PAUSED, or a replacement whose prior status was PAUSED) to ACTIVE. It signals `resume` and rolls back if the signal fails, sharing that code with `resumeAgentWorkflow`. The helper never throws into the send path.
 
-It has two callers:
+Every send lifts the pause. `deliverUserMessageToWorkflow` signals `receive_user_response` and then lifts the pause even when that signal is lost, because the resumed loop polls the database for new rows before every LLM turn. Its callers:
 
-- `commitReplyToAgent`, for plain replies, after a successful `receive_user_response` signal. Attention approvals and rejections leave the pause alone, matching the web approval path.
-- `postMessage`, for user-authenticated USER rows only. Internal USER rows stay paused.
+- `commitReplyToAgent`, for every SMS/WhatsApp reply, including attention approvals and rejections.
+- `postMessage`, for every USER row, whether it came from a user session or the internal API key.
+- `POST /attention-requests/:id/respond` and `/reject` (via `resumePausedAgentForUserMessage` after `resolveAndSignal` resolves the gate).
 
-The web composer no longer calls `/resume` first, so one backend rule covers every client, and the message is durable before `resume` is sent.
+Only rows the agent's own workflow writes leave the pause alone: internal writes stamped with `X-Agent-Workflow-Generation`, such as response-schema context, OTP relays, and sub-agent auto-replies. Those can land after the user paused, so lifting the pause there would undo it. Webhook gate resolutions (payments, OAuth) also leave the pause to the user, and COST_LIMIT_REACHED / OUT_OF_CREDITS are not pauses, so they keep their own paths.
+
+The web composer no longer calls `/resume` first. One backend rule covers every client, and the message is durable before `resume` is sent.
 
 Tests:
 
-- The SMS case observes the fake Temporal signals `receive_user_response` and then `resume`.
-- The HTTP case observes ACTIVE.
-- Unit tests cover the parent guard, replacement pauses, signal failure, and non-pause statuses.
+- The SMS cases observe the fake Temporal signals `receive_user_response` and then `resume`, for both a plain reply and an attention decision.
+- The HTTP cases observe ACTIVE after a user-session send, an internal-key send, an attention answer, and an attention rejection. A generation-stamped workflow write stays PAUSED.
+- Before the fix, the internal-key, attention respond, attention reject, and SMS attention-decision cases failed with the agent still PAUSED.
+- Unit tests cover the parent guard, replacement pauses, signal failure, a lost message signal, and non-pause statuses.
 - `wf_user_message_alone_never_lifts_pause` pins the workflow contract. The existing `wf_pause_resume` and `wf_deployment_cold_states_do_not_poll` prove that `resume` wakes the run and that the continued run reaches `poll_new_messages`.
 
 At 10k agents, every user message adds one indexed read. Only paused agents also take the per-agent advisory-locked transaction and send one Temporal signal. There is no fan-in.
 
 Known gaps, not fixed here:
 
-- **Benchmark coverage.** The benchmark harness stands in for the user with the internal API key, so no benchmark exercises this path.
+- **Benchmark coverage.** No benchmark pauses an agent and then messages it.
 - **Cost cap.** A cost-limited agent that the user then pauses is stored as PAUSED, and the workflow `resume` handler does not check `_cost_limit_reached`. Resuming it, already possible through `/resume`, can therefore continue past the cap while `run_agent` is still in its paused poll.
 - **Prod agent.** `5c8b0ca4` is still paused; it needs one resume from the user.
 
 ## Human feedback
 
-None recorded.
+The first fix still excluded internal-key USER rows and attention decisions. The user asked that any message send unpause, with no separate call, so those exclusions were removed.
 
 ## Reusable lesson
 
