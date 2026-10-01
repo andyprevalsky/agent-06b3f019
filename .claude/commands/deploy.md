@@ -1158,13 +1158,19 @@ Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins
 real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
 or skip it because "claude-code wasn't touched."
 
-With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
-`$LOCAL_DB_PORT`), run the claude-code blackbox with the smoke phase enabled
-against the existing backend:
+With the full stack from Step 5 still running, resolve its actual backend and
+database ports from the live service manifest. This command runs correctly in a
+fresh shell and chooses the runtime port for Docker or system Postgres:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
+. scripts/lib/workspace-env.sh
+normalize_conductor_workspace_env
+STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1
+read -r CONDUCTOR_PORT SMOKE_DB_PORT <<< "$STACK_PORTS"
+export CONDUCTOR_PORT
 cd back-end && BLACKBOX_SMOKE=1 \
-  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```

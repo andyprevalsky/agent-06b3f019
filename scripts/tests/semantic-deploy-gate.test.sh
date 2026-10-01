@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUNNER="$ROOT_DIR/front-end/scripts/run-semantic-tests.sh"
+RUNNER="${SEMANTIC_RUNNER_OVERRIDE:-$ROOT_DIR/front-end/scripts/run-semantic-tests.sh}"
 RUN_SH="$ROOT_DIR/scripts/run.sh"
 HELPERS="$ROOT_DIR/front-end/tests-e2e/helpers.ts"
 LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
@@ -10,7 +10,8 @@ WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
 FRONTEND_LOCK="$ROOT_DIR/front-end/package-lock.json"
 PROD_SESSION_GENERATOR="$ROOT_DIR/front-end/scripts/generate-prod-test-session.mjs"
 PROD_SESSION_TEST="$ROOT_DIR/scripts/tests/prod-semantic-session.test.mjs"
-DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+DEPLOY_COMMAND="${DEPLOY_COMMAND_OVERRIDE:-$ROOT_DIR/.claude/commands/deploy.md}"
+STACK_DB_RESOLVER="$ROOT_DIR/scripts/resolve-deploy-stack-db.sh"
 CODERABBIT_CONFIG="$ROOT_DIR/.coderabbit.yaml"
 REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
 REVIEW_CYCLES="$ROOT_DIR/scripts/deploy_review_cycle.py"
@@ -48,7 +49,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -311,6 +312,8 @@ if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; th
   fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
 fi
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
+require_text "$DEPLOY_COMMAND" 'STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1' "/deploy E2B smoke must fail closed when it cannot resolve the running stack"
+require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME"' "/deploy E2B smoke must name the isolated workspace test database"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
 require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
 require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
@@ -332,5 +335,55 @@ export SEMANTIC_DIRECT_URL='postgresql://custom/direct'
 apply_local_semantic_db_urls
 [ "$SEMANTIC_DIRECT_URL" = 'postgresql://custom/direct' ] || fail "LOCAL_DB_PORT fallback must preserve caller SEMANTIC_DIRECT_URL"
 [[ "$SEMANTIC_DATABASE_URL" == *":4205/"* ]] || fail "LOCAL_DB_PORT fallback must still set SEMANTIC_DATABASE_URL"
+
+# A fresh semantic shell must seed the DB named by the active run.sh stack,
+# even when LOCAL_DB_PORT was only present in the stack launcher.
+REPO_DIR="$LOCK_TEST_DIR"
+mkdir -p "$REPO_DIR/.context"
+jq -n --arg worktree "$ROOT_DIR" '{status:"running",worktree:$worktree,urls:{backend:"http://localhost:55170"},ports:{backend:55170},database:{runtime_port:55175}}' > "$REPO_DIR/.context/services.json"
+unset LOCAL_DB_PORT SEMANTIC_DATABASE_URL SEMANTIC_DIRECT_URL
+BACKEND_URL='http://localhost:55170'
+apply_local_semantic_db_urls
+[ "${LOCAL_DB_PORT:-}" = '55175' ] || fail "semantic runner must read the active stack database port"
+[[ "$SEMANTIC_DATABASE_URL" == *":55175/"* ]] || fail "semantic runner must seed the active stack database"
+[ "$(bash "$STACK_DB_RESOLVER" "$REPO_DIR/.context/services.json")" = $'55170\t55175' ] || fail "/deploy E2B smoke must resolve the Docker stack ports"
+
+unset LOCAL_DB_PORT SEMANTIC_DATABASE_URL SEMANTIC_DIRECT_URL
+BACKEND_URL='http://localhost:55180'
+if apply_local_semantic_db_urls 2>/dev/null; then
+  fail "semantic runner must reject a different stack's database manifest"
+fi
+
+# The manifest's runtime port is authoritative for system Postgres too. Its
+# allocated Docker port may be unrelated to the database actually in use.
+jq -n --arg worktree "$ROOT_DIR" '{status:"running",worktree:$worktree,urls:{backend:"http://localhost:55170"},ports:{backend:55170,local_db:55175},database:{runtime_port:5432}}' > "$REPO_DIR/.context/services.json"
+unset LOCAL_DB_PORT SEMANTIC_DATABASE_URL SEMANTIC_DIRECT_URL
+BACKEND_URL='http://localhost:55170'
+apply_local_semantic_db_urls
+[ "$LOCAL_DB_PORT" = '5432' ] || fail "semantic runner must use the system Postgres runtime port"
+[[ "$SEMANTIC_DATABASE_URL" == *":5432/"* ]] || fail "semantic runner must seed the system Postgres runtime"
+[ "$(bash "$STACK_DB_RESOLVER" "$REPO_DIR/.context/services.json")" = $'55170\t5432' ] || fail "/deploy E2B smoke must use system Postgres runtime port"
+
+# A stopped, incomplete, or malformed stack manifest cannot identify the DB.
+for manifest in \
+  '{"status":"stopped","urls":{"backend":"http://localhost:55170"},"database":{"runtime_port":55175}}' \
+  '{"status":"running","urls":{"backend":"http://localhost:55170"},"database":{}}' \
+  '{'; do
+  printf '%s\n' "$manifest" > "$REPO_DIR/.context/services.json"
+  unset LOCAL_DB_PORT SEMANTIC_DATABASE_URL SEMANTIC_DIRECT_URL
+  if apply_local_semantic_db_urls 2>/dev/null; then
+    fail "semantic runner must reject an unusable stack manifest"
+  fi
+  if bash "$STACK_DB_RESOLVER" "$REPO_DIR/.context/services.json" >/dev/null 2>&1; then
+    fail "/deploy E2B smoke must reject an unusable stack manifest"
+  fi
+done
+
+# A caller can supply the database explicitly, even when services.json is bad.
+export SEMANTIC_DATABASE_URL='postgresql://custom/semantic'
+export SEMANTIC_DIRECT_URL='postgresql://custom/direct'
+apply_local_semantic_db_urls
+[ "$SEMANTIC_DATABASE_URL" = 'postgresql://custom/semantic' ] || fail "semantic runner must preserve caller SEMANTIC_DATABASE_URL"
+[ "$SEMANTIC_DIRECT_URL" = 'postgresql://custom/direct' ] || fail "semantic runner must preserve caller SEMANTIC_DIRECT_URL"
 
 echo "All semantic deploy gate checks passed."
