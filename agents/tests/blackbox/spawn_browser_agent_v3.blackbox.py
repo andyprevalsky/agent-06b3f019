@@ -2171,6 +2171,89 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
         else:
             os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
 
+async def test_browser_agent_recording_retains_kernel_segments_without_recovery_frames():
+    """A failed promoted screenshot must not discard the prior native recording."""
+    import tempfile
+    from playwright.async_api import async_playwright
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FailedScreenshotPage:
+        url = "https://steel.example/recovered"
+
+        async def screenshot(self, **_kwargs):
+            raise RuntimeError("Page.screenshot: browser has been closed")
+
+    restore = _kernel_replay_env()
+    calls = []
+    try:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"BROWSER_AGENT_RECORDINGS_DIR": directory, "BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL": "0"}
+        ), patch.object(recording_module.httpx, "AsyncClient", lambda *a, **k: _SessionAwareReplayClient(calls)):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(), agent_id="agent-1", task_id="task-1", session_id="kernel-one",
+                browser_url="https://kernel.example/live/one", session_metadata={"provider": "kernel"},
+            )
+            assert recorder is not None
+            await recorder.rotate_kernel_replay("kernel-two")
+            await recorder.transition_browser(
+                page=FailedScreenshotPage(), session_id="steel-final",
+                browser_url="https://steel.example/live/final", session_metadata={"provider": "steel"},
+            )
+            urls = ["https://kernel.example/view/kernel-one", "https://kernel.example/view/kernel-two"]
+            assert recorder.replay_view_urls == urls
+            assert recorder.frames == [] and not recorder.uses_kernel_replay
+            upload = AsyncMock(return_value={"id": "retained-native-recording"})
+            save = AsyncMock(return_value=True)
+            with patch("domains.spawn_browser_agent_v3.handler.upload_to_storage", upload), patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message", save
+            ), patch.object(recorder, "archive_recording_artifacts_in_background", return_value=False):
+                result = await _finalize_browser_recording_for_fe(
+                    browser_recorder=recorder, agent_id="agent-1", task_id="task-1", user_id="user-1",
+                    browser_url="https://steel.example/live/final", browser_session_metadata={"provider": "steel"},
+                )
+            assert result is not None, "retained native replay was discarded when recovery captured no frames"
+            assert result["recording_file_pointer"] == {"id": "retained-native-recording"}
+            upload.assert_awaited_once()
+            save.assert_awaited_once()
+            assert save.await_args.kwargs["status"].value == "FINISHED"
+            assert save.await_args.kwargs["extra_metadata"]["recording_file_pointer"] == result["recording_file_pointer"]
+            html_text = upload.await_args.kwargs["file_content"].decode("utf-8")
+            assert all(url in html_text for url in urls)
+            assert recorder.frames == []
+            manifest = json.loads((recorder.output_dir / "manifest.json").read_text())
+            assert manifest["source_frame_count"] == 0 and manifest["frame_count"] == 0
+            assert manifest["recording_source"] == "kernel_replay"
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                try:
+                    page = await browser.new_page()
+                    page_errors = []
+                    page.on("pageerror", lambda error: page_errors.append(error))
+                    await page.route("**/*", lambda route: route.abort())
+                    await page.set_content(html_text)
+                    assert await page.evaluate("prefixVideo.getAttribute('src')") == urls[0]
+                    await page.locator("#skipIdle").uncheck()
+                    assert await page.evaluate("!prefixVideo.hidden && canvas.hidden && showingPrefix")
+                    await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+                    assert await page.evaluate("prefixVideo.getAttribute('src')") == urls[1]
+                    await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+                    await page.locator("#skipIdle").check()
+                    assert await page.evaluate("!prefixVideo.hidden && canvas.hidden && showingPrefix")
+                    assert page_errors == [], "native-only recording controls raised a page error"
+                finally:
+                    await browser.close()
+            empty = BrowserAgentRecorder(
+                page=FailedScreenshotPage(), agent_id="agent-1", task_id="empty-task", session_id="steel-empty",
+                browser_url="https://steel.example/empty", session_metadata={"provider": "steel"},
+            )
+            assert await empty.close(include_steel_media=False, archive_artifacts=False) is None
+            assert empty.export_inline_html_bytes() is None
+    finally:
+        restore()
+
+
 async def test_browser_agent_recording_rebinds_screenshot_mode_across_providers():
     """Steel -> Steel and Steel -> Kernel keep one screenshot timeline. Once a
     recording is in screenshot mode it must not open an unrelated native replay
@@ -23278,6 +23361,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_survives_kernel_to_steel_recovery",
         test_browser_agent_recording_survives_kernel_to_steel_recovery,
+    )
+    await r.record_async(
+        "browser_agent_recording_retains_kernel_segments_without_recovery_frames",
+        test_browser_agent_recording_retains_kernel_segments_without_recovery_frames,
     )
     await r.record_async(
         "browser_agent_recording_rebinds_screenshot_mode_across_providers",

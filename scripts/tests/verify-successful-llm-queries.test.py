@@ -359,6 +359,80 @@ class QueryEvidenceTest(unittest.TestCase):
             )
             self.assertFalse((base / "report.json").exists())
 
+    def test_composite_stage_accepts_only_its_owned_descendants(self):
+        payload = rose_fixture()
+        task = payload["tasks"][0]
+        child = "44444444-4444-4444-8444-444444444444"
+        foreign = "55555555-5555-4555-8555-555555555555"
+        events = task["logs"]["worker_logs"]
+        first, second = [], []
+        for index, event in enumerate(events):
+            event = dict(event)
+            query = index // 4
+            event["agent_id"] = (ROOT_AGENT, child, SECOND_AGENT)[query]
+            event["root_agent_id"] = SECOND_AGENT if query == 2 else ROOT_AGENT
+            (second if query == 2 else first).append(event)
+        task["agent_id"] = f"{ROOT_AGENT},{SECOND_AGENT}"
+        task["logs"] = {
+            "first": {
+                "tree": {
+                    ROOT_AGENT: {"parent_agent_id": None},
+                    child: {"parent_agent_id": ROOT_AGENT},
+                },
+                "worker_logs": first,
+            },
+            "second": {
+                "tree": {SECOND_AGENT: {"parent_agent_id": None}},
+                "worker_logs": second,
+            },
+            "worker_logs": first + second,
+        }
+        result = module.verify(payload)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["successful_llm_queries"], 3)
+        self.assertEqual(
+            {row["agent_id"] for row in result["queries"]},
+            {ROOT_AGENT, child, SECOND_AGENT},
+        )
+        for bad in (foreign, SECOND_AGENT):
+            with self.subTest(unowned_or_cross_stage=bad):
+                invalid = json.loads(json.dumps(payload))
+                invalid["tasks"][0]["logs"]["first"]["worker_logs"].append(
+                    {"event": "unrelated", "agent_id": bad}
+                )
+                with self.assertRaisesRegex(AssertionError, "unbound composite stage"):
+                    module.verify(invalid)
+        for overlapping in (SECOND_AGENT, child):
+            with self.subTest(overlapping_stage_agent=overlapping):
+                invalid = json.loads(json.dumps(payload))
+                stage = "first" if overlapping == SECOND_AGENT else "second"
+                parent = ROOT_AGENT if stage == "first" else SECOND_AGENT
+                invalid["tasks"][0]["logs"][stage]["tree"][overlapping] = {
+                    "parent_agent_id": parent
+                }
+                with self.assertRaisesRegex(
+                    AssertionError, "overlapping stage ownership"
+                ):
+                    module.verify(invalid)
+        invalid = json.loads(json.dumps(payload))
+        invalid["tasks"][0]["logs"]["first"]["tree"][child]["parent_agent_id"] = foreign
+        with self.assertRaisesRegex(AssertionError, "unbound tree nodes"):
+            module.verify(invalid)
+        first.append(
+            {
+                "event": "rose.complete.failed",
+                "agent_id": child,
+                "root_agent_id": ROOT_AGENT,
+                "request_id": "child-failed",
+                "span_id": "child-failed",
+                "timestamp": "2026-09-29T00:00:35Z",
+            }
+        )
+        failed = module.verify(payload)
+        self.assertEqual(failed["successful_llm_queries"], 3)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(len(failed["failed_queries"]), 1)
+
     def test_composite_benchmark_counts_each_sealed_root_once(self):
         payload = fixture()
         task = payload["tasks"][0]

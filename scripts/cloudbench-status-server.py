@@ -129,17 +129,21 @@ def main() -> int:
         log_generation = log_generation_path.read_text().strip()
     except FileNotFoundError:
         log_generation = secrets.token_hex(16)
+        descriptor, staged_name = tempfile.mkstemp(
+            dir=root, prefix=".bench.log.generation."
+        )
+        staged_path = Path(staged_name)
         try:
-            descriptor = os.open(
-                log_generation_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            log_generation = log_generation_path.read_text().strip()
-        else:
             with os.fdopen(descriptor, "w") as generation_file:
                 generation_file.write(f"{log_generation}\n")
+                generation_file.flush()
+                os.fsync(generation_file.fileno())
+            try:
+                os.link(staged_path, log_generation_path)
+            except FileExistsError:
+                log_generation = log_generation_path.read_text().strip()
+        finally:
+            staged_path.unlink(missing_ok=True)
     if re.fullmatch(r"[0-9a-f]{32}", log_generation) is None:
         raise SystemExit("invalid bench log generation")
 

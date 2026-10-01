@@ -20,6 +20,107 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Exercise the actual server at the create-before-write boundary. A killed
+# writer and concurrent readers must never expose a partial generation.
+python3 - "$ROOT/scripts/cloudbench-status-server.py" "$tmp" <<'PY_GENERATION'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+source, temporary = map(Path, sys.argv[1:])
+bootstrap = r"""
+import os, runpy, sys, time
+from pathlib import Path
+source, root, marker, release, mode, ready = sys.argv[1:]
+native_open = os.open
+def intercepted_open(path, flags, *args, **kwargs):
+    descriptor = native_open(path, flags, *args, **kwargs)
+    name = Path(path).name
+    if flags & os.O_CREAT and (name == 'bench.log.generation' or
+                              name.startswith('.bench.log.generation.')):
+        Path(marker).write_text('opened\n')
+        if mode == 'crash':
+            os._exit(73)
+        deadline = time.monotonic() + 5
+        while not Path(release).exists():
+            assert time.monotonic() < deadline, 'writer was not released'
+            time.sleep(.01)
+    return descriptor
+os.open = intercepted_open
+sys.argv = [source, '--bind', '127.0.0.1', '--port', '0', '--directory', root,
+            '--ready-file', ready]
+runpy.run_path(source, run_name='__main__')
+"""
+
+def await_file(path, process):
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        assert process.poll() is None, process.stdout.read().decode()
+        assert time.monotonic() < deadline, f'owned server did not publish {path.name}'
+        time.sleep(.01)
+
+def generation(ready):
+    with urllib.request.urlopen(
+        f'http://127.0.0.1:{ready.read_text().strip()}/bench.log?offset=0&limit=32',
+        timeout=2,
+    ) as response:
+        assert response.read() == b'owned log\n'
+        return response.headers['X-Cloudbench-Log-Generation']
+
+failures = []
+for mode in ('crash', 'concurrent'):
+    root = temporary / mode
+    root.mkdir()
+    (root / 'bench.log').write_text('owned log\n')
+    marker, release = root / 'opened', root / 'release'
+    first_ready, second_ready = root / 'first.ready', root / 'second.ready'
+    processes = []
+    try:
+        first = subprocess.Popen(
+            [sys.executable, '-c', bootstrap, str(source), str(root), str(marker),
+             str(release), mode, str(first_ready)], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        processes.append(first)
+        await_file(marker, first)
+        if mode == 'crash':
+            assert first.wait(timeout=5) == 73
+        second = subprocess.Popen(
+            [sys.executable, str(source), '--bind', '127.0.0.1', '--port', '0',
+             '--directory', str(root), '--ready-file', str(second_ready)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        processes.append(second)
+        await_file(second_ready, second)
+        winner = generation(second_ready)
+        assert re.fullmatch(r'[0-9a-f]{32}', winner)
+        assert (root / 'bench.log.generation').read_text().strip() == winner
+        assert (root / 'bench.log.generation').stat().st_mode & 0o777 == 0o600
+        release.touch()
+        if mode == 'concurrent':
+            await_file(first_ready, first)
+            assert generation(first_ready) == winner, 'concurrent writer replaced winner'
+    except AssertionError as error:
+        failures.append(f'{mode}: {error}')
+    finally:
+        release.touch()
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+assert not failures, '\n'.join(failures)
+print('PASS: killed and concurrent generation publishers preserve complete ownership')
+PY_GENERATION
+
 run_token="test-run-$$"
 auth_token="test-auth-$$"
 ready_file="$tmp/status.ready"

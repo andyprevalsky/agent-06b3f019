@@ -155,12 +155,15 @@ def verify(payload, minimum=3):
                 if isinstance(event, dict) and event.get('agent_id') is not None:
                     observed.add(event['agent_id'])
             candidates = observed & set(roots)
-            assert len(candidates) == 1 and observed == candidates, 'unbound composite stage'
-            stages.append((next(iter(candidates)), stage))
+            assert len(candidates) == 1, 'unbound composite stage'
+            stage_root = next(iter(candidates))
+            assert observed <= set(stage.get('tree') or {stage_root: {}}), 'unbound composite stage'
+            stages.append((stage_root, stage))
         assert {agent_id for agent_id, _ in stages} == set(roots), 'missing composite root'
     spans = defaultdict(lambda: defaultdict(list))
     usage = []
     rose_events = []
+    stage_owners = set()
     for stage_root, stage in stages:
         tree = stage.get('tree')
         if tree:
@@ -176,6 +179,8 @@ def verify(payload, minimum=3):
         else:
             assert len(roots) > 1, 'missing single-root tree'
             owned = {stage_root}
+        assert not (owned & stage_owners), 'overlapping stage ownership'
+        stage_owners.update(owned)
         for line in stage['worker_logs']:
             try:
                 event = json.loads(line) if isinstance(line, str) else line

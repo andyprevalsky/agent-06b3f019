@@ -12,6 +12,7 @@ symptoms:
   - local_start_services_exact_process_group_cleanup failed
   - "JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
   - test_boot_payload_fixture_cleanup_without_proc_reaps_detached_children failed
+  - "invalid bench log generation"
 tags:
   - benchmark-harness
   - process-groups
@@ -128,6 +129,49 @@ the benchmark blackbox in agents coverage and by the controller deploy gate.
 This fixture correction adds no production work or paid benchmark executions.
 The full fresh deployment loop and separate cloud outcome proof are still
 required; the local publication regression supplies no cloud acceptance credit.
+
+### October 1 recurrence in the native status server
+
+PR #1299 review finding 4153604581 identified another producer with the same
+create-before-write protocol: `cloudbench-status-server.py` opened the final
+`bench.log.generation` path with `O_EXCL`, then wrote its token. The existing
+shutdown fixture covered normal startup and ownership checks, but never paused
+this publication boundary. Searches for `invalid bench log generation` and
+`generation non atomic publication crash concurrent`, followed by the literal
+atomic-publication archive, identified this recurrence. Earlier fixes protected
+their fixture producers; the production status server repeated the class.
+
+The new compact control in the existing shutdown fixture runs the actual server
+and intercepts only the filesystem create boundary. Killing the writer before
+its first write leaves a final empty file; starting a second server while the
+writer is paused exposes that same empty file. Both actual restarts fail with
+`invalid bench log generation` on unchanged 9d6 source. This is a controlled
+owning reproduction of a review finding, not attribution of a live fleet failure.
+
+The fix writes, flushes and fsyncs a private sibling file, then publishes it with
+a non-replacing hard link. Concurrent losers read the complete winning token;
+normal cleanup removes only the writer's temporary path. Invalid existing tokens
+still fail closed. The change adds no retries, global registry, long-lived lock,
+log reset, timeout increase or provider call. The durable identity cannot be
+deleted or recomputed on every server restart because bounded log readers use it
+to detect generation changes; atomic publication is the narrow owner-level fix.
+
+The same fixture checks crash/restart and concurrent publishers through real
+HTTP log reads, including matching generation tokens and mode 0600. All previous
+shutdown assertions remain unchanged. The initial Mac run passed the new
+publication controls after the fix but correctly refused the later Linux-only
+`/proc/<pid>/environ` driver check. Native evidence and invocation corrections
+are kept separately under `.context/acceptance/proof85-cycle2-findings/`;
+only the native unchanged fixture can certify the full shutdown contract.
+The identical native full fixture failed in 0.372 seconds and passed in 1.567
+seconds after the fix. A separate first native invocation lacked `rg`; that
+environmental failure is preserved, and a checksum-verified real ripgrep binary
+was supplied only on this isolated fixture PATH. No assertion changed. The
+existing root test runner already invokes this file; `/deploy` Step 4cb now
+lists the same native command explicitly. Independent review verified the
+identical native fixture bindings and separately exercised the actual server's
+publication controls and rejection of an invalid existing token. This focused
+regression provides no cloud-fleet acceptance credit.
 
 ## Human feedback
 

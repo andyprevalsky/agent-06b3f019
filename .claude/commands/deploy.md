@@ -597,6 +597,8 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+# Native Linux with ripgrep: driver ownership reads /proc.
+bash scripts/tests/cloudbench-status-service-shutdown.test.sh
 bash scripts/tests/fleet-infra-canary.test.sh
 bash scripts/tests/fleet-infra-stability-proof.test.sh
 python3 scripts/tests/verify-successful-llm-queries.test.py

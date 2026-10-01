@@ -1436,14 +1436,14 @@ class BrowserAgentRecorder:
             )
         self._closed = True
         steel_media = await self._download_steel_hls_recording() if include_steel_media else None
-        if not self.frames and not steel_media:
+        if not self.frames and not steel_media and not self.replay_view_urls:
             return None
         source_frame_count = len(self.frames)
         playback_frames = self._build_playback_frames() if self.frames else []
         manifest_path = self.output_dir / "manifest.json"
         html_path = self.output_dir / "index.html"
         final_dom_path = await self._write_final_dom_artifact()
-        recording_source = "steel_hls" if steel_media else "screenshot_replay"
+        recording_source = "steel_hls" if steel_media else "screenshot_replay" if self.frames else "kernel_replay"
         manifest_path.write_text(
             json.dumps(
                 {
@@ -1555,9 +1555,9 @@ class BrowserAgentRecorder:
     def export_inline_html_bytes(self) -> Optional[bytes]:
         """Build a SINGLE self-contained replay HTML with every frame inlined as a
         base64 data URI, so it can be uploaded to Supabase Storage and iframed by
-        the front-end without any sibling assets. Works for both recording modes
-        (we always have screenshot frames). Returns None when there are no frames."""
-        if not self.frames:
+        the front-end without any sibling assets. Retained Kernel replay URLs
+        also remain playable when a promoted session captures no frames."""
+        if not self.frames and not self.replay_view_urls:
             return None
         # Inline the REAL captured frames (self.frames), NOT _build_playback_frames()
         # — the latter collapses every entry to frame_00001, so inlining it produced
@@ -1854,6 +1854,7 @@ function drawCursor(c) {{
   ctx.restore();
 }}
 function renderAt(tsMs) {{
+  if (!frames.length) return;
   playheadMs = Math.max(0, Math.min(totalMs, tsMs));
   const idx = frameIndexAtTime(playheadMs);
   const img = images[idx], f = frames[idx];
@@ -1934,7 +1935,8 @@ prefixVideo.onplay = () => {{ if (showingPrefix) playBtn.textContent = 'Pause'; 
 prefixVideo.onpause = () => {{ if (showingPrefix && !prefixVideo.ended) playBtn.textContent = 'Play'; }};
 prefixVideo.onended = () => {{
   if (prefixIndex + 1 < prefixVideoUrls.length) startPrefix(prefixIndex + 1);
-  else beginFrameReplay(true);
+  else if (frames.length) beginFrameReplay(true);
+  else playBtn.textContent = 'Play';
 }};
 playBtn.onclick = () => {{
   if (showingPrefix) {{

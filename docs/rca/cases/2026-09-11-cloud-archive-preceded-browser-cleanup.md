@@ -645,3 +645,88 @@ those two stacks. Clean receipts took 7.526 and 5.154 seconds; their recorded
 service identities, exact database containers and volumes were absent afterward.
 Appended terminal logs and the original snapshots remain retained. No unrelated
 process or database was touched, and neither failed gate receives proof credit.
+
+
+## Recurrence: native recording lost after an empty screenshot handoff, October 1
+
+Proof85 run `20261001-084827-31152`, owner
+`fbdaed7cb2e54929928a69cf217f3a93`, used immutable source
+`9d6b571a20f4442ea980e68d7bcc1b8f049e676a`. Nine task children returned
+records and guest cleanup acknowledgements. `polar-bu-063`, root
+`b5c2dde8-0468-4bf5-a51f-cbadd2d0cfdd`, failed owned evidence finalization
+with `archive: TimeoutError`. Its last snapshot at 09:03:55 UTC had FINISHED
+browser terminals but only an IN_PROGRESS recording, without an attachment.
+The strict collector then received HTTP500 from `/shutdown-health` with
+`driver exited without cleanup acknowledgement`. That collection error is a
+consequence of the failed guest barrier, not evidence of an OOM. The original
+slice remains rejected with zero acceptance credit.
+
+The browser task `997c87bb-459a-56ae-b3ee-e71b9c9fddc3` began Kernel replay
+at 08:59:18 UTC. Challenge recovery promoted a Steel session; the outgoing
+native finalizer logged `has_view_url=true` at 09:01:06 UTC. The raw provider
+response and signed URL were not captured, and fresh media reachability was not
+verified. The promoted screenshot
+timed out, and the final screenshot encountered a closed browser. Original
+recording scratch has zero frames and no player file. The first bad producer
+boundary is `BrowserAgentRecorder.close`: after changing to screenshot mode,
+it returned no recording when frames were empty, ignoring retained native
+replay segments. `export_inline_html_bytes` had the same empty-frame guard.
+Thus the prior handoff regression, which always captured a promoted screenshot,
+missed loss of an already captured recording. The cause of the original CDP and
+screenshot failures remains unproven.
+
+The new permanent browser blackbox executes the real recorder's native replay
+rotation and Kernel-to-Steel transition, then the real FE finalizer with failed
+screenshots. The identical test fails on the original recorder in 0.577 seconds
+and passes after the fix in 0.744 seconds. It requires a nonempty uploaded player
+and acknowledged FINISHED recording attachment, executes that player in a local
+browser, and checks both retained segments in order and the visible final video.
+It records zero screenshot frames; no frames or provider recordings are invented.
+A screenshot-only recorder with no captured evidence still returns no recording.
+Six existing handoff, player, native replay and backend-acknowledgement controls
+passed in 0.789 seconds. The complete owning browser domain then passed all 628
+registered cases in 40.112 seconds, using the activated environment and unchanged
+runner/fixture bounds; its exact source bindings are retained separately.
+
+Independent review found one new empty-frame control error: toggling skip idle
+called the frame renderer with no images. The same added case now captures page
+errors and toggles the real control before and after native segment completion.
+This final test failed on the draft in 1.339 seconds and passed with a one-line
+empty-frame render guard in 2.023 seconds, both from the activated agents
+environment. Six unchanged nearby controls pass on these final bytes in 0.863
+seconds; all 627 original browser test bodies remain AST-identical. The prior
+complete-domain result is not relabeled as execution of this final guard. The
+final canonical agents gate remains required. All player requests were aborted;
+these checks prove player sequencing, controls and attachment persistence, not
+native media availability. The new case is registered in the owning browser
+blackbox domain.
+
+The repair preserves retained native URLs through both empty-frame guards,
+labels the zero-frame manifest as `kernel_replay`, and keeps the last native video
+visible when no screenshot timeline follows it. Empty-frame rendering is a no-op.
+It adds no provider request,
+model call, polling service, global state or timeout. Work and memory remain
+bounded to the recorder's existing segment list; no per-fleet scan is added.
+Task definitions, prompts, models, evaluators, execution bounds and recording
+readiness requirements are unchanged.
+
+Before recovery, original guest logs and run records were archived privately:
+21 files, 20,582,869 source bytes, archive SHA-256
+`938e3542a8d168752949bbedc9e8bc23fac5081fb1024984dec52bef103b0c00`.
+The exact recording directory was also preserved outside the guest, archive
+SHA-256 `707cac036be03494f2ce828206c87861bd6987de8f73857a6b25cd98ed23b183`.
+Original cleanup records confirm the root deleted and its tree sealed, one exact
+Steel session closed with HTTP200, and no purchases. They do not replace the
+missing archive or guest acknowledgement. Private evidence, source/test hashes
+and unchanged RED/GREEN receipts are in
+`.context/acceptance/proof85-polar-runtime-rca/producer-diagnosis.receipt.private.json`;
+final source/test bindings, the corrected URL-observation limits and all retained
+receipts are in `producer-final-ready.receipt.private.json` in that directory.
+
+Archive searches covered `driver exited without cleanup acknowledgement` and
+`guest exited shutdown health 500 runtime evidence unsealed`; this is a producer
+recurrence of this recording/finalization case. The user required compact owning
+regressions and zero INFRA acceptance, so no broad suite or paid task was launched
+for diagnosis. The causal regression does not establish the exact unchanged
+benchmark outcome. That local RED/GREEN and fresh fleet proof remain outstanding;
+this case stays open.

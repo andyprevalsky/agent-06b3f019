@@ -9,6 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: scripts/verify_successful_llm_queries.py::verify derived proof success only from completed-query count
 symptoms:
   - "rose.complete.failed"
+  - "unbound composite stage"
   - "RoseDeadlineError"
   - "rose.complete idle for 120.0s (deadline 590.0s)"
   - "successful_llm_queries 28 despite a terminal model-request failure"
@@ -121,6 +122,43 @@ unchanged; the existing registered suite now has twelve cases. This does not
 accept replay, partial output or a failed request, and grants no fleet credit.
 Private source-bound evidence is under
 `.context/acceptance/proof84-main-integration/foundry-integration/`.
+
+### 2026-10-01 review recurrence: composite child ownership
+
+PR #1299 review finding 4153604599 exposed inconsistent ownership validation.
+The composite binding pre-pass required every observed agent ID to be the stage
+root, while the subsequent common tree walk intentionally accepts that root's
+connected descendants. The prior composite fixture contained roots only; the
+owned-child failure fixture used a single root. Neither exercised their valid
+combination. Archive searches used `unbound composite stage` and
+`composite roots child live query proof`; this is a recurrence in the existing
+proof owner, not an LLM/provider failure.
+
+The added case in the existing query evidence suite supplies three completed,
+correlated live lifecycles across two roots and a connected child. The real
+verifier rejected it with `unbound composite stage` on unchanged 9d6 source.
+Remove the conflicting root-only restriction: bind exactly one declared root,
+require every observed ID to belong to that stage's tree, and retain the common
+connected-tree validation. No query-count, timing, usage, completion, duplicate
+or terminal-failure checks change. The same case also rejects an unknown agent,
+another stage's root and a disconnected tree; an owned child terminal failure
+still invalidates all three successes.
+
+The initial formatted, identical focused command failed in 0.072 seconds and
+passed after the fix in 0.063 seconds. Independent review then reproduced two
+ownership gaps in that draft: another declared root could appear in a stage's
+tree without an event, and a child could belong to both stages. The same added
+case now includes both negative mutations, and the verifier requires disjoint
+validated stage trees before issuing proof credit. This final, unchanged case
+failed on the draft in 0.046 seconds and passed after the correction in 0.047
+seconds. Independent review confirmed both controls and the original ownership
+and terminal-failure checks. All twelve prior cases remain unchanged; the
+registered thirteen-case suite passed in 0.049 seconds. Private frozen
+source/test and native evidence receipts live under
+`.context/acceptance/proof85-cycle2-findings/`. The active campaign source was
+kept immutable in a separate checkout throughout this diagnosis. This is
+acceptance-observer regression proof, not credit for any live benchmark or
+resolution of the original upstream provider-stall gap.
 
 ## Human feedback
 
