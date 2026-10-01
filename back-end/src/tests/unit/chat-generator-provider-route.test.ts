@@ -351,8 +351,8 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
 
 // Cerebras Qwen is rate-capped hard at the org level (5 req/min across all
 // models), so a burst of concurrent chats trips a 402 `quota` before any
-// caller-visible content. Race same-model spill against a fast paid fallback so
-// a slow Qwen host cannot consume the chat completion deadline.
+// caller-visible content. Try the same-model spill first; the separate stalled
+// response test verifies that a fast paid fallback starts after the hedge delay.
 async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
@@ -398,9 +398,10 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
     );
     const sameModelBody = openRouterBodies.find((body) => body.model === 'qwen/qwen3.8-27b');
     assert.ok(sameModelBody, 'fallover must attempt rose-fast Qwen');
-    assert.ok(
-      openRouterBodies.some((body) => body.model === 'z-ai/glm-5.3-flash'),
-      'fallover must also start the fast paid route'
+    assert.equal(
+      openRouterBodies.length,
+      1,
+      'a prompt same-model reply must avoid a second paid provider request'
     );
     // Provider unpinned: prefer Cerebras then Groq, but allowed to spill past the cap.
     const provider = sameModelBody.provider as {
