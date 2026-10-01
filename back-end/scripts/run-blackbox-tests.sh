@@ -426,22 +426,22 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-PORT="$PORT" \
-DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
-BACKEND_PID=$!
-
+source "$SCRIPT_DIR/process-tree.sh"
+BACKEND_PID=""
 cleanup() {
-  if kill -0 "$BACKEND_PID" >/dev/null 2>&1; then
-    kill "$BACKEND_PID" >/dev/null 2>&1 || true
-    wait "$BACKEND_PID" 2>/dev/null || true
-  fi
+  stop_process_tree "$BACKEND_PID"
+  BACKEND_PID=""
 
   if [[ -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT INT TERM
+
+PORT="$PORT" \
+DISABLE_GMAIL_SYNC=1 \
+npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+BACKEND_PID=$!
 
 READY=0
 for _ in $(seq 1 120); do
