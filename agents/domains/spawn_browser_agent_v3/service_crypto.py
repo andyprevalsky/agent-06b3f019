@@ -538,6 +538,18 @@ async def fetch_recent_otps(user_id: str, api_url: str, api_key: str) -> List[Ex
 # AUTH OPTIONS PROMPT BUILDING
 # ========================================
 
+# Dev tunnel hosts fronting a local stack; only these (plus localhost) may
+# override their realm with ?authRealm=. Keep in sync with the backend's
+# canonicalAuthRealm (back-end/src/providers/authRealm.ts).
+AUTH_REALM_OVERRIDE_HOST_SUFFIXES = (
+    ".ngrok-free.dev",
+    ".ngrok-free.app",
+    ".ngrok.app",
+    ".ngrok.io",
+    ".loca.lt",
+    ".trycloudflare.com",
+)
+
 
 def auth_realm_from_url(url: str) -> str:
     """Best-effort realm derivation for the auth-options request."""
@@ -555,9 +567,7 @@ def auth_realm_from_url(url: str) -> str:
     host = (parsed.hostname or parsed.path.split("/")[0]).lower()
     if host.startswith("www."):
         host = host[4:]
-    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(
-        (".ngrok-free.dev", ".ngrok.app", ".ngrok.io", ".loca.lt")
-    )
+    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(AUTH_REALM_OVERRIDE_HOST_SUFFIXES)
     if allow_query_override:
         query = parse_qs(parsed.query)
         override = (query.get("authRealm") or query.get("auth_realm") or [""])[0]
