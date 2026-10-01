@@ -91,7 +91,13 @@ _AUTH_FLOW_URL_WORDS = frozenset({
 })
 # Joined path words such as ``emailsignup`` or ``wplogin``.
 _AUTH_FLOW_URL_WORD_SUFFIXES = ("login", "signin", "signup")
-_AUTH_FLOW_URL_BIGRAMS = re.compile(r"\b(?:log|sign) (?:in|on|up)\b")
+# A route segment that ends in one of these after at most one qualifier
+# (``ServiceLogin``, ``user-sign-in``) is an auth step; a longer slug such as
+# ``i_cant_log_in`` is a post title that only mentions one.
+_AUTH_FLOW_URL_TAIL_PHRASES = (
+    ("login",), ("signin",), ("signup",), ("log", "in"), ("log", "on"), ("sign", "in"), ("sign", "on"), ("sign", "up"),
+)
+_URL_FILE_EXTENSION_RE = re.compile(r"\.[a-z0-9]{1,5}$", re.IGNORECASE)
 
 # Payment field patterns (case-insensitive, check name, id, autocomplete, placeholder).
 # Generic checkout words ("billing", "payment", "expir") are deliberately absent:
@@ -530,20 +536,33 @@ def is_click_write_lock_eligible_control(element: Any) -> bool:
     return True
 
 
-def _is_auth_flow_url(url: str) -> bool:
-    """True when a host label or a path/fragment word marks a login/signup flow.
+def _is_auth_flow_segment(segment: str) -> bool:
+    tokens = _action_words(_URL_FILE_EXTENSION_RE.sub("", segment)).split()
+    if not tokens:
+        return False
+    if "".join(tokens) in _AUTH_FLOW_URL_WORDS:
+        return True
+    if len(tokens) == 1:
+        return tokens[0].endswith(_AUTH_FLOW_URL_WORD_SUFFIXES)
+    return any(
+        tuple(tokens[-len(phrase):]) == phrase and len(tokens) - len(phrase) <= 1
+        for phrase in _AUTH_FLOW_URL_TAIL_PHRASES
+    )
 
-    The query string is ignored: ``?redirect_after_login=/compose/post`` names
+
+def _is_auth_flow_url(url: str) -> bool:
+    """True when a host label or a whole path/fragment segment is a login/signup step.
+
+    Segments are judged whole: ``/login``, ``/i/flow/signup``, ``wp-login.php``
+    are auth steps, while a post slug that mentions one (``i_cant_log_in``,
+    ``how_to_register``) is a public thread whose reply box still posts. The
+    query string is ignored: ``?redirect_after_login=/compose/post`` names
     where to go after auth, not the page the agent is on.
     """
     parsed = urlparse(url)
-    host_labels = (parsed.hostname or "").lower().split(".")
-    route = unquote(f"{parsed.path} {parsed.fragment}")
-    words = _action_words(route).split()
-    for word in [*host_labels, *words]:
-        if word in _AUTH_FLOW_URL_WORDS or word.endswith(_AUTH_FLOW_URL_WORD_SUFFIXES):
-            return True
-    return _AUTH_FLOW_URL_BIGRAMS.search(" ".join(words)) is not None
+    host_labels = (parsed.hostname or "").split(".")
+    segments = unquote(f"{parsed.path}/{parsed.fragment}").split("/")
+    return any(_is_auth_flow_segment(part) for part in (*host_labels, *segments))
 
 
 def is_social_domain(url: str) -> bool:

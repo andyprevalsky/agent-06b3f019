@@ -4,7 +4,8 @@ The write-lock classifiers in ``write_lock.py`` judge a label. This module
 decides WHICH label: the control a click lands on (not every element under
 the pointer, not hidden descendants, not neighbouring cards), or the control
 an Enter key would activate (the form's default button, not every button in
-the form). It also recognizes clicks into a text field, which cannot commit,
+the form; a form without one leaves Enter to page script, so its buttons all
+count). It also recognizes clicks into a text field, which cannot commit,
 and hyperlinks, which cannot post or send.
 
 Two sources produce the same "control facts" dict:
@@ -17,8 +18,9 @@ Two sources produce the same "control facts" dict:
   element, and the form's default button.
 
 ``target_from_facts`` turns those facts into the signals the classifiers read.
-Every function returns ``None`` when it cannot resolve the target so callers
-keep their previous signal.
+Every function returns ``None`` when it cannot resolve the target (including a
+point or focus inside a cross-origin frame) so callers keep their previous
+signal.
 
     action ──► facts (cached AX node │ live PROBE_JS) ──► WriteLockTarget
                                                           ├─ commits=False → no lock
@@ -517,25 +519,46 @@ function (mode, intent, x, y) {
         }
         return el;
     };
+    // A form with no submit button gives Enter no default action, so page script
+    // decides what it triggers (chat composers send through a type="button").
+    // Every visible button the form owns is a candidate.
+    const formButtonNames = (form) => {
+        const names = [];
+        const candidates = new Set([...Array.from(form.elements), ...Array.from(form.querySelectorAll('[role="button"]'))]);
+        for (const el of candidates) {
+            const button = el.localName === 'button' || (el.localName === 'input' && el.type === 'button') || roleOf(el) === 'button';
+            if (!button || hidden(el)) continue;
+            const name = accName(el);
+            if (name && !names.includes(name)) names.push(name);
+            if (names.length >= 10) break;
+        }
+        return names;
+    };
     // Enter semantics (HTML implicit submission): a single-line field in a form
     // activates the form's default button (first submit button in tree order);
     // any other field receives the key itself; a focused control is activated.
     const enterSubject = (focus) => {
         if (!focus || PAGE_CONTAINERS.has(focus.localName)) return {via: 'none', subject: null, multiline: false};
         if (isEditable(focus)) {
-            if (focus.localName === 'input' && focus.form) {
-                const defaultButton = Array.from(focus.form.elements).find(isSubmitter);
-                if (defaultButton) return {via: 'default_button', subject: defaultButton, multiline: false};
+            const defaultButton = focus.form ? Array.from(focus.form.elements).find(isSubmitter) : null;
+            if (defaultButton && focus.localName === 'input') {
+                return {via: 'default_button', subject: defaultButton, multiline: false};
             }
             const multiline = focus.localName === 'textarea'
                 || (focus.localName !== 'input' && (focus.isContentEditable || focus.getAttribute('aria-multiline') === 'true'));
-            return {via: 'field', subject: focus, multiline};
+            const formButtons = focus.form && !defaultButton ? formButtonNames(focus.form) : [];
+            return {via: 'field', subject: focus, multiline, formButtons};
         }
         return {via: 'control', subject: clickSubject(focus), multiline: false};
     };
 
     let start = mode === 'element' ? this : (mode === 'point' ? deepFromPoint(Number(x), Number(y)) : deepActive());
     if (start && !isElement(start)) start = start.parentElement;
+    // A cross-origin frame hides the element actually hit or focused; its title
+    // says nothing about that control, so leave the target unresolved.
+    if (start && mode !== 'element' && (start.localName === 'iframe' || start.localName === 'frame')) {
+        return JSON.stringify({ok: false, reason: 'opaque_frame'});
+    }
     let resolved;
     if (intent === 'enter') {
         resolved = enterSubject(mode === 'point' && start ? clickSubject(start) : start);
@@ -548,6 +571,7 @@ function (mode, intent, x, y) {
         via: resolved.via,
         multiline: !!resolved.multiline,
         target: resolved.subject ? describe(resolved.subject) : null,
+        form_buttons: resolved.formButtons || [],
     });
 }
 """
@@ -590,7 +614,12 @@ async def _run_probe(session: Any, *, element: Any, coords: Optional[dict], inte
     except Exception as error:
         logger.warning("Write-lock probe unavailable (%s): %s", mode, str(error)[:200])
         return None
-    return data if isinstance(data, dict) and data.get("ok") is True else None
+    if not isinstance(data, dict):
+        return None
+    if data.get("ok") is not True:
+        logger.info("Write-lock probe left the %s target unresolved (%s): %s", intent, mode, data.get("reason"))
+        return None
+    return data
 
 
 async def probe_click_target(session: Any, coords: Optional[dict]) -> Optional[WriteLockTarget]:
@@ -627,4 +656,14 @@ async def probe_enter_target(
     via = data.get("via")
     if via == "field" and typed_newline and data.get("multiline"):
         return WriteLockTarget(commits=False, reason="newline typed into a multi-line field")
-    return target_from_facts(target, typing=via == "field")
+    resolved = target_from_facts(target, typing=via == "field")
+    buttons = [name for name in (_collapse(value) for value in data.get("form_buttons") or []) if name]
+    if not resolved.commits or not buttons:
+        return resolved
+    return WriteLockTarget(
+        commits=True,
+        label="\n".join(part for part in (resolved.label, *buttons) if part),
+        return_signal="\n".join(part for part in (resolved.return_signal, *buttons) if part),
+        reason=resolved.reason,
+        navigates=resolved.navigates,
+    )

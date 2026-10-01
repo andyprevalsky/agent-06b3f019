@@ -143,11 +143,16 @@ def _free_port() -> int:
 
 
 class _CorpusServer:
-    def __init__(self, cases: list[dict]) -> None:
-        pages = {
-            f"/case/{case['id']}": _PAGE_SHELL.format(title=case["id"], body=case["html"]).encode("utf-8")
-            for case in cases
-        }
+    """Serves each case page; ``{frame_origin}`` in a case points at another origin's ``frame_html``."""
+
+    def __init__(self, cases: list[dict], *, frame_origin: str = "") -> None:
+        pages = {}
+        for case in cases:
+            body = case["html"].replace("{frame_origin}", frame_origin)
+            pages[f"/case/{case['id']}"] = _PAGE_SHELL.format(title=case["id"], body=body).encode("utf-8")
+            if case.get("frame_html"):
+                frame = _PAGE_SHELL.format(title=f"{case['id']} frame", body=case["frame_html"])
+                pages[f"/frame/{case['id']}"] = frame.encode("utf-8")
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
@@ -296,7 +301,8 @@ async def _run_case(browser: _Browser, server: _CorpusServer, case: dict) -> tup
 
 
 # Real commits that sit next to the corpus exemptions (links, nameless
-# controls, Enter in a field). They locked before the fix and must still lock.
+# controls, Enter in a field, a click the probe cannot see into). They locked
+# before the fix and must still lock.
 _EXEMPTION_GUARD_CASES = [
     {
         "id": "guard-link-styled-purchase-commit",
@@ -339,11 +345,34 @@ _EXEMPTION_GUARD_CASES = [
         "action": {"action": "click", "target": "coordinates"},
         "expect": "purchase",
     },
+    {
+        "id": "guard-enter-in-buttonless-form-reads-script-buttons",
+        "url": "https://www.example-shop.com/messages/order-42",
+        "html": (
+            '<form onsubmit="return false"><input aria-label="Type a message" data-wl-target>'
+            '<button type="button">Send</button></form>'
+        ),
+        "action": {"action": "press_key", "params": {"key": "Enter"}, "focus_target": True},
+        "expect": "email_send",
+    },
+    {
+        "id": "guard-click-into-cross-origin-frame-keeps-page-signal",
+        "url": "https://www.example-shop.com/checkout/review",
+        "html": (
+            "<h2>Review and place order</h2><p>Total $42.10</p>"
+            '<iframe title="PayPal" data-wl-target style="width:320px;height:80px;border:0" '
+            'src="{frame_origin}/frame/guard-click-into-cross-origin-frame-keeps-page-signal"></iframe>'
+        ),
+        "frame_html": '<button type="button">Pay with PayPal</button>',
+        "action": {"action": "click", "target": "coordinates"},
+        "expect": "purchase",
+    },
 ]
 
 
 async def _resolve_cases(cases: list[dict]) -> list[str]:
-    server = _CorpusServer(cases)
+    frames = _CorpusServer(cases) if any(case.get("frame_html") for case in cases) else None
+    server = _CorpusServer(cases, frame_origin=frames.base if frames else "")
     browser = _Browser()
     failures: list[str] = []
     try:
@@ -368,6 +397,8 @@ async def _resolve_cases(cases: list[dict]) -> list[str]:
     finally:
         await browser.close()
         server.close()
+        if frames is not None:
+            frames.close()
     return failures
 
 
@@ -410,6 +441,31 @@ def test_held_out_word_boundary_grammar():
         assert is_submit_button(label), label
 
 
+def test_held_out_auth_flow_routes():
+    """Only a whole route segment or host label that is an auth step turns the social lock off."""
+    from browser_tools.write_lock import is_social_domain
+
+    for url in (
+        "https://www.reddit.com/r/help/comments/abc123/i_cant_log_in/",
+        "https://www.reddit.com/r/startups/comments/x1y2z3/how_to_register_an_llc/",
+        "https://www.reddit.com/r/sysadmin/comments/q9w8e7/sso_setup_question/",
+        "https://www.reddit.com/r/webdev/comments/k4j5h6/oauth2-authentication-flow-explained/",
+        "https://www.linkedin.com/posts/jane-doe_why-i-stopped-using-sign-up-walls-activity-1234",
+    ):
+        assert is_social_domain(url), url
+    for url in (
+        "https://www.reddit.com/login/",
+        "https://www.reddit.com/account/register/",
+        "https://www.facebook.com/login.php",
+        "https://x.com/i/flow/login",
+        "https://www.instagram.com/accounts/emailsignup/",
+        "https://www.linkedin.com/uas/user-sign-in",
+        "https://www.tiktok.com/oauth2/authorize?client_key=abc",
+        "https://login.discord.com/channels/@me",
+    ):
+        assert not is_social_domain(url), url
+
+
 def test_anti_reward_hack_corpus_not_embedded_in_production():
     """Classifier/probe code must not import the fixture or paste its labels or ids."""
     from browser_tools.write_lock import PURCHASE_BUTTON_PHRASES, RETURN_BUTTON_PHRASES
@@ -443,6 +499,7 @@ async def run_all_tests():
     await r.record_async("exemptions_keep_real_commits_locked", test_exemptions_keep_real_commits_locked)
     r.record("held_out_registrable_domains_stay_separate", test_held_out_registrable_domains_stay_separate)
     r.record("held_out_word_boundary_grammar", test_held_out_word_boundary_grammar)
+    r.record("held_out_auth_flow_routes", test_held_out_auth_flow_routes)
     r.record(
         "anti_reward_hack_corpus_not_embedded_in_production",
         test_anti_reward_hack_corpus_not_embedded_in_production,
