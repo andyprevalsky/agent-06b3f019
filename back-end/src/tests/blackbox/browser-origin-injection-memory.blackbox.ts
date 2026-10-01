@@ -96,20 +96,29 @@ async function main() {
   });
   try {
     // Build in Postgres so fixture construction cannot be the Node memory sink.
+    // Aggregate serialized records before one JSONB parse: jsonb_agg retains
+    // the full nested object accumulator and can exhaust the shared Docker VM.
     await prisma.$executeRaw`
       INSERT INTO "IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
       SELECT ${randomUUID()}, ${userId}, ${bigOrigin},
-        jsonb_build_array(jsonb_build_object('name', 'DocsErrors',
-          'objectStores', jsonb_build_array(jsonb_build_object('name', 'Errors',
-            'records', (SELECT jsonb_agg(jsonb_build_object('key', 'record-key-' || i,
+        ('[{"name":"DocsErrors","objectStores":[{"name":"Errors","records":[' ||
+          (SELECT string_agg(jsonb_build_object('key', 'record-key-' || i,
               'value', jsonb_build_object('key', 'record-key-' || i,
-                'value', md5(i::text) || md5((i * 7)::text))))
-              FROM generate_series(1, ${RECORDS}::int) i))))),
+                'value', md5(i::text) || md5((i * 7)::text)))::text, ',' ORDER BY i)
+            FROM generate_series(1, ${RECORDS}::int) i) || ']}]}]')::jsonb,
         'synthetic-origin', now()`;
-    const [expected] = await prisma.$queryRaw<Array<{ hash: string; bytes: number }>>`
-      SELECT md5(databases::text) AS hash, octet_length(databases::text)::int AS bytes
+    const [expected] = await prisma.$queryRaw<
+      Array<{ hash: string; bytes: number; records: number }>
+    >`
+      SELECT md5(databases::text) AS hash, octet_length(databases::text)::int AS bytes,
+        jsonb_array_length(databases->0->'objectStores'->0->'records') AS records
       FROM "IndexedDBOrigin" WHERE "userId" = ${userId} AND origin = ${bigOrigin}`;
     assert(expected.bytes > 70_000_000, 'fixture lost the observed large-origin shape');
+    assert(expected.records === RECORDS, 'fixture lost records during construction');
+    assert(
+      expected.bytes === 78_617_865 && expected.hash === '9e9427f49de602f7a41fffc175aec0d8',
+      'fixture canonical bytes changed during construction'
+    );
     const proc = spawn(
       process.execPath,
       [

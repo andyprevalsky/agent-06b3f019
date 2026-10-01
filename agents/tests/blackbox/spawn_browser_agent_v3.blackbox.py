@@ -1379,18 +1379,50 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
 
-def test_browser_navigation_uses_event_timeout_without_global_patch():
-    """Navigation follows browser-use's event budget without mutating asyncio globally."""
+async def test_browser_navigation_uses_event_timeout_without_global_patch():
+    """The actual CDP navigation receives the event budget without global mutation."""
     import browser_use.browser.session as browser_session_mod
     from browser_use.browser.events import NavigateToUrlEvent
+    from types import MethodType
 
     from domains.spawn_browser_agent_v3 import handler as handler_mod
     from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
-    upstream_source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    original_wait_for = asyncio.wait_for
+    budgets = []
+
+    async def observe_wait_for(awaitable, timeout):
+        assert asyncio.wait_for is original_wait_for
+        budgets.append(timeout)
+        return await original_wait_for(awaitable, timeout)
+
+    navigate = AsyncMock(return_value={"loaderId": "offline-loader"})
+    cdp_session = SimpleNamespace(
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Page=SimpleNamespace(navigate=navigate))),
+        session_id="offline-session",
+    )
+    session = SimpleNamespace(
+        agent_focus_target_id="offline-target",
+        session_manager=SimpleNamespace(get_target=lambda _: SimpleNamespace(url="about:blank")),
+        get_or_create_cdp_session=AsyncMock(return_value=cdp_session),
+        event_bus=SimpleNamespace(dispatch=AsyncMock()),
+        _close_extension_options_pages=AsyncMock(),
+        logger=MagicMock(),
+    )
+    session._navigate_and_wait = MethodType(browser_session_mod.BrowserSession._navigate_and_wait, session)
+    event = NavigateToUrlEvent(url="https://example.com", wait_until="commit")
+    assert event.event_timeout == NAVIGATE_TO_URL_TIMEOUT_SECONDS
+    # Observe only browser-use's module binding; never alter the asyncio module.
+    observed_asyncio = SimpleNamespace(**vars(asyncio))
+    observed_asyncio.wait_for = observe_wait_for
+    with patch.object(browser_session_mod, "asyncio", observed_asyncio):
+        await browser_session_mod.BrowserSession.on_NavigateToUrlEvent(session, event)
+    assert budgets == [NAVIGATE_TO_URL_TIMEOUT_SECONDS], budgets
+    navigate.assert_awaited_once_with(
+        params={"url": event.url, "transitionType": "address_bar"}, session_id="offline-session"
+    )
+    assert asyncio.wait_for is original_wait_for
     handler_source = Path(handler_mod.__file__).read_text(encoding="utf-8")
-    assert "nav_timeout = 20.0" not in upstream_source
-    assert NavigateToUrlEvent(url="https://example.com").event_timeout == NAVIGATE_TO_URL_TIMEOUT_SECONDS
     assert "apply_browser_use_navigate_timeout_patch" not in handler_source
 
 
@@ -21919,7 +21951,7 @@ async def run_all_tests():
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
-    r.record(
+    await r.record_async(
         "browser_navigation_uses_event_timeout_without_global_patch",
         test_browser_navigation_uses_event_timeout_without_global_patch,
     )

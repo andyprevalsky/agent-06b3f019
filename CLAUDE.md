@@ -146,6 +146,12 @@ For direct agent tests, run from `agents/` with `source venv/bin/activate`;
 an absolute venv Python alone leaves subprocess `python3` on the asdf shim.
 Install the matching browser once with `python -m playwright install chromium`
 inside that activated venv before browser blackbox tests.
+Use the browser-use version pinned in `agents/requirements.txt`: native
+navigation must forward the event's timeout to CDP. The browser blackbox checks
+that actual path and rejects a global asyncio patch. Resolve Python dependency
+changes against the complete manifest and run `python -m pip check` before
+refreshing cloud dependency snapshots; an old pool fingerprint cannot certify
+the new environment.
 On Mac, a failed Docker database setup must stop before any shared-system-PG
 reset. `scripts/tests/setup-db-concurrency.test.sh` covers that boundary.
 For explicit isolated coverage URLs, use `BACKEND_COVERAGE_DATABASE_URL` with

@@ -758,6 +758,7 @@ import fcntl
 import glob
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -1311,7 +1312,11 @@ elif args[:2] == ["machine", "clone"]:
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad",
-            "private_ip": f"fdaa::{machine_id[:4]}",
+            # Preserve the full machine identity in a fixture-owned IPv6
+            # namespace; a four-digit UUID prefix can alias another guest.
+            "private_ip": str(ipaddress.IPv6Address(
+                (0xFDAA << 112) | (0xC10D << 64) | int(machine_id, 16)
+            )),
             "config": {"mounts": [{"volume": volume_id, "size_gb": 40}],
                        "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                  "memory_mb": vm_memory}},

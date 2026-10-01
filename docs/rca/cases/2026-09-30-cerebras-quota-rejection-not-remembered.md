@@ -124,6 +124,34 @@ bind identical final fixture bytes under
 `.context/acceptance/proof84-main-integration/foundry-integration/`; network
 connections were forbidden, and these checks earn no benchmark credit.
 
+### 2026-10-01 coverage recurrence: cancellation fixture shared its timeout arm
+
+The canonical integrated coverage gate failed the sibling-success assertion in
+`test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated`. Runtime logging
+showed that the shared GET hit the fixture's 40-millisecond timeout before the
+fixture released its mocked response. Production's two-second RPC budget was
+unchanged. The test applied its deliberately short timeout to both the positive
+cancellation handshake and the requests intentionally held open to test timeout.
+
+An unchanged private launcher pauses the scheduler for 80 milliseconds at that
+handshake in the actual registered test. Before the fixture correction it fails
+at `assert await sibling is True` with one shared-read timeout warning (0.314
+seconds). The same pause and assertions pass after scoping the existing
+40-millisecond override only to the deliberate timeout arms (0.413 seconds).
+Those ten-reader and POST arms retain their original 40-millisecond and
+300-millisecond limits, result assertions, request counts and pending-task checks.
+The cancellation handshake exercises the unchanged production RPC budget.
+No production code, production cap, provider call or extra test suite changed.
+
+This is a recurrence in the cooldown regression fixture, not evidence that
+production sibling cancellation failed. Original failing coverage and the
+scheduler-pause RED/GREEN receipts remain private under
+`.context/acceptance/proof84-agents-contract-rca/`. Archive searches were
+`cerebras_cooldown_rpc_is_bounded` and `cooldown singleflight cancellation`.
+The existing Rose registration continues to own the corrected case. On the
+actually adopted dependency environment its complete owning domain passes all
+201 cases in 10.435 seconds; production Cerebras bytes remain unchanged.
+
 ## Human feedback
 
 Use the existing waterfall to preemptively avoid rate-limited providers. Fix

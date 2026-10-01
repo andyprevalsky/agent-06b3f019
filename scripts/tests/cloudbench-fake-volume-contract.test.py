@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Admit the lifecycle fixture's real provider inventories through snapshot preflight."""
 
+import ipaddress
 import json
 import os
 import re
@@ -48,19 +49,35 @@ def main() -> None:
         )
         app = re.search(r'^BENCH_APP = "([^"]+)"', fake_source, re.MULTILINE).group(1)
 
-        def clone(source: str, name: str) -> str:
+        def clone(source: str, name: str, *, identity: str | None = None) -> str:
+            command = [
+                str(fly),
+                "machine",
+                "clone",
+                source,
+                "--name",
+                name,
+                "-a",
+                app,
+                "--json",
+            ]
+            if identity is not None:
+                # Execute the actual provider with distinct machine UUIDs that
+                # share the historical four-digit address prefix. The second
+                # UUID supplies a distinct volume identity, as a real clone does.
+                command = [
+                    sys.executable,
+                    "-c",
+                    "import runpy,sys,uuid; "
+                    f"machine=uuid.UUID({identity!r}); "
+                    "identities=iter((machine,uuid.UUID(int=machine.int^(1<<127)))); "
+                    "uuid.uuid4=lambda:next(identities); "
+                    "sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')",
+                    str(fake),
+                    *command[1:],
+                ]
             subprocess.run(
-                [
-                    str(fly),
-                    "machine",
-                    "clone",
-                    source,
-                    "--name",
-                    name,
-                    "-a",
-                    app,
-                    "--json",
-                ],
+                command,
                 env=env,
                 check=True,
                 capture_output=True,
@@ -126,6 +143,36 @@ def main() -> None:
         first = clone("aaaa0000000001", "cloudbench-volume-contract-primary")
         preflight(first)
         preflight(clone(first, "cloudbench-volume-contract-worker"))
+        left = clone(
+            "aaaa0000000001",
+            "cloudbench-address-contract-left",
+            identity="f5319f05-e70a-4500-8000-000000000001",
+        )
+        right = clone(
+            "aaaa0000000001",
+            "cloudbench-address-contract-right",
+            identity="f5311cec-e893-4200-8000-000000000002",
+        )
+        machines = json.loads((base / "state.json").read_text())["machines"]
+        addresses = {
+            row["id"]: ipaddress.IPv6Address(row["private_ip"])
+            for row in machines
+            if row["id"] in {left, right}
+        }
+        assert left != right and left[:4] == right[:4]
+        assert addresses[left] != addresses[right], (
+            "distinct fake machines share a private address and misroute their status proxies"
+        )
+        for machine_id in (left, right):
+            matches = [
+                row
+                for row in machines
+                if row.get("private_ip")
+                and ipaddress.IPv6Address(row["private_ip"]) == addresses[machine_id]
+            ]
+            assert len(matches) == 1 and matches[0]["id"] == machine_id, (
+                "the proxy private-address selector must resolve the intended machine"
+            )
         subprocess.run(
             [
                 "bash",

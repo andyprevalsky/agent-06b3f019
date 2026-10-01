@@ -5145,10 +5145,7 @@ async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
     def offline_client(*args, **kwargs):
         return real_client(transport=httpx.MockTransport(handler), trust_env=False)
 
-    with (
-        patch("providers.rose.cerebras._COOLDOWN_RPC_TIMEOUT_S", 0.04),
-        patch("providers.rose.cerebras.httpx.AsyncClient", offline_client),
-    ):
+    with patch("providers.rose.cerebras.httpx.AsyncClient", offline_client):
         try:
             first = asyncio.create_task(cb._cerebras_on_cooldown(scope, "offline-fake"))
             await entered.wait()
@@ -5166,18 +5163,21 @@ async def test_cerebras_cooldown_rpc_is_bounded_and_cancellation_isolated():
             cb._reset_cerebras_cooldown_cache()
             release.clear()
             entered.clear()
-            # The mocked request has no IO timeout of its own. A whole-RPC
-            # budget must release all ten callers, even with shielded lookup.
-            results = await asyncio.wait_for(
-                asyncio.gather(*(cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=0.3
-            )
-            assert results == [False] * 10
-            assert seen == ["GET", "GET"]
-            await asyncio.sleep(0)
-            assert not cb._cooldown_reads
-            await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=0.3)
-            assert await cb._cerebras_on_cooldown(scope, "offline-fake") is True
-            assert seen == ["GET", "GET", "POST"]
+            # Keep the real RPC budget for the cancellation/response handshake.
+            # The short test budget belongs only to requests deliberately held open.
+            with patch("providers.rose.cerebras._COOLDOWN_RPC_TIMEOUT_S", 0.04):
+                # The mocked request has no IO timeout of its own. A whole-RPC
+                # budget must release all ten callers, even with shielded lookup.
+                results = await asyncio.wait_for(
+                    asyncio.gather(*(cb._cerebras_on_cooldown(scope, "offline-fake") for _ in range(10))), timeout=0.3
+                )
+                assert results == [False] * 10
+                assert seen == ["GET", "GET"]
+                await asyncio.sleep(0)
+                assert not cb._cooldown_reads
+                await asyncio.wait_for(cb._mark_cerebras_cooldown(scope, "offline-fake", 30), timeout=0.3)
+                assert await cb._cerebras_on_cooldown(scope, "offline-fake") is True
+                assert seen == ["GET", "GET", "POST"]
         finally:
             pending = list(cb._cooldown_reads.values())
             for task in pending:

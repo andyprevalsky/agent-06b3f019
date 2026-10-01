@@ -14078,6 +14078,7 @@ def test_local_automatic_port_range_excludes_reported_ephemeral_window():
 def test_local_start_services_limits_automatic_system_postgres_to_linux():
     """Darwin isolated runs retain Docker selection or an explicit system-PG opt-in."""
     from unittest.mock import Mock, patch
+    from types import SimpleNamespace
 
     from benchmarks import local as local_bench
 
@@ -14091,16 +14092,7 @@ def test_local_start_services_limits_automatic_system_postgres_to_linux():
     ]
     with tempfile.TemporaryDirectory() as tmp:
         for index, (platform, configured, expected) in enumerate(cases):
-            context_dir = Path(tmp) / f"platform-{index}"
-            stack = local_bench.ServiceStack(
-                run_id=f"platform-{index}",
-                context_dir=context_dir,
-                manifest_path=context_dir / "services.json",
-                service_log=context_dir / "services.log",
-                isolated=True,
-                workspace_name=f"blackbox-platform-{index}",
-                base_port=55130,
-            )
+            args = SimpleNamespace(use_existing=False, shared_stack=False, run_id=f"platform-{index}", base_port=55130)
             environment = {"BENCHMARK_SEED_DUMP": str(Path(tmp) / "canonical.dump")}
             if configured is not None:
                 environment["ROSE_USE_SYSTEM_PG"] = configured
@@ -14109,10 +14101,14 @@ def test_local_start_services_limits_automatic_system_postgres_to_linux():
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch.object(local_bench.sys, "platform", platform),
+                patch.object(local_bench, "BENCHMARK_CONTEXT_ROOT", Path(tmp)),
+                patch.object(local_bench, "allocate_port_range", return_value=55130),
                 patch.object(local_bench.subprocess, "Popen", return_value=process) as launch,
                 patch.object(local_bench, "wait_for_services", return_value=manifest),
                 patch.object(local_bench, "_release_port_range"),
             ):
+                stack = local_bench.build_service_stack(args)
+                assert stack.use_system_postgres is (expected == "true")
                 assert local_bench.start_services(stack, clean_first=False) == (process, manifest)
                 launch.assert_called_once()
                 args, kwargs = launch.call_args
@@ -18800,9 +18796,202 @@ def test_predeploy_selector_rejects_production_only_tasks():
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
 
 
+async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
+    """Keep native checks serial while existing live judge I/O progresses.
+
+    These checks only spawn isolated subprocesses. Defer their BlackboxResult
+    recording until judges finish so capture resets remain on the main loop.
+    """
+    import inspect
+
+    stop = threading.Event()
+    outcomes = []
+
+    def run_case(case):
+        try:
+            returned = case()
+            if inspect.iscoroutine(returned):
+                returned.close()
+                raise AssertionError("async subprocess case must not pass without executing its assertions")
+        except Exception as error:
+            return error
+        return None
+
+    async def run_subprocess_cases():
+        for name, case in subprocess_cases:
+            if stop.is_set():
+                break
+            outcomes.append((name, await asyncio.to_thread(run_case, case)))
+
+    pending = asyncio.create_task(run_subprocess_cases())
+    interrupted = None
+    try:
+        for name, case in judge_cases:
+            await result.record_async(name, case)
+    except BaseException as error:
+        interrupted = error
+        stop.set()
+    finally:
+        while not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError as error:
+                interrupted = interrupted or error
+                stop.set()
+        pending.result()
+        for name, error in outcomes:
+            def report(error=error):
+                if error is not None:
+                    raise error
+            result.record(name, report)
+    if interrupted is not None:
+        raise interrupted
+
+
+async def test_benchmark_native_checks_overlap_judges_without_losing_ownership():
+    import io
+    import _test_utils
+
+    started, release = threading.Event(), threading.Event()
+    seen, resets = [], []
+    main_thread = threading.get_ident()
+    judges_finished = False
+
+    def native_failure():
+        seen.append(("native_failure", threading.get_ident()))
+        started.set()
+        assert release.wait(2), "judge did not progress while native subprocess waited"
+        raise RuntimeError("owned native failure")
+
+    def native_success():
+        seen.append(("native_success", threading.get_ident()))
+
+    async def unexecuted_native():
+        raise AssertionError("must be rejected before becoming a false pass")
+
+    async def judge_success():
+        assert await asyncio.to_thread(started.wait, 2), "native checks never started"
+        release.set()
+
+    async def judge_failure():
+        raise RuntimeError("owned judge failure")
+
+    async def final_judge():
+        nonlocal judges_finished
+        judges_finished = True
+
+    result = BlackboxResult()
+    controller_cases = [
+        ("test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate", "cloudbench_prisma_freshness_permanent_gate"),
+        ("test_cloudbench_boot_payload_behavior_is_in_permanent_gate", "cloudbench_boot_payload_permanent_gate"),
+        ("test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate", "cloudbench_bundled_frontend_prerequisites_permanent_gate"),
+        ("test_cloudbench_log_transport_contract_is_in_permanent_gate", "cloudbench_log_transport_contract_permanent_gate"),
+        ("test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate", "cloudbench_dependency_rebuild_permanent_gate"),
+        ("test_private_fleet_source_behavior_is_in_permanent_gate", "private_fleet_source_permanent_gate"),
+        ("test_fly_native_completion_is_in_permanent_gate", "fly_native_completion_permanent_gate"),
+        ("test_autoscaler_runtime_handoff_is_in_permanent_gate", "autoscaler_runtime_handoff_permanent_gate"),
+        ("test_boot_terminal_runtime_evidence_is_in_permanent_gate", "boot_terminal_runtime_evidence_permanent_gate"),
+        ("test_cloudbench_codex_auth_is_in_permanent_gate", "cloudbench_codex_auth_permanent_gate"),
+        ("test_cloudbench_pool_vm_shapes_are_in_permanent_gate", "cloudbench_pool_vm_shapes_permanent_gate"),
+        ("test_live_query_proof_rejects_zero_spend_tasks_before_provisioning", "live_query_proof_zero_spend_admission"),
+        ("test_successful_llm_evidence_is_in_permanent_gate", "successful_llm_evidence_permanent_gate"),
+    ]
+    judge_cases = [
+        ("test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics"),
+        ("test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics"),
+        ("test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics"),
+        ("test_blue_bottle_tree_proof_passes_with_subagent_evidence", "blue_bottle_tree_proof_passes_with_subagent_evidence"),
+    ]
+    invoked_controllers, invoked_judges = [], []
+    replacements = {}
+    for index, (name, _) in enumerate(controller_cases):
+        def controller(index=index, name=name):
+            invoked_controllers.append(name)
+            if index < 3:
+                return (native_failure, native_success, unexecuted_native)[index]()
+        replacements[name] = controller
+    for index, (name, _) in enumerate(judge_cases):
+        async def judge(index=index, name=name):
+            invoked_judges.append(name)
+            if index < 3:
+                await (judge_success, judge_failure, final_judge)[index]()
+        replacements[name] = judge
+    original_record, original_async = BlackboxResult.record, BlackboxResult.record_async
+    controller_names = [name for _, name in controller_cases]
+    judge_names = [name for _, name in judge_cases]
+    def record_registered(self, name, case):
+        if name in controller_names:
+            index = controller_names.index(name)
+            if index < 3:
+                original_record(result, ("native_failure", "native_success", "unexecuted_native")[index], case)
+            else:
+                case()
+    async def record_registered_async(self, name, case):
+        if name in judge_names:
+            index = judge_names.index(name)
+            if index < 3:
+                await original_async(result, ("judge_success", "judge_failure", "final_judge")[index], case)
+            else:
+                await case()
+    with (
+        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stderr(io.StringIO()),
+        patch.dict(globals(), replacements),
+        patch.object(BlackboxResult, "record", record_registered),
+        patch.object(BlackboxResult, "record_async", record_registered_async),
+        patch.object(_test_utils, "clear_captures", side_effect=lambda: resets.append((threading.get_ident(), judges_finished))),
+    ):
+        await run_all_tests()
+    assert invoked_controllers == [name for name, _ in controller_cases]
+    assert invoked_judges == [name for name, _ in judge_cases]
+    assert [name for name, _ in seen] == ["native_failure", "native_success"]
+    assert "native_failure: owned native failure" in result.errors, "native wait finished before the judge progressed"
+    assert all(thread != main_thread for _, thread in seen)
+    assert result.summary() == {"passed": 3, "failed": 3, "total": 6}
+    assert {error.split(":", 1)[0] for error in result.errors} == {"native_failure", "judge_failure", "unexecuted_native"}
+    assert all(thread == main_thread for thread, _ in resets)
+    assert all(done for _, done in resets[-3:]), "native result recording reset captures during a judge"
+
+    started.clear()
+    release.clear()
+    seen.clear()
+    def owned_native():
+        started.set()
+        assert release.wait(2)
+        seen.append("drained")
+    def forbidden_next_native():
+        seen.append("started_after_cancellation")
+    async def waiting_judge():
+        await asyncio.Event().wait()
+    with contextlib.redirect_stdout(io.StringIO()):
+        owner = asyncio.create_task(_run_benchmark_subprocess_and_judge_cases(
+            BlackboxResult(), [("owned", owned_native), ("forbidden", forbidden_next_native)], [("waiting", waiting_judge)],
+        ))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            owner.cancel()
+            await asyncio.sleep(0)
+            owner.cancel()
+            await asyncio.sleep(0)
+            assert not owner.done(), "owner abandoned its active native check"
+        finally:
+            release.set()
+        try:
+            await asyncio.wait_for(owner, 2)
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("owner cancellation was swallowed")
+    assert seen == ["drained"], seen
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "benchmark_native_checks_overlap_judges_without_losing_ownership",
+        test_benchmark_native_checks_overlap_judges_without_losing_ownership,
+    )
     r.record(
         "local_benchmark_rejects_disabled_trace_before_allocation",
         test_local_benchmark_rejects_disabled_trace_before_allocation,
@@ -18871,51 +19060,30 @@ async def run_all_tests():
         "cloud_fleet_controller_detaches_by_default",
         test_cloud_fleet_controller_detaches_by_default,
     )
-    r.record(
-        "cloudbench_prisma_freshness_permanent_gate",
-        test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+    await _run_benchmark_subprocess_and_judge_cases(
+        r,
+        [
+            ("cloudbench_prisma_freshness_permanent_gate", test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate),
+            ("cloudbench_boot_payload_permanent_gate", test_cloudbench_boot_payload_behavior_is_in_permanent_gate),
+            ("cloudbench_bundled_frontend_prerequisites_permanent_gate", test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate),
+            ("cloudbench_log_transport_contract_permanent_gate", test_cloudbench_log_transport_contract_is_in_permanent_gate),
+            ("cloudbench_dependency_rebuild_permanent_gate", test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate),
+            ("private_fleet_source_permanent_gate", test_private_fleet_source_behavior_is_in_permanent_gate),
+            ("fly_native_completion_permanent_gate", test_fly_native_completion_is_in_permanent_gate),
+            ("autoscaler_runtime_handoff_permanent_gate", test_autoscaler_runtime_handoff_is_in_permanent_gate),
+            ("boot_terminal_runtime_evidence_permanent_gate", test_boot_terminal_runtime_evidence_is_in_permanent_gate),
+            ("cloudbench_codex_auth_permanent_gate", test_cloudbench_codex_auth_is_in_permanent_gate),
+            ("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate),
+            ("live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning),
+            ("successful_llm_evidence_permanent_gate", test_successful_llm_evidence_is_in_permanent_gate),
+        ],
+        [
+            ("blue_bottle_k5_trial_b217afca_passes_single_turn_semantics", test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics),
+            ("blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics", test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics),
+            ("blue_bottle_k5_trial_7d282652_passes_single_turn_semantics", test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics),
+            ("blue_bottle_tree_proof_passes_with_subagent_evidence", test_blue_bottle_tree_proof_passes_with_subagent_evidence),
+        ],
     )
-    r.record(
-        "cloudbench_boot_payload_permanent_gate",
-        test_cloudbench_boot_payload_behavior_is_in_permanent_gate,
-    )
-    r.record(
-        "cloudbench_bundled_frontend_prerequisites_permanent_gate",
-        test_cloudbench_bundled_frontend_prerequisites_are_in_permanent_gate,
-    )
-    r.record(
-        "cloudbench_log_transport_contract_permanent_gate",
-        test_cloudbench_log_transport_contract_is_in_permanent_gate,
-    )
-    r.record(
-        "cloudbench_dependency_rebuild_permanent_gate",
-        test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
-    )
-    r.record(
-        "private_fleet_source_permanent_gate",
-        test_private_fleet_source_behavior_is_in_permanent_gate,
-    )
-    r.record(
-        "fly_native_completion_permanent_gate",
-        test_fly_native_completion_is_in_permanent_gate,
-    )
-    r.record(
-        "autoscaler_runtime_handoff_permanent_gate",
-        test_autoscaler_runtime_handoff_is_in_permanent_gate,
-    )
-    r.record(
-        "boot_terminal_runtime_evidence_permanent_gate",
-        test_boot_terminal_runtime_evidence_is_in_permanent_gate,
-    )
-    r.record(
-        "cloudbench_codex_auth_permanent_gate",
-        test_cloudbench_codex_auth_is_in_permanent_gate,
-    )
-    r.record("cloudbench_pool_vm_shapes_permanent_gate", test_cloudbench_pool_vm_shapes_are_in_permanent_gate)
-    r.record(
-        "live_query_proof_zero_spend_admission", test_live_query_proof_rejects_zero_spend_tasks_before_provisioning
-    )
-    r.record("successful_llm_evidence_permanent_gate", test_successful_llm_evidence_is_in_permanent_gate)
     r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
@@ -19872,22 +20040,6 @@ async def run_all_tests():
     r.record(
         "cuda_kernel_stall_limit_covers_full_claude_code_runtime",
         test_cuda_kernel_stall_limit_covers_full_claude_code_runtime,
-    )
-    await r.record_async(
-        "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
-        test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
-    )
-    await r.record_async(
-        "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
-        test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
-    )
-    await r.record_async(
-        "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
-        test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
-    )
-    await r.record_async(
-        "blue_bottle_tree_proof_passes_with_subagent_evidence",
-        test_blue_bottle_tree_proof_passes_with_subagent_evidence,
     )
     r.record(
         "blue_bottle_spawn_contract_seeds_live_target",
