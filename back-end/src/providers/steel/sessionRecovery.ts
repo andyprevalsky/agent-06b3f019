@@ -17,6 +17,7 @@ import {
   type SteelProxyConfig,
 } from './session';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
+import { steelSessionTimeoutMs } from './sessionLifetime';
 import { log } from './types';
 import { steelCdpUrl, steelDebugUrl } from './urls';
 
@@ -39,7 +40,7 @@ export function buildSteelRecoveryBrowserOptions(input: {
     solveCaptcha: true,
     debugConfig: { systemCursor: false },
     stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-    timeout: 900000,
+    timeout: steelSessionTimeoutMs(),
     dimensions: { width: 1288, height: 891 },
   };
 }

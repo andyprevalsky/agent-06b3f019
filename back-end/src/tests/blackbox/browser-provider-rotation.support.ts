@@ -1,5 +1,6 @@
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import { retryWithBackoff } from '../../providers/retry';
+import { browserActivityBudgetMinutes } from '../../providers/steel/sessionLifetime';
 
 interface RotationResponse {
   task_id?: string;
@@ -25,7 +26,7 @@ interface CrossProviderLadderOptions {
   post: (path: string, body?: unknown) => Promise<RotationResponse>;
   readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
-  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string; timeout?: number }>;
   /**
    * Every provider session this ladder allocates, appended as it is created.
    *
@@ -312,6 +313,12 @@ export async function runCrossProviderRotationLadder(
     `call 4 leaked the superseded Steel session (status=${supersededSteelStatus})`
   );
   const secondSteelIp = await readDifferentExitIp(String(steelRotated.ws_url), firstSteelIp);
+  const liveSteelTimeoutMs = (await retrieveSteelBrowser(String(steelRotated.session_id))).timeout;
+  const activityBudgetMs = browserActivityBudgetMinutes() * 60_000;
+  assert(
+    typeof liveSteelTimeoutMs === 'number' && liveSteelTimeoutMs > activityBudgetMs,
+    `Steel session lifetime ${String(liveSteelTimeoutMs)}ms does not outlive the ${activityBudgetMs}ms browser activity budget; Steel releases it mid-run`
+  );
 
   const exhaustedResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
     method: 'POST',

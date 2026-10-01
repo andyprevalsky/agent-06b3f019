@@ -22,6 +22,7 @@ import {
   steelDebugUrl,
 } from './session';
 import { validateSessionConnection } from './sessionConnection';
+import { steelSessionTimeoutMs } from './sessionLifetime';
 import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
@@ -220,7 +221,7 @@ export async function recreateSession(
         solveCaptcha: envEnabled('BROWSER_AGENT_STEEL_CAPTCHA_SOLVER_ENABLED', true),
         debugConfig: { systemCursor: false },
         stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-        timeout: 900000,
+        timeout: steelSessionTimeoutMs(),
         dimensions: { width: 1288, height: 891 },
       });
       createdSessionId = session.id;

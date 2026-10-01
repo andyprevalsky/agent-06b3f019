@@ -20,6 +20,7 @@ import {
   shouldWriteSteelProfileToBrowserContext,
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
+import { steelSessionTimeoutMs } from './sessionLifetime';
 import {
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
@@ -223,7 +224,7 @@ export async function createSessionWithContext(
           humanizeInteractions: false, // Disabled - we handle humanization with BrowserHumanizer
           skipFingerprintInjection: true, // We inject user's real fingerprint ourselves
         },
-        timeout: 900000, // 15 minutes
+        timeout: steelSessionTimeoutMs(),
         dimensions: {
           width: 1288, // 1280 + 8 for borders → 1280 viewport
           height: 891, // 800 + 91 for browser chrome → 800 viewport
