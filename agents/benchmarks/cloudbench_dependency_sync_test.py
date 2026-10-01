@@ -6953,7 +6953,9 @@ if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
         text=True,
         capture_output=True,
         check=False,
-        timeout=10,
+        # This fake Fly recovery executes many shell subprocesses even though
+        # sleep is stubbed. Leave room for a loaded deploy host to schedule them.
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
