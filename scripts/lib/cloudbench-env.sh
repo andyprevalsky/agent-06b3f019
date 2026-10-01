@@ -289,6 +289,7 @@ cloudbench_tcp_listener_present() {  # <port>
   python3 - "$1" <<'PY'
 import socket
 import sys
+import errno
 
 try:
     port = int(sys.argv[1])
@@ -298,7 +299,14 @@ except (IndexError, ValueError):
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.2)
-        raise SystemExit(0 if probe.connect_ex(("127.0.0.1", port)) == 0 else 1)
+        result = probe.connect_ex(("127.0.0.1", port))
+        if result in (0, errno.EAGAIN, errno.EWOULDBLOCK):
+            # A full accept backlog can return EAGAIN on macOS; the port is
+            # still occupied and must not be selected for another hub.
+            raise SystemExit(0)
+        if result == errno.ECONNREFUSED:
+            raise SystemExit(1)
+        raise SystemExit(3)
 except SystemExit:
     raise
 except Exception:

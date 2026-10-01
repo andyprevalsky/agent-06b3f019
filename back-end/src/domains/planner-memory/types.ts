@@ -9,6 +9,7 @@ export const plannerMemorySearchSchema = z.object({
   exclude_root_agent_id: z.string().optional(),
   limit: z.number().int().min(1).max(50).optional(),
   passed_only: z.boolean().optional(),
+  min_similarity: z.number().min(-1).max(1).optional(),
 });
 export type PlannerMemorySearchBody = z.infer<typeof plannerMemorySearchSchema>;
 
@@ -44,3 +45,8 @@ export const plannerMemoryCompressionReleaseSchema = z.object({
 export type PlannerMemoryCompressionReleaseBody = z.infer<
   typeof plannerMemoryCompressionReleaseSchema
 >;
+
+export const plannerMemoryEmbedPendingSchema = z.object({
+  limit: z.number().int().min(1).max(200).optional(),
+});
+export type PlannerMemoryEmbedPendingBody = z.infer<typeof plannerMemoryEmbedPendingSchema>;

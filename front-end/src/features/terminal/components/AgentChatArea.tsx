@@ -21,6 +21,7 @@
 
 import { useRef, Suspense, type ComponentType } from 'react';
 import * as analytics from '@/lib/analytics';
+import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import { ApprovalChip } from '@/features/terminal-component-group';
 import { QueryInput } from '@/features/terminal-component-group';
@@ -73,6 +74,7 @@ export function AgentChatArea({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const opening = useOpeningAnimation(a.selectedAgentId, a.isLoadingNetwork);
   const { tickerOffset, tickerRef } = useTickerCarousel(a.selectedAgentId);
+  const sharedView = isBenchmarkSharedView();
 
   const canSubmit =
     !a.selectedAgentId ||
@@ -113,20 +115,32 @@ export function AgentChatArea({
         </Suspense>
       )}
 
-      <InputArea
-        agents={a}
-        drip={drip}
-        models={models}
-        modelsLoading={modelsLoading}
-        pendingApproval={pendingApproval}
-        pendingGates={pendingGates}
-        canSubmit={canSubmit}
-        tickerOffset={tickerOffset}
-        tickerRef={tickerRef}
-      />
+      {sharedView ? (
+        <SharedRecordingNotice />
+      ) : (
+        <InputArea
+          agents={a}
+          drip={drip}
+          models={models}
+          modelsLoading={modelsLoading}
+          pendingApproval={pendingApproval}
+          pendingGates={pendingGates}
+          canSubmit={canSubmit}
+          tickerOffset={tickerOffset}
+          tickerRef={tickerRef}
+        />
+      )}
 
       <TerminalLegalFooter />
     </>
+  );
+}
+
+function SharedRecordingNotice() {
+  return (
+    <div className="relative z-10 pb-8 text-center text-sm text-muted-foreground">
+      Read-only benchmark recording
+    </div>
   );
 }
 

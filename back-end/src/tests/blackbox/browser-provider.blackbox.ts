@@ -1,17 +1,20 @@
 #!/usr/bin/env tsx
 
-import { APIConnectionTimeoutError } from '@onkernel/sdk';
 import { selectedBrowserProvider } from '../../providers/browser/config';
 import {
-  isKernelProxyAvailabilityError,
-  KERNEL_CREATE_REQUEST_OPTIONS,
   kernelProxyCandidates,
   kernelRecreateProxySelection,
   managedKernelProxyFromSource,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
 import { steel } from '../../providers/steel/session';
-import { assert, isRetryableKernelNavigationError, withProvider } from './browser-provider.helpers';
+import {
+  assert,
+  assertKernelCityInventoryFallback,
+  assertKernelTimeoutFallback,
+  isRetryableKernelNavigationError,
+  withProvider,
+} from './browser-provider.helpers';
 import {
   assertFixedRotationLadder,
   isSteelCapacityRateLimit,
@@ -175,33 +178,8 @@ const tests: Array<[string, () => void]> = [
       assert(mode.proxyId === 'proxy-123', 'expected configured proxy ID');
     },
   ],
-  [
-    'Kernel city inventory errors trigger location fallback',
-    () => {
-      const error = new Error(
-        "400 proxy configuration validation failed: city 'sanfrancisco' is not available for subdivision 'us-ca'"
-      );
-      assert(isKernelProxyAvailabilityError(error), 'expected proxy availability error');
-    },
-  ],
-  [
-    'Kernel SDK request timeouts trigger location fallback',
-    () => {
-      assert(
-        isKernelProxyAvailabilityError(new APIConnectionTimeoutError()),
-        'APIConnectionTimeoutError must relax city→state→country'
-      );
-      assert(
-        isKernelProxyAvailabilityError(new Error('Request timed out.')),
-        'string timeout must also relax location specificity'
-      );
-      assert(
-        KERNEL_CREATE_REQUEST_OPTIONS.maxRetries === 0 &&
-          KERNEL_CREATE_REQUEST_OPTIONS.timeout === 45_000,
-        'create calls must fail fast (no SDK retry multiplication into ~180s)'
-      );
-    },
-  ],
+  ['Kernel city inventory errors trigger location fallback', assertKernelCityInventoryFallback],
+  ['Kernel SDK request timeouts trigger location fallback', assertKernelTimeoutFallback],
   [
     'Kernel navigation retries only transient proxy failures',
     () => {

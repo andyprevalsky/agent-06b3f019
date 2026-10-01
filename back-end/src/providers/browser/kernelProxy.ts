@@ -1,4 +1,5 @@
 import Kernel, { APIConnectionTimeoutError } from '@onkernel/sdk';
+import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
@@ -141,6 +142,23 @@ export function kernelProxyCandidates(
   return candidates;
 }
 
+export function selectReusableKernelProxy(
+  proxies: ProxyListResponse[],
+  candidate: KernelProxyCandidate
+): string | undefined {
+  return proxies.find((proxy) => {
+    if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) return false;
+    if (proxy.status !== 'available') return false;
+    if (proxy.bypass_hosts?.length) return false;
+    const config = proxy.config as Record<string, unknown> | undefined;
+    if (!config || Object.keys(config).length !== Object.keys(candidate.config).length)
+      return false;
+    return Object.entries(candidate.config).every(
+      ([key, value]) => String(config?.[key] ?? '').toLowerCase() === value.toLowerCase()
+    );
+  })?.id;
+}
+
 export async function getOrCreateKernelProxy(
   client: Kernel,
   candidate: KernelProxyCandidate
@@ -158,15 +176,31 @@ export async function getOrCreateKernelProxy(
     };
   }
 
-  const remote = await client.proxies.create(
-    {
-      type: candidate.type,
-      name: candidate.name,
-      config: candidate.config,
-    },
-    KERNEL_CREATE_REQUEST_OPTIONS
+  // Isolated benchmark databases and restored snapshots can lose the local row
+  // while the project still owns this proxy. Reuse it instead of provisioning
+  // another identical proxy (which can exceed browser-session init deadlines).
+  let projectProxies = await client.proxies.list(
+    { query: candidate.name, limit: 100 },
+    { timeout: 10_000, maxRetries: 0 }
   );
-  if (remote.id === undefined || remote.id === '') {
+  let reusableId: string | undefined;
+  while (true) {
+    reusableId = selectReusableKernelProxy(projectProxies.items, candidate);
+    if (reusableId !== undefined || !projectProxies.hasNextPage()) break;
+    projectProxies = await projectProxies.getNextPage();
+  }
+  const remote = reusableId
+    ? null
+    : await client.proxies.create(
+        {
+          type: candidate.type,
+          name: candidate.name,
+          config: candidate.config,
+        },
+        KERNEL_CREATE_REQUEST_OPTIONS
+      );
+  const remoteId = reusableId ?? remote?.id;
+  if (remoteId === undefined || remoteId === '') {
     throw new Error(`Kernel proxy creation returned no ID for ${candidate.proxyKey}`);
   }
 
@@ -175,7 +209,7 @@ export async function getOrCreateKernelProxy(
       data: {
         provider: 'kernel',
         proxyKey: candidate.proxyKey,
-        proxyId: remote.id,
+        proxyId: remoteId,
         proxyType: candidate.type,
         config: candidate.config,
       },
@@ -192,7 +226,6 @@ export async function getOrCreateKernelProxy(
       where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
     });
     if (winner !== null) {
-      await client.proxies.delete(remote.id).catch(() => {});
       return {
         proxyId: winner.proxyId,
         proxyKey: winner.proxyKey,
@@ -201,7 +234,8 @@ export async function getOrCreateKernelProxy(
         location: candidate.location,
       };
     }
-    await client.proxies.delete(remote.id).catch(() => {});
+    // Another caller may have listed this remote proxy and be about to save it.
+    // Retain it for a later lookup rather than deleting a possibly referenced ID.
     throw error;
   }
 }

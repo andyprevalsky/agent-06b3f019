@@ -3154,6 +3154,31 @@ async def test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost():
         _restore_workflow(original)
 
 
+async def test_workflow_track_llm_cost_foundry_is_zero_user_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.input_cents_per_1k = 0.3
+    wf.output_cents_per_1k = 1.5
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._track_llm_cost(
+            tokens_in=10_000,
+            tokens_out=1_000,
+            call_site="verifier_browser",
+            actual_model="gpt-6-sol-foundry",
+        )
+        assert wf.own_cost_cents == 0.0
+        saved_item = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "gpt-6-sol-foundry"
+        assert saved_item["from_fast_cache"] is False
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_track_usage_empty_is_no_op():
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
@@ -3212,6 +3237,32 @@ async def test_workflow_track_usage_direct_compute_token_is_zero_cost():
         assert saved_item["model"] == "gpt-5.4-gpt"
         assert saved_item["cache_read_input_tokens"] == 8576
         assert saved_item["cache_creation_input_tokens"] == 7984
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_track_usage_foundry_is_zero_user_cost():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        usage = {
+            "llm": [
+                {
+                    "tokens_in": 10_000,
+                    "tokens_out": 1_000,
+                    "model": "gpt-6-sol-foundry",
+                    "provider": "Explore Agent",
+                }
+            ]
+        }
+        await wf._track_usage(usage, tool_name="spawn_sub_agent", call_site="explore_agent")
+        assert wf.own_cost_cents == 0.0
+        saved_item = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")[1][3][0]
+        assert saved_item["cost_cents"] == 0
+        assert saved_item["model"] == "gpt-6-sol-foundry"
     finally:
         _restore_workflow(original)
 
@@ -4324,13 +4375,28 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
     wf.user_id = "u-free-credit"
     wf.agent_id = "a-free-credit"
     fake = _FakeWorkflowModule()
-    fake.activity_returns["check_user_usage"] = {
-        "has_credits": False,
-        "remaining": 0,
-        "used": 0.01,
-        "total": 0.01,
-        "tier": None,
-    }
+    checks = 0
+
+    async def fake_exec(fn, args=None, **kwargs):
+        nonlocal checks
+        name = getattr(fn, "__name__", "")
+        fake.activity_calls.append((name, args))
+        if name == "check_user_usage":
+            checks += 1
+            if checks == 2:
+                return None  # transient post-Checkout read; the workflow must recheck
+            return {
+                "has_credits": checks > 2,
+                "remaining": 30 if checks > 2 else 0,
+                "used": 0.01,
+                "total": 30.01 if checks > 2 else 0.01,
+                "tier": 30 if checks > 2 else None,
+            }
+        if name == "mint_subscription_checkout_activity":
+            return "https://roselabs.ai/s/free-credit"
+        return None
+
+    fake.execute_activity = fake_exec
     fake.activity_returns["mint_subscription_checkout_activity"] = "https://roselabs.ai/s/free-credit"
     raised = {}
 
@@ -4338,6 +4404,7 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
         raised["workflow"] = workflow_instance
         raised["gate"] = gate
         raised["gate_key"] = gate_key
+        raised["paused_at_raise"] = workflow_instance.is_paused
         return "resolved"
 
     original_workflow = _patch_workflow(fake)
@@ -4345,8 +4412,9 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
     workflow_module.raise_gate_direct = fake_raise_gate
     try:
         await wf._check_credits()
-        assert wf._has_credits is False
+        assert wf._has_credits is True
         assert wf.is_paused is False
+        assert raised["paused_at_raise"] is False
         assert raised["workflow"] is wf
         assert raised["gate_key"] == "subscription"
         assert raised["gate"]["type"] == "subscription"
@@ -4354,7 +4422,48 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
         assert raised["gate"]["presentation"]["title"] == "Subscribe to continue this task"
         assert raised["gate"]["presentation"]["reason"].startswith("Your free credits are exhausted")
         activity_names = [name for name, _args in fake.activity_calls]
-        assert activity_names == ["check_user_usage", "mint_subscription_checkout_activity"]
+        assert activity_names == [
+            "check_user_usage",
+            "mint_subscription_checkout_activity",
+            "check_user_usage",
+            "check_user_usage",
+        ]
+    finally:
+        workflow_module.raise_gate_direct = original_raise_gate
+        _restore_workflow(original_workflow)
+
+
+async def test_subscription_credit_recheck_preserves_concurrent_pause():
+    import workflows.agent_workflow as workflow_module
+
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+    checks = 0
+
+    async def fake_exec(fn, args=None, **kwargs):
+        nonlocal checks
+        name = getattr(fn, "__name__", "")
+        if name == "check_user_usage":
+            checks += 1
+            if checks == 2:
+                wf.is_paused = True  # pause signal while the post-Checkout activity is pending
+            return {"has_credits": checks > 1, "tier": 30 if checks > 1 else None}
+        if name == "mint_subscription_checkout_activity":
+            return "https://roselabs.ai/s/free-credit"
+        return None
+
+    async def fake_raise_gate(workflow_instance, gate, gate_key):
+        return "resolved"
+
+    original_workflow = _patch_workflow(fake)
+    original_raise_gate = workflow_module.raise_gate_direct
+    workflow_module.raise_gate_direct = fake_raise_gate
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is True
+        assert wf.is_paused is True
     finally:
         workflow_module.raise_gate_direct = original_raise_gate
         _restore_workflow(original_workflow)
@@ -4398,10 +4507,10 @@ async def test_workflow_check_credits_free_credit_checkout_failure_pauses():
     try:
         await wf._check_credits()
         assert wf._has_credits is False
-        assert wf.is_paused is False
+        assert wf.is_paused is True
         assert raised["workflow"] is wf
         assert raised["gate_key"] == "subscription"
-        assert raised["paused_at_raise"] is True
+        assert raised["paused_at_raise"] is False
         assert raised["gate"]["type"] == "subscription"
         assert raised["gate"]["severity"] == "blocking"
         assert raised["gate"]["action"]["url"] == "https://roselabs.ai/subscribe"
@@ -7822,6 +7931,10 @@ async def run_all_tests():
     await r.record_async("wf_track_llm_cost", test_workflow_track_llm_cost_calculates_and_persists)
     await r.record_async("wf_track_llm_cost_no_pricing", test_workflow_track_llm_cost_zero_when_no_pricing)
     await r.record_async(
+        "wf_track_llm_cost_foundry_zero_user_cost",
+        test_workflow_track_llm_cost_foundry_is_zero_user_cost,
+    )
+    await r.record_async(
         "wf_track_llm_cost_fast_cache_replay",
         test_workflow_track_llm_cost_fast_cache_replay_is_zero_cost,
     )
@@ -7830,6 +7943,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_track_usage_direct_compute_token",
         test_workflow_track_usage_direct_compute_token_is_zero_cost,
+    )
+    await r.record_async(
+        "wf_track_usage_foundry",
+        test_workflow_track_usage_foundry_is_zero_user_cost,
     )
     await r.record_async(
         "wf_track_usage_fast_cache_replay",

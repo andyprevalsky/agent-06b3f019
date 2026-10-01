@@ -654,6 +654,7 @@ async function testClaudeCodeRateLimited_noAuth() {
 // agents Rose client reads (it has no DB). Mark → cooldown GET reports true.
 const ANTHROPIC_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
 const ANTHROPIC_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
+const GPT_API_KEY_COOLDOWN_NAME = 'gpt_api_key_cooldown';
 
 async function snapshotAnthropicApiKeyCooldown() {
   return prisma.integration.findUnique({
@@ -717,6 +718,62 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
+  }
+}
+
+async function testGptApiKeyCooldown_markThenOnCooldown() {
+  const { __clearGptApiKeyCooldownCache } = await import('../../providers/computeCredentials');
+  const key = {
+    userId: ANTHROPIC_COOLDOWN_USER_ID,
+    name: GPT_API_KEY_COOLDOWN_NAME,
+    accountId: '',
+  };
+  const previous = await prisma.integration.findUnique({
+    where: { userId_name_accountId: key },
+    select: { id: true, rateLimitedUntil: true, failureReason: true, updatedAt: true },
+  });
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'gpt_api_key',
+        source: 'pool',
+        failureReason: 'RosePaymentRequiredError',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+    const status = await request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
+      headers: apiKeyHeaders(),
+    });
+    assertStatus(status.status, 200, status.data);
+    assert(
+      typeof (status.data as { configured?: unknown }).configured === 'boolean',
+      'GPT key status should report configuration without revealing the key'
+    );
+    assert(
+      (status.data as { onCooldown?: boolean }).onCooldown === true,
+      'GPT key should be cooled across clients after a credit failure'
+    );
+    const row = await prisma.integration.findUnique({ where: { userId_name_accountId: key } });
+    assert(
+      row?.rateLimitedUntil && row.rateLimitedUntil > new Date(),
+      'cooldown is persisted in DB'
+    );
+  } finally {
+    if (previous === null) {
+      await prisma.integration.deleteMany({ where: key });
+    } else {
+      await prisma.integration.update({
+        where: { id: previous.id },
+        data: {
+          rateLimitedUntil: previous.rateLimitedUntil,
+          failureReason: previous.failureReason,
+          updatedAt: previous.updatedAt,
+        },
+      });
+    }
+    __clearGptApiKeyCooldownCache();
   }
 }
 
@@ -2802,14 +2859,17 @@ async function testEmailGmailAccountDelete_removesOneCredential() {
   });
   assert(deleted === null, 'deleted Gmail credential should be removed');
   const purge = await prisma.googleDataPurge.findFirst({
-    where: { userId, email: 'primary@gmail.com', processedAt: null },
+    // A concurrent purge worker may finish the obligation before this read.
+    where: { userId, email: 'primary@gmail.com' },
   });
   assert(purge !== null, 'disconnect should queue cached Google data for deletion');
-  await prisma.googleDataPurge.update({
-    where: { id: purge.id },
-    data: { revocationToken: null },
-  });
-  await processGoogleDataPurge(purge.id);
+  if (purge.processedAt === null) {
+    await prisma.googleDataPurge.update({
+      where: { id: purge.id },
+      data: { revocationToken: null, claimedUntil: null },
+    });
+    await processGoogleDataPurge(purge.id);
+  }
   let staleSyncRejected = false;
   try {
     await upsertPersonAndMessageRecords(
@@ -7184,10 +7244,6 @@ async function runAll() {
       fn: testGoogleRevocationFailure_retainsDurableRetry,
     },
     {
-      name: 'Google revocation failures do not starve later purges',
-      fn: testGoogleRevocationFailures_doNotStarveLaterPurge,
-    },
-    {
       name: 'Google external revocation queues data purge',
       fn: testGoogleExternalRevocation_queuesPurgeAndReconnect,
     },
@@ -7411,10 +7467,19 @@ async function runAll() {
 
   // Phase 3: Sequential tests (state-dependent + boundary capture)
   const sequentialTests: { name: string; fn: () => Promise<void> }[] = [
+    // This case drains the global purge queue, so keep it after parallel cases.
+    {
+      name: 'Google revocation failures do not starve later purges',
+      fn: testGoogleRevocationFailures_doNotStarveLaterPurge,
+    },
     { name: 'state transition -- full lifecycle', fn: testStateTransition_fullLifecycle },
     {
       name: 'anthropic api-key cooldown -- mark then on-cooldown',
       fn: testAnthropicApiKeyCooldown_markThenOnCooldown,
+    },
+    {
+      name: 'gpt api-key cooldown -- mark then on-cooldown',
+      fn: testGptApiKeyCooldown_markThenOnCooldown,
     },
     {
       name: 'claude-code billing-failure -- funded API key backed off globally',

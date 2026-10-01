@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from typing import Any, Dict
+from urllib.parse import urlsplit
 
 from utils.purchase_approval import (
     validate_product_detail_url,
@@ -45,6 +46,13 @@ def _to_int(value: Any) -> int:
     return 0
 
 
+def _canonicalize_image_url(value: Any) -> Any:
+    """Use the secure origin for the test checkout's placeholder image host."""
+    if not isinstance(value, str):
+        return value
+    return re.sub(r"^http://placehold\.co(?=/|$)", "https://placehold.co", value, flags=re.I)
+
+
 def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     line_items = []
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
@@ -56,7 +64,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
         line_items.append(
             {
                 "name": str(item.get("name") or "").strip(),
-                "imageUrl": item.get("image_url") or item.get("imageUrl"),
+                "imageUrl": _canonicalize_image_url(item.get("image_url") or item.get("imageUrl")),
                 "productUrl": product_url,
                 "rating": rating,
                 "reviewCount": review_count,
@@ -107,11 +115,24 @@ def _canonicalize_review_count(value: str) -> str:
     return re.sub(r"(?<=\d),(?=\d)", "", value)
 
 
-_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+x(\d+)\s*$", re.IGNORECASE)
+_LINE_ITEM_QTY_SUFFIX_RE = re.compile(r"\s+(?:-\s*)?x([0-9]+)\s*$", re.IGNORECASE)
+_LINE_ITEM_QTY_MERCHANT_SUFFIX_RE = re.compile(
+    r"\s+(?:-\s*)?x([0-9]+)\s+\(([^()]*)\)\s*$", re.IGNORECASE
+)
+_LINE_ITEM_PRICED_SUFFIX_RE = re.compile(
+    r"\s+-\s+([0-9]+)\s+x\s+\$([0-9]+)\.([0-9]{2})\s*$", re.IGNORECASE
+)
+_LINE_ITEM_CART_SUMMARY_SUFFIX_RE = re.compile(
+    r"\s+-\s+x([0-9]+)\s+-\s+\$([0-9]+)\.([0-9]{2})"
+    r"(?:\s+\(([^()]*)\))?\s*$",
+    re.IGNORECASE,
+)
 
 
-def _canonicalize_line_item_name(name: Any, quantity: Any) -> Any:
-    """Strip a trailing ` x{quantity}` echo of the quantity field.
+def _canonicalize_line_item_name(
+    name: Any, quantity: Any, unit_price_cents: Any, merchant: Any
+) -> Any:
+    """Strip matching quantity and merchant echoes from an item title.
 
     Browser agents often copy order-summary prose ("Aurora Notebook x1") into
     `name` while also setting `quantity: 1`. That display-only suffix must not
@@ -119,15 +140,59 @@ def _canonicalize_line_item_name(name: Any, quantity: Any) -> Any:
     """
     if not isinstance(name, str):
         return name
-    match = _LINE_ITEM_QTY_SUFFIX_RE.search(name)
-    if match is None:
-        return name
     qty = quantity if isinstance(quantity, int) and not isinstance(quantity, bool) else _to_int(quantity)
     if qty <= 0:
         qty = 1
+    merchant_echo = _LINE_ITEM_QTY_MERCHANT_SUFFIX_RE.search(name)
+    if (
+        merchant_echo is not None
+        and int(merchant_echo.group(1)) == qty
+        and merchant_echo.group(2).strip().lower() == str(merchant or "").strip().lower()
+    ):
+        return name[: merchant_echo.start()].rstrip()
+    cart_summary = _LINE_ITEM_CART_SUMMARY_SUFFIX_RE.search(name)
+    if cart_summary is not None:
+        echoed_price = int(cart_summary.group(2)) * 100 + int(cart_summary.group(3))
+        merchant_label = str(merchant or "").strip().lower()
+        source_label = (cart_summary.group(4) or "").strip().lower()
+        if (
+            int(cart_summary.group(1)) == qty
+            and echoed_price == _to_int(unit_price_cents)
+            and (not source_label or source_label in {merchant_label, f"{merchant_label} checkout"})
+        ):
+            return name[: cart_summary.start()].rstrip()
+    priced = _LINE_ITEM_PRICED_SUFFIX_RE.search(name)
+    if priced is not None:
+        echoed_price = int(priced.group(2)) * 100 + int(priced.group(3))
+        if int(priced.group(1)) == qty and echoed_price == _to_int(unit_price_cents):
+            return name[: priced.start()].rstrip()
+    match = _LINE_ITEM_QTY_SUFFIX_RE.search(name)
+    if match is None:
+        return name
     if int(match.group(1)) != qty:
         return name
     return name[: match.start()].rstrip()
+
+
+def _canonicalize_product_description(name: Any, product_url: Any) -> Any:
+    """Drop a long description only when the title agrees with the product URL slug."""
+    if not isinstance(name, str) or not isinstance(product_url, str):
+        return name
+    title, separator, description = name.partition(" - ")
+    if not separator or len(description.split()) < 5:
+        return name
+    try:
+        url = urlsplit(product_url)
+    except ValueError:
+        return name
+    if url.scheme.lower() not in {"http", "https"} or not url.netloc:
+        return name
+    slug_match = re.search(
+        r"/(?:p|products)/([a-z0-9]+(?:-[a-z0-9]+)*)/?$", url.path, re.IGNORECASE
+    )
+    if slug_match is None or re.sub(r"\s+", "-", title.strip().lower()) != slug_match.group(1).lower():
+        return name
+    return title.strip()
 
 
 def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -137,10 +202,15 @@ def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(raw_item, dict):
             continue
         item = dict(raw_item)
+        if "imageUrl" in item:
+            item["imageUrl"] = _canonicalize_image_url(item["imageUrl"])
         review_count = item.get("reviewCount")
         if isinstance(review_count, str):
             item["reviewCount"] = _canonicalize_review_count(review_count)
-        item["name"] = _canonicalize_line_item_name(item.get("name"), item.get("quantity"))
+        item["name"] = _canonicalize_line_item_name(
+            item.get("name"), item.get("quantity"), item.get("unitPriceCents"), payload.get("merchant")
+        )
+        item["name"] = _canonicalize_product_description(item["name"], item.get("productUrl"))
         candidate["lineItems"].append(item)
     return candidate
 

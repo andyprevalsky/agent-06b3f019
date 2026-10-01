@@ -33,6 +33,46 @@ def msg(**meta: Any) -> dict:
 
 agent = "00000000-0000-4000-8000-000000000001"
 
+# The browser verifier checks both rendered roles. Markdown progress headings
+# become plain text in the page, and hidden messages must not count.
+snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Raise the round for Rose Labs"},
+        {"role": "ASSISTANT", "text": "**Setting the plan**\n\n"},
+        {"role": "ASSISTANT", "text": "private hidden reply", "metadata": {"hidden": True}},
+    ]
+)
+assert snippets == {
+    "user": ["Raise the round for Rose Labs"],
+    "assistant": ["Setting the plan"],
+}, snippets
+
+literal_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "Investigate foo_bar failure"},
+        {"role": "ASSISTANT", "text": "**Inspect `foo_bar` before retrying**"},
+    ]
+)
+assert literal_snippets == {
+    "user": ["Investigate foo_bar failure"],
+    "assistant": ["Inspect foo_bar before retrying"],
+}, literal_snippets
+
+fe_url = mod.durable_fe_url(agent, agent, "run.signature")
+assert "?agent-id=" in fe_url and "#benchmark-share=run.signature" in fe_url, fe_url
+assert "benchmark-share=" not in fe_url.split("#", 1)[0], fe_url
+
+list_snippets = mod.visible_transcript_snippets(
+    [
+        {"role": "USER", "text": "1. Open the benchmark link"},
+        {"role": "ASSISTANT", "text": "- [Inspect the run](https://example.com/run) before retrying"},
+    ]
+)
+assert list_snippets == {
+    "user": ["Open the benchmark link"],
+    "assistant": ["Inspect the run before retrying"],
+}, list_snippets
+
 # No browser tasks → pass
 assert mod.validate_browser_agents_terminated_with_recording(agent, []) == []
 

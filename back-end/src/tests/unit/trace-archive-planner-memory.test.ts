@@ -17,6 +17,18 @@ async function main(): Promise<void> {
   );
   assert.strictEqual(wrote, false);
   console.log('  ✅ planner-memory index failure does not reject archive finalization');
+
+  const embedded: string[] = [];
+  const indexed = await bestEffortIndexPlannerMemory(
+    { rootAgentId: 'agent-indexed', userId: 'user-1', goal: 'Archive this completed run' },
+    async () => undefined,
+    (rootAgentId) => {
+      embedded.push(rootAgentId);
+    }
+  );
+  assert.strictEqual(indexed, true);
+  assert.deepStrictEqual(embedded, ['agent-indexed']);
+  console.log('  ✅ a written planner-memory row schedules its retrieval embedding');
 }
 
 main().catch((error) => {

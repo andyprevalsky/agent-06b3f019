@@ -1,6 +1,6 @@
 import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
 import { getOrgCardholderVerificationStatus } from './org-onboarding';
-import { extractAgentCardOrgWallet } from './org-wallet-monitor';
+import { readAgentCardOrgWallet } from './org-wallet-monitor';
 import { retryWithBackoff } from '../retry';
 
 /**
@@ -192,7 +192,11 @@ export async function ensureAgentCardSandboxFloat(
   minCents: number = minSandboxFloatCents(),
   callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
 ): Promise<AgentCardSandboxFloat> {
-  const wallet = extractAgentCardOrgWallet(await readWalletWithRateLimitRetry(callOrgTool));
+  const wallet = await readAgentCardOrgWallet((toolName, args, deadlineAtMs) =>
+    toolName === 'get_company_wallet'
+      ? readWalletWithRateLimitRetry(callOrgTool)
+      : callOrgTool(toolName, args, deadlineAtMs)
+  );
 
   if (wallet.livemode) {
     throw new Error(

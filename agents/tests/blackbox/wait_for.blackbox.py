@@ -1,6 +1,7 @@
 """Blackbox tests for wait-for domain."""
 
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -221,9 +222,14 @@ class _FakeWFModule:
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
         self._current_time = current_time or datetime(2026, 4, 18, 12, 0, 0, tzinfo=timezone.utc)
         self.sleep_records = []
+        self._uuid_index = 0
 
     def now(self):
         return self._current_time
+
+    def uuid4(self):
+        self._uuid_index += 1
+        return uuid.UUID(int=self._uuid_index)
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")

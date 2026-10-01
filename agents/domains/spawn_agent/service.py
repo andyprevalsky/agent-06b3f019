@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -78,6 +79,123 @@ _TOOL_EVIDENCE_METADATA_KEYS = {
 
 EXPLORE_FALLBACK_PAYLOAD_BUDGET = 12_000
 _EXPLORE_STUB_MARKERS = ("fast mode", "cached trajectory")
+_DIRECT_FETCH_FAILURE = re.compile(
+    r"^the (?:requested )?(?:url|page) https?://\S+ returned\b",
+    re.IGNORECASE,
+)
+
+
+def _explore_tool_failure(tool_name: str, value: Any) -> str:
+    """Recognize explicit tool failures without treating quoted 404s as failures."""
+    if tool_name not in {"web_search", "web_fetch"}:
+        return ""
+    if tool_name == "web_fetch" and isinstance(value, str):
+        content = value.strip()
+        if _DIRECT_FETCH_FAILURE.match(content) and any(
+            marker in content.lower() for marker in ("404", "page not found", "ページが見つかりません")
+        ):
+            return content
+    if not isinstance(value, dict):
+        return ""
+    if value.get("success") is False or value.get("ok") is False:
+        return str(value.get("error") or value.get("message") or "Tool failed.")
+    status = value.get("status") or value.get("status_code") or value.get("http_status")
+    if isinstance(status, int) and status >= 400:
+        return str(value.get("error") or value.get("content") or f"HTTP {status}")
+    if str(status).lower() in {"error", "failed", "failure"} or value.get("error"):
+        return str(value.get("error") or value.get("message") or "Tool failed.")
+    if tool_name == "web_fetch":
+        content = str(value.get("content") or "").strip()
+        if _DIRECT_FETCH_FAILURE.match(content) and any(
+            marker in content.lower() for marker in ("404", "page not found", "ページが見つかりません")
+        ):
+            return content
+    return ""
+
+
+def _render_explore_tool_result(tool_name: str, value: Any) -> str:
+    """Expose search/fetch content and URLs as readable text instead of JSON."""
+    if tool_name in {"web_search", "web_fetch"} and isinstance(value, dict):
+        body = value.get("answer") if tool_name == "web_search" else value.get("content")
+        if isinstance(body, str):
+            urls: List[str] = []
+            if isinstance(value.get("url"), str):
+                urls.append(value["url"])
+            sources = value.get("sources")
+            if isinstance(sources, list):
+                urls.extend(source for source in sources if isinstance(source, str))
+            unique_urls = list(dict.fromkeys(urls))
+            source_text = "\n".join(f"Source: {url}" for url in unique_urls)
+            primary_field = "answer" if tool_name == "web_search" else "content"
+            details = {key: item for key, item in value.items() if key not in {primary_field, "url", "sources"}}
+            if isinstance(sources, list) and any(not isinstance(source, str) for source in sources):
+                details["sources"] = [source for source in sources if not isinstance(source, str)]
+            elif sources is not None and not isinstance(sources, list):
+                details["sources"] = sources
+            if value.get("url") is not None and not isinstance(value.get("url"), str):
+                details["url"] = value["url"]
+            detail_text = json.dumps(details, ensure_ascii=False, default=str) if details else ""
+            return "\n\n".join(part for part in (source_text, body.strip(), detail_text) if part)
+    if isinstance(value, str) and tool_name in {"web_search", "web_fetch"}:
+        return value
+    return json.dumps(value, ensure_ascii=tool_name not in {"web_search", "web_fetch"}, default=str)
+
+
+def _fallback_trace_text(item: Any) -> str:
+    """Normalize legacy JSON trace entries as well as new readable entries."""
+    raw = str(item or "").strip()
+    if not raw:
+        return ""
+    match = re.match(r"^\[([^\]]+)\]\s*(.*)$", raw, re.DOTALL)
+    if match and match.group(1) in {"web_search", "web_fetch"}:
+        tool_name, payload = match.groups()
+        try:
+            value = json.loads(payload)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None:
+            if _explore_tool_failure(tool_name, value):
+                return ""
+            return f"[{tool_name}] {_render_explore_tool_result(tool_name, value)}"
+        if tool_name == "web_fetch":
+            body = payload.split("**Result:**", 1)[-1].strip()
+            if _explore_tool_failure(tool_name, body):
+                return ""
+    marker = "**Result:**"
+    if raw.startswith(("**Params Passed:**", marker)) and marker in raw:
+        raw = raw.split(marker, 1)[1].strip()
+    return raw
+
+
+def _bounded_explore_parts(parts: List[str], budget: int) -> str:
+    """Share the payload budget across results so late evidence stays visible."""
+    if not parts or budget <= 0:
+        return ""
+    separator = "\n\n"
+    separator_cost = len(separator) * (len(parts) - 1)
+    if separator_cost >= budget:
+        return parts[-1][:budget]
+    available = budget - separator_cost
+    lo, hi = 0, max(len(part) for part in parts)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if sum(min(len(part), mid) for part in parts) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    cap = lo
+    marker = "\n[...truncated...]\n"
+    excerpts: List[str] = []
+    for part in parts:
+        if len(part) <= cap:
+            excerpts.append(part)
+        elif cap > len(marker) + 2:
+            head = (cap - len(marker)) // 2
+            tail = cap - len(marker) - head
+            excerpts.append(part[:head] + marker + part[-tail:])
+        else:
+            excerpts.append(part[:cap])
+    return separator.join(excerpts)
 
 
 def compile_explore_wrap_up(
@@ -99,20 +217,8 @@ def compile_explore_wrap_up(
         text = ""
     if text:
         return text
-    parts: list[str] = []
-    for item in tool_call_results or []:
-        raw = str(item)
-        marker = "**Result:**"
-        if marker in raw:
-            excerpt = raw.split(marker, 1)[1].strip()
-            if excerpt:
-                parts.append(excerpt)
-        elif raw.strip():
-            parts.append(raw.strip())
-    compiled = "\n\n".join(parts)
-    if len(compiled) > budget:
-        compiled = compiled[:budget] + "\n\n[truncated]"
-    return compiled
+    parts = [_fallback_trace_text(item) for item in tool_call_results or []]
+    return _bounded_explore_parts([part for part in parts if part], budget)
 
 
 _SOURCE_GOAL_TERMS = {
@@ -721,18 +827,18 @@ async def spawn_explore_agent_activity(
         else:
             actual_result = result
 
+        failure = _explore_tool_failure(tool_name, actual_result)
+        if failure:
+            return {"error": True, "message": failure}
+
         if _has_usable_tool_evidence(actual_result):
             has_usable_tool_evidence = True
-        activity.heartbeat(_heartbeat_payload())
+        result_str = _render_explore_tool_result(tool_name, actual_result)
 
-        # Serialize the actual result into message so run_agent puts it in context.
-        try:
-            result_str = json.dumps(actual_result, default=str)
-        except Exception:
-            result_str = str(actual_result)
-
-        # Collect raw tool results for callers (e.g. wait_for condition evaluator)
+        # Keep readable tool evidence for heartbeat, completion fallback, and
+        # wait_for's out-of-band condition evaluator.
         tool_call_results.append(f"[{tool_name}] {result_str}")
+        activity.heartbeat(_heartbeat_payload())
 
         return {"success": True, "message": result_str}
 
@@ -918,20 +1024,4 @@ async def spawn_explore_agent_activity(
         "llm_iteration_usage": llm_iteration_usage,
         "tool_call_results": tool_call_results,
     }
-    if final_response and init_tool_call_id:
-        # Same spawn_agent chip the parent left IN_PROGRESS. Post FINISHED
-        # here so a later parent-side timeout still leaves T3 a summary.
-        _dispatch_fe_post(
-            init_tool_call_id,
-            lambda: save_explore_message(
-                agent_id=agent_id,
-                title=(goal or "Explore")[:EXPLORE_GOAL_DISPLAY_LEN],
-                message=final_response[:EXPLORE_FALLBACK_PAYLOAD_BUDGET],
-                status=MessageStatus.FINISHED,
-                task_id=task_id,
-                tool_call_id=init_tool_call_id,
-                tool_name="spawn_agent",
-            ),
-        )
-        await _drain_pending_fe_posts()
     return result_payload
