@@ -90,6 +90,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
@@ -718,6 +719,12 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'anthropic',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 
@@ -774,6 +781,12 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
       });
     }
     __clearGptApiKeyCooldownCache();
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: cooldownIsLive(previous),
+    });
   }
 }
 

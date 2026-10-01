@@ -29,6 +29,7 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -325,6 +326,12 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
   }
 }
 
@@ -349,6 +356,24 @@ async function testSmoke_codexCompletesE2bTask() {
   const agentId = crypto.randomUUID();
   let taskId: string | undefined;
   let sandboxId: string | undefined;
+  const sharedCooldown = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+        accountId: '',
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  if (!cooldownIsLive(sharedCooldown)) {
+    await waitForServerFundedKeyCooldown({
+      baseUrl: BASE_URL,
+      apiKey: API_KEY,
+      key: 'gpt',
+      onCooldown: false,
+    });
+  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
