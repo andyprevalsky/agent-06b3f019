@@ -431,7 +431,15 @@ class ActionHistory:
             if element:
                 tag = getattr(element, "tag_name", None) or getattr(element, "node_name", "unknown")
                 element_description = f"[{index}] {tag}"
-                text = getattr(element, "text_content", "") or ""
+                # Browser DOM nodes often keep a button's visible label in
+                # children while text_content on the button itself is empty.
+                # Preserve that label so later decisions can identify the
+                # control that was actually clicked.
+                try:
+                    text = element.get_all_children_text() or ""
+                except Exception:
+                    text = ""
+                text = str(text or getattr(element, "text_content", "") or "").strip()
                 if text:
                     element_description += f" '{text[:50]}'"
 
