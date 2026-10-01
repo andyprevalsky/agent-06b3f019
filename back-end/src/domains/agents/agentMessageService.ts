@@ -4,6 +4,7 @@
 
 import { getTemporalClient } from '../../providers/temporal';
 import { handleChatMessage } from '../../providers/chat';
+import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
 import {
   type FilePointer,
@@ -16,7 +17,6 @@ import {
   type ResponseSchemaDirectAuth,
 } from '../../providers/setResponseSchema';
 import { createLogger } from '../../providers/logger';
-import { alertError } from '../../providers/errorAlert';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 
@@ -118,34 +118,12 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
       agentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
-    }).catch(async (err: unknown) => {
-      log.error('Chat handler error in message route', {
-        agent_id: agentId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      alertError({
-        source: 'chat',
-        message: err instanceof Error ? err.message : String(err),
+    }).catch((err: unknown) => {
+      void recoverChatHandlerFailure({
         agentId,
         userId: agentForChat.userId,
-        stack: err instanceof Error ? err.stack : undefined,
+        error: err,
       });
-      // Fail loud, not silent: without this the user gets a 201 and then nothing
-      // (the prod symptom). Surface an assistant message so the UI shows the
-      // failure instead of an unresponsive chat.
-      try {
-        await createMessage({
-          agentId,
-          role: 'ASSISTANT',
-          text: "Sorry — I couldn't generate a response just now. Please try again.",
-          metadata: { error: true, source: 'chat_handler_failure' },
-        });
-      } catch (persistErr) {
-        log.error('Failed to persist chat-failure notice', {
-          agent_id: agentId,
-          error: persistErr instanceof Error ? persistErr.message : String(persistErr),
-        });
-      }
     });
   }
 }

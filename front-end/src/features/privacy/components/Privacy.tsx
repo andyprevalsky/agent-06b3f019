@@ -50,10 +50,33 @@ function PolicySection({ section }: { readonly section: PrivacySection }) {
   return (
     <section>
       <h2 className="text-2xl font-semibold mb-4 text-foreground">
-        {section.number}. {section.title}
+        {section.number === undefined ? '' : `${section.number}. `}
+        {section.title}
       </h2>
       {section.bullets ? <BulletList items={section.bullets} /> : null}
       {section.paragraph ? <p className="text-muted-foreground">{section.paragraph}</p> : null}
+      {section.paragraphs ? (
+        <div className="space-y-4 text-muted-foreground">
+          {section.paragraphs.map((paragraph) => (
+            <p key={paragraph}>
+              {paragraph.startsWith('Limited Use.') ? (
+                <>
+                  {paragraph.split('Google API Services User Data Policy')[0]}
+                  <a
+                    href="https://developers.google.com/terms/api-services-user-data-policy"
+                    className={LINK_CLASSES}
+                  >
+                    Google API Services User Data Policy
+                  </a>
+                  {paragraph.split('Google API Services User Data Policy')[1]}
+                </>
+              ) : (
+                paragraph
+              )}
+            </p>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -132,7 +155,7 @@ const Privacy = () => {
                   SectionComponent = ContactSection;
                 }
                 return (
-                  <Fragment key={section.number}>
+                  <Fragment key={section.title}>
                     <SectionDivider />
                     <SectionComponent section={section} />
                   </Fragment>

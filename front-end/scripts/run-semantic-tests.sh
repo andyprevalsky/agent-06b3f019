@@ -61,8 +61,40 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
+# True when URL host is loopback: localhost, *.localhost, 127.0.0.0/8, or ::1.
+is_loopback_url() {
+  local url="$1" host=""
+  [[ -n "$url" ]] || return 1
+  host=$(URL="$url" python3 - <<'PY'
+import os, urllib.parse
+u = urllib.parse.urlparse(os.environ["URL"])
+host = (u.hostname or "").lower()
+print(host)
+PY
+) || return 1
+  [[ -n "$host" ]] || return 1
+  case "$host" in
+    localhost|*.localhost|::1) return 0 ;;
+  esac
+  # 127.0.0.0/8
+  if [[ "$host" =~ ^127\.([0-9]{1,3}\.){2}[0-9]{1,3}$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
 if [[ "$PROD_MODE" -eq 1 ]]; then
   # ── Production mode ──────────────────────────────────────────────────
+  # Cloud/injected envs often export BACKEND_URL to a loopback port (same
+  # footgun local mode already forces away). In --prod that would health-check
+  # a dead local port and false-fail the production gate — drop loopback URLs
+  # so the prod defaults win unless an explicit non-local override is set.
+  if is_loopback_url "${BACKEND_URL:-}"; then
+    unset BACKEND_URL
+  fi
+  if is_loopback_url "${FRONTEND_URL:-}"; then
+    unset FRONTEND_URL
+  fi
   export BACKEND_URL="${BACKEND_URL:-https://navi-j9a9.onrender.com}"
   # Prefer www — apex `roselabs.ai` 307s to www, and some runners flake on the
   # apex probe (no AAAA / Happy-Eyeballs). Keep accepting either host.

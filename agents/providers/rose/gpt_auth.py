@@ -631,23 +631,23 @@ async def openai_api_key_complete(
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
-                    raise RoseRateLimitError(f"OpenAI 429: {error_body[:2000]}", status=status)
+                    raise RoseRateLimitError("OpenAI 429", status=status)
 
                 if status in (401, 403):
-                    raise RoseAuthError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+                    raise RoseAuthError(f"OpenAI {status}", status=status)
 
                 if status == 400:
-                    raise RoseInvalidRequest(f"OpenAI 400: {error_body[:2000]}", status=status)
+                    raise RoseInvalidRequest("OpenAI 400", status=status)
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
                         await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
-                    raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+                    raise RoseServerError(f"OpenAI {status}", status=status)
 
                 # Mirror Codex: unexpected statuses (incl. 404) fall through as
                 # RoseServerError, never bare RoseError (not in _FALL_THROUGH_ERRORS).
-                raise RoseServerError(f"OpenAI {status}: {error_body[:2000]}", status=status)
+                raise RoseServerError(f"OpenAI {status}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
@@ -723,15 +723,15 @@ async def _attempt_with_token(
                             await asyncio.sleep(_backoff_for_429(response, attempt))
                         continue
                     rate_limited_until = _extract_rate_limited_until(response, error_body)
-                    exc = RoseRateLimitError(f"Codex 429: {error_body[:2000]}", status=status)
+                    exc = RoseRateLimitError("Codex 429", status=status)
                     exc.rate_limited_until = rate_limited_until  # type: ignore[attr-defined]
                     raise exc
 
                 if status in (401, 403):
-                    raise RoseAuthError(f"Codex {status}: {error_body[:2000]}", status=status)
+                    raise RoseAuthError(f"Codex {status}", status=status)
 
                 if status == 400:
-                    raise RoseInvalidRequest(f"Codex 400: {error_body[:2000]}", status=status)
+                    raise RoseInvalidRequest("Codex 400", status=status)
 
                 if status >= 500:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
@@ -740,7 +740,7 @@ async def _attempt_with_token(
                         ):
                             await asyncio.sleep(min(2**attempt, _BACKOFF_CAP_S))
                         continue
-                    raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
+                    raise RoseServerError(f"Codex {status}", status=status)
 
                 # 404 (and any other unexpected non-2xx) must be RoseServerError so
                 # RoseClient._FALL_THROUGH_ERRORS catches it and walks openai-api-key
@@ -748,7 +748,7 @@ async def _attempt_with_token(
                 # Cloudflare/edge 404s (empty body, same response for garbage tokens)
                 # fail the whole agent 3× instead of falling through. Do not retry
                 # 404 in-place: the same egress IP keeps getting blocked.
-                raise RoseServerError(f"Codex {status}: {error_body[:2000]}", status=status)
+                raise RoseServerError(f"Codex {status}", status=status)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             last_error = exc
             if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:

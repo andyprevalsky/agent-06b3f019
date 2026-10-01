@@ -416,19 +416,15 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
         );
         continue;
       }
-      throw new RoseRateLimitError(
-        `Codex 429: ${errorBody.substring(0, 200)}`,
-        status,
-        rateLimitedUntil
-      );
+      throw new RoseRateLimitError('Codex 429', status, rateLimitedUntil);
     }
 
     if (status === 401 || status === 403) {
-      throw new RoseAuthError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseAuthError(`Codex ${status}`, status);
     }
 
     if (status === 400) {
-      throw new RoseInvalidRequest(`Codex 400: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseInvalidRequest('Codex 400', status);
     }
 
     if (status >= 500) {
@@ -436,7 +432,7 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
-      throw new RoseServerError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseServerError(`Codex ${status}`, status);
     }
 
     // 404 (and any other unexpected non-2xx) must be RoseServerError so
@@ -444,7 +440,7 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     // is NOT fall-through — that gap made Cloudflare/edge 404s (empty body,
     // same for garbage tokens) fail the whole agent instead of falling through.
     // Do not retry 404 in place: the same egress IP keeps getting blocked.
-    throw new RoseServerError(`Codex ${status}: ${errorBody.substring(0, 200)}`, status);
+    throw new RoseServerError(`Codex ${status}`, status);
   }
 
   if (lastError) throw new RoseServerError(`Codex exhausted retries: ${lastError.message}`);
@@ -536,19 +532,15 @@ export async function* openAiApiKeyComplete(
         );
         continue;
       }
-      throw new RoseRateLimitError(
-        `OpenAI 429: ${errorBody.substring(0, 200)}`,
-        status,
-        rateLimitedUntil
-      );
+      throw new RoseRateLimitError('OpenAI 429', status, rateLimitedUntil);
     }
 
     if (status === 401 || status === 403) {
-      throw new RoseAuthError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseAuthError(`OpenAI ${status}`, status);
     }
 
     if (status === 400) {
-      throw new RoseInvalidRequest(`OpenAI 400: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseInvalidRequest('OpenAI 400', status);
     }
 
     if (status >= 500) {
@@ -556,12 +548,12 @@ export async function* openAiApiKeyComplete(
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
-      throw new RoseServerError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseServerError(`OpenAI ${status}`, status);
     }
 
     // Mirror Codex: unexpected statuses (incl. 404) fall through as
     // RoseServerError, never bare RoseError (not in isFallThroughError).
-    throw new RoseServerError(`OpenAI ${status}: ${errorBody.substring(0, 200)}`, status);
+    throw new RoseServerError(`OpenAI ${status}`, status);
   }
 
   if (lastError) throw new RoseServerError(`OpenAI exhausted retries: ${lastError.message}`);

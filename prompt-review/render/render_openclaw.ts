@@ -13,8 +13,9 @@
 
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = "/Users/andyprevalsky/conductor/workspaces/navi-whisper-lux-v2/istanbul";
+const REPO_ROOT = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const OUTPUT_DIR = `${REPO_ROOT}/prompt-review/rendered/openclaw`;
 const OPENCLAW_SRC = `${REPO_ROOT}/openclaw/src`;
 

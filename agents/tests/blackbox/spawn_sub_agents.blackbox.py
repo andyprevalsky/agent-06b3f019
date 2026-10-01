@@ -790,6 +790,50 @@ async def test_execute_tool_happy_path_completes_and_tracks_child():
     assert finished.message == "all done"
 
 
+async def test_finalize_child_keeps_result_until_finished_event_is_consumed():
+    """If FINISHED handling raises, child_results must still be available for recovery."""
+    from domains.spawn_sub_agents.handler import SpawnSubAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWorkflowModule(
+        activity_result={
+            "agents": [
+                {
+                    "agent_id": "child-keep",
+                    "goal": "Keep result",
+                    "temporal_workflow_id": "wf-child-keep",
+                }
+            ]
+        }
+    )
+    restore = _patch_spawn_sub_agents_workflow(fake)
+    try:
+        parent = _FakeParentWorkflow()
+        parent.child_results["child-keep"] = {
+            "status": "completed",
+            "summary": "still here",
+            "structured_response": {},
+        }
+        manager = SpawnSubAgentManager()
+        agen = manager.finalize_child(
+            parent,
+            {"agent_id": "child-keep", "goal": "Keep result"},
+            {"goal": "Keep result"},
+            "tc-keep",
+            "bus-1",
+            for_each_child=True,
+        )
+        first = await agen.__anext__()
+        assert getattr(first, "status", None) == MessageStatus.IN_PROGRESS
+        finished = await agen.__anext__()
+        assert getattr(finished, "status", None) == MessageStatus.FINISHED
+        assert "child-keep" in parent.child_results
+        await agen.aclose()
+        assert finished.message == "still here"
+    finally:
+        restore()
+
+
 async def test_execute_tool_recovers_terminal_child_from_persisted_state():
     """A missed child_completed signal is recovered from the child agent row."""
     from domains.spawn_sub_agents.handler import SpawnSubAgentManager
@@ -1348,6 +1392,10 @@ async def run_all_tests():
         test_execute_tool_generation_handoff_closes_finished_and_reraises,
     )
     await r.record_async("exec_happy_path", test_execute_tool_happy_path_completes_and_tracks_child)
+    await r.record_async(
+        "exec_keeps_result_until_finished_consumed",
+        test_finalize_child_keeps_result_until_finished_event_is_consumed,
+    )
     await r.record_async("exec_recovers_terminal_child", test_execute_tool_recovers_terminal_child_from_persisted_state)
     await r.record_async("exec_no_bus_id", test_execute_tool_happy_path_no_parent_bus_id_sets_it)
     await r.record_async("exec_failed_child", test_execute_tool_failed_child_yields_failure_events)

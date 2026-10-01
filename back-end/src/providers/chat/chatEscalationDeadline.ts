@@ -2,11 +2,11 @@
  * Bound the persist half of chat → Temporal escalation.
  *
  * handleChatMessage is fire-and-forget. If createMessage hangs after the router
- * chooses start_superintelligence, the catch that fails the agent never runs and
- * the row stays ACTIVE with a null workflow forever. Race the persist against a
- * deadline so that path rejects and the existing failAgentIfStillActive hook can
- * fire. Temporal start stays outside this helper — acceptance already has its
- * own reject/terminate path.
+ * chooses start_superintelligence, the catch never runs and the row stays
+ * ACTIVE with a null workflow forever. Race the persist against a deadline so
+ * that path rejects and recoverChatHandlerFailure can surface a notice without
+ * marking the agent FAILED. Temporal start stays outside this helper —
+ * acceptance already has its own reject/terminate path.
  */
 
 export const CHAT_ESCALATION_DEADLINE_MS = 30_000;

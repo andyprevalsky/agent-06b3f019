@@ -3993,6 +3993,70 @@ async def test_handler_for_each_spawn_exception_counts_as_failure():
     assert any(e.status == MessageStatus.ERROR and "2/2" in e.message for e in events)
 
 
+async def test_handler_for_each_oai_demo_timeout_recovery_reconciles_instead_of_hanging():
+    """A finalize timeout after child_results was consumed must not park gather forever.
+
+    Mass-agent 01682a79 stalled 518s: 50 children COMPLETED, 6 timeout recoveries
+    succeeded, then one drain entered ``_recover_oai_demo_for_each_timeout`` with
+    an empty in-memory map and never called fetch_child_terminal_result_activity.
+    """
+    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from tools.base import MessageStatus
+    import domains.spawn_agent.handler as h
+
+    class _TimeoutAfterConsumeMgr:
+        def finalize_child(self, wf, child_info, sub_agent, tcid, bus_id, *, for_each_child: bool = False):
+            async def _gen():
+                wf.child_results.pop(child_info.get("agent_id"), None)
+                raise TimeoutError("Activity task timed out")
+                yield  # generator marker
+
+            return _gen()
+
+    fake = _FakeSpawnWF(
+        activity_results={
+            "fetch_child_terminal_result_activity": {
+                "status": "completed",
+                "summary": "durable child",
+                "structured_response": {"ok": True},
+            }
+        }
+    )
+    restore_wf = _patch_spawn_workflow(fake)
+    original_sub = h.get_sub_agent_manager
+    original_july = h.apply_oai_demo_july_for_each
+    h.get_sub_agent_manager = lambda: _TimeoutAfterConsumeMgr()
+    h.apply_oai_demo_july_for_each = lambda goal, items, enabled=False: (goal, items)
+    wf = _FakeWFInstance(goal=OAI_DEMO_ROOT_GOAL_PREFIX)
+    wf.fast_mode_cache_enabled = True
+    try:
+        events = await asyncio.wait_for(
+            _collect(
+                h.SpawnAgentManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={
+                        "type": "for_each",
+                        "goal": "process",
+                        "output_schema": {"fields": []},
+                        "items": ["a"],
+                    },
+                    tool_call_id="tc",
+                )
+            ),
+            timeout=2.0,
+        )
+    finally:
+        h.get_sub_agent_manager = original_sub
+        h.apply_oai_demo_july_for_each = original_july
+        restore_wf()
+
+    finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED]
+    assert finished, f"for_each never completed: {[getattr(e, 'title', None) for e in events]}"
+    assert any(getattr(e, "title", None) == "for_each complete" for e in finished)
+    assert fake.activity_calls
+    assert any(c["name"] == "fetch_child_terminal_result_activity" for c in fake.activity_calls)
+
+
 async def test_handler_for_each_drain_handoff_reraises_instead_of_failing_children():
     """Cutover during for_each drain must not mark parked children failed."""
     from helpers.generation_handoff import GenerationHandoffRequested
@@ -4406,6 +4470,10 @@ async def run_all_tests():
     await r.record_async("handler_explore_unknown_attachment", test_handler_explore_unknown_attachment_warns)
     await r.record_async("handler_for_each_drain_exception", test_handler_for_each_drain_exception_counts_as_failure)
     await r.record_async("handler_for_each_spawn_exception", test_handler_for_each_spawn_exception_counts_as_failure)
+    await r.record_async(
+        "handler_for_each_timeout_recovery_reconciles",
+        test_handler_for_each_oai_demo_timeout_recovery_reconciles_instead_of_hanging,
+    )
     await r.record_async(
         "handler_for_each_drain_handoff_reraises",
         test_handler_for_each_drain_handoff_reraises_instead_of_failing_children,
