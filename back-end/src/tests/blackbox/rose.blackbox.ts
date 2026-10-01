@@ -78,7 +78,11 @@ import {
   transformMessagesForAnthropic,
   transformSchemaForAnthropic,
 } from '../../providers/rose/transforms';
-import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
+import type {
+  CompletionMessage,
+  CompletionOptions,
+  RoseStreamChunk,
+} from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
   CEREBRAS_API_URL,
@@ -827,7 +831,7 @@ async function testWaterfall_openAiToolCallsCarryFunctionType() {
     },
     {
       label: 'buildOpenRouterFastChatBody',
-      build: (messages) => buildOpenRouterFastChatBody({ messages }),
+      build: (messages) => buildOpenRouterFastChatBody({ messages }, 'req-tool-shape'),
     },
   ];
 
@@ -2287,13 +2291,16 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
     'openrouter→cerebras stamps reasoning.effort=low'
   );
 
-  const orFast = buildOpenRouterFastChatBody({ messages });
+  const orFast = buildOpenRouterFastChatBody({ messages }, 'req-effort');
   assertEqual(
     (orFast.reasoning as Record<string, unknown>).effort,
     'xhigh',
     'openrouter-fast default effort=xhigh'
   );
-  const orFastMinimal = buildOpenRouterFastChatBody({ messages, effort: 'minimal' });
+  const orFastMinimal = buildOpenRouterFastChatBody(
+    { messages, effort: 'minimal' },
+    'req-effort-minimal'
+  );
   assertEqual(
     (orFastMinimal.reasoning as Record<string, unknown>).effort,
     'low',
@@ -2320,14 +2327,24 @@ async function testWaterfall_bodyBuildersAlwaysStampEffortXhigh() {
   }
 }
 
-async function testOpenRouterFastChat_routesByThroughputWithRequiredParameters() {
-  const body = buildOpenRouterFastChatBody({
+async function testOpenRouterFastChat_routesEachRequestByThroughput() {
+  const options: CompletionOptions = {
     messages: [{ role: 'user', content: 'wrong address' }],
     response_format: {
       type: 'json_schema',
       json_schema: { name: 'router_decision', strict: true, schema: { type: 'object' } },
     },
-  });
+  };
+  const body = buildOpenRouterFastChatBody(options, 'req-attempt-1');
+  const regenerate = buildOpenRouterFastChatBody(options, 'req-attempt-2');
+  assert(
+    typeof body.session_id === 'string' && body.session_id.length > 0,
+    'failover must name its own OpenRouter session instead of the conversation-derived one'
+  );
+  assert(
+    body.session_id !== regenerate.session_id,
+    'a router regenerate must route afresh: a Rose stall abort never releases the host pin'
+  );
   const provider = body.provider as Record<string, unknown> | undefined;
   assertEqual(
     provider?.sort,
@@ -2341,7 +2358,7 @@ async function testOpenRouterFastChat_routesByThroughputWithRequiredParameters()
   );
   assert(
     provider?.order === undefined && provider?.only === undefined,
-    'failover must not pin every Cerebras-stall turn onto one GLM host'
+    'failover must follow the live throughput ranking, not a fixed GLM host list'
   );
   assert(
     provider?.allow_fallbacks !== false,
@@ -4036,8 +4053,8 @@ async function main(): Promise<void> {
       fn: testWaterfall_bodyBuildersAlwaysStampEffortXhigh,
     },
     {
-      name: 'openrouter-fast / routes by throughput and requires response_format support',
-      fn: testOpenRouterFastChat_routesByThroughputWithRequiredParameters,
+      name: 'openrouter-fast / routes each request by throughput to response_format hosts',
+      fn: testOpenRouterFastChat_routesEachRequestByThroughput,
     },
     {
       name: 'claudeAuth / omits effort for haiku (rose-1-mini)',

@@ -53,25 +53,42 @@ function normalizeOpenRouterFastChatEffort(effort?: string): string {
 }
 
 /**
- * OpenRouter's default routing is price-weighted, and after the first cached
- * response it keeps each conversation on that host for 10 minutes (sticky
- * routing; `sort` only picks the first host). On the e8f2279b router request
- * the cheap hosts it favors finished in p50 8.4s / p90 11.9s; throughput
- * sorting finished in p50 2.9s / p90 3.9s and spreads conversations across
- * hosts. `require_parameters` keeps hosts that would ignore `response_format`.
+ * OpenRouter's default routing is price-weighted. On the e8f2279b router
+ * request the cheap hosts it favors finished in p50 8.4s / p90 11.9s;
+ * throughput sorting finished in p50 2.7s / p90 3.4s (62/62 inside the router
+ * bounds). Load-balanced throughput floors spread hosts but still drew slow
+ * ones (p90 13.0s; first content past the router's 4.2s pre-content budget).
+ * `sort` disables load balancing, so failover traffic goes to OpenRouter's
+ * current throughput leader and moves on only when that host errors.
+ * `require_parameters` keeps hosts that would ignore `response_format`.
  */
 export const OPENROUTER_FAST_CHAT_PROVIDER = {
   sort: 'throughput',
   require_parameters: true,
 } as const;
 
-export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<string, unknown> {
+/**
+ * OpenRouter pins a conversation (keyed by its first messages unless
+ * `session_id` is set) to the host that served it for 10 minutes, and `sort`
+ * did not override the pin on the e8f2279b profile. A Rose stall abort is not
+ * a provider error, so it never releases the pin: without a per-request
+ * session the router's regenerate would wait on the same slow host.
+ */
+export function openRouterFastChatSessionId(requestId: string): string {
+  return `rose-fast-chat-${requestId}`;
+}
+
+export function buildOpenRouterFastChatBody(
+  options: CompletionOptions,
+  requestId: string
+): Record<string, unknown> {
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
     messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
     provider: OPENROUTER_FAST_CHAT_PROVIDER,
+    session_id: openRouterFastChatSessionId(requestId),
     // Always stamp reasoning.effort so every Rose body builder is well-formed.
     // Callers (chat router/generator) may pass effort:'minimal' for latency;
     // omit → xhigh to match the rest of the Rose surface.
@@ -116,7 +133,7 @@ export async function* exclusiveOpenRouterFastChatCompletion(params: {
 
   try {
     const response = await postOpenRouterStream({
-      body: buildOpenRouterFastChatBody(params.options),
+      body: buildOpenRouterFastChatBody(params.options, params.requestId),
       openrouterKey: params.openrouterKey,
       requestId: params.requestId,
       callSite: params.callSite,

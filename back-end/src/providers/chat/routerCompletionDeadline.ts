@@ -8,12 +8,16 @@
  * 3.8s / max 8.6s, never paused more than ~0.4s between chunks, and closed the
  * decision in 4.1–19.1s (p50 6.0s, p90 10.7s). A whole-completion bound sized
  * for the healthy primary (3s) killed every failover attempt. The completion
- * cap holds only while the failover picks GLM hosts by throughput
- * (OPENROUTER_FAST_CHAT_PROVIDER): on the slow hosts that price-weighted
- * routing favors, the same request finished at p90 16.6s.
+ * cap holds only while each failover request picks its GLM host by throughput
+ * (OPENROUTER_FAST_CHAT_PROVIDER, fresh session per request): pinned to a slow
+ * host that price-weighted routing favors, the same request finished at p90
+ * 16.6s.
  *
  * - stall: no content/reasoning progress for this long (hung provider).
- *   Reasoning counts: the router streams it to the user as the thinking row.
+ *   Reasoning counts once a branch serves: the router streams it to the user
+ *   as the thinking row. Until then the Rose hedge buffers every chunk, so on
+ *   a Cerebras stall the failover must reach first content within this bound
+ *   minus the hedge delay (5s - 0.8s) of its own request.
  * - completion: hard cap on one attempt even while it keeps dribbling
  */
 

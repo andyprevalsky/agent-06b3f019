@@ -32,7 +32,8 @@
  * CHAT_ROUTER_FAILOVER_LIVE=1 adds the live probe: same seeded agent, a
  * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
  * stalled), and the real OpenRouter GLM failover as the only path that can
- * serve. /deploy runs it in scripts/run_deploy_live_probes.py.
+ * serve. It must serve inside the first router attempt and reports which
+ * OpenRouter host did. /deploy runs it in scripts/run_deploy_live_probes.py.
  */
 
 import 'dotenv/config';
@@ -51,6 +52,7 @@ import { DEFAULT_CHAT_ROUTER_STALL_TIMEOUT_MS } from '../../providers/chat/route
 import { OPENROUTER_CEREBRAS_MODEL } from '../../providers/rose/openrouterCerebrasRoute';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import { type LiveObservation, observedLiveFetch } from './chat-router-failover.live.support';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.CHAT_ROUTER_FAILOVER_LIVE === '1';
@@ -101,12 +103,14 @@ const PROD_ROUTER_CONTENT_CHARS = 88_440;
 
 type Behavior = 'stall' | 'healthy' | 'glm-recorded' | 'live';
 
-interface ProviderRequest {
+/** Live requests also record the OpenRouter host that served, and when. */
+interface ProviderRequest extends LiveObservation {
   provider: 'cerebras' | 'openrouter';
   model: string;
   schema: string;
   messageCount: number;
   contentChars: number;
+  sessionId?: string;
   atMs: number;
 }
 
@@ -203,17 +207,20 @@ function installNetwork(scenario: Scenario, startedAt: number) {
       model: string;
       messages: Array<{ content?: unknown }>;
       response_format?: { json_schema?: { name?: string } };
+      session_id?: string;
     };
     const schema = body.response_format?.json_schema?.name ?? '';
     const provider = url === CEREBRAS_API_URL ? 'cerebras' : 'openrouter';
-    requests.push({
+    const request: ProviderRequest = {
       provider,
       model: body.model,
       schema,
       messageCount: body.messages.length,
       contentChars: contentChars(body.messages),
+      sessionId: body.session_id,
       atMs: Date.now() - startedAt,
-    });
+    };
+    requests.push(request);
     const isRouter = schema === 'router_decision';
     let behavior: Behavior;
     if (provider === 'cerebras') {
@@ -226,7 +233,7 @@ function installNetwork(scenario: Scenario, startedAt: number) {
     const signal = init?.signal;
     switch (behavior) {
       case 'live':
-        return realFetch(input, init);
+        return observedLiveFetch(realFetch, input, init, request);
       case 'healthy':
         return replayResponse(streams.cerebrasHealthy.events, signal, false);
       case 'glm-recorded':
@@ -450,6 +457,17 @@ async function testFirstStalledAttemptRegenerates(): Promise<void> {
     );
     assertHealthyTurn(network);
     assert.equal(network.routerRequests('cerebras').length, 2, 'exactly one regenerate');
+    const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
+    assert.equal(glm.length, 2, 'each router attempt raced its own GLM failover');
+    assert.ok(
+      glm.every((request) => request.sessionId),
+      'every GLM failover must name its own OpenRouter session'
+    );
+    assert.notEqual(
+      glm[0].sessionId,
+      glm[1].sessionId,
+      'the regenerate must not inherit the OpenRouter host pin of the stalled attempt'
+    );
   } finally {
     await cleanup(seeded);
   }
@@ -529,6 +547,16 @@ async function testLiveFailoverEscalates(): Promise<void> {
   try {
     assertExactProdRouterContext(network);
     const attempts = network.routerRequests('cerebras').length;
+    const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
+    const served = glm
+      .map(
+        (request, index) =>
+          `attempt ${index + 1}: ${request.upstreamProvider ?? 'no host'}, HTTP ` +
+          `${request.status ?? '-'} at ${request.headersMs ?? '-'}ms, first event ` +
+          `${request.firstEventMs ?? '-'}ms, first content ${request.firstContentMs ?? '-'}ms`
+      )
+      .join('; ');
+    process.stdout.write(`  live GLM failover: ${served}\n`);
     assert.equal(
       outcome.kind,
       'escalated',
@@ -540,13 +568,14 @@ async function testLiveFailoverEscalates(): Promise<void> {
       network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
       'the OpenRouter race must still start its Qwen branch (stalled here)'
     );
+    assert.equal(glm.length, attempts, 'every router attempt must reach the real GLM failover');
     assert.equal(
-      network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL).length,
       attempts,
-      'every router attempt must reach the real GLM failover, the only live path'
+      1,
+      `the live GLM failover must serve inside the first router attempt's bounds (${served})`
     );
     process.stdout.write(
-      `  live GLM failover escalated at ${outcome.atMs}ms on router attempt ${attempts}\n`
+      `  live GLM failover escalated at ${outcome.atMs}ms via ${glm[0].upstreamProvider}\n`
     );
   } finally {
     await cleanup(seeded);
