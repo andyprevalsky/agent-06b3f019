@@ -900,7 +900,10 @@ async def test_handler_explore_capture_tool_results():
     from domains.spawn_agent.handler import SpawnAgentManager
     from tools.base import MessageStatus
 
-    sub_agent_trace = ["[web_search] {big}", "[grep] {stuff}"]
+    sub_agent_trace = [
+        "[web_search] {big}",
+        "[grep] {trace_path: agent_trajectories/root/USER/message, message_role: USER, text: City comparison}",
+    ]
     fake = _FakeSpawnWF(
         activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
         start_activity_result=_Activity(
@@ -929,6 +932,9 @@ async def test_handler_explore_capture_tool_results():
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
     assert "tool_call_results" not in (finished.data or {}), "must not persist raw trace in event data"
     assert captured == sub_agent_trace, "collector must receive the raw trace out-of-band"
+    assert "Original grep results:" in finished.message
+    assert "agent_trajectories/root/USER/message" in finished.message
+    assert "[web_search]" not in finished.message
 
 
 async def test_handler_explore_failed_result_yields_error():

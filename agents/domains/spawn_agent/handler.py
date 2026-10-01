@@ -39,6 +39,7 @@ from domains.spawn_agent.service import (
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_wrap_up,
+    compile_explore_grep_evidence,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -923,6 +924,9 @@ class SpawnAgentManager(ToolManager):
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
             event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
+            grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
+            if not explore_failed and grep_evidence and grep_evidence not in explore_result:
+                event_message = f"{event_message}\n\nOriginal grep results:\n{grep_evidence}"
             if (
                 not oai_demo
                 and not explore_failed

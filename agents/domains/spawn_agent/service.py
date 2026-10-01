@@ -226,6 +226,16 @@ def compile_explore_wrap_up(
     return _bounded_explore_parts([part for part in parts if part], budget)
 
 
+def compile_explore_grep_evidence(tool_call_results: List[Any], *, budget: int = 6_000) -> str:
+    """Keep bounded, original grep results beside an explore agent's summary."""
+    grep_results = [
+        str(item).strip()
+        for item in tool_call_results
+        if str(item).lstrip().startswith("[grep]")
+    ]
+    return _bounded_explore_parts(list(dict.fromkeys(grep_results))[-3:], budget)
+
+
 _SOURCE_GOAL_TERMS = {
     "email": ("email", "gmail"),
     "gmail": ("email", "gmail"),
