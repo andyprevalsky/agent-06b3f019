@@ -581,6 +581,85 @@ def test_speculative_state_wired_after_step_start_mutations():
     assert "state_prefetch.discard()" in teardown
 
 
+async def test_pooled_http_client_reused_per_loop():
+    import httpx
+
+    from helpers import http_client
+
+    http_client._clients.clear()
+
+    async def grab():
+        return http_client.get_http_client(), http_client.get_http_client(), http_client.get_streaming_http_client()
+
+    first, again, streaming = await grab()
+    assert first is again
+    assert streaming is not first
+    await first.aclose()
+    reopened = http_client.get_http_client()
+    assert reopened is not first and not reopened.is_closed
+
+    def other_loop():
+        return asyncio.run(grab())[0]
+
+    other = await asyncio.to_thread(other_loop)
+    assert other is not reopened
+    assert isinstance(other, httpx.AsyncClient)
+    http_client._clients.clear()
+
+
+async def test_per_step_backend_and_llm_calls_never_build_a_client():
+    """Each fresh httpx.AsyncClient builds an SSLContext (CA bundle parse) and a
+    new TLS connection; py-spy put that at ~27% of a live browser worker's main
+    thread, paid on every per-step message save, control poll, and LLM stream."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    import httpx
+
+    import config as config_module
+    from domains.spawn_browser_agent_v3 import repo
+    from helpers import http_client, update_status
+    from providers.rose import transport
+    from tools.base import MessageStatus
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"state": "agent"})
+
+    loop = asyncio.get_running_loop()
+    http_client._clients.clear()
+    for name in ("default", "streaming"):
+        http_client._clients[name] = (httpx.AsyncClient(transport=httpx.MockTransport(handler)), loop)
+
+    def no_new_clients(*_a, **_k):
+        raise AssertionError("per-call httpx.AsyncClient constructed on the browser step hot path")
+
+    cfg = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="k"))
+    try:
+        with (
+            patch.object(httpx, "AsyncClient", side_effect=no_new_clients),
+            patch.object(config_module, "load_config", return_value=cfg),
+            patch.object(update_status, "load_config", return_value=cfg),
+        ):
+            assert await repo.fetch_browser_control_state(cfg, "t1") == "agent"
+            await repo.fetch_browser_captcha_telemetry(cfg, "t1")
+            assert await repo.save_browser_action_message("a1", "Click", "msg", MessageStatus.IN_PROGRESS, "t1")
+            await repo.save_browser_assistant_message("a1", "thinking", "t1")
+            await update_status._update_agent_status_impl("a1", "ACTIVE", 0.5, "", 0, 0, 0)
+            async with transport.post_cerebras_stream(body={"model": "m"}, cerebras_key="k", request_id="r") as resp:
+                assert resp.status_code == 200
+    finally:
+        for client, _ in list(http_client._clients.values()):
+            await client.aclose()
+        http_client._clients.clear()
+    assert "/api/browser-session/task/t1/control" in seen
+    assert "/api/agents/a1/messages" in seen
+    assert "/api/agents/a1/status" in seen
+    assert "/v1/chat/completions" in seen
+
+
 async def run_all_tests():
     print("browser-step-timing blackbox tests:")
     r = BlackboxResult()
@@ -615,6 +694,8 @@ async def run_all_tests():
         test_light_step_observe_skips_dom_and_read_browser_state_builds_it,
     )
     await r.record_async("page_identity_cached_target_info", test_page_identity_reads_cached_target_info)
+    await r.record_async("pooled_http_client_reused_per_loop", test_pooled_http_client_reused_per_loop)
+    await r.record_async("step_calls_never_build_http_client", test_per_step_backend_and_llm_calls_never_build_a_client)
     teardown_mock()
     return r.all_passed
 
