@@ -21,7 +21,7 @@ sources:
   - PR #1299
   - commit 9d44d054cae4ed89eea11c6a469697a881583683
 repro: scripts/tests/cloudbench-fake-volume-contract.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -84,9 +84,9 @@ exact owners, its sessions and remaining fixture processes were verified gone,
 and it is not counted as a completed red result. Its prepared recipe and
 cancelled evidence remain private.
 
-The required complete Linux controller suite must still pass on the final
-committed source before this case closes. The original failure is not relabeled
-and none of this diagnostic work grants paid-fleet acceptance credit.
+The complete Linux controller verification subsequently passed, as recorded
+below. The original failure is not relabeled and none of this diagnostic work
+grants paid-fleet acceptance credit.
 
 Private receipts, unchanged assertion-block hashes, original source and fixture
 archives, logs, final fast red/green evidence and native replay owners are under
@@ -126,11 +126,27 @@ hashes and red/green receipts are private under
 
 Archive searches used the exact indexed-private-IP failure and fake IPv6
 fixture/identity vocabulary. This is a follow-up to the same fixture repair:
-the missing guardrail was exercising its actual address consumer. The complete
-mandatory Linux suite must still pass on the committed repair. Earlier passing
+the missing guardrail was exercising its actual address consumer. Earlier passing
 commands retain their original source identity only where their executed
 inputs are unchanged; they are not relabeled as new executions. This work
 grants no paid-fleet acceptance credit.
+
+## Final verification
+
+The complete multi-workstream command passed on `58b56241` in 1294.719 seconds,
+including the actual repaired scenario 2a and the original scenario 3 collision
+boundary. Its 49 PASS records cover every scenario through 16. The remaining
+four native commands also passed; the final focused pytest command reported
+288 passed and 449 deselected cases. All original limits remained unchanged.
+
+The combined 13-command receipt preserves eight actual passes on `0bf943c9`
+with independently verified unchanged executed inputs, and five actual
+executions on `58b56241`. All 8,216 source hashes matched before and after the
+new execution, and every recorded native owner and session was absent after
+completion. Independent fixture review and root verification are retained
+with `combined-native13.receipt.private.json` under the private directory above.
+This closes the fake-provider regression; live fleet acceptance remains a
+separate requirement.
 
 ## Human feedback
 

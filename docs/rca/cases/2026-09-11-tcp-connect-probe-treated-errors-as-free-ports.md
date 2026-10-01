@@ -21,7 +21,7 @@ sources:
   - PR #1299
   - commit 8fec27c4d80e54f44d25e930ebdbd3dff1999fd7
 repro: scripts/tests/cloudbench-env.test.sh; scripts/tests/cloudbench-multi-workstream.test.sh
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -149,8 +149,24 @@ errno free. Production file hashes are identical before and after this fixture
 repair; it adds no runtime work, model call or provider allocation. Exact
 receipts and the focused runner are in
 `.context/acceptance/proof85-tcp-errno-fixture-rca/`. The existing owning command
-remains registered in `/deploy` Step 4cb and `scripts/test.sh`. The final full
-native sequence is still pending, so this case is open for that outcome.
+remains registered in `/deploy` Step 4cb and `scripts/test.sh`.
+
+### Final native verification
+
+The unchanged complete `cloudbench-env.test.sh` command passed on `0bf943c9`
+in 27.131 seconds. The combined 13-command native verification subsequently
+passed: eight original passes retain their actual source identity and an
+independent unchanged-input audit, while the remaining five commands executed
+on `58b56241`. The later changes affected only the separate fake IPv6 fixture
+and its RCA; the TCP runtime and owning command stayed unchanged.
+
+The full multi-workstream command passed in 1294.719 seconds, and the final
+focused pytest command reported 288 passed cases. Original bounds were
+preserved, source hashes matched before and after execution, and all recorded
+native owners and sessions were absent. The combined receipt and independent
+reviews are private under
+`.context/acceptance/proof85-native-multi-final-rca/`. This closes the TCP
+regression without granting live fleet acceptance credit.
 
 ## Human feedback
 

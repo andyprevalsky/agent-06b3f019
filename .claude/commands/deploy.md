@@ -618,12 +618,12 @@ if [ -z "$CHANGED_AGENTS" ]; then
 fi
 ```
 
-The twelve controller commands must pass. The agents `benchmark` blackbox domain
+The controller commands above must pass. The agents `benchmark` blackbox domain
 must also pass exactly once: Step 4g's agents coverage already runs it whenever
 `$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
 coverage was skipped. Never launch the same controller-owning domain in both
 parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
-is non-empty, wait for Step 4g to finish before starting the nine controller
+is non-empty, wait for Step 4g to finish before starting the controller
 commands above. This operational
 verification wiring is pre-authorized by Step 0p and must never pause for human
 approval.
