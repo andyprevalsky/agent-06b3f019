@@ -65,12 +65,12 @@ from domains.request_user_approval.repo import (
     resolve_attention_request_activity,
 )
 from domains.spawn_agent.oai_demo_report_files import materialize_oai_demo_report_files_activity
+from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
     spawn_explore_agent_activity,
 )
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,
     spawn_browser_agent_activity_v3,
@@ -129,6 +129,7 @@ from helpers.llm import (
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
+from helpers.process_exit import run_then_exit
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from helpers.save_tool_usage import save_tool_usage
 from helpers.sms_activities import (
@@ -1370,4 +1371,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_then_exit(main)
