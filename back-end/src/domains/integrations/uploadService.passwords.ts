@@ -3,7 +3,6 @@
  * Split from uploadService.ts for max-lines compliance.
  */
 
-import { randomBytes, createCipheriv, publicEncrypt, constants } from '../../providers/crypto';
 import {
   type CacheStoragePayload,
   type PasswordPayload,
@@ -12,8 +11,10 @@ import {
   IntegrationStatus,
 } from './types';
 import { createLogger } from '../../providers/logger';
-import { RSA_PUBLIC_KEY_PEM } from '../../providers/encryptionKeys';
+import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
 import * as repo from './repo';
+
+export { encryptPasswordForStorage };
 
 const log = createLogger('Integrations');
 
@@ -160,37 +161,6 @@ async function bulkUpsertPasswordEntries(
   }
 
   await repo.bulkUpsertPasswords(values, params);
-}
-
-/**
- * Encrypt a password using RSA-2048 + AES-256-GCM hybrid encryption.
- */
-export function encryptPasswordForStorage(password: string): string {
-  const aesKey = randomBytes(32);
-  const iv = randomBytes(12);
-
-  const cipher = createCipheriv('aes-256-gcm', aesKey, iv);
-  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  const ciphertext = Buffer.concat([encrypted, authTag]);
-
-  const encryptedAesKey = publicEncrypt(
-    {
-      key: RSA_PUBLIC_KEY_PEM,
-      padding: constants.RSA_PKCS1_OAEP_PADDING,
-      oaepHash: 'sha256',
-    },
-    aesKey
-  );
-
-  const envelope = {
-    version: 1,
-    encrypted_aes_key: encryptedAesKey.toString('base64'),
-    iv: iv.toString('base64'),
-    ciphertext: ciphertext.toString('base64'),
-  };
-
-  return Buffer.from(JSON.stringify(envelope)).toString('base64');
 }
 
 /** Parse the CSV header and return column indices. */

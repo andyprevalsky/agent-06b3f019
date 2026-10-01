@@ -10,8 +10,8 @@
 
 import { canonicalAuthRealm, hostnameFromRealmInput } from '../../providers/authRealm';
 import { createLogger } from '../../providers/logger';
+import { encryptPasswordForStorage } from '../../providers/credentialEnvelope';
 import { IntegrationStatus, IntegrationType, type PasskeyPayload } from './types';
-import { encryptPasswordForStorage } from './uploadService.passwords';
 import * as repo from './repo';
 
 const log = createLogger('Integrations');
