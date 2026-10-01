@@ -35,6 +35,7 @@ from domains.spawn_agent.repo import (
     save_explore_message,
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
+from helpers.activity_heartbeat import heartbeat_resume_details
 from helpers.tracing import span, traced
 from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
@@ -534,12 +535,14 @@ async def spawn_explore_agent_activity(
     # source_connect gate per unavailable source after this explore returns.
     unavailable_sources_collected: List[Dict] = []
 
+    # Every heartbeat replaces the details a timeout hands the parent, so the
+    # latest evidence also rides on beats from the LLM helpers run_agent calls.
+    resume_details: Dict[str, Any] = {}
+
     def _heartbeat_payload() -> Dict[str, Any]:
         compiled = compile_explore_wrap_up("", tool_call_results)
-        return {
-            "result": compiled,
-            "tool_call_results": list(tool_call_results[-8:]),
-        }
+        resume_details.update(result=compiled, tool_call_results=list(tool_call_results[-8:]))
+        return dict(resume_details)
 
     async def _heartbeat_loop() -> None:
         """Keep the activity alive during wrap-up LLM calls; details hold evidence."""
@@ -925,38 +928,39 @@ async def spawn_explore_agent_activity(
     # exactly the error path where visibility matters most.
     result: Dict[str, Any] = {}
     try:
-        result = await run_agent(
-            agent_id=agent_id,
-            user_id=user_id,
-            system_prompt=explore_system_prompt,
-            verifier_prompt_generator=explore_verifier_prompt,
-            model=model,
-            tools=get_explore_agent_tools(),
-            initial_context=[{"role": "USER", "text": initial_user_text}],
-            task_id=task_id,
-            is_inside_temporal_activity=True,
-            execute_tool=explore_execute_tool,
-            post_message=explore_post_message,
-            max_iterations=resolved_max_iterations,
-            winddown_window=EXPLORE_WINDDOWN_WINDOW,
-            max_context_tokens=max_context_tokens,
-            skip_verification=True,
-            skip_blueprint_query=True,
-            skip_status_updates=True,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            get_gpt_token_source=(lambda: gpt_token_source),
-            get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
-            on_tokens=on_tokens,
-            call_site_override="explore_agent",
-            cache_sequence_id=explore_cache_sequence_id,
-            # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
-            # agent_id), so the N parallel explore agents under one sub-agent don't all
-            # collide on (parent_goal, explore_agent, iteration) and bust each other.
-            fast_mode_cache_enabled=_explore_fast_mode_enabled,
-            goal_text=_explore_fast_mode_goal,
-        )
+        with heartbeat_resume_details(resume_details):
+            result = await run_agent(
+                agent_id=agent_id,
+                user_id=user_id,
+                system_prompt=explore_system_prompt,
+                verifier_prompt_generator=explore_verifier_prompt,
+                model=model,
+                tools=get_explore_agent_tools(),
+                initial_context=[{"role": "USER", "text": initial_user_text}],
+                task_id=task_id,
+                is_inside_temporal_activity=True,
+                execute_tool=explore_execute_tool,
+                post_message=explore_post_message,
+                max_iterations=resolved_max_iterations,
+                winddown_window=EXPLORE_WINDDOWN_WINDOW,
+                max_context_tokens=max_context_tokens,
+                skip_verification=True,
+                skip_blueprint_query=True,
+                skip_status_updates=True,
+                claude_token=claude_token,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                get_gpt_token_source=(lambda: gpt_token_source),
+                get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
+                on_tokens=on_tokens,
+                call_site_override="explore_agent",
+                cache_sequence_id=explore_cache_sequence_id,
+                # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
+                # agent_id), so the N parallel explore agents under one sub-agent don't all
+                # collide on (parent_goal, explore_agent, iteration) and bust each other.
+                fast_mode_cache_enabled=_explore_fast_mode_enabled,
+                goal_text=_explore_fast_mode_goal,
+            )
     finally:
         _heartbeat_stop.set()
         heartbeat_task.cancel()

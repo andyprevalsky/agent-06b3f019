@@ -1143,8 +1143,12 @@ async def test_handler_explore_cancelled_yields_error():
     assert any(e.status == MessageStatus.ERROR for e in events)
 
 
-def _explore_timeout_activity_error(heartbeat=None):
+def _explore_timeout_activity_error(*heartbeat_details):
+    """A timed-out explore as the workflow receives it: Temporal decodes the
+    last heartbeat's details into a list on the TimeoutError cause."""
     from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import TimeoutError as TemporalTimeoutError
+    from temporalio.exceptions import TimeoutType
 
     exc = ActivityError(
         message="activity StartToClose timeout",
@@ -1155,9 +1159,11 @@ def _explore_timeout_activity_error(heartbeat=None):
         activity_id="1",
         retry_state=None,
     )
-    exc.__cause__ = TimeoutError("StartToClose")
-    if heartbeat is not None:
-        exc.last_heartbeat_details = (heartbeat,)
+    exc.__cause__ = TemporalTimeoutError(
+        "activity StartToClose timeout",
+        type=TimeoutType.START_TO_CLOSE,
+        last_heartbeat_details=list(heartbeat_details),
+    )
     return exc
 
 
@@ -1188,11 +1194,61 @@ async def test_handler_explore_timeout_finishes_with_heartbeat_wrap_up():
     finally:
         restore()
 
-    finished = next(event for event in events if event.status == MessageStatus.FINISHED)
-    assert "median rent" in finished.message
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert finished, (
+        f"a timed-out explore with heartbeat evidence must FINISH, got {[(e.status, e.message) for e in events]}"
+    )
+    assert "median rent" in finished[0].message
     assert not any(event.status == MessageStatus.ERROR for event in events)
     assert fake.wait_condition_timeouts
     assert fake.wait_condition_timeouts[0] is not None
+
+
+async def test_explore_timeout_during_an_llm_call_keeps_the_tool_evidence():
+    """Explore evidence must survive a timeout that lands mid LLM call.
+
+    Each heartbeat replaces the details the timeout hands the parent. The LLM
+    helpers run_agent calls heartbeat with a status string only, so a timeout
+    during the wrap-up call delivered no evidence and the explore ended as
+    "stopped before completion with no tool evidence" despite its results.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_agent.handler import _explore_result_after_activity_failure
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.llm import _safe_heartbeat as llm_heartbeat
+
+    search = MagicMock()
+    search.execute_tool = AsyncMock(
+        return_value={"result": "Denver median rent is $1,800 (Zillow, Sep 2026)", "usage": {"llm": [], "service": []}}
+    )
+    beats: list = []
+    beat_at_timeout: list = []
+
+    async def run_agent_until_wrap_up(**kwargs):
+        await kwargs["execute_tool"]("web_search", {"query": "Denver rent"}, "tc-search")
+        llm_heartbeat("LLM streaming... 120 chars")
+        beat_at_timeout.append(beats[-1])
+        return {"status": "completed", "final_response": "Denver rent summary"}
+
+    env = ActivityEnvironment()
+    env.on_heartbeat = lambda *details: beats.append(details)
+    with (
+        patch("loop.run_agent.run_agent", new=run_agent_until_wrap_up),
+        patch("tools.web_search.WebSearchManager", return_value=search),
+    ):
+        await env.run(spawn_explore_agent_activity, agent_id="a", user_id="u", goal="research Denver rent", model="m")
+
+    result, was_cancelled = _explore_result_after_activity_failure(
+        _explore_timeout_activity_error(*beat_at_timeout[0]), user_paused=False
+    )
+    assert not was_cancelled
+    assert result.get("status") == "completed", (
+        f"the last heartbeat {beat_at_timeout[0]!r} lost the explore evidence: {result}"
+    )
+    assert any("$1,800" in text for text in result["tool_call_results"]), result
 
 
 async def test_handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence():
@@ -4535,6 +4591,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_explore_timeout_finishes_with_heartbeat_wrap_up",
         test_handler_explore_timeout_finishes_with_heartbeat_wrap_up,
+    )
+    await r.record_async(
+        "explore_timeout_during_llm_call_keeps_tool_evidence",
+        test_explore_timeout_during_an_llm_call_keeps_the_tool_evidence,
     )
     await r.record_async(
         "handler_explore_timeout_without_heartbeat_recovers_persisted_tool_evidence",

@@ -89,11 +89,14 @@ def wrap_up_payload_from_failure(exc: BaseException) -> Dict[str, Any]:
         seen.add(id(cur))
         details = getattr(cur, "last_heartbeat_details", None)
         if details:
-            payload = details[0] if isinstance(details, tuple) and details else details
-            if isinstance(payload, dict):
-                return payload
-            if isinstance(payload, str) and payload.strip():
-                return {"result": payload}
+            # Temporal decodes heartbeat details into a list; the evidence dict
+            # follows the message when an LLM helper sent the last beat.
+            payloads = list(details) if isinstance(details, (list, tuple)) else [details]
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    return payload
+            if isinstance(payloads[0], str) and payloads[0].strip():
+                return {"result": payloads[0]}
         cur = getattr(cur, "cause", None) or getattr(cur, "__cause__", None)
     return {}
 
