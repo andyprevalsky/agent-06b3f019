@@ -11397,23 +11397,22 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
     from benchmarks import benchmark_tasks
     from benchmarks import local as local_bench
 
-    previous = os.environ.get("NON_PURCHASE_GATES_ENABLED")
     original_tasks = benchmark_tasks._cached_tasks
+    # configure_task_environment exports several process-wide flags (e.g.
+    # ROSE_DISABLE_CODE_AGENT_VERIFIER); restore all of them so later suites in
+    # the same runner process see the real environment.
     try:
-        source_task = replace(
-            benchmark_tasks.get_task_by_name("gate-source-connect-gmail"),
-            name="future-source-connect-benchmark",
-        )
-        benchmark_tasks._cached_tasks = [source_task]
-        os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
-        local_bench.configure_task_environment(["future-source-connect-benchmark"])
-        assert os.environ.get("NON_PURCHASE_GATES_ENABLED") == "1"
+        with patch.dict(os.environ, {}, clear=False):
+            source_task = replace(
+                benchmark_tasks.get_task_by_name("gate-source-connect-gmail"),
+                name="future-source-connect-benchmark",
+            )
+            benchmark_tasks._cached_tasks = [source_task]
+            os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
+            local_bench.configure_task_environment(["future-source-connect-benchmark"])
+            assert os.environ.get("NON_PURCHASE_GATES_ENABLED") == "1"
     finally:
         benchmark_tasks._cached_tasks = original_tasks
-        if previous is None:
-            os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
-        else:
-            os.environ["NON_PURCHASE_GATES_ENABLED"] = previous
 
 
 def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():

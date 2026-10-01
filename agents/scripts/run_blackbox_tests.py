@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 
 import structlog.contextvars
+from dotenv import load_dotenv
 
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = AGENTS_ROOT / "tests" / "blackbox"
@@ -34,12 +35,6 @@ ARTIFACT_ROOT = ROOT_DIR / ".context" / "test-runs"
 sys.path.insert(0, str(AGENTS_ROOT))
 # Add tests/blackbox to path so test files can import _test_utils
 sys.path.insert(0, str(TESTS_DIR))
-
-# Single source of truth, shared with agents/conftest.py so the pytest suites
-# and the blackbox runner start from the same deterministic environment.
-from dotenv import load_dotenv  # noqa: E402
-
-from tests.env_defaults import apply_test_env_defaults  # noqa: E402
 
 # Real credentials from agents/.env must win over test placeholders. Cloud deploy
 # shells often omit injected secrets, so load dotenv before setdefault defaults.
@@ -82,11 +77,22 @@ def list_domains() -> None:
         print(f"  {d}")
 
 
+def _restore_environ(snapshot: dict[str, str]) -> None:
+    for key in set(os.environ) - snapshot.keys():
+        del os.environ[key]
+    for key, value in snapshot.items():
+        if os.environ.get(key) != value:
+            os.environ[key] = value
+
+
 async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, str]:
     """Run a single domain's blackbox test. Returns (domain, passed, message)."""
-    # Sequential coverage shards share an interpreter, but each domain must
-    # begin with the same request/logging context as an isolated process.
+    # Domains run sequentially in one interpreter, but each domain must begin
+    # with the same request/logging context and os.environ as an isolated
+    # process: a flag one suite exports (e.g. a benchmark-only kill switch)
+    # must not silently change the code paths a later suite exercises.
     structlog.contextvars.clear_contextvars()
+    env_snapshot = dict(os.environ)
     try:
         spec = importlib.util.spec_from_file_location(f"blackbox_{domain.replace('-', '_')}", test_file)
         if spec is None or spec.loader is None:
@@ -114,6 +120,7 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
         return (domain, False, f"ERROR: {e}")
     finally:
         structlog.contextvars.clear_contextvars()
+        _restore_environ(env_snapshot)
 
 
 async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
@@ -139,7 +146,11 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
     # Blackbox requests are captured and replayed, but importing a domain may
     # still construct AppConfig before its test installs a narrower fixture.
     # Keep the standalone runner deterministic in clean CI without overriding
-    # any explicitly supplied credential or endpoint.
+    # any explicitly supplied credential or endpoint. Single source of truth,
+    # shared with agents/conftest.py so the pytest suites and the blackbox
+    # runner start from the same deterministic environment.
+    from tests.env_defaults import apply_test_env_defaults
+
     apply_test_env_defaults()
 
     # Install capture harness

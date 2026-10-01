@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 
 import structlog.contextvars
@@ -33,3 +34,30 @@ def test_sequential_domains_do_not_share_structlog_context(tmp_path: Path):
     assert asyncio.run(runner.run_single_domain(leaking_domain, "leaking"))[1]
     assert asyncio.run(runner.run_single_domain(observing_domain, "observing"))[1]
     assert structlog.contextvars.get_contextvars() == {}
+
+
+def test_sequential_domains_do_not_share_environment(tmp_path: Path, monkeypatch):
+    runner = load_runner()
+    monkeypatch.setenv("BLACKBOX_RUNNER_KEPT", "original")
+    monkeypatch.delenv("BLACKBOX_RUNNER_LEAKED", raising=False)
+    leaking_domain = tmp_path / "leaking.blackbox.py"
+    leaking_domain.write_text(
+        "import os\n"
+        "async def run_all_tests():\n"
+        "    os.environ['BLACKBOX_RUNNER_LEAKED'] = '1'\n"
+        "    os.environ['BLACKBOX_RUNNER_KEPT'] = 'overwritten'\n"
+        "    del os.environ['BLACKBOX_RUNNER_KEPT']\n"
+        "    return True\n"
+    )
+    observing_domain = tmp_path / "observing.blackbox.py"
+    observing_domain.write_text(
+        "import os\n"
+        "async def run_all_tests():\n"
+        "    return 'BLACKBOX_RUNNER_LEAKED' not in os.environ"
+        " and os.environ.get('BLACKBOX_RUNNER_KEPT') == 'original'\n"
+    )
+
+    assert asyncio.run(runner.run_single_domain(leaking_domain, "leaking"))[1]
+    assert asyncio.run(runner.run_single_domain(observing_domain, "observing"))[1]
+    assert "BLACKBOX_RUNNER_LEAKED" not in os.environ
+    assert os.environ["BLACKBOX_RUNNER_KEPT"] == "original"
