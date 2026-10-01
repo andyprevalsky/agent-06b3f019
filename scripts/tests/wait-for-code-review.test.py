@@ -8,7 +8,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
     "wait_for_code_review", ROOT / "scripts/wait_for_code_review.py"
@@ -85,6 +84,83 @@ class ReviewWaitTest(unittest.TestCase):
         )
 
         self.assertEqual(status.state, "SUCCESS")
+
+    def test_rides_out_a_rejected_github_token(self) -> None:
+        # Cloud tokens rotate and can be rejected for minutes before the
+        # replacement lands; a 401 mid-wait used to end the wait with exit 2.
+        head = "e" * 40
+        responses = iter(
+            [
+                MODULE.GhCommandError("HTTP 401: Bad credentials (https://api.github.com/graphql)"),
+                MODULE.GhCommandError("HTTP 401: Bad credentials (https://api.github.com/graphql)"),
+                {
+                    "headRefOid": head,
+                    "statusCheckRollup": [
+                        {"__typename": "StatusContext", "context": "CodeRabbit", "state": "SUCCESS"}
+                    ],
+                },
+            ]
+        )
+
+        def loader(_pr: str, _repo: str | None) -> dict[str, object]:
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        messages: list[str] = []
+        status = MODULE.wait_for_review(
+            pr="123",
+            expected_head=head,
+            repo=None,
+            timeout_seconds=5,
+            poll_seconds=0,
+            loader=loader,
+            sleeper=lambda _seconds: None,
+            progress=messages.append,
+        )
+
+        self.assertEqual(status.state, "SUCCESS")
+        self.assertEqual(
+            messages,
+            [
+                (
+                    f"gh failed while waiting on {head[:12]}; retrying: "
+                    "HTTP 401: Bad credentials (https://api.github.com/graphql)"
+                ),
+                f"CodeRabbit SUCCESS on {head[:12]}",
+            ],
+        )
+
+    def test_persistent_gh_failure_times_out_with_the_error(self) -> None:
+        def loader(_pr: str, _repo: str | None) -> dict[str, object]:
+            raise MODULE.GhCommandError("HTTP 401: Bad credentials")
+
+        with self.assertRaisesRegex(TimeoutError, "last state: gh error: HTTP 401: Bad credentials"):
+            MODULE.wait_for_review(
+                pr="123",
+                expected_head="f" * 40,
+                repo=None,
+                timeout_seconds=0.05,
+                poll_seconds=0.01,
+                loader=loader,
+                sleeper=MODULE.time.sleep,
+            )
+
+    def test_gh_payload_reports_a_failed_gh_call_as_retryable(self) -> None:
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
+            return MODULE.subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="HTTP 401: Bad credentials (https://api.github.com/graphql)"
+            )
+
+        original_run = MODULE.subprocess.run
+        MODULE.subprocess.run = fake_run
+        try:
+            with self.assertRaises(MODULE.GhCommandError):
+                MODULE.gh_payload("1354", repo="acme/rose", timeout=5.0)
+        finally:
+            MODULE.subprocess.run = original_run
 
     def test_rejects_status_from_a_different_head(self) -> None:
         with self.assertRaisesRegex(MODULE.ReviewWaitError, "PR HEAD changed"):
