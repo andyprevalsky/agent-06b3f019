@@ -1850,6 +1850,98 @@ def test_output_schema_states_attempt_completion_takes_no_arguments():
     )
 
 
+# ============================================================================
+# 21. Write-lock approval is requested by the commit click
+# ----------------------------------------------------------------------------
+# WHY: The browser write lock intercepts the final commit click (Place order,
+# Pay, Send, Post) and asks the user before replaying it. No tool requests
+# approval. Prod agent 5c8b0ca4 stalled at the Amazon review page because its
+# parent wrote "do not click Place order without approval" and the browser
+# agent, told only that it "may be asked to confirm", stopped there or called
+# generate_write_lock_notification / request_payment_card / attempt_completion
+# as if they were the approval tool. Live replay of that decision point
+# (benchmarks/run_write_lock_approval_scenarios.py, pre and post run
+# concurrently, 10 trials x 6 scenarios): 14/60 trials passed before these
+# prompts, 47/60 after.
+# ============================================================================
+
+
+def test_browser_prompt_says_commit_click_requests_approval():
+    """The browser prompt states that the commit click is the approval request."""
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from providers.rose.browser_use import build_browser_use_system_prompt
+
+    prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
+    assert "Clicking the commit control is how approval is requested; no tool requests it." in prompt, (
+        "The browser prompt no longer says the commit click is the approval request. Without it the "
+        "model stops at the review page or calls a non-approval tool when the goal asks for approval."
+    )
+    assert "The runtime intercepts the click, shows the user what the action will do, and asks for approval." in prompt
+    assert "finish every earlier step, then click the commit control" in prompt
+    assert "This rule does not apply when a Write Lock Disabled section says the lock is off." in prompt
+    assert "you may be asked to confirm with the user first" not in prompt, (
+        "The vague pre-fix wording is back; it does not tell the model how approval is requested."
+    )
+
+
+def test_parent_prompts_route_browser_approval_through_commit_click():
+    """Main-loop and planner prompts tell parents not to forbid the commit click."""
+    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
+    from utils.prompts import build_planner_system_prompt, build_system_prompt
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS
+
+    sentence = (
+        "In browser sessions the approval prompt fires when the browser agent clicks the final commit "
+        "control itself (Place order, Pay, Send, Post), so when a task needs the user's approval first, "
+        "tell the browser agent to carry the flow through that click and never tell it not to click."
+    )
+    prompts = {
+        "EXECUTE": build_system_prompt("EXECUTE", list(EXECUTE_PHASE_TOOLS)),
+        "planner": build_planner_system_prompt(SPAWN_AGENT_PROMPT),
+    }
+    for name, prompt in prompts.items():
+        assert sentence in prompt, (
+            f"The {name} prompt no longer tells parents that browser approval fires on the commit "
+            "click. Parents then write 'do not click Place order' and the approval prompt never fires."
+        )
+
+
+def test_browser_dynamic_context_flags_write_lock_disabled():
+    """Sessions with the write lock off say so, since the static prompt describes it as on."""
+    from domains.spawn_browser_agent_v3.service import (
+        WRITE_LOCK_DISABLED_SECTION,
+        build_browser_dynamic_system_context,
+    )
+
+    enabled = build_browser_dynamic_system_context("# User Context\n\nName: Test")
+    disabled = build_browser_dynamic_system_context("# User Context\n\nName: Test", write_lock_enabled=False)
+    assert WRITE_LOCK_DISABLED_SECTION not in enabled
+    assert WRITE_LOCK_DISABLED_SECTION in disabled, (
+        "A write-lock-off session no longer warns the browser agent. The static prompt says a commit "
+        "click asks the user first, which is false when the lock is off."
+    )
+    assert "do not click the commit control" in WRITE_LOCK_DISABLED_SECTION
+
+
+def test_browser_handler_passes_write_lock_state_to_dynamic_context():
+    """Every handler call to build_browser_dynamic_system_context passes write_lock_enabled."""
+    handler_path = AGENTS_ROOT / "domains" / "spawn_browser_agent_v3" / "handler.py"
+    tree = ast.parse(handler_path.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_browser_dynamic_system_context"
+    ]
+    assert calls, "handler.py no longer builds the browser dynamic system context"
+    missing = [call.lineno for call in calls if "write_lock_enabled" not in {kw.arg for kw in call.keywords}]
+    assert not missing, (
+        f"handler.py lines {missing} build the browser dynamic context without write_lock_enabled, so a "
+        "write-lock-off session would tell the model that commit clicks ask the user first."
+    )
+
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -2073,6 +2165,24 @@ async def run_all_tests():
     r.record(
         "output_schema_states_attempt_completion_takes_no_arguments",
         test_output_schema_states_attempt_completion_takes_no_arguments,
+    )
+
+    # 21. Write-lock approval is requested by the commit click
+    r.record(
+        "browser_prompt_says_commit_click_requests_approval",
+        test_browser_prompt_says_commit_click_requests_approval,
+    )
+    r.record(
+        "parent_prompts_route_browser_approval_through_commit_click",
+        test_parent_prompts_route_browser_approval_through_commit_click,
+    )
+    r.record(
+        "browser_dynamic_context_flags_write_lock_disabled",
+        test_browser_dynamic_context_flags_write_lock_disabled,
+    )
+    r.record(
+        "browser_handler_passes_write_lock_state_to_dynamic_context",
+        test_browser_handler_passes_write_lock_state_to_dynamic_context,
     )
 
     teardown_mock()
