@@ -6,6 +6,7 @@ import {
   type CardProvider,
   type CardProviderDetailsResult,
 } from './card-provider';
+import { isClosedCardDetailsError } from './card-provider/errors';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { reversePurchasePaymentIntent, stripe } from './stripe';
@@ -40,23 +41,10 @@ const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 
 const STALE_RECLAIMING_MS = 2 * 60 * 1000;
 
 /**
- * Funding states that mean *we already closed this card to reclaim it* (or finished doing so). Once
- * a reclaim is underway, the card reads as not-live because Rose closed it, NOT because a merchant
- * settled a charge — so `!isCardLive` must not be treated as "the card was spent".
- */
-const RECLAIM_IN_PROGRESS_FUNDING_STATUSES = new Set<PurchaseWalletFundingStatus>([
-  PurchaseWalletFundingStatus.RECLAIMING,
-  PurchaseWalletFundingStatus.RECLAIMED,
-  PurchaseWalletFundingStatus.RECLAIM_FAILED,
-]);
-
-/**
- * Whether a purchase's single-use card was actually spent by a merchant (vs. closed by Rose during
- * an abandonment/reclaim). A live card is never spent. A not-live card is only "spent" when no
- * reclaim is already recorded for it; otherwise the card is not-live because a prior/concurrent
- * cleanup pass already closed it to release the AgentCard transfer, and reclassifying it as "used"
- * would consume the org-wallet funding and permanently drain the float. In that case we defer to the
- * in-flight reclaim / release-pending retry instead of marking the purchase settled.
+ * A closed company card alone does not prove merchant spend: unused mints also close before their
+ * exact transfer releases. Only canonical settlement's CONSUMED ledger can establish spending;
+ * unresolved funding stays with the existing reclaim owner and its release/refund boundary.
+ * Legacy cards without company funding retain their existing settlement behavior.
  */
 async function purchaseCardWasSpent(
   purchaseId: string,
@@ -64,22 +52,7 @@ async function purchaseCardWasSpent(
 ): Promise<boolean> {
   if (isCardLive(details)) return false;
   const funding = await findWalletFundingByPurchaseId(purchaseId);
-  if (funding !== null && RECLAIM_IN_PROGRESS_FUNDING_STATUSES.has(funding.status)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * AgentCard deliberately stops returning credentials after a card is closed. The literal
- * `card_closed` provider code is therefore an authoritative closed/zero-balance card state, not
- * an unreadable-card outage. Both the typed code and the wrapped MCP message are accepted because
- * the MCP SDK can surface tool errors through either path.
- */
-function isClosedCardDetailsError(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === 'string' && code.toLowerCase() === 'card_closed') return true;
-  return /\bcard_closed\b/i.test(error instanceof Error ? error.message : String(error));
+  return funding === null || funding.status === PurchaseWalletFundingStatus.CONSUMED;
 }
 
 async function closeCardForReclaim(
@@ -544,7 +517,7 @@ export async function reconcileDissolvedPurchaseHolds(
       });
       continue;
     }
-    await activeCardProvider.closeCard(cardId);
+    await closeCardForReclaim(activeCardProvider, cardId, purchase.id);
     try {
       await reclaimPurchaseWalletFunding(
         purchase,

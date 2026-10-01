@@ -174,9 +174,9 @@ export async function updatePurchaseStatus(
 }
 
 /**
- * Mark an unavailable HELD card as merchant-spent without racing the abandon
- * path. Both the observed purchase state and the absence of an active/finished
- * reclaim are predicates of the same database statement.
+ * Preserve unresolved company funding when a held card becomes unavailable. Only canonical
+ * settlement's CONSUMED funding (or a legacy card without company funding) permits clearing.
+ * The shared transition lock keeps settlement and reclaim ownership mutually exclusive.
  */
 export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
   return runTransactionWithRetry(async (transaction) => {
@@ -185,17 +185,10 @@ export async function markHeldPurchaseClearedIfNoReclaim(id: string) {
       where: {
         id,
         status: PurchaseSpendStatus.HELD,
-        walletFunding: {
-          isNot: {
-            status: {
-              in: [
-                PurchaseWalletFundingStatus.RECLAIMING,
-                PurchaseWalletFundingStatus.RECLAIMED,
-                PurchaseWalletFundingStatus.RECLAIM_FAILED,
-              ],
-            },
-          },
-        },
+        OR: [
+          { walletFunding: { is: null } },
+          { walletFunding: { is: { status: PurchaseWalletFundingStatus.CONSUMED } } },
+        ],
       },
       data: { status: PurchaseSpendStatus.CLEARED },
     });

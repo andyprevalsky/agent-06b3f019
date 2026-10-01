@@ -72,6 +72,42 @@ export class FakeCardProvider implements CardProvider {
   }
 }
 
+export class LifecycleCardProvider extends FakeCardProvider {
+  closed = false;
+  readFailure: Error | undefined;
+  async getDetails(cardId: string) {
+    if (this.readFailure) throw this.readFailure;
+    if (this.closed) throw Object.assign(new Error('card_closed'), { code: 'card_closed' });
+    return super.getDetails(cardId);
+  }
+  async closeCard(cardId: string) {
+    await super.closeCard(cardId);
+    if (this.closed) throw Object.assign(new Error('card_closed'), { code: 'card_closed' });
+    this.closed = true;
+  }
+}
+
+export async function createAgent(userId: string, label: string): Promise<string> {
+  const agent = await prisma.agent.create({
+    data: { userId, goal: `purchase cleanup test ${label}` },
+    select: { id: true },
+  });
+  return agent.id;
+}
+
+export function validMintBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    fingerprint: `fp-${randomUUID()}`,
+    merchant: 'Test Merchant',
+    currency: 'USD',
+    lineItems: [{ label: 'Widget', amountCents: 1000 }],
+    fees: [{ label: 'Tax', amountCents: 80 }],
+    subtotalCents: 1000,
+    totalCents: 1080,
+    ...overrides,
+  };
+}
+
 /**
  * Provider whose getDetails reports a fixed card state for ANY card id — used to exercise the
  * webhook-independent liveness guard (a card the network has already settled reports
