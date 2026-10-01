@@ -29,9 +29,15 @@ command -v psql >/dev/null 2>&1 || {
   exit 2
 }
 
-awk '
-  /^-- Protect the rolling-deploy window/ { emit = 1 }
-  /^-- Prefer explicit logical-iteration checkpoints/ { emit = 0 }
-  emit { print }
-' "$MIGRATION_SQL" | psql "$DATABASE_URL" -v ON_ERROR_STOP=1
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$UTC_CLEANUP_MIGRATION_SQL"
+# Concurrent black-box runners share one local database, and DROP/CREATE
+# TRIGGER pairs race each other ("already exists", "tuple concurrently
+# updated"). One transaction behind an advisory lock serializes them.
+{
+  echo "SELECT pg_advisory_xact_lock(hashtext('rose-local-runtime-sql-hooks'));"
+  awk '
+    /^-- Protect the rolling-deploy window/ { emit = 1 }
+    /^-- Prefer explicit logical-iteration checkpoints/ { emit = 0 }
+    emit { print }
+  ' "$MIGRATION_SQL"
+  cat "$UTC_CLEANUP_MIGRATION_SQL"
+} | psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction

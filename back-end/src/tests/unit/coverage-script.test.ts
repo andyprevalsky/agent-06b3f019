@@ -365,6 +365,11 @@ assert.ok(
   'coverage must install migration-owned database triggers after Prisma schema sync'
 );
 assert.match(
+  localRuntimeSqlHooks,
+  /pg_advisory_xact_lock\(hashtext\('rose-local-runtime-sql-hooks'\)\)[\s\S]*psql "\$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction/,
+  'concurrent runners sharing one local database must apply the trigger hooks in one advisory-locked transaction'
+);
+assert.match(
   coverageScript,
   /DATABASE_URL="\$LOCAL_PSQL_URL" DIRECT_URL="\$LOCAL_PSQL_URL"[\s\\]+bash "\$SCRIPT_DIR\/apply-local-runtime-sql-hooks\.sh"/,
   'the psql-backed runtime hook installer must receive the plain libpq URL'
