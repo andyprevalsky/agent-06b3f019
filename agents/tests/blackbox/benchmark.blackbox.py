@@ -432,7 +432,7 @@ def test_fly_native_completion_is_in_permanent_gate():
             "-q",
             str(repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"),
             "-k",
-            "fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone",
+            "fly_with_timeout or test_clone_retries_transient_volume_not_found or test_clone_gives_up_after_max_attempts or test_clone_times_out_and_retries_a_hung_clone or clone_creation_cannot_start_copied_primary",
         ],
         cwd=repo_root,
         text=True,

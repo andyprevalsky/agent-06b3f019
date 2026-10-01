@@ -8762,6 +8762,13 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
     local clone_out clone_status target_id target_name target_volume diagnostic_log names_ledger deadline
     local storage_deadline preallocation_failure reap_status terminal_disposition
     local attempt max_attempts retry_delay clone_timeout
+    # --detach still launches the clone. CMD can be made inert at creation only
+    # when no inherited exec/entrypoint takes precedence; use the shared native
+    # inventory and reject unknown shapes before creating any provider resource.
+    if [ "$(inventory_machine_field "$source_id" clone_cmd_overridable)" != "1" ]; then
+        echo "❌ clone source startup cannot be safely overridden; refusing allocation" >&2
+        return 1
+    fi
     # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
     # momentarily unlistable — both transient, both fatal to a synchronized
@@ -8793,7 +8800,8 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
             --from-snapshot "$clone_snapshot" --region "$REGION" --name "$target_name" \
-            --vm-size "$vm_size" --vm-memory "$vm_memory" --detach 2>&1)"
+            --vm-size "$vm_size" --vm-memory "$vm_memory" \
+            --override-cmd "sleep infinity" --detach 2>&1)"
         clone_status=$?
         {
             printf 'clone name=%s source=%s status=%s attempt=%s/%s\n' \
@@ -12186,10 +12194,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
             sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
             continue
         fi
-        # A worker is cloned from this benchmark's primary, whose config is
-        # already set to auto-run cloudbench-boot.sh. Neutralize that copied
-        # command before its first start or staging could race a duplicate
-        # primary benchmark driver on the same task queue/run token.
+        # Creation already overrides the copied primary command with an inert
+        # sleep. Clear the inherited boot flag before staging the worker too.
         if [ "$worker_neutralized" != "1" ]; then
             if ! run_worker_stage_cmd "neutralize cloned boot command" \
                 fly_with_timeout 30 machine update "$wid" -a "$APP" \
@@ -12361,7 +12367,15 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 # but never forge the collector's independent finish marker.
                 [ -e "$out/benchmark-child.finished" ] && break
             fi
-            if [ "$SECONDS" -ge "$terminal_deadline" ]; then
+            # No new capacity is admitted after runtime completion. Once all
+            # admitted workers have settled, a retired worker's unmet demand
+            # cannot recover by waiting out the provisioning deadline.
+            if [ "$SECONDS" -ge "$terminal_deadline" ] || {
+                [ "$tracked_workers" -lt "$desired_workers" ] \
+                    && [ "$tracked_workers" = "$ready_workers" ] \
+                    && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
+                        -print -quit 2>/dev/null | grep -q .
+            }; then
                 if [ "$ready_workers" -lt "$desired_workers" ]; then
                     printf '%s\n' \
                         "worker capacity below desired: $ready_workers/$desired_workers workers queue-ready" \

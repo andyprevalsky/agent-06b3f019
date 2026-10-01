@@ -335,6 +335,7 @@ clone_source_read_rate_limit_contract() (
     machine_volume_id() { printf 'vol_captured'; }
     machine_storage_ready() { return 0; }
     machine_storage_failed() { return 1; }
+    inventory_machine_field() { printf '1'; }
     inventory_machine_id_for_name() { return 1; }
     machines_snapshot_identity() {
         printf 'generation-%s' "$(wc -l < "$refresh_calls" | tr -d ' ')"

@@ -579,6 +579,15 @@ Debug receipt failures with the original owner/stop/terminal files retained
 privately. The existing `cloudbench_worker_evidence_test.py` owning gate covers
 the live supervisor's publication race and immutable-owner controls; extend that
 gate instead of adding another verification suite.
+Autoscaled clones must be inert at creation: `machine clone --detach` still
+boots immediately, so a later `machine update` cannot prevent a copied primary
+driver from running. The controller uses `--override-cmd "sleep infinity"` and
+the existing native inventory to reject inherited `init.exec`/`init.entrypoint`
+before allocation. If a worker fails to join, inspect its preserved bootstrap
+log and provider startup timestamps before retrying. After runtime completion,
+settled tracked=ready capacity below desired is an explicit INFRA failure;
+waiting cannot create replacement capacity. The existing benchmark blackbox
+gate covers immediate clone startup and retired-worker terminal handling.
 For sustained mixed or load-test validation, select dedicated primary CPUs
 through the existing fleet settings, retaining catalog-specific memory:
 

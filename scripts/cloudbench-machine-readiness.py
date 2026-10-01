@@ -205,10 +205,16 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
                 volume_states.get(volume_id) in TERMINAL_FAILED_VOLUME_STATES
                 for volume_id in volume_ids
             )
+            config = machine.get("config")
+            init = config.get("init") or {} if isinstance(config, dict) else None
+            clone_cmd_overridable = (
+                isinstance(init, dict) and not init.get("exec") and not init.get("entrypoint")
+            )
             (machine_dir / machine_id).write_text(
                 f"state={state}\n"
                 f"instance_id={instance_id}\n"
                 f"private_ip={private_ip}\n"
+                f"clone_cmd_overridable={int(clone_cmd_overridable)}\n"
                 f"storage_ready={int(storage_ready)}\n"
                 f"storage_failed={int(storage_failed)}\n"
             )

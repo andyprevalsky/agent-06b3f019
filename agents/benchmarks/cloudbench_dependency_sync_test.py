@@ -4350,6 +4350,7 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         "state=created",
         "instance_id=",
         "private_ip=fdaa::1",
+        "clone_cmd_overridable=1",
         "storage_ready=0",
         "storage_failed=1",
     ]
@@ -4357,6 +4358,7 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
         "state=stopped",
         "instance_id=",
         "private_ip=fdaa::2",
+        "clone_cmd_overridable=1",
         "storage_ready=1",
         "storage_failed=0",
     ]
@@ -6814,6 +6816,7 @@ SNAP_ID=vs_D7yODvl0BVgi9JajQpkR
 FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
+inventory_machine_field() {{ printf '1'; }}
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 python3() {{
@@ -6932,6 +6935,7 @@ FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
 LEDGER={shlex.quote(str(ledger))}
 CALLS={shlex.quote(str(calls))}
 SHOW_MODE={shlex.quote(show_mode)}
+inventory_machine_field() {{ printf '1'; }}
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 sleep() {{ :; }}
@@ -7041,6 +7045,7 @@ CLONE_COUNT={shlex.quote(str(clone_count))}
 SHOW_COUNT={shlex.quote(str(show_count))}
 UUID_COUNT={shlex.quote(str(uuid_count))}
 AUDIT={shlex.quote(str(audit))}
+inventory_machine_field() {{ printf '1'; }}
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=2
 CLOUDBENCH_CLONE_RETRY_SECONDS=0
 CLOUDBENCH_CLONE_RETRY_MAX_SECONDS=0
@@ -8496,6 +8501,7 @@ def _clone_machine_bundle(source: str) -> str:
     return "\n".join(
         (
             "machine_volume_id() { printf 'vol-owned-fixture'; }",
+            "inventory_machine_field() { printf '1'; }",
             "reap_volume() { :; }",
             "fleet_audit_update_fresh_clone() { return 0; }",
             _worker_ledger_lock_bundle(source),
@@ -8534,6 +8540,7 @@ def _clone_index_adapter_fixture() -> str:
     """
     return r"""
 machines_snapshot_identity() { printf 'test-generation'; }
+inventory_machine_field() { printf '1'; }
 refresh_machines_snapshot_after() { return 0; }
 inventory_machine_id_for_name() {
   FLY machines list -a "$APP" --json | python3 -c '
@@ -8619,6 +8626,72 @@ def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> 
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == full_ref
+
+
+@pytest.mark.parametrize("init_override", [None, "exec", "entrypoint"])
+def test_clone_creation_cannot_start_copied_primary(tmp_path: Path, init_override) -> None:
+    """Fly clone starts immediately; a later update cannot fence initial boot."""
+    source = FLEET_SCRIPT.read_text()
+    booted = tmp_path / "unintended-primary-boot"
+    boot = [sys.executable, "-c", f"from pathlib import Path; Path({str(booted)!r}).touch()"]
+    init = {"cmd": boot}
+    if init_override:
+        init[init_override] = boot
+    machines = tmp_path / "machines.json"
+    machines.write_text(json.dumps([{
+        "id": "feedface000001", "name": "primary", "state": "started",
+        "config": {"init": init, "mounts": []},
+    }]))
+    volumes = tmp_path / "volumes.json"
+    volumes.write_text("[]")
+    index = tmp_path / "inventory"
+    subprocess.run([sys.executable, str(MACHINE_READINESS_SCRIPT), "--publish-index",
+                    str(machines), str(volumes), str(index)], check=True, capture_output=True)
+    provider = tmp_path / "provider.py"
+    provider.write_text('''import json,os,shlex,subprocess,sys
+from pathlib import Path
+args=sys.argv[1:]
+Path(os.environ['ALLOCATED']).touch()
+init=json.loads(Path(os.environ['MACHINES']).read_text())[0]['config']['init']
+cmd=shlex.split(args[args.index('--override-cmd')+1]) if '--override-cmd' in args else init['cmd']
+command=init.get('exec') or (init.get('entrypoint',[])+cmd)
+# Model the immediate Linux guest start. Only the inert sleep is shortened;
+# copied application commands execute unchanged and leave an observable write.
+if command==['sleep','infinity']:command=['sleep','0.01']
+subprocess.run(command,check=True)
+print('Machine feedface000002 has been created...')
+''')
+    funcs = "\n".join(_extract_fleet_function(source, name + "() {") for name in [
+        "inventory_machine_record_path", "inventory_machine_field",
+    ])
+    script = f'''set -uo pipefail
+APP=fixture-app
+REGION=iad
+WARM_ID=feedface000001
+SNAP_ID=vs_fixture
+INVENTORY_INDEX={shlex.quote(str(index))}
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
+inventory_index_healthy() {{ return 0; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+machine_storage_ready() {{ return 0; }}
+machine_storage_failed() {{ return 1; }}
+fly_with_timeout() {{ shift; {shlex.quote(sys.executable)} {shlex.quote(str(provider))} "$@"; }}
+{_clone_machine_bundle(source)}
+{funcs}
+clone_machine_target {shlex.quote(str(tmp_path / 'owned.ids'))}
+'''
+    env = dict(os.environ, ALLOCATED=str(tmp_path / "allocated"), MACHINES=str(machines))
+    result = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
+                            text=True, timeout=5)
+    assert not booted.exists(), "clone executed primary work before worker staging"
+    if init_override:
+        assert result.returncode != 0
+        assert not (tmp_path / "allocated").exists(), "unsafe startup reached provider allocation"
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "feedface000002"
+        assert (tmp_path / "owned.ids").read_text().split() == ["feedface000002"]
 
 
 def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
@@ -23450,7 +23523,7 @@ def test_autoscaler_runtime_handoff_status_identity(autoscaler_runtime_handoff_f
 
 @pytest.mark.parametrize("variant,child_exit", [
     ("terminal", 0), ("terminal", 1), ("pending_ready", 1),
-    ("pending_failed", 1), ("pending_stuck", 1), ("missing_child", 1),
+    ("pending_failed", 1), ("pending_stuck", 1), ("pending_removed", 1), ("missing_child", 1),
     ("missing_ack", 1), ("wrong_ack", 1), ("running", 1),
     ("wrong_run", 1), ("wrong_owner", 1), ("same_bearer_sibling", 1),
     ("wrong_auth", 1), ("prior_failure", 1),
@@ -23500,7 +23573,7 @@ APP=fixture-app
 RUN_ID=fixture-fleet
 AUTOSCALE_POLL=.05
 AUTOSCALE_MAX=2
-AUTOSCALER_FINALIZATION_WAIT_SECONDS=2
+AUTOSCALER_FINALIZATION_WAIT_SECONDS={30 if variant == "pending_removed" else 2}
 BOX_HEALTH_PORT=3003
 CLOUDBENCH_BOOT_LAUNCH=0
 CLOUDBENCH_BARRIER_TOKEN={q('wrong' if variant == 'wrong_auth' else f['auth'])}
@@ -23577,9 +23650,14 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
                     (out / "worker-fixture.ready").touch()
                 elif variant == "pending_failed":
                     (out / "worker-fixture.failed").touch()
+                elif variant == "pending_removed":
+                    # Successful retirement removes the committed worker and
+                    # pending marker. Terminal finalization cannot replace it.
+                    (out / "worker-clones.ids").write_text("")
+                    (out / "worker-fixture.pending").unlink()
             if variant != "missing_child":
                 release.touch()
-            scaler_rc = scaler.wait(timeout=8)
+            scaler_rc = scaler.wait(timeout=2 if variant == "pending_removed" else 8)
             release.touch(exist_ok=True)
             assert child.wait(timeout=5) == child_exit
             assert (out / "benchmark-child.finished").read_text().strip() == str(child_exit)
@@ -23594,6 +23672,8 @@ bench_autoscaler fixture-task {q(expected_machine)} fixture-workspace 0 {q(str(o
                 assert not (out / "autoscaler.completed-after-child").exists()
                 if variant == "prior_failure":
                     assert failed.read_text() == "prior-failure"
+                elif variant == "pending_removed":
+                    assert "worker capacity below desired: 0/1" in failed.read_text()
                 elif variant not in {"pending_failed", "pending_stuck", "missing_child"}:
                     assert (tmp_path / "metrics-polls").read_text().splitlines().count("missing") == 6
         finally:
@@ -23883,7 +23963,11 @@ def test_fly_with_timeout_descendant_held_writer_is_bounded_without_signalling_c
 kill() { printf 'unexpected signal\n' >&2; return 97; }
 pkill() { printf 'unexpected tree signal\n' >&2; return 97; }
 FLY() { sleep 2 & return 0; }
+started=$EPOCHREALTIME
 fly_with_timeout 1
+rc=$?
+printf 'native-phase=%s,%s\n' "$started" "$EPOCHREALTIME"
+exit "$rc"
 """
     )
     start = time.monotonic()
@@ -23891,7 +23975,7 @@ fly_with_timeout 1
         ["bash", "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)}, capture_output=True, text=True, timeout=4
     )
     assert r.returncode == 142, (r.stdout, r.stderr)
-    assert time.monotonic() - start < 1.8
+    assert time.monotonic() - start < 1.8, (r.stdout, r.stderr)
     assert "unexpected" not in r.stderr
     assert not list(tmp_path.iterdir())
     # Finite injected descendant has its own bounded lifetime and no provider work.
