@@ -350,17 +350,27 @@ export async function runTests(): Promise<boolean> {
             await putFixture(unrelatedId, {
               goal: `Translate my resume into Spanish and keep the formatting identical. Run ${RUN_ID}`,
             });
-            const hits = await search({
-              goal: 'find me a wheelchair friendly lodge by the water up in tahoe, 2 people, has a steam room',
-              user_id: s.userId,
-            });
+            const paraphrase =
+              'find me a wheelchair friendly lodge by the water up in tahoe, 2 people, has a steam room';
+            // Ranking check on the search layer (below the production cutoff).
+            const hits = await search({ goal: paraphrase, user_id: s.userId, min_similarity: 0 });
             const hit = hits.find((c) => c.id === id);
             assert(hit, 'paraphrased request must retrieve the semantically matching run');
-            assert(hit.similarity >= 0.5 && hit.similarity <= 1, `similarity ${hit.similarity}`);
             const unrelated = hits.find((c) => c.id === unrelatedId);
+            assert(unrelated, 'with no floor every visible row is scored');
             assert(
-              !unrelated || unrelated.similarity < hit.similarity,
-              'unrelated run must rank below the semantic match'
+              hit.similarity > unrelated.similarity + 0.1,
+              `semantic match ${hit.similarity} must clearly outrank unrelated ${unrelated.similarity}`
+            );
+            // Default floor is the production cutoff (0.70): the unrelated run never surfaces.
+            const defaults = await search({ goal: paraphrase, user_id: s.userId });
+            assert(
+              defaults.every((c) => c.similarity >= 0.7),
+              'default floor must be 0.70'
+            );
+            assert(
+              !defaults.some((c) => c.id === unrelatedId),
+              'unrelated run is below the cutoff'
             );
           } finally {
             await prisma.plannerMemory.deleteMany({ where: { id: { in: [id, unrelatedId] } } });

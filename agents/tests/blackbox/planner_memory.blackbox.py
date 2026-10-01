@@ -490,10 +490,10 @@ def _cand(
     }
 
 
-def test_shortlist_floor_dedupe_success_filter_and_top_n():
-    from providers.planner_memory import RetrievalConfig, shortlist
+def test_select_hits_cutoff_dedupe_success_filter_and_top_k():
+    from providers.planner_memory import RetrievalConfig, select_hits
 
-    config = RetrievalConfig(min_similarity=0.5, top_n=3)
+    config = RetrievalConfig(min_similarity=0.5, k=3)
     same = _cand("a", GOAL, sim=0.9, created="2026-09-01T00:00:00Z")
     same_newer_compressed = _cand(
         "b", GOAL, sim=0.9, cp={"outcome": "passed", "terminal_condition": "x"}, created="2026-09-02T00:00:00Z"
@@ -503,46 +503,28 @@ def test_shortlist_floor_dedupe_success_filter_and_top_n():
     failed = _cand("e", GOAL + " failed", passed=False, status="PAUSED", sim=0.95)
     private_completed = _cand("f", GOAL + " today", passed=None, status="COMPLETED", task=None, sim=0.8)
     extra = _cand("g", "Order a latte from Blue Bottle", sim=0.6)
-    hits = shortlist([same, same_newer_compressed, near, below_floor, failed, private_completed, extra], config)
+    hits = select_hits([same, same_newer_compressed, near, below_floor, failed, private_completed, extra], config)
     ids = [h.id for h in hits]
-    assert "d" not in ids, "candidates under the similarity floor never reach the judge"
+    assert "d" not in ids, "candidates under the similarity cutoff are never memories"
     assert "e" not in ids, "failed runs are not memories"
     assert "a" not in ids and ids[0] == "b", "one hit per unique goal, prefer the compressed row"
-    assert ids == ["b", "f", "c"], f"similarity-ordered and capped at top_n: {ids}"
-    assert shortlist([below_floor], config) == [] and shortlist([], config) == []
+    assert ids == ["b", "f", "c"], f"similarity-ordered and capped at k: {ids}"
+    assert select_hits([below_floor], config) == [] and select_hits([], config) == []
 
 
-def test_apply_verdict_only_in_range_match():
-    from providers.planner_memory import JudgeVerdict, apply_verdict, shortlist
+def test_default_config_is_top3_at_cutoff_070():
+    from providers.planner_memory import RetrievalConfig, select_hits
 
-    hits = shortlist([_cand("a", GOAL, sim=0.9), _cand("b", GOAL + " oat", sim=0.8)], _default_config())
-    assert apply_verdict(hits, JudgeVerdict(match=2)).id == "b"
-    assert apply_verdict(hits, JudgeVerdict(match=None)) is None, "no useful candidate"
-    assert apply_verdict(hits, JudgeVerdict(match=3)) is None, "out-of-range index"
-    assert apply_verdict(hits, JudgeVerdict(match=0)) is None
-
-
-def test_judge_prompt_lists_numbered_goals_and_bounds_the_request():
-    from providers.planner_memory import shortlist
-    from providers.planner_memory.retrieval import JUDGE_QUERY_MAX_CHARS, build_judge_messages
-
-    hits = shortlist([_cand("a", GOAL, sim=0.9), _cand("b", "Book a table at Nopa", sim=0.7)], _default_config())
-    [message] = build_judge_messages("x" * (JUDGE_QUERY_MAX_CHARS + 500), hits)
-    content = message["content"]
-    assert "[1]\n" + GOAL in content and "[2]\nBook a table at Nopa" in content
-    assert "x" * (JUDGE_QUERY_MAX_CHARS + 1) not in content
-    assert "never copies names, prices, dates, quantities, or steps" in content, "planner get_memories criteria"
-    assert "only shares topic or location words" in content, "negative-control criterion"
-
-
-def _default_config():
-    from providers.planner_memory import RetrievalConfig
-
-    return RetrievalConfig()
+    assert RetrievalConfig().min_similarity == 0.70 and RetrievalConfig().k == 3
+    picked = select_hits(
+        [_cand("hi", GOAL, sim=0.71), _cand("edge", GOAL + " b", sim=0.70), _cand("lo", GOAL + " c", sim=0.69)],
+        RetrievalConfig(),
+    )
+    assert [h.id for h in picked] == ["hi", "edge"], "0.70 is inclusive; 0.69 is excluded"
 
 
 def test_stale_compressor_cache_is_recomputed_without_a_ttl():
-    from providers.planner_memory import RetrievalConfig, shortlist
+    from providers.planner_memory import RetrievalConfig, select_hits
 
     stale = _cand(
         "stale",
@@ -557,7 +539,7 @@ def test_stale_compressor_cache_is_recomputed_without_a_ttl():
         cp={"outcome": "passed", "terminal_condition": "current output"},
         sim=0.8,
     )
-    hits = shortlist([stale, current], RetrievalConfig(min_similarity=0.0))
+    hits = select_hits([stale, current], RetrievalConfig(min_similarity=0.0))
     by_id = {hit.id: hit for hit in hits}
     assert by_id["stale"].critical_path is None, "a stale compressor version must refill lazily"
     assert by_id["current"].critical_path is not None, "the current version remains a cache hit"
@@ -836,26 +818,15 @@ def _mock_backend(candidates: list[dict[str, Any]]):
     return calls
 
 
-JUDGE_SAME_TASK_1 = '{"match": 1}'
-
-
-async def _run_activity(
-    *,
-    memory_enabled: bool,
-    candidates: list[dict[str, Any]],
-    judge_reply: Optional[str] = JUDGE_SAME_TASK_1,
-    judge_delay_s: float = 0.0,
-):
+async def _run_activity(*, memory_enabled: bool, candidates: list[dict[str, Any]]):
     import helpers.llm as llm
     from utils.tool_schemas import PlannerResponse
 
-    captured: dict[str, Any] = {"judge_calls": []}
+    captured: dict[str, Any] = {"llm_calls": []}
 
     async def fake_call_llm(messages, **kwargs):
-        captured["judge_calls"].append({"messages": messages, **kwargs})
-        if judge_delay_s:
-            await asyncio.sleep(judge_delay_s)
-        return {"content": judge_reply}
+        captured["llm_calls"].append({"messages": messages, **kwargs})
+        return {"content": ""}
 
     async def fake_structured(**kwargs):
         captured.update(kwargs)
@@ -902,11 +873,7 @@ async def test_planner_activity_forks_get_memories_when_enabled_with_hits():
         memory_enabled=True, candidates=[_cand("mem-1", GOAL, sim=0.95, cp=cp)]
     )
     sent = captured["messages"]
-    [judge] = captured["judge_calls"]
-    assert judge["call_site"] == "planner_memory_judge" and judge["model"] == "rose-labs/rose-1-mini"
-    assert judge["claude_token_user_id"] == "user-a"
-    assert "response_model" not in judge, "a response_format schema adds judge latency"
-    assert result["planner_memory"]["judge"] == {"match": 1}
+    assert captured["llm_calls"] == [], "retrieval makes no LLM call when hits are already compressed"
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "tool"]
     assert sent[2]["tool_calls"][0]["function"]["name"] == "get_memories"
     assert sent[3]["name"] == "get_memories" and "order.online/store/blue-bottle" in sent[3]["content"]
@@ -919,13 +886,13 @@ async def test_planner_activity_forks_get_memories_when_enabled_with_hits():
     assert any("/api/planner-memory/search" in c["url"] for c in calls)
     search_body = json.loads(next(c["body"] for c in calls if "/search" in c["url"]))
     assert search_body["goal"] == GOAL and search_body["user_id"] == "user-a"
-    assert search_body["min_similarity"] == 0.5 and search_body["passed_only"] is True
+    assert search_body["min_similarity"] == 0.70 and search_body["passed_only"] is True
 
 
 async def test_planner_activity_without_memory_sends_unchanged_context():
     result, captured, calls = await _run_activity(memory_enabled=False, candidates=[_cand("mem-1", GOAL, sim=0.95)])
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
-    assert captured["judge_calls"] == [], "memory off must not call the judge"
+    assert captured["llm_calls"] == [], "memory off makes no retrieval LLM call"
     assert result["planner_memory"] is None and result["planner_memory_injected"] is None
     assert not any("/api/planner-memory" in c["url"] for c in calls), "memory off must not touch the history table"
     assert [t["name"] for t in captured["context_tools"]][-1] == "get_memories", "declared toolset is constant"
@@ -936,34 +903,25 @@ async def test_planner_activity_enabled_without_hits_adds_no_fork():
         memory_enabled=True, candidates=[_cand("x", "Renew my passport downtown", sim=0.2)]
     )
     assert [m["role"] for m in captured["messages"]] == ["system", "user"]
-    assert captured["judge_calls"] == [], "nothing above the floor → no judge call"
+    assert captured["llm_calls"] == [], "nothing above the cutoff → no LLM call"
     assert result["planner_memory"]["hits"] == [] and result["planner_memory_injected"] is None
 
 
-async def test_planner_activity_judge_rejection_adds_no_fork():
+async def test_planner_activity_injects_top3_in_similarity_order():
     cp = _hit().critical_path.model_dump()
-    for reply in ('{"match": null}', '{"match": 9}', "not json"):
-        result, captured, _ = await _run_activity(
-            memory_enabled=True, candidates=[_cand("mem-1", GOAL, sim=0.9, cp=cp)], judge_reply=reply
-        )
-        assert len(captured["judge_calls"]) == 1
-        assert [m["role"] for m in captured["messages"]] == ["system", "user"], reply
-        assert result["planner_memory"]["hits"] == [] and result["planner_memory_injected"] is None, reply
-
-
-async def test_planner_activity_judge_timeout_injects_nothing_quickly():
-    import providers.planner_memory.retrieval as retrieval
-
-    cp = _hit().critical_path.model_dump()
-    with patch.object(retrieval, "DEFAULT_CONFIG", retrieval.RetrievalConfig(judge_timeout_s=0.05)):
-        started = asyncio.get_running_loop().time()
-        result, captured, _ = await _run_activity(
-            memory_enabled=True, candidates=[_cand("mem-1", GOAL, sim=0.9, cp=cp)], judge_delay_s=5.0
-        )
-        elapsed = asyncio.get_running_loop().time() - started
-    assert elapsed < 2.0, f"a hung judge must not stall the planner ({elapsed:.2f}s)"
-    assert result["planner_memory"]["judge"] == {"error": "timeout"}
-    assert [m["role"] for m in captured["messages"]] == ["system", "user"]
+    candidates = [
+        _cand("m4", GOAL + " four", sim=0.72, cp=cp),
+        _cand("m1", GOAL + " one", sim=0.95, cp=cp),
+        _cand("m3", GOAL + " three", sim=0.80, cp=cp),
+        _cand("m2", GOAL + " two", sim=0.90, cp=cp),
+        _cand("low", GOAL + " low", sim=0.60, cp=cp),
+    ]
+    result, captured, _ = await _run_activity(memory_enabled=True, candidates=candidates)
+    assert [h["id"] for h in result["planner_memory"]["hits"]] == ["m1", "m2", "m3"]
+    assert [m["role"] for m in captured["messages"]] == ["system", "user", "assistant", "tool"]
+    rendered = captured["messages"][3]["content"]
+    assert rendered.index("## Memory 1") < rendered.index("## Memory 2") < rendered.index("## Memory 3")
+    assert "## Memory 4" not in rendered
 
 
 async def test_failed_run_is_never_compressed_into_a_memory():
@@ -999,14 +957,14 @@ async def test_failed_run_is_never_compressed_into_a_memory():
     assert not any(c["method"] == "PATCH" for c in calls)
 
 
-def test_search_requests_completed_runs_only_and_shortlist_drops_failures():
-    from providers.planner_memory.retrieval import DEFAULT_CONFIG, shortlist
+def test_search_requests_completed_runs_only_and_selection_drops_failures():
+    from providers.planner_memory.retrieval import DEFAULT_CONFIG, select_hits
 
     assert DEFAULT_CONFIG.passed_only is True
     failed = _cand("f1", GOAL, passed=False, status="COMPLETED", sim=0.9)
     timed_out = _cand("f2", GOAL + " b", passed=None, status="PAUSED", sim=0.9)
     completed_private = _cand("ok", GOAL + " c", passed=None, status="COMPLETED", task=None, sim=0.9)
-    hits = shortlist([failed, timed_out, completed_private], DEFAULT_CONFIG)
+    hits = select_hits([failed, timed_out, completed_private], DEFAULT_CONFIG)
     assert [h.id for h in hits] == ["ok"]
 
 
@@ -1062,14 +1020,10 @@ async def test_compression_timeout_injects_nothing_and_releases_the_lease():
     async def hanging_compressor(*args, **kwargs):
         await asyncio.Event().wait()
 
-    async def same_task(*args, **kwargs):
-        return retrieval.JudgeVerdict(match=1)
-
     with (
         patch.object(retrieval.backend, "search_memories", new=fake_search),
         patch.object(retrieval.backend, "claim_compression", new=fake_claim),
         patch.object(retrieval.backend, "release_compression", new=fake_release),
-        patch.object(retrieval, "judge_candidates", new=same_task),
         patch("providers.planner_memory.transcript.load_bundle_transcript", return_value=transcript),
         patch.object(retrieval, "compress_transcript", new=hanging_compressor),
         patch.object(retrieval, "COMPRESSION_BATCH_TIMEOUT_SECONDS", 0.01),
@@ -1133,9 +1087,8 @@ async def run_all_tests():
     await r.record_async(
         "compress_transcript_contract", test_compress_transcript_uses_structured_call_and_transcript_outcome_wins
     )
-    r.record("shortlist_floor_dedupe_success", test_shortlist_floor_dedupe_success_filter_and_top_n)
-    r.record("verdict_in_range_only", test_apply_verdict_only_in_range_match)
-    r.record("judge_prompt_goals", test_judge_prompt_lists_numbered_goals_and_bounds_the_request)
+    r.record("select_cutoff_dedupe_success", test_select_hits_cutoff_dedupe_success_filter_and_top_k)
+    r.record("default_top3_cutoff_070", test_default_config_is_top3_at_cutoff_070)
     r.record("compressor_cache_version", test_stale_compressor_cache_is_recomputed_without_a_ttl)
     r.record("fork_shape_pairing_render", test_fork_shape_pairing_and_render)
     r.record("render_caps", test_render_caps_total_size)
@@ -1151,10 +1104,9 @@ async def run_all_tests():
     await r.record_async("activity_forks_with_hits", test_planner_activity_forks_get_memories_when_enabled_with_hits)
     await r.record_async("activity_memory_off_unchanged", test_planner_activity_without_memory_sends_unchanged_context)
     await r.record_async("activity_enabled_no_hits", test_planner_activity_enabled_without_hits_adds_no_fork)
-    await r.record_async("activity_judge_rejects", test_planner_activity_judge_rejection_adds_no_fork)
-    await r.record_async("activity_judge_timeout", test_planner_activity_judge_timeout_injects_nothing_quickly)
+    await r.record_async("activity_top3_order", test_planner_activity_injects_top3_in_similarity_order)
     await r.record_async("failed_run_never_compressed", test_failed_run_is_never_compressed_into_a_memory)
-    r.record("completed_only_shortlist", test_search_requests_completed_runs_only_and_shortlist_drops_failures)
+    r.record("completed_only_selection", test_search_requests_completed_runs_only_and_selection_drops_failures)
     await r.record_async(
         "activity_compresses_and_caches", test_planner_activity_compresses_uncompressed_hit_and_caches_it
     )

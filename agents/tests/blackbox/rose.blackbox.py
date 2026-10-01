@@ -149,10 +149,7 @@ def test_oss_pool_is_open_weights_only():
     assert oss.waterfall == ("moonshotai/kimi-k3",)
     assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
     # Speed pools skip Claude/GPT auth so Cerebras Qwen is the real primary.
-    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use", "rose-1-mini"}
-    mini = POOL_REGISTRY["rose-1-mini"]
-    assert mini.waterfall == ("google/gemini-3.5-flash-lite",)
-    assert mini.waterfall_reasoning_effort == "low", "flash-lite rejects effort none; judge latency budget"
+    auth_skipped = {"rose-1-oss", "rose-1-flash", "rose-1-browser-use"}
     for name, spec in POOL_REGISTRY.items():
         if name in auth_skipped:
             assert spec.direct_auth_enabled is False, f"{name} should skip direct auth"
@@ -217,32 +214,16 @@ def test_classify_claude_token_error_each_branch():
 # =====================================================================
 
 
-def _anthropic_layer_pool():
-    """Test-only pool whose waterfall leads with an Anthropic model.
-
-    No production pool keeps an Anthropic waterfall layer, but the
-    anthropic-family skip logic must stay covered; these tests exercise it on
-    a synthetic spec (registered as rose-1-mini only inside the test).
-    """
-    from providers.rose.pools import PoolSpec
-
-    return PoolSpec(
-        name="rose-1-mini",
-        claude_auth_model="claude-haiku-4-5",
-        gpt_auth_model="gpt-5.6-luna",
-        waterfall=("anthropic/claude-haiku-4.5", "z-ai/glm-5.3-flash"),
-        waterfall_reasoning_effort="low",
-    )
-
-
 def test_pool_registry_lookup():
     mini = get_pool("rose-1-mini")
     flash = get_pool("rose-1-flash")
     ultra = get_pool("rose-1-ultra")
     browser_use = get_pool("rose-1-browser-use")
     assert mini.gpt_auth_model == "gpt-5.6-luna"
-    assert mini.waterfall == ("google/gemini-3.5-flash-lite",)
-    assert mini.direct_auth_enabled is False
+    assert mini.waterfall == (
+        "anthropic/claude-haiku-4.5",
+        "z-ai/glm-5.3-flash",
+    )
     assert mini.waterfall_reasoning_effort == "low"
     assert flash.name == "rose-1-flash"
     assert flash.claude_auth_model.startswith("claude-")
@@ -3836,7 +3817,10 @@ async def test_waterfall_skips_anthropic_for_response_format():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=_anthropic_layer_pool(),
+            # rose-1-mini, not ultra: ultra's waterfall no longer contains an
+            # Anthropic layer, so it cannot exercise the skip. mini still leads
+            # with anthropic/claude-haiku-4.5.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
             openrouter_key="ork-test",
@@ -3884,8 +3868,9 @@ async def test_waterfall_uses_anthropic_with_native_tools():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            # Synthetic pool leading with anthropic/claude-haiku-4.5.
-            pool_spec=_anthropic_layer_pool(),
+            # rose-1-mini leads with anthropic/claude-haiku-4.5 — the only
+            # remaining pool with an Anthropic waterfall layer.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "finish"}],
             tools=[
                 {
@@ -3928,8 +3913,9 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            # Synthetic pool with an Anthropic waterfall layer to exclude.
-            pool_spec=_anthropic_layer_pool(),
+            # rose-1-mini: the only pool that still has an Anthropic waterfall
+            # layer to exclude (ultra/browser-use are now Anthropic-free).
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             openrouter_key="ork-test",
             request_id="r-exclude-anthropic",
@@ -4603,18 +4589,15 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
     set_mock_handler(handler)
     prev = os.environ.get("ANTHROPIC_API_KEY")
     os.environ["ANTHROPIC_API_KEY"] = "sk-ant-api03-test"
-    from providers.rose.pools import POOL_REGISTRY
-
     try:
-        with patch.dict(POOL_REGISTRY, {"rose-1-mini": _anthropic_layer_pool()}):
-            chunks = await _drain(
-                RoseClient(openrouter_key="ork-x").complete(
-                    # Synthetic pool with an Anthropic waterfall layer to skip.
-                    pool="rose-1-mini",
-                    messages=[{"role": "user", "content": "hi"}],
-                    _exclude_anthropic_family=True,
-                )
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
+                pool="rose-1-mini",
+                messages=[{"role": "user", "content": "hi"}],
+                _exclude_anthropic_family=True,
             )
+        )
     finally:
         if prev is None:
             os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -4652,21 +4635,16 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
         return httpx.Response(200, json={"ok": True})
 
     set_mock_handler(handler)
-    from providers.rose.pools import POOL_REGISTRY
-
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "ANTHROPIC_API_KEY": "sk-ant-api03-test",
-                "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1",
-            },
-        ),
-        patch.dict(POOL_REGISTRY, {"rose-1-mini": _anthropic_layer_pool()}),
+    with patch.dict(
+        os.environ,
+        {
+            "ANTHROPIC_API_KEY": "sk-ant-api03-test",
+            "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1",
+        },
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                # Synthetic pool with an Anthropic waterfall layer to skip.
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
                 pool="rose-1-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=ClaudeAuthContext(
@@ -6415,7 +6393,7 @@ def test_build_anthropic_body_omits_effort_for_haiku():
         {"role": "user", "content": "hi"},
     ]
     mini = build_anthropic_body(
-        pool_spec=_anthropic_layer_pool(),
+        pool_spec=get_pool("rose-1-mini"),
         messages=msgs,
         tools=None,
         tool_choice=None,

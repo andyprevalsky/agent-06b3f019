@@ -45,13 +45,10 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-mini',
     claudeAuthModel: 'claude-haiku-4-5',
     gptAuthModel: 'gpt-5.6-luna',
-    // Gemini 3.5 Flash-Lite (vision; ~0.8s p50) won the planner-memory judge
-    // bench against gemini-3.8-flash and Cerebras qwen/gpt-oss. The endpoint
-    // rejects reasoning effort "none", so "low". Direct auth is skipped so the
-    // funded GPT key / claudeAuth never pre-empt it.
-    waterfall: ['google/gemini-3.5-flash-lite'],
+    // Haiku stays first so anthropic-family skip tests still have a layer.
+    // Second layer is glm-5.3-flash (vision, index 42, TTFT ~0.5s).
+    waterfall: ['anthropic/claude-haiku-4.5', 'z-ai/glm-5.3-flash'],
     waterfallReasoningEffort: 'low',
-    directAuthEnabled: false,
   },
   'rose-1-flash': {
     name: 'rose-1-flash',

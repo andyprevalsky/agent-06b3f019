@@ -31,7 +31,7 @@ export const PLANNER_MEMORY_SEARCH_DEFAULT_LIMIT = 20;
 export const PLANNER_MEMORY_COMPRESSION_LEASE_MS = 30 * 60 * 1000;
 
 /** Candidates below this cosine similarity never reach the judge. */
-export const PLANNER_MEMORY_DEFAULT_MIN_SIMILARITY = 0.5;
+export const PLANNER_MEMORY_DEFAULT_MIN_SIMILARITY = 0.7;
 
 export interface PlannerMemoryRunInput {
   rootAgentId: string;

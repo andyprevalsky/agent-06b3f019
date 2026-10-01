@@ -15,13 +15,18 @@ The corpus is written through ``PUT /api/planner-memory/:id`` (which embeds each
 row: the voyage-4 goal vector) under
 ``benchmark_task_name="retrieval-bench:<task>"`` and removed afterwards. Every
 query then runs the exact production path: backend semantic search →
-``shortlist`` → the real judge LLM call → ``apply_verdict``.
+``select_hits`` (top 3 distinct completed runs at cosine >= 0.70).
 
-Metrics per split (fit / held-out by task hash): recall@1 (the judge's single
-injected memory is the right task), paraphrase recall@1, negative and
-hard-negative false-positive rates. ``write_snapshot`` freezes each query's
-candidates and judge verdict; tests/blackbox/memory_retrieval_bench.blackbox.py
-replays it through ``shortlist``/``apply_verdict`` and pins the floors for $0.
+Metrics per split (fit / held-out by task hash): recall@1 (the top memory is the
+right task), recall@3 (the right task is among the injected memories),
+paraphrase recall, and negative / hard-negative injection rates.
+``write_snapshot`` freezes each query's candidates;
+tests/blackbox/memory_retrieval_bench.blackbox.py replays them through
+``select_hits`` and pins the floors for $0.
+
+``--trajectories benchmark|owner`` evaluates on real archived runs whose
+relevance labels come from their actual executed plans
+(benchmarks/memory_trajectory_labels.py).
 
 Usage:
     python benchmarks/memory_retrieval_bench.py --build-labels          # from R2 (needs creds), writes the labels file
@@ -51,7 +56,6 @@ TASKS_PATH = AGENTS_ROOT / "benchmarks" / "tasks.json"
 BENCH_PREFIX = "retrieval-bench:"
 SEARCH_LIMIT = 50
 WRITE_CONCURRENCY = 12
-JUDGE_CONCURRENCY = 4
 NEGATIVE_QUERIES = [
     "Draft a two-paragraph thank-you note to my landlord for fixing the heater and email it to me as plain text.",
     "Book me a haircut at a barbershop near the Ferry Building in San Francisco for Saturday morning.",
@@ -150,16 +154,6 @@ def build_labels(limit_per_task: int = 14) -> dict[str, Any]:
 # ── evaluation ──────────────────────────────────────────────────────────────
 
 
-def _disable_dump_archive() -> None:
-    """Bench judge calls belong to no agent, so their LLM dumps are not archived.
-
-    Archiving would otherwise POST each dump to the backend synchronously on the
-    event loop (serializing judge calls ~1s apart under load) or, with async
-    writes, keep the process alive at exit while the executor drains.
-    """
-    os.environ["TRACE_ARCHIVE_ENABLED"] = "0"
-
-
 def load_queries(labels: dict[str, Any]) -> list[dict[str, Any]]:
     extra = json.loads(EXTRA_LABELS_PATH.read_text(encoding="utf-8"))
     return list(labels["queries"]) + list(extra["paraphrases"]) + list(extra["hard_negatives"])
@@ -182,35 +176,33 @@ def _task_of(candidate: dict[str, Any]) -> str:
 
 
 def evaluate(items: list[dict[str, Any]], corpus: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pure metrics over per-query outcomes: {query, candidates, verdict}. Replays shortlist + verdict."""
-    from providers.planner_memory.retrieval import DEFAULT_CONFIG, JudgeVerdict, apply_verdict, shortlist
+    """Pure metrics over per-query outcomes {query, candidates}, replayed through select_hits."""
+    from providers.planner_memory.retrieval import DEFAULT_CONFIG, select_hits
 
     equiv = equivalent_tasks(corpus)
     stats = {split: defaultdict(float) for split in ("fit", "held_out")}
     neg = defaultdict(float)
     for item in items:
         query = item["query"]
-        hits = shortlist(item["candidates"], DEFAULT_CONFIG)
-        verdict = item.get("verdict")
-        chosen = apply_verdict(hits, JudgeVerdict.model_validate(verdict)) if hits and verdict else None
-        chosen_task = str(chosen.benchmark_task_name or "")[len(BENCH_PREFIX) :] if chosen else None
+        tasks = [
+            _task_of({"benchmark_task_name": h.benchmark_task_name})
+            for h in select_hits(item["candidates"], DEFAULT_CONFIG)
+        ]
         if query["positive_task"] is None:
             kind = "hard" if query["kind"] == "hard_negative" else "neg"
             neg[f"{kind}_total"] += 1
-            neg[f"{kind}_fp"] += 1 if chosen else 0
+            neg[f"{kind}_fp"] += 1 if tasks else 0
             continue
         ok = equiv.get(query["positive_task"]) or {query["positive_task"]}
         s = stats[_split_for(query["positive_task"])]
         s["pos"] += 1
-        correct = chosen_task in ok
-        s["recall1"] += 1 if correct else 0
-        s["shortlist_recall"] += (
-            1 if any(str(h.benchmark_task_name or "")[len(BENCH_PREFIX) :] in ok for h in hits) else 0
-        )
-        s["wrong"] += 1 if chosen and not correct else 0
+        s["recall1"] += 1 if tasks[:1] and tasks[0] in ok else 0
+        s["recall3"] += 1 if any(t in ok for t in tasks) else 0
+        s["injected"] += len(tasks)
+        s["injected_ok"] += sum(1 for t in tasks if t in ok)
         if query["kind"] == "paraphrase":
             s["para"] += 1
-            s["para_recall1"] += 1 if correct else 0
+            s["para_recall3"] += 1 if any(t in ok for t in tasks) else 0
     out: dict[str, Any] = {
         "negative_fp_rate": round(neg["neg_fp"] / (neg["neg_total"] or 1), 4),
         "hard_negative_fp_rate": round(neg["hard_fp"] / (neg["hard_total"] or 1), 4),
@@ -222,35 +214,17 @@ def evaluate(items: list[dict[str, Any]], corpus: list[dict[str, Any]]) -> dict[
         out[split] = {
             "queries": int(s["pos"]),
             "recall@1": round(s["recall1"] / pos, 4),
-            "paraphrase_recall@1": round(s["para_recall1"] / (s["para"] or 1), 4),
-            "shortlist_recall": round(s["shortlist_recall"] / pos, 4),
-            "wrong_memory_rate": round(s["wrong"] / pos, 4),
+            "recall@3": round(s["recall3"] / pos, 4),
+            "paraphrase_recall@3": round(s["para_recall3"] / (s["para"] or 1), 4),
+            "precision": round(s["injected_ok"] / (s["injected"] or 1), 4),
         }
     return out
-
-
-async def _judge(
-    query: dict[str, Any], candidates: list[dict[str, Any]], sem: asyncio.Semaphore
-) -> dict[str, Any] | None:
-    from providers.planner_memory.retrieval import DEFAULT_CONFIG, judge_candidates, shortlist
-
-    hits = shortlist(candidates, DEFAULT_CONFIG)
-    if not hits:
-        return None
-    async with sem:
-        try:
-            verdict = await judge_candidates(query["query"], hits, config=DEFAULT_CONFIG, agent_id=None, user_id=None)
-        except Exception as exc:  # a judge error/timeout injects nothing in production too
-            print(f"  judge error ({query['kind']}): {str(exc)[:120]}", flush=True)
-            return {"match": None, "error": str(exc)[:120]}
-    return verdict.model_dump()
 
 
 async def run_bench(port: int, api_key: str) -> dict[str, Any]:
     from providers.planner_memory import client as backend
     from providers.planner_memory.retrieval import DEFAULT_CONFIG
 
-    _disable_dump_archive()
     os.environ["BACKEND_API_URL"] = f"http://localhost:{port}"
     os.environ["BACKEND_API_KEY"] = api_key
     base_url = f"http://localhost:{port}"
@@ -276,7 +250,6 @@ async def run_bench(port: int, api_key: str) -> dict[str, Any]:
     print(f"indexed {len(corpus)} corpus rows (voyage-4 goal vectors)", flush=True)
     try:
         search_sem = asyncio.Semaphore(WRITE_CONCURRENCY)
-        judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
 
         async def one(query: dict[str, Any]) -> dict[str, Any]:
             async with search_sem:
@@ -301,7 +274,7 @@ async def run_bench(port: int, api_key: str) -> dict[str, Any]:
                 for c in found
                 if str(c.get("benchmark_task_name") or "").startswith(BENCH_PREFIX)
             ]
-            return {"query": query, "candidates": candidates, "verdict": await _judge(query, candidates, judge_sem)}
+            return {"query": query, "candidates": candidates}
 
         items = await asyncio.gather(*(one(q) for q in queries))
     finally:
@@ -327,11 +300,11 @@ def write_snapshot(labels: dict[str, Any], queries: list[dict[str, Any]], items:
         for c in item["candidates"]:
             docs.setdefault(c["id"], {"task": c["benchmark_task_name"], "goal": c["goal"]})
             rows.append([c["id"], round(c["similarity"], 6)])
-        per_query.append({"query": item["query"], "candidates": rows, "verdict": item["verdict"]})
+        per_query.append({"query": item["query"], "candidates": rows})
     payload = {
         "description": (
             "Frozen retrieval-bench snapshot: for every labeled query, the candidates the production path returned "
-            "(backend voyage-4 semantic search, [id, similarity]) and the judge verdict over the shortlist. Goal and "
+            "(backend voyage-4 semantic search, [id, similarity]). Goal "
             "goal texts are stored once under `docs`. Rebuild with `python benchmarks/memory_retrieval_bench.py --port N`."
         ),
         "config": DEFAULT_CONFIG.__dict__,
@@ -360,30 +333,8 @@ def load_snapshot_items(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             }
             for cid, sim in entry["candidates"]
         ]
-        items.append({"query": entry["query"], "candidates": candidates, "verdict": entry["verdict"]})
+        items.append({"query": entry["query"], "candidates": candidates})
     return items
-
-
-async def rejudge_snapshot() -> dict[str, Any]:
-    """Re-run only the judge over the frozen candidates (judge prompt/model iteration, no backend)."""
-    from providers.planner_memory.retrieval import DEFAULT_CONFIG
-
-    _disable_dump_archive()
-    labels = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
-    items = load_snapshot_items(json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8")))
-    judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
-
-    async def one(item: dict[str, Any]) -> dict[str, Any]:
-        return {**item, "verdict": await _judge(item["query"], item["candidates"], judge_sem)}
-
-    items = await asyncio.gather(*(one(item) for item in items))
-    write_snapshot(labels, [item["query"] for item in items], items)
-    return {
-        "corpus_rows": len(labels["corpus"]),
-        "queries": len(items),
-        "config": DEFAULT_CONFIG.__dict__,
-        "metrics": evaluate(items, labels["corpus"]),
-    }
 
 
 # ── real-trajectory evaluation (labels from real plans) ─────────────────────
@@ -395,10 +346,12 @@ TRAJECTORY_SNAPSHOT_PATH = LABELS_PATH.parent / "retrieval-trajectories-candidat
 def trajectory_metrics(items: list[dict[str, Any]], runs: list[dict[str, Any]]) -> dict[str, Any]:
     """Relevance = each run's LLM-over-real-plans labels (memory_trajectory_labels); two slices per item.
 
-    Only a run's labeled neighbors carry labels; an injected memory outside them
-    counts as not relevant and is reported as `unlabeled_injections`.
+    precision: share of injected memories that are useful; recall: queries with a
+    useful run available whose injected set contains one; false injection: queries
+    with no useful run that still get a memory. Only a run's labeled neighbors
+    carry labels; injected memories outside them are reported as unlabeled.
     """
-    from providers.planner_memory.retrieval import DEFAULT_CONFIG, JudgeVerdict, apply_verdict, shortlist
+    from providers.planner_memory.retrieval import DEFAULT_CONFIG, select_hits
 
     by_id = {run["id"]: run for run in runs}
     out: dict[str, Any] = {}
@@ -411,30 +364,26 @@ def trajectory_metrics(items: list[dict[str, Any]], runs: list[dict[str, Any]]) 
                 for rid in query.get("relevant") or []
                 if slice_name == "all" or query["task"] is None or by_id[rid]["task"] != query["task"]
             }
-            view = item[slice_name]
-            hits = shortlist(view["candidates"], DEFAULT_CONFIG)
-            verdict = view.get("verdict")
-            chosen = apply_verdict(hits, JudgeVerdict.model_validate(verdict)) if hits and verdict else None
-            chosen_relevant = bool(chosen and chosen.id in relevant_ids)
+            hits = select_hits(item[slice_name]["candidates"], DEFAULT_CONFIG)
+            useful = [h.id in relevant_ids for h in hits]
             s["queries"] += 1
-            s["injected"] += 1 if chosen else 0
-            s["injected_relevant"] += 1 if chosen_relevant else 0
-            s["unlabeled_injections"] += 1 if chosen and chosen.id not in (query.get("neighbors") or []) else 0
+            s["injected"] += len(hits)
+            s["injected_useful"] += sum(useful)
+            s["unlabeled_injections"] += sum(1 for h in hits if h.id not in (query.get("neighbors") or []))
             if relevant_ids:
                 s["with_relevant"] += 1
-                s["recall_hits"] += 1 if chosen_relevant else 0
-                s["shortlist_has_relevant"] += 1 if any(h.id in relevant_ids for h in hits) else 0
+                s["recall_hits"] += 1 if any(useful) else 0
             else:
                 s["without_relevant"] += 1
-                s["false_injections"] += 1 if chosen else 0
+                s["false_injections"] += 1 if hits else 0
         out[slice_name] = {
             "queries": int(s["queries"]),
             "with_relevant": int(s["with_relevant"]),
-            "precision": round(s["injected_relevant"] / (s["injected"] or 1), 4),
+            "precision": round(s["injected_useful"] / (s["injected"] or 1), 4),
             "recall": round(s["recall_hits"] / (s["with_relevant"] or 1), 4),
-            "shortlist_recall": round(s["shortlist_has_relevant"] / (s["with_relevant"] or 1), 4),
             "false_injection_rate": round(s["false_injections"] / (s["without_relevant"] or 1), 4),
             "without_relevant": int(s["without_relevant"]),
+            "avg_memories": round(s["injected"] / (s["queries"] or 1), 2),
             "unlabeled_injections": int(s["unlabeled_injections"]),
         }
     return out
@@ -445,7 +394,6 @@ async def run_trajectory_bench(port: int, api_key: str, runs: list[dict[str, Any
     from providers.planner_memory import client as backend
     from providers.planner_memory.retrieval import DEFAULT_CONFIG
 
-    _disable_dump_archive()
     os.environ["BACKEND_API_URL"] = f"http://localhost:{port}"
     os.environ["BACKEND_API_KEY"] = api_key
     base_url = f"http://localhost:{port}"
@@ -468,7 +416,6 @@ async def run_trajectory_bench(port: int, api_key: str, runs: list[dict[str, Any
         await asyncio.gather(*(put(client, run) for run in runs))
     print(f"indexed {len(runs)} trajectory runs", flush=True)
     search_sem = asyncio.Semaphore(WRITE_CONCURRENCY)
-    judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)
     try:
 
         async def one(run: dict[str, Any]) -> dict[str, Any]:
@@ -495,14 +442,7 @@ async def run_trajectory_bench(port: int, api_key: str, runs: list[dict[str, Any
                 if c["id"] in by_id
             ]
             cross = [c for c in candidates if run["task"] is None or c["benchmark_task_name"] != run["task"]]
-            query = {"query": run["goal"], "kind": "trajectory"}
-            all_verdict = await _judge(query, candidates, judge_sem)
-            cross_verdict = all_verdict if len(cross) == len(candidates) else await _judge(query, cross, judge_sem)
-            return {
-                "id": run["id"],
-                "all": {"candidates": candidates, "verdict": all_verdict},
-                "cross_task": {"candidates": cross, "verdict": cross_verdict},
-            }
+            return {"id": run["id"], "all": {"candidates": candidates}, "cross_task": {"candidates": cross}}
 
         return await asyncio.gather(*(one(run) for run in runs))
     finally:
@@ -512,17 +452,14 @@ async def run_trajectory_bench(port: int, api_key: str, runs: list[dict[str, Any
 
 
 def write_trajectory_snapshot(runs: list[dict[str, Any]], items: list[dict[str, Any]]) -> Path:
-    """Freeze candidates ([id, similarity]) + verdicts per slice; goals live in the labels file."""
+    """Freeze candidates ([id, similarity]) per slice; goals live in the labels file."""
     from providers.planner_memory.retrieval import DEFAULT_CONFIG
 
     compact = [
         {
             "id": item["id"],
             **{
-                name: {
-                    "candidates": [[c["id"], round(c["similarity"], 6)] for c in item[name]["candidates"]],
-                    "verdict": item[name]["verdict"],
-                }
+                name: {"candidates": [[c["id"], round(c["similarity"], 6)] for c in item[name]["candidates"]]}
                 for name in ("all", "cross_task")
             },
         }
@@ -531,7 +468,7 @@ def write_trajectory_snapshot(runs: list[dict[str, Any]], items: list[dict[str, 
     payload = {
         "description": (
             "Frozen real-trajectory snapshot: for each archived run in retrieval-trajectories.json, the "
-            "production search candidates for its goal and the judge verdict, with and without same-task runs. "
+            "production search candidates for its goal, with and without same-task runs. "
             "Rebuild with `python benchmarks/memory_retrieval_bench.py --port N --trajectories`."
         ),
         "config": DEFAULT_CONFIG.__dict__,
@@ -561,10 +498,7 @@ def load_trajectory_items(snapshot: dict[str, Any], runs: list[dict[str, Any]]) 
     return [
         {
             "id": entry["id"],
-            **{
-                name: {"candidates": expand(entry[name]["candidates"]), "verdict": entry[name]["verdict"]}
-                for name in ("all", "cross_task")
-            },
+            **{name: {"candidates": expand(entry[name]["candidates"])} for name in ("all", "cross_task")},
         }
         for entry in snapshot["snapshot"]
     ]
@@ -573,7 +507,6 @@ def load_trajectory_items(snapshot: dict[str, Any], runs: list[dict[str, Any]]) 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build-labels", action="store_true")
-    parser.add_argument("--rejudge", action="store_true", help="Re-run only the judge over the frozen snapshot")
     parser.add_argument(
         "--trajectories",
         choices=["benchmark", "owner"],
@@ -605,14 +538,11 @@ def main() -> int:
         metrics = trajectory_metrics(items, runs)
         print(json.dumps({"set": args.trajectories, "runs": len(runs), "metrics": metrics}, indent=1))
         return 0
-    if args.rejudge:
-        report = asyncio.run(rejudge_snapshot())
-    else:
-        api_key = os.environ.get("BACKEND_API_KEY") or ""
-        if not api_key:
-            print("BACKEND_API_KEY required")
-            return 2
-        report = asyncio.run(run_bench(args.port, api_key))
+    api_key = os.environ.get("BACKEND_API_KEY") or ""
+    if not api_key:
+        print("BACKEND_API_KEY required")
+        return 2
+    report = asyncio.run(run_bench(args.port, api_key))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
     print(f"corpus={report['corpus_rows']} queries={report['queries']}")
