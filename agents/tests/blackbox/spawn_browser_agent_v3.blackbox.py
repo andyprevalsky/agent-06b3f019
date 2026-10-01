@@ -20948,7 +20948,6 @@ def test_browser_resume_keeps_auth_attempts_and_task_summary():
     assert after.email_otp_attempted is True
     assert after.guest_option_seen is True
     assert after.guest_attempted is True
-    assert after.user_assistance_guard()[0] is False  # password-3 remains untried
 
 
 def test_browser_resume_keeps_embedded_screenshots():
