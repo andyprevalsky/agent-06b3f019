@@ -2035,6 +2035,7 @@ start_public_tunnel() {
             export ALLOWED_ORIGINS="$origins_before_ngrok"
             if command -v cloudflared >/dev/null 2>&1; then
                 start_cloudflare_quick_tunnel && return 0
+                export ALLOWED_ORIGINS="$origins_before_ngrok"
             fi
             start_localtunnel_public_tunnel && return 0
             echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (reserved ngrok domain held elsewhere; tried cloudflare, localtunnel)." >&2
@@ -2724,8 +2725,7 @@ while true; do
                 code=$?
             fi
             name="${NAMES[$i]}"
-            if [ "$name" = "ngrok" ] && \
-                ! public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
+            if public_tunnel_process_is_optional "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
                 echo "⚠️  local public tunnel $name (PID $pid) exited with code $code; keeping local services running."
                 unset "PIDS[$i]"
                 unset "NAMES[$i]"

@@ -217,8 +217,9 @@ run_ngrok_mode() { # run_ngrok_mode <ngrok_ok> <ngrok_log_line> <cloudflare_ok>
       }
       start_cloudflare_quick_tunnel() {
         echo cloudflare >> "$RUN_CONTEXT_DIR/calls"
-        [ "$STUB_CLOUDFLARE_OK" = 1 ] || return 1
+        # Like the real NXDOMAIN path: the hostname is published, then never routes.
         public_tunnel_publish_environment "https://stub.trycloudflare.com" "$ALLOWED_ORIGINS"
+        [ "$STUB_CLOUDFLARE_OK" = 1 ] || return 1
         sleep 30 & NGROK_PID=$!
         PIDS+=("$NGROK_PID"); NAMES+=(cloudflared)
       }
@@ -252,6 +253,8 @@ out="$(run_ngrok_mode 0 "$held_line" 0)" \
   || fail "case 9b: localtunnel must serve when cloudflare also fails ($(cat "$TMP/ngrok_mode.err"))"
 printf '%s\n' "$out" | grep -qx 'url=https://stub.loca.lt' \
   || fail "case 9b: expected the localtunnel origin, got: $out"
+printf '%s\n' "$out" | grep -qx 'origins=http://localhost:3002,https://stub.loca.lt' \
+  || fail "case 9b: the unroutable cloudflare origin must not stay in ALLOWED_ORIGINS, got: $out"
 [ "$(tr '\n' ' ' < "$TMP/ctx/calls")" = "ngrok cloudflare localtunnel " ] \
   || fail "case 9b: unexpected provider order: $(tr '\n' ' ' < "$TMP/ctx/calls")"
 echo "PASS: ERR_NGROK_334 reaches localtunnel when cloudflare cannot route"
@@ -329,5 +332,35 @@ out="$(fallback_domain_for managua-v1)" \
 [ "$out" = "https://rose-managua-v1-bench.ngrok.app" ] \
   || fail "case 10: plain worktree fallback domain changed, got $out"
 echo "PASS: the ngrok fallback reuses one per-worktree domain across isolated runs"
+
+# --- case 11: a dropped fallback tunnel does not take the shared stack down ---
+# RCA cement (2026-10-01). After case 9's fallback, /deploy's Step 5 stack was
+# fronted by localtunnel. The client exited 1 two minutes in, and the monitor
+# loop (which only exempted a process named "ngrok") killed backend, frontend,
+# and worker under the running semantic suite. Only an isolated run's own
+# account-less tunnel is load-bearing.
+grep -q 'public_tunnel_process_is_optional "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"' "$RUN_SH" \
+  || fail "case 11: run.sh's service monitor no longer consults public_tunnel_process_is_optional"
+tunnel_optional() { # tunnel_optional <process name> <ephemeral mode>
+  bash -c 'source "$1/scripts/lib/ngrok-tunnel.sh"; public_tunnel_process_is_optional "$2" "$3"' \
+    _ "$ROOT_DIR" "$1" "$2"
+}
+for name in ngrok cloudflared localtunnel; do
+  tunnel_optional "$name" 0 \
+    || fail "case 11: a dead $name tunnel must not stop a shared (non-isolated) stack"
+done
+tunnel_optional ngrok 1 \
+  || fail "case 11: the isolated-run ngrok fallback stays optional"
+for name in cloudflared localtunnel; do
+  tunnel_optional "$name" 1 \
+    && fail "case 11: an isolated run must stop when its $name tunnel dies"
+done
+for name in back-end front-end agents; do
+  for mode in 0 1; do
+    tunnel_optional "$name" "$mode" \
+      && fail "case 11: $name (mode $mode) is a required service, not a public tunnel"
+  done
+done
+echo "PASS: only an isolated run's own account-less tunnel is load-bearing"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

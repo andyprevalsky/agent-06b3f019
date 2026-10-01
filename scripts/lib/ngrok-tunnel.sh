@@ -14,10 +14,25 @@ public_tunnel_provider_for_mode() {
   esac
 }
 
+# An isolated run hands its account-less tunnel URL to the harness, so losing
+# that tunnel fails the run. A shared stack serves localhost first: whichever
+# provider fronts it publicly (including an ERR_NGROK_334 fallback) is optional.
 public_tunnel_process_is_required() {
   local process_name="$1" ephemeral="$2"
-  [ "$(public_tunnel_provider_for_mode "$ephemeral")" = "cloudflare" ] && \
-    [ "$process_name" = "cloudflared" ]
+  [ "$(public_tunnel_provider_for_mode "$ephemeral")" = "cloudflare" ] || return 1
+  case "$process_name" in
+    cloudflared|localtunnel) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+public_tunnel_process_is_optional() {
+  local process_name="$1" ephemeral="$2"
+  case "$process_name" in
+    ngrok|cloudflared|localtunnel) ;;
+    *) return 1 ;;
+  esac
+  ! public_tunnel_process_is_required "$process_name" "$ephemeral"
 }
 
 # ERR_NGROK_334: the bound domain is already online in a different agent
