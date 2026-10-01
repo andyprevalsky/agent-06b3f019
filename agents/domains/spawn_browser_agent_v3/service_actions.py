@@ -222,12 +222,7 @@ def get_domain_from_url(url: str) -> str:
             # Bare host / domain strings from notification payloads (e.g. "roselabs.ai").
             # Require a dot so junk like "not-a-url" stays empty.
             candidate = url.strip().lower()
-            if (
-                candidate
-                and "." in candidate
-                and " " not in candidate
-                and "/" not in candidate
-            ):
+            if candidate and "." in candidate and " " not in candidate and "/" not in candidate:
                 domain = candidate
         if "@" in domain:
             domain = domain.rsplit("@", 1)[-1]
@@ -861,9 +856,7 @@ async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[
             ),
         }
     try:
-        payment_request = RequestPaymentCardBrowserTool.model_validate(
-            {"tool": context.action_name, **context.params}
-        )
+        payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": context.action_name, **context.params})
         for item in payment_request.line_items:
             validate_product_url_for_pages(
                 item.product_url,
@@ -1118,10 +1111,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
                     _kernel_computer_key(str(key)),
                 )
             except httpx.HTTPStatusError as error:
-                if (
-                    error.response.status_code
-                    not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES
-                ):
+                if error.response.status_code not in _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES:
                     raise
                 logger.info(
                     "Provider computer input rejected before execution; falling back",
@@ -1210,9 +1200,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         if not context.element:
             return {"success": False, "error": "Dropdown requires an element index"}
         value = context.params.get("value", "")
-        event = context.session.event_bus.dispatch(
-            SelectDropdownOptionEvent(node=context.element, text=value)
-        )
+        event = context.session.event_bus.dispatch(SelectDropdownOptionEvent(node=context.element, text=value))
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
         await context.action_history.record_action(
@@ -1283,9 +1271,9 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         # specifically for another approval burns the one-time card's live window
         # (AgentCard closes unused cards) and breaks same-last4 reuse. Ordinary
         # waits (OTP / payment-widget settle) must still honor WaitEvent.
-        if has_payment_card_secret_refs(
-            context.secret_refs
-        ) and _is_redundant_payment_approval_wait(context.thinking, context.params):
+        if has_payment_card_secret_refs(context.secret_refs) and _is_redundant_payment_approval_wait(
+            context.thinking, context.params
+        ):
             ready_message = (
                 "Payment approval is already complete. Do not wait for another approval. "
                 "Type the existing secret refs card_number, card_name, card_expiry, and "
@@ -1542,9 +1530,7 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         exception = result.get("exceptionDetails")
         if exception:
             error_text = (
-                exception.get("text")
-                or (exception.get("exception") or {}).get("description")
-                or "evaluate raised"
+                exception.get("text") or (exception.get("exception") or {}).get("description") or "evaluate raised"
             )
             logger.warning(
                 "Browser evaluate raised",
@@ -1646,9 +1632,7 @@ async def execute_action(
     system_name: str = "Rose",
     browser_network_recorder: Optional[Any] = None,
     current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[
-        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
-    ] = None,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
@@ -2167,7 +2151,6 @@ _PAYMENT_REF_FILL_JS = f"""
 """
 
 
-
 def _explicit_session_callable(session: Any, *names: str) -> Optional[Callable[..., Any]]:
     """Return a callable explicitly present on the session (skip MagicMock auto-attrs)."""
     if session is None:
@@ -2447,9 +2430,7 @@ async def _resolve_password_field_coordinates(
         return None
     hint_payload = field_hint if isinstance(field_hint, dict) and field_hint else None
     for label, target in await _iter_payment_fill_targets(session, input_page):
-        result = await _evaluate_on_payment_fill_target(
-            target, _PASSWORD_FIELD_LOCATE_JS, hint_payload
-        )
+        result = await _evaluate_on_payment_fill_target(target, _PASSWORD_FIELD_LOCATE_JS, hint_payload)
         if not result:
             continue
         if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
@@ -3458,9 +3439,7 @@ def should_skip_input_text_refocus(
     last_coords = last.get("coordinates")
     if isinstance(coords, dict) and isinstance(last_coords, dict):
         try:
-            return int(last_coords["x"]) == int(coords["x"]) and int(last_coords["y"]) == int(
-                coords["y"]
-            )
+            return int(last_coords["x"]) == int(coords["x"]) and int(last_coords["y"]) == int(coords["y"])
         except (TypeError, ValueError, KeyError):
             return False
     return False
@@ -3493,16 +3472,10 @@ async def _execute_indexed_input_text(
             secret_ref_name or "",
             input_page=_humanizer_input_page(humanizer),
         )
-    is_password_credential = bool(
-        credential_ref and str(credential_ref.get("kind") or "") == "password"
-    )
+    is_password_credential = bool(credential_ref and str(credential_ref.get("kind") or "") == "password")
     if humanizer and not coord_tuple and is_password_credential:
         attrs = getattr(element, "attributes", None) or {}
-        field_hint = {
-            key: str(attrs[key])
-            for key in ("id", "name", "autocomplete")
-            if attrs.get(key)
-        }
+        field_hint = {key: str(attrs[key]) for key in ("id", "name", "autocomplete") if attrs.get(key)}
         coord_tuple = await _resolve_password_field_coordinates(
             session,
             input_page=_humanizer_input_page(humanizer),
@@ -3784,9 +3757,7 @@ async def _execute_goto(
     session_id: Optional[str],
     config: Any,
     current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[
-        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
-    ] = None,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Prepare a target realm's credentials, then execute navigation."""
@@ -3886,9 +3857,7 @@ async def _execute_goto(
         # internally. Only its deliberately non-sensitive summary may enter
         # action history or the model-visible tool result.
         result["credentials_prepared"] = credential_summary
-        result["auth_realm"] = str(
-            credential_summary.get("auth_realm") or target_auth_realm
-        )
+        result["auth_realm"] = str(credential_summary.get("auth_realm") or target_auth_realm)
     await action_history.record_action(
         dom_service=dom_service,
         action="goto",
