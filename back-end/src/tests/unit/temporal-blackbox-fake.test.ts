@@ -71,7 +71,10 @@ async function main(): Promise<void> {
     { name: 'receive_user_response', args: ['hello'] },
     { name: 'resume', args: [] },
   ]);
-  await assert.rejects(() => client.workflow.getHandle('missing').signal('resume'), WorkflowNotFoundError);
+  await assert.rejects(
+    () => client.workflow.getHandle('missing').signal('resume'),
+    WorkflowNotFoundError
+  );
   assert.deepEqual(blackboxTemporalSignals(client, 'missing'), []);
   assert.throws(
     () => blackboxTemporalSignals({} as typeof client, 'agent-1'),
