@@ -83,7 +83,9 @@ const isolatedRunId =
   process.env.BENCHMARK_ISOLATED_RUN === 'true' ? process.env.BENCHMARK_RUN_ID : undefined;
 if (
   process.env.BENCHMARK_ISOLATED_RUN === 'true' &&
-  !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? '')
+  (isolatedRunId === '.' ||
+    isolatedRunId === '..' ||
+    !/^[A-Za-z0-9._-]+$/.test(isolatedRunId ?? ''))
 ) {
   throw new Error('BENCHMARK_RUN_ID must be a safe, nonempty ID for an isolated Benchmark Hub');
 }
