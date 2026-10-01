@@ -2215,7 +2215,23 @@ async def test_simulated_payment_card_approval_finishes_pending_tool_for_resumed
             {
                 "action": {
                     "action": "request_payment_card",
-                    "params": {"merchant": "Rose Labs Test Payment", "total_cents": 4396, "currency": "USD"},
+                    "params": {
+                        "merchant": "Rose Labs Test Payment",
+                        "line_items": [
+                            {
+                                "name": "Aurora Notebook",
+                                "product_url": "https://shop.example.test/products/aurora-notebook",
+                                "rating": "4.9 stars",
+                                "review_count": "217 reviews",
+                                "unit_price_cents": 1200,
+                                "quantity": 1,
+                                "line_total_cents": 1200,
+                            }
+                        ],
+                        "subtotal_cents": 1200,
+                        "total_cents": 4396,
+                        "currency": "USD",
+                    },
                 },
                 "tool_call_id": "payment-call",
                 "usage": {},
@@ -3148,6 +3164,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",
         test_simulated_provider_activities_call_wmh_instead_of_live_services,
+    )
+    await r.record_async(
+        "simulated_payment_approval_finishes_pending_tool",
+        test_simulated_payment_card_approval_finishes_pending_tool_for_resumed_policy,
     )
     teardown_mock()
     return r.all_passed
