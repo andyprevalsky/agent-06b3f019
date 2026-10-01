@@ -90,9 +90,12 @@ function mintedAccounts(plan: ScenarioPlan, mintedEmail: string | null): SiteAcc
 export async function createAuthTestSite(
   input: CreateAuthTestSiteInput
 ): Promise<AuthTestSiteManifest> {
-  if (!(await repo.userExists(input.userId))) {
+  const user = await repo.findUserName(input.userId);
+  if (user === null) {
     throw new AuthTestSiteError('User not found', 404);
   }
+  const trimmedName = user.name?.trim() ?? '';
+  const holderName = trimmedName === '' ? null : trimmedName;
   const nowMs = Date.now();
   const siteId = randomBytes(6).toString('hex');
   const realm = `larkspur-${siteId}.test`;
@@ -104,7 +107,7 @@ export async function createAuthTestSite(
     );
   }
 
-  const plan = planScenario(input.scenario, siteId);
+  const plan = planScenario(input.scenario, siteId, holderName);
   const savedPasswords = await seedSavedPasswords(input.userId, entryUrl, plan, nowMs);
   const authOptions = await getAuthOptions(input.userId, realm);
   const mintedEmail = authOptions.minted?.email ?? null;
@@ -122,6 +125,7 @@ export async function createAuthTestSite(
     realm,
     entryUrl,
     createdAtMs: nowMs,
+    holderName,
     accounts,
     savedPasswords,
     mintedEmail,

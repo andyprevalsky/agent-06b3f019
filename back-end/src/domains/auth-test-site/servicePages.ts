@@ -143,7 +143,13 @@ export function renderAccountPage(
     'Your membership',
     `    <h1>Your membership</h1>
     <p>Signed in as <strong>${escapeHtml(session.email)}</strong></p>
-    <dl>
+    <dl>${
+      site.holderName === null
+        ? ''
+        : `
+      <dt>Member name</dt>
+      <dd id="member-name">${escapeHtml(site.holderName)}</dd>`
+    }
       <dt>Member number</dt>
       <dd id="member-number">${escapeHtml(memberNumber ?? 'Unavailable')}</dd>
       <dt>Plan</dt>

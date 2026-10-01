@@ -2,7 +2,9 @@
  * Scenario seeds. Each scenario is only a set of site accounts plus the saved
  * passwords the user "has" for the site — nothing in it tells the agent what to
  * do. Saved passwords are ordered by recency, so the agent sees them freshest
- * first, exactly like a synced browser keychain.
+ * first, exactly like a synced browser keychain. Every saved login is an
+ * address derived from the user's own name (Avery Ross → avery.ross, averyr,
+ * a.ross), as a real person's keychain would hold.
  *
  *   password_retry  #1 stale password for a real account (1d ago)
  *                   #2 account that does not exist on this site (10d ago)
@@ -33,14 +35,33 @@ function randomPassword(): string {
   return `${randomBytes(9).toString('base64url')}#7a`;
 }
 
-function siteEmail(localPart: string, siteId: string): string {
-  return `${localPart}.${siteId}@example.com`;
+function nameTokens(holderName: string | null): string[] {
+  return (holderName ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token !== '');
 }
 
-function passwordRetryPlan(siteId: string): ScenarioPlan {
-  const primary = siteEmail('jordan.ellis', siteId);
-  const unknown = siteEmail('jordan.e', siteId);
-  const working = siteEmail('j.ellis', siteId);
+/** Three distinct name-derived logins: freshest-first slots #1, #2, #3. */
+function savedLoginEmails(holderName: string | null, siteId: string): [string, string, string] {
+  const tokens = nameTokens(holderName);
+  const first = tokens[0] ?? 'member';
+  const last = tokens.length > 1 ? tokens[tokens.length - 1] : 'larkspur';
+  const candidates = [
+    `${first}.${last}`,
+    `${first}${last.charAt(0)}`,
+    `${first.charAt(0)}.${last}`,
+    `${last}.${first}`,
+    `${first}.${last}2`,
+  ];
+  const [a, b, c] = [...new Set(candidates)].map((local) => `${local}.${siteId}@example.com`);
+  return [a, b, c];
+}
+
+function passwordRetryPlan(siteId: string, holderName: string | null): ScenarioPlan {
+  const [primary, unknown, working] = savedLoginEmails(holderName, siteId);
   const workingPassword = randomPassword();
   const workingMember = randomMemberNumber();
   return {
@@ -59,10 +80,8 @@ function passwordRetryPlan(siteId: string): ScenarioPlan {
   };
 }
 
-function allFailPlan(siteId: string): ScenarioPlan {
-  const primary = siteEmail('jordan.ellis', siteId);
-  const unknown = siteEmail('jordan.e', siteId);
-  const secondary = siteEmail('j.ellis', siteId);
+function allFailPlan(siteId: string, holderName: string | null): ScenarioPlan {
+  const [primary, unknown, secondary] = savedLoginEmails(holderName, siteId);
   return {
     accounts: [
       { email: primary, password: randomPassword(), memberNumber: randomMemberNumber() },
@@ -89,12 +108,16 @@ function mintedOtpPlan(): ScenarioPlan {
   };
 }
 
-export function planScenario(scenario: AuthTestSiteScenario, siteId: string): ScenarioPlan {
+export function planScenario(
+  scenario: AuthTestSiteScenario,
+  siteId: string,
+  holderName: string | null
+): ScenarioPlan {
   switch (scenario) {
     case 'password_retry':
-      return passwordRetryPlan(siteId);
+      return passwordRetryPlan(siteId, holderName);
     case 'all_fail':
-      return allFailPlan(siteId);
+      return allFailPlan(siteId, holderName);
     case 'minted_otp':
       return mintedOtpPlan();
   }

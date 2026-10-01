@@ -52,9 +52,9 @@ interface Report {
   savedPasswords: Array<{ username: string; matchesAccount: boolean }>;
 }
 
-async function createUser(): Promise<string> {
+async function createUser(name: string | null = null): Promise<string> {
   const userId = `auth-test-site-${randomUUID()}`;
-  await prisma.user.create({ data: { userId, isAnonymous: true, systemName: 'Rose' } });
+  await prisma.user.create({ data: { userId, name, isAnonymous: true, systemName: 'Rose' } });
   return userId;
 }
 
@@ -204,7 +204,7 @@ test('fixture management requires the internal API key and unknown sites 404', a
 });
 
 test('password_retry seeds three realm-scoped saved passwords, freshest first, then deletes them', async () => {
-  const userId = await createUser();
+  const userId = await createUser('J Ng');
   try {
     const response = await createFixture(BASE_URL, {
       userId,
@@ -213,6 +213,11 @@ test('password_retry seeds three realm-scoped saved passwords, freshest first, t
     });
     assert(response.status === 201, `fixture expected 201, got ${response.status}`);
     const manifest = (await response.json()) as Manifest;
+    const usernames = manifest.savedPasswordUsernames;
+    assert(
+      new Set(usernames).size === 3 && usernames.every((name) => /^(j|ng)[.a-z]*\./.test(name)),
+      `saved logins must be three distinct addresses derived from the user's name: ${usernames}`
+    );
     assert(/^larkspur-[0-9a-f]{12}\.test$/.test(manifest.realm), `bad realm ${manifest.realm}`);
     assert(canonicalAuthRealm(manifest.entryUrl) === manifest.realm, 'entryUrl must carry realm');
     assert(manifest.savedBrowserAuthHidden === false, 'saved browser auth must be visible');
@@ -279,7 +284,7 @@ test('dev tunnel hosts honor authRealm overrides; ordinary hosts do not', async 
 });
 
 test('password_retry: the two stale saved passwords are rejected and the third signs in', async () => {
-  const userId = await createUser();
+  const userId = await createUser('Avery Quinlan-Ross');
   try {
     await withLocalSite(async ({ base }) => {
       const created = await createFixture(base, {
@@ -289,6 +294,13 @@ test('password_retry: the two stale saved passwords are rejected and the third s
       });
       assert(created.status === 201, `fixture expected 201, got ${created.status}`);
       const manifest = (await created.json()) as Manifest;
+      const expectedUsernames = ['avery.ross', 'averyr', 'a.ross'].map(
+        (localPart) => `${localPart}.${manifest.siteId}@example.com`
+      );
+      assert(
+        JSON.stringify(manifest.savedPasswordUsernames) === JSON.stringify(expectedUsernames),
+        `saved logins must belong to the user by name: ${manifest.savedPasswordUsernames}`
+      );
       const saved = await savedPasswordsInListedOrder(userId, manifest);
       const outcomes: number[] = [];
       let cookie = '';
@@ -311,6 +323,10 @@ test('password_retry: the two stale saved passwords are rejected and the third s
         'wrong account'
       );
       assert(html.includes(manifest.expectedMemberNumber ?? '?'), 'member number must be shown');
+      assert(
+        html.includes('<dd id="member-name">Avery Quinlan-Ross</dd>'),
+        'account page must name the member'
+      );
 
       const report = await fetchReport(base, manifest.siteId);
       const reasons = report.attempts.map((attempt) => `${attempt.outcome}:${attempt.reason}`);
@@ -367,7 +383,7 @@ test('all_fail: every saved password is rejected and no minted account is offere
 });
 
 test('minted_otp: the emailed code reaches the minted inbox and signs in', async () => {
-  const userId = await createUser();
+  const userId = await createUser('Rowan Ellery');
   const mintedEmail = `rose.cedar11.${randomUUID().slice(0, 8)}@${STUB_MAIL_DOMAIN}`;
   try {
     await prisma.agentIdentity.create({
@@ -413,9 +429,11 @@ test('minted_otp: the emailed code reaches the minted inbox and signs in', async
       const account = await fetch(`${base}${pagePath(manifest, '/account')}`, {
         headers: { Cookie: sessionCookie(verified) },
       });
+      const accountHtml = await account.text();
+      assert(accountHtml.includes(manifest.expectedMemberNumber ?? '?'), 'member number');
       assert(
-        (await account.text()).includes(manifest.expectedMemberNumber ?? '?'),
-        'member number'
+        accountHtml.includes('<dd id="member-name">Rowan Ellery</dd>'),
+        'minted account page must name the member it was opened for'
       );
       const report = await fetchReport(base, manifest.siteId);
       assert(
@@ -433,7 +451,8 @@ test('minted_otp: the emailed code reaches the minted inbox and signs in', async
 });
 
 async function main(): Promise<void> {
-  if (BASE_URL === '') throw new Error('TEST_BASE_URL is required (scripts/run-blackbox-tests.sh sets it)');
+  if (BASE_URL === '')
+    throw new Error('TEST_BASE_URL is required (scripts/run-blackbox-tests.sh sets it)');
   console.log(`Running auth-test-site black-box tests (${tests.length} tests)...`);
   let failed = 0;
   for (const { name, fn } of tests) {

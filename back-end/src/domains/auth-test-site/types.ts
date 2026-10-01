@@ -89,6 +89,8 @@ export interface AuthTestSite {
   realm: string;
   entryUrl: string;
   createdAtMs: number;
+  /** The benchmark user's name; every site account is theirs. */
+  holderName: string | null;
   accounts: SiteAccount[];
   savedPasswords: SavedPasswordRecord[];
   mintedEmail: string | null;

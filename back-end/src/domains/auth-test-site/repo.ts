@@ -1,9 +1,8 @@
 import { prisma } from '../../providers/database';
 import { SAVED_PASSWORD_BROWSER_SOURCE } from './config';
 
-export async function userExists(userId: string): Promise<boolean> {
-  const user = await prisma.user.findUnique({ where: { userId }, select: { userId: true } });
-  return user !== null;
+export async function findUserName(userId: string): Promise<{ name: string | null } | null> {
+  return prisma.user.findUnique({ where: { userId }, select: { name: true } });
 }
 
 /**
