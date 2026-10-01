@@ -45,8 +45,10 @@ import unicodedata
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
@@ -1833,10 +1835,12 @@ _cached_headers: Optional[dict] = None
 _cached_headers_user_id: Optional[str] = None
 _auth_mode: Optional[str] = None  # "jwt" or "api_key"
 _subscription_webhook_stripe_customers: Dict[str, str] = {}
+_task_benchmark_user_id: ContextVar[Optional[str]] = ContextVar("task_benchmark_user_id", default=None)
+_default_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
 
 
 def _current_benchmark_user_id() -> str:
-    return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
+    return _task_benchmark_user_id.get() or os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
 
 
 def _new_user_payment_journey_user_id() -> str:
@@ -2279,6 +2283,8 @@ def _benchmark_goal_for_task(task: BenchmarkTask, base_url: str) -> str:
         or task.prompt
     )
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
+    if task.name == "google-oauth":
+        goal = goal.replace("{demo_run_nonce}", uuid.uuid4().hex)
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     goal = _inject_benchmark_prompt_secrets(goal)
     if task.success_on_payment_card_request and PAYMENT_BOUNDARY_GOAL_MARKER not in goal:
@@ -12080,6 +12086,21 @@ async def _run_declared_evaluators(
     return True, None, results
 
 
+def _scoped_benchmark_user(run_task):
+    """Restore the caller's user even when a task exits before its main finally."""
+
+    @wraps(run_task)
+    async def scoped(*args, **kwargs):
+        token = _task_benchmark_user_id.set(_default_benchmark_user_id)
+        try:
+            return await run_task(*args, **kwargs)
+        finally:
+            _task_benchmark_user_id.reset(token)
+
+    return scoped
+
+
+@_scoped_benchmark_user
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
@@ -12130,6 +12151,9 @@ async def run_single_task(
         # exists to prevent.
         run_user_id_override = _live_fixture_run_user_id(task)
     if run_user_id_override:
+        # The parallel runner shares os.environ across asyncio tasks. Pin this
+        # task's identity before any preflight, gate poll, or early return.
+        _task_benchmark_user_id.set(run_user_id_override)
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)

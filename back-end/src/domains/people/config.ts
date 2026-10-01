@@ -12,8 +12,7 @@ export const DEFAULT_SEARCH_LIMIT = 5;
 /** Default message limit when fetching messages for a person. */
 export const DEFAULT_MESSAGE_LIMIT = 50;
 
-/** Default and max days for recent messages endpoint. */
-export const DEFAULT_RECENT_DAYS = 1;
+/** Maximum age window when a caller explicitly requests one. */
 export const MAX_RECENT_DAYS = 30;
 
 /** Default limit for recent messages. */
