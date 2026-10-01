@@ -90,6 +90,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
+import { waitForBackendFundedKeyCooldown } from './funded-key-cooldown.helper';
 import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
@@ -718,7 +719,17 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     );
   } finally {
     await restoreAnthropicApiKeyCooldown(previous);
+    await waitForBackendFundedKeyCooldown(
+      BASE_URL,
+      API_KEY,
+      'anthropic-key',
+      isStillCooled(previous)
+    );
   }
+}
+
+function isStillCooled(row: { rateLimitedUntil: Date | null } | null): boolean {
+  return row?.rateLimitedUntil instanceof Date && row.rateLimitedUntil.getTime() > Date.now();
 }
 
 async function testGptApiKeyCooldown_markThenOnCooldown() {
@@ -774,6 +785,7 @@ async function testGptApiKeyCooldown_markThenOnCooldown() {
       });
     }
     __clearGptApiKeyCooldownCache();
+    await waitForBackendFundedKeyCooldown(BASE_URL, API_KEY, 'gpt-key', isStillCooled(previous));
   }
 }
 
@@ -6392,6 +6404,12 @@ async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
     await restoreAnthropicApiKeyCooldown(previousCooldown);
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await waitForBackendFundedKeyCooldown(
+      BASE_URL,
+      API_KEY,
+      'anthropic-key',
+      isStillCooled(previousCooldown)
+    );
   }
 }
 
@@ -6426,6 +6444,7 @@ async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await __resetAnthropicApiKeyCooldown();
+    await waitForBackendFundedKeyCooldown(BASE_URL, API_KEY, 'anthropic-key', false);
   }
 }
 

@@ -29,6 +29,7 @@ import {
   testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
+import { waitForBackendFundedKeyCooldown } from './funded-key-cooldown.helper';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -325,6 +326,7 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
         name: 'gpt_api_key_cooldown',
       },
     });
+    await waitForBackendFundedKeyCooldown(BASE_URL, API_KEY, 'gpt-key', false);
   }
 }
 
