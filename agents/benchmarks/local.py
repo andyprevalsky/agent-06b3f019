@@ -755,6 +755,49 @@ def _port_listener_pids(port: int) -> set[int]:
     return pids
 
 
+def _environment_entry_pids(entry: str) -> set[int]:
+    """PIDs whose launch environment contains exactly ``entry`` (``NAME=value``)."""
+    pids: set[int] = set()
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        wanted = entry.encode()
+        for proc_dir in proc_root.iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            with contextlib.suppress(OSError):
+                if wanted in (proc_dir / "environ").read_bytes().split(b"\0"):
+                    pids.add(int(proc_dir.name))
+        return pids
+    # macOS has no /proc; `ps -E` appends each process's launch environment.
+    with contextlib.suppress(Exception):
+        out = subprocess.run(
+            ["ps", "-axwwE", "-o", "pid=,command="], capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+        for line in out.splitlines():
+            pid_text, _, command = line.strip().partition(" ")
+            if entry in command.split():
+                with contextlib.suppress(ValueError):
+                    pids.add(int(pid_text))
+    return pids
+
+
+def _ancestor_pids() -> set[int]:
+    """This process and every ancestor: the controller that is tearing the run down."""
+    pids: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in pids:
+        pids.add(pid)
+        try:
+            pid = int(
+                subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=2, check=False
+                ).stdout.strip()
+            )
+        except (ValueError, OSError, subprocess.SubprocessError):
+            break
+    return pids
+
+
 def _pid_cwd_under_worktree(pid: int) -> bool:
     """True iff pid's cwd is inside this worktree. Safety gate: guarantees the
     isolated teardown can never reach a process owned by a sibling worktree,
@@ -782,11 +825,14 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
     The run_id only appears in run.sh's (and ngrok's) command line — the backend
     (`tsx src/server.ts`) and worker (`python worker.py`) carry it only in their
-    environment, and they routinely reparent to launchd, so a command-line match
-    alone leaks them. We instead union three run-specific signals — command-line
-    run_id match, the manifest's recorded PIDs + their process trees, and the
-    listeners on this run's unique service ports — then gate every candidate on
-    cwd-under-this-worktree so a sibling worktree's stack is never touched.
+    environment, and they routinely reparent to init/launchd, so a command-line
+    match alone leaks them. We instead union four run-specific signals —
+    command-line run_id match, the manifest's recorded PIDs + their process
+    trees, the listeners on this run's unique service ports, and an exact
+    ``BENCHMARK_RUN_ID=<run_id>`` launch-environment entry (the only signal left
+    for a reparented worker that binds no port) — then gate every candidate on
+    cwd-under-this-worktree so a sibling worktree's stack is never touched, and
+    never signal the controller doing the teardown.
     """
     if not stack.isolated or not stack.run_id or stack.run_id == "existing":
         return
@@ -829,8 +875,10 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
                 if isinstance(port, int) and port > 0:
                     targets |= _port_listener_pids(port)
 
-    current_pid = os.getpid()
-    targets.discard(current_pid)
+    # 4) exact run-scoped launch environment (reparented, portless workers)
+    targets |= _environment_entry_pids(f"BENCHMARK_RUN_ID={stack.run_id}")
+
+    targets -= _ancestor_pids()
     # Safety gate: only reap processes whose cwd is inside THIS worktree.
     scoped = {pid for pid in targets if _pid_cwd_under_worktree(pid)}
     if not scoped:
