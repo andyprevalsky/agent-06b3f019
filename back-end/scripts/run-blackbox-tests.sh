@@ -399,9 +399,6 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 # behavior is unchanged.
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
-# benchmark-share signs bearer links with the same HMAC key this isolated
-# backend verifies, so any shared value exercises the contract.
-export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-benchmark-share-secret}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TEMPORAL="${BLACKBOX_TEST_FAKE_TEMPORAL:-1}"

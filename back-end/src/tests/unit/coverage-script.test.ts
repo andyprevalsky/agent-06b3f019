@@ -59,6 +59,7 @@ for (const variable of [
   'WHATSAPP_ACCESS_TOKEN',
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
+  'BENCHMARK_SHARE_SECRET',
 ]) {
   assert.match(
     autoRcaEnv,
