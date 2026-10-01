@@ -157,6 +157,9 @@ export function buildRouterCompletionOptions(params: {
     model: params.model,
     messages: params.messages,
     temperature: 0.3,
+    // Cerebras reserves the model's full sequence length when this is omitted,
+    // exhausting the shared token quota even for a short routing decision.
+    ...(params.providerRoute === 'direct-cerebras' ? { max_tokens: 1_024 } : {}),
     // The router is a small structured classification step. Gemini 3.5 Flash
     // enables medium reasoning by default on OpenRouter, which can consume most
     // of the synchronous chat latency budget after a Cerebras stall. Keep its

@@ -41,6 +41,7 @@ describe('cerebras chat model inventory', () => {
     const body = buildCerebrasChatBody({
       messages: [{ role: 'user', content: 'Include CHATWEBSEARCH marker verbatim.' }],
       temperature: 0.7,
+      max_tokens: 4_096,
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -60,6 +61,7 @@ describe('cerebras chat model inventory', () => {
     assert.equal(body.reasoning_effort, CEREBRAS_CHAT_REASONING_EFFORT);
     assert.equal(body.reasoning_effort, 'low');
     assert.equal(body.stream, true);
+    assert.equal(body.max_completion_tokens, 4_096, 'Cerebras must receive the quota bound');
   });
 
   it('coerces mid-conversation system tool results to user (Qwen chat template)', () => {
