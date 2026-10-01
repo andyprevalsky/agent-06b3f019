@@ -8245,12 +8245,84 @@ def test_tamy_identity_fixture_declaration_drives_the_run_user():
     )
     assert bench._live_fixture_run_user_id(catalog_task) == TAMY_IDENTITY_USER_ID
     assert catalog_task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES, (
-        "the fixture changes BENCHMARK_RUN_USER_ID process-wide and must not overlap siblings"
+        "the identity fixture rewrites shared browser-auth rows and must not overlap siblings"
     )
     assert catalog_task.environment["required_injectable_cookie_domains"] == [
         "amazon.com.mx",
         "amazon.com",
     ]
+
+
+async def test_parallel_tasks_keep_their_own_run_user():
+    """A parallel sibling can neither borrow nor erase another task's run identity.
+
+    Regression (deploy smoke, 2026-10-01): run_single_task saved and restored the
+    process-wide BENCHMARK_RUN_USER_ID. claude-code-agent started before
+    agent-payment-new-user-journey and finished one second after the new user's
+    subscription gate opened; restoring its saved "unset" value switched every
+    later attention-request poll to the default user, the gate was never seen,
+    and the tree stalled. A sibling starting after the override instead ran as
+    the exhausted new user.
+    """
+    import asyncio
+    import os
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    base_url = "https://bench-run-user.invalid"
+    sibling = bench.get_task_by_name("chat-mode")
+    payer = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    payer_user = bench.benchmark_run_user_id_for_task(payer.name)
+    assert payer_user and payer_user != bench.USER_ID
+    assert bench.benchmark_run_user_id_for_task(sibling.name) is None
+    seen: dict[str, str] = {}
+
+    async def scenario():
+        payer_identity_set = asyncio.Event()
+        sibling_finished = asyncio.Event()
+
+        async def sibling_setup(_base_url, _action):
+            await payer_identity_set.wait()
+            seen["sibling"] = bench._current_benchmark_user_id()
+            raise RuntimeError("sibling stops before creating an agent")
+
+        async def payer_preflight(_base_url):
+            payer_identity_set.set()
+            await sibling_finished.wait()
+            seen["payer"] = bench._current_benchmark_user_id()
+            raise RuntimeError("payer stops before creating an agent")
+
+        async def run_sibling():
+            try:
+                return await bench.run_single_task(base_url, sibling)
+            finally:
+                sibling_finished.set()
+
+        with (
+            patch.object(
+                bench,
+                "_agentcard_setup_fixture_action",
+                lambda task, _url: "complete" if task.name == sibling.name else None,
+            ),
+            patch.object(bench, "configure_benchmark_agentcard_setup", sibling_setup),
+            patch.object(bench, "_preflight_production_payment_identity", payer_preflight),
+        ):
+            sibling_run = asyncio.create_task(run_sibling())
+            payer_run = asyncio.create_task(bench.run_single_task(base_url, payer))
+            return await asyncio.gather(sibling_run, payer_run, return_exceptions=True)
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_RUN_USER_ID", None)
+        sibling_result, payer_result = await scenario()
+        leaked_user = os.environ.get("BENCHMARK_RUN_USER_ID")
+        user_after_run = bench._current_benchmark_user_id()
+
+    assert sibling_result.status == "ERROR", sibling_result
+    assert isinstance(payer_result, RuntimeError), payer_result
+    assert seen == {"sibling": bench.USER_ID, "payer": payer_user}, seen
+    assert leaked_user is None
+    assert user_after_run == bench.USER_ID
 
 
 def test_live_fixture_fails_when_live_auth_refresh_fails():
@@ -13318,6 +13390,65 @@ def _pid_is_live(pid: int) -> bool:
     )
     status = result.stdout.strip()
     return bool(status) and not status.startswith("Z")
+
+
+def test_isolated_teardown_reaps_reparented_portless_run_processes():
+    """A process that carries this run's id only in its environment is still this run's.
+
+    Regression (deploy smoke, 2026-10-01): one of eight `python worker.py`
+    processes took a single SIGTERM into Temporal's 2100s graceful shutdown, was
+    reparented to init when its launcher exited, and bound no service port. The
+    run-scoped reaper matched only command lines, manifest process trees and
+    service ports, so the worker outlived its stack. A sibling run's identical
+    process must still be left alone.
+    """
+    from benchmarks import local as local_bench
+
+    run_id = f"reaper-env-{os.getpid()}-{int(time.time())}"
+
+    def spawn_reparented(env_run_id: str) -> int:
+        launcher = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys; "
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+                "start_new_session=True); print(child.pid)",
+            ],
+            cwd=local_bench.REPO_ROOT / "agents",
+            env={**os.environ, "BENCHMARK_RUN_ID": env_run_id},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        return int(launcher.stdout.strip())
+
+    own_pid = spawn_reparented(run_id)
+    sibling_pid = spawn_reparented(f"{run_id}-sibling")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            context_dir = Path(tmp)
+            manifest_path = context_dir / "services.json"
+            manifest_path.write_text(json.dumps({"run_sh_pid": 2**22 + 1, "services": [], "ports": {}}))
+            stack = local_bench.ServiceStack(
+                run_id=run_id,
+                context_dir=context_dir,
+                manifest_path=manifest_path,
+                service_log=context_dir / "services.log",
+                isolated=True,
+            )
+            local_bench._kill_scoped_processes_by_run_id(stack)
+        deadline = time.monotonic() + 5
+        while _pid_is_live(own_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _pid_is_live(own_pid), "the run's reparented, portless process survived teardown"
+        assert _pid_is_live(sibling_pid), "teardown reaped a sibling run's process"
+    finally:
+        for pid in (own_pid, sibling_pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, 9)
 
 
 def test_local_stop_services_removes_pre_manifest_owned_database():
@@ -18666,6 +18797,10 @@ async def run_all_tests():
         test_local_stop_services_removes_pre_manifest_owned_database,
     )
     r.record(
+        "isolated_teardown_reaps_reparented_portless_run_processes",
+        test_isolated_teardown_reaps_reparented_portless_run_processes,
+    )
+    r.record(
         "local_isolated_stack_uses_docker_on_mac_by_default",
         test_local_isolated_stack_uses_docker_on_mac_by_default,
     )
@@ -19401,6 +19536,10 @@ async def run_all_tests():
     r.record(
         "tamy_identity_fixture_declaration_drives_run_user",
         test_tamy_identity_fixture_declaration_drives_the_run_user,
+    )
+    await r.record_async(
+        "parallel_tasks_keep_their_own_run_user",
+        test_parallel_tasks_keep_their_own_run_user,
     )
     r.record(
         "live_fixture_auth_failure_is_fatal",
