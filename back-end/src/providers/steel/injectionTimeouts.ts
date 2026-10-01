@@ -1,7 +1,7 @@
 /** Timeout helpers for browser state/credential injection. */
 
-const DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = 15_000;
-const DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS = 15_000;
+const DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = 18_000;
+const DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS = 18_000;
 
 /** Node stores a timer delay in a signed 32-bit int. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;

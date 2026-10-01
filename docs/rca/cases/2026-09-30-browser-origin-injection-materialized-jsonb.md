@@ -11,6 +11,7 @@ symptoms:
   - "Failed to inject indexedDB"
   - "origin transfer exceeded 1200MB RSS: 1390.015625"
   - "Google credential preparation returned HTTP 500 after 32 seconds before an 8 GB guest OOM"
+  - "Browser state injection timed out after 15000ms"
 tags:
   - indexeddb
   - jsonb
@@ -22,6 +23,7 @@ sources:
   - PR #1299
   - commit d4c3d87c05f364a5dfb5ef28a6ed8828e9e537b0
   - fleet run 20260930-205255-27412
+  - fleet run 20261001-195536-10470
 repro: back-end/src/tests/blackbox/browser-origin-injection-memory.blackbox.ts
 status: open
 ---
@@ -83,8 +85,8 @@ receiver assembler is necessary because init-script order is unspecified; the
 old per-table serialization now shares one transfer implementation. At 10,000
 agents there is no global lock, per-user fan-in or shared payload cache. Each
 preparation has independent bounded transfer buffers and document state. A
-transaction pins one pool connection during CDP awaits for at most its 15-second
-bound and uses temporary PostgreSQL disk proportional to payload bytes. Real
+transaction pins one pool connection during CDP awaits within the configured
+state budget and uses temporary PostgreSQL disk proportional to payload bytes. Real
 Playwright retains registered script sources, so total Node/browser storage is
 not constant in payload size; the fake receiver does not prove that retention
 fits the original live guest. No global resource or shared payload cache is added.
@@ -118,9 +120,61 @@ The
 existing runner's late exclusive phase now owns the memory and Steel injection
 domains after its fixture-writing pool drains. Their assertions, phase limits,
 RSS budget and domain coverage remain unchanged; both then passed in the full
-backend coverage run. That run still failed its separate live Kernel parity
-check, which is being investigated independently. This scheduling evidence does
-not establish the original live OOM's allocation source.
+backend coverage run. That initial run failed its separate live Kernel parity
+check; the later integrated backend coverage gate passed on `5c6f095`. This
+scheduling evidence does not establish the original live OOM's allocation source.
+
+### October 1 live timeout and approved infrastructure headroom
+
+Proof94's second slice failed on `polar-odysseys-8f005e9f0910`. A browser
+initialization exhausted the 15-second state-injection budget on five attempts.
+Its peer initialized successfully, but the failed browser had no recording;
+the archive correctly rejected incomplete browser evidence. Exact provider
+cleanup and subsequent zero-credit forensic retirement succeeded. All ten
+Machines were independently confirmed stopped with zero claims and no owner
+registry. The consecutive acceptance streak reset to zero.
+
+The original backend evidence selected 34 LocalStorage and eight IndexedDB
+origins per initialization. The successful peer took 14.686 seconds overall,
+including 13.347 seconds in IndexedDB injection. One failed attempt completed
+IndexedDB in 13.176 seconds and then expired in CacheStorage. Summed successful
+raw SQL operations consumed 3.430–5.320 seconds per request. These observations
+show accumulated preparation time; they do not isolate the remaining time
+between script construction and CDP acknowledgements. The existing immediate
+receiver proves memory and assembly, but does not exercise real CDP latency.
+
+The user explicitly authorized 20% more infrastructure timeout headroom and
+then clarified that harness timeouts must remain unchanged. Credential CDP
+connection and browser-state injection therefore default to 18 seconds. The
+payload transaction derives its timeout from the same configured state budget,
+retaining one attempt, revision checks, byte bounds and cancellation fences.
+This is an approved budget mitigation, not proof that the original OOM's exact
+allocation source was found. The normal 7200-second harness limit, temporary
+300-second execution backstop and independent 1800-second fleet E2E cutoff are
+unchanged.
+
+A private real-Chromium/CDP extension of the same owning fixture transferred
+78.6 MB through 133 bounded scripts (101.78 MB of escaped wire data), then read
+back all 540,000 IndexedDB records and verified both full-content hashes. The
+original 15-second budget passed in 9.55 seconds at 351 MB peak Node RSS; the
+approved 18-second policy passed in 11.78 seconds at 304 MB. Each run retired
+its exact browser processes, profile and SQL fixture. An initial profile run
+had a readback-oracle serialization error; that failed diagnostic is retained
+privately and earns no verification credit. These Mac profiles do not reproduce
+the cloud timeout and establish neither its exact cause nor fleet acceptance.
+Independent scoped review passed the timeout policy, explicit override behavior
+and unchanged cancellation/ownership boundaries. A fresh consecutive fleet proof
+remains required before reporting qualification.
+
+The existing 75 ms stalled-CDP regression also exposed a fixture boundary issue:
+one run spent 80 ms preparing SQL and never reached its intended browser stall,
+while the unchanged isolated run reached it in 12 ms and passed all ten cases.
+The fixture now uses permission and scrollbar mutations, which enter CDP
+directly after metadata selection. It retains the 75 ms timeout, 500 ms outcome
+guard and serial-call assertions, then releases the stalled call after timeout
+to verify that no later mutation begins. Actual SQL scope, content and chunk
+cancellation remain covered by the payload and memory blackboxes. No production
+behavior or harness deadline was changed for this fixture correction.
 
 ## Human feedback
 
@@ -130,6 +184,8 @@ live-query/teardown proof. A failed slice earns no credit after recovery. The
 user explicitly instructed that the separate cybersecurity issue must not become
 a prerequisite and that synthetic memory evidence must not be reported as
 resolution of the original live OOM.
+On October 1 the user approved approximately 20% longer infrastructure timeouts
+and explicitly excluded harness timeouts from that authorization.
 
 ## Reusable lesson
 

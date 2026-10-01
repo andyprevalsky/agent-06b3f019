@@ -367,6 +367,11 @@ through real `injectUserData` and Postgres under an unchanged 1,200 MB RSS budge
 isolation. Both are discovered by the backend blackbox runner in `/deploy`.
 These causal tests do not prove that an earlier live OOM had the same allocation
 source; retain its evidence and verify fresh fleet outcomes separately.
+Credential CDP connection and browser-state injection default to 18 seconds;
+`BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS` and `BROWSER_STATE_INJECTION_TIMEOUT_MS`
+override those infrastructure budgets. Origin-payload SQL uses the configured
+state budget too. This approved 20% headroom does not change benchmark execution
+backstops, the fleet E2E cutoff, or evidence and teardown requirements.
 
 Run durable publication with the agents environment, for example
 `agents/venv/bin/python scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`.

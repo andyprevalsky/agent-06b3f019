@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { runTransactionWithRetry } from '../database';
+import { browserStateInjectionTimeoutMs } from './injectionTimeouts';
 
 export interface InitScriptContext {
   addInitScript(script: string): Promise<unknown>;
@@ -43,6 +44,7 @@ async function readOriginTextParts(
         FROM jsonb_array_elements("${column}") AS item)`
       : `"${column}"`;
   const stage = `rose_origin_${randomUUID().replaceAll('-', '')}`;
+  const timeout = browserStateInjectionTimeoutMs();
   await runTransactionWithRetry(
     async (tx) => {
       signal?.throwIfAborted();
@@ -95,9 +97,9 @@ async function readOriginTextParts(
       const tail = decoder.decode();
       if (tail) await consume(tail);
     },
-    // Keep the existing phase budget: transaction-start retries must not extend
+    // Use the configured phase budget: transaction-start retries must not extend
     // an injection that already owns external CDP mutations and cancellation.
-    { maxWait: 15_000, timeout: 15_000, maxRetries: 1 }
+    { maxWait: timeout, timeout, maxRetries: 1 }
   );
 }
 
