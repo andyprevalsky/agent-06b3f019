@@ -31,17 +31,20 @@ command -v psql >/dev/null 2>&1 || {
 
 WORKFLOW_SQL="$(awk '
   /^-- Protect the rolling-deploy window/ { starts++; if (starts == 1 && ends == 0) emit = 1 }
-  /^-- Prefer explicit logical-iteration checkpoints/ { ends++; emit = 0 }
+  /^-- Prefer explicit logical-iteration checkpoints/ { if (starts == 0) misordered = 1; ends++; emit = 0 }
+  emit && $0 !~ /^[[:space:]]*(--.*)?$/ { statements++ }
   emit { print }
-  END { if (starts != 1 || ends != 1) exit 3 }
+  END {
+    if (starts != 1 || ends != 1 || misordered) exit 3
+    if (statements == 0) exit 4
+  }
 ' "$MIGRATION_SQL")" || {
-  echo "Refusing local runtime SQL hooks: workflow markers must each appear exactly once in $MIGRATION_SQL" >&2
+  case $? in
+    4) echo "Refusing local runtime SQL hooks: no workflow SQL between the markers in $MIGRATION_SQL" >&2 ;;
+    *) echo "Refusing local runtime SQL hooks: workflow markers must each appear exactly once, in order, in $MIGRATION_SQL" >&2 ;;
+  esac
   exit 2
 }
-if [ -z "$(printf '%s' "$WORKFLOW_SQL" | tr -d '[:space:]')" ]; then
-  echo "Refusing local runtime SQL hooks: no workflow SQL between the markers in $MIGRATION_SQL" >&2
-  exit 2
-fi
 
 # Concurrent black-box runners share one local database, and DROP/CREATE
 # TRIGGER pairs race each other ("already exists", "tuple concurrently

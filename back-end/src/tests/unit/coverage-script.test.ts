@@ -401,7 +401,11 @@ assert.match(
 
 const START_MARKER = '-- Protect the rolling-deploy window';
 const END_MARKER = '-- Prefer explicit logical-iteration checkpoints';
-function runSqlHooks(workflowMigration: string): { status: number | null; psqlInput: string } {
+function runSqlHooks(workflowMigration: string): {
+  status: number | null;
+  psqlInput: string;
+  stderr: string;
+} {
   const root = mkdtempSync(join(tmpdir(), 'runtime-sql-hooks-'));
   try {
     const backend = join(root, 'back-end');
@@ -443,6 +447,7 @@ function runSqlHooks(workflowMigration: string): { status: number | null; psqlIn
     return {
       status: result.status,
       psqlInput: existsSync(psqlInput) ? readFileSync(psqlInput, 'utf8') : '',
+      stderr: result.stderr,
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -463,18 +468,31 @@ assert.doesNotMatch(
   /SELECT (before|after);/,
   'only the marked workflow block may be applied from the iteration-offset migration'
 );
-for (const [label, migration] of [
-  ['a missing end marker', `${START_MARKER}\nCREATE TRIGGER workflow_guard;\n`],
+const MARKER_REASON = /workflow markers must each appear exactly once, in order/;
+const EMPTY_REASON = /no workflow SQL between the markers/;
+for (const [label, migration, reason] of [
+  ['a missing end marker', `${START_MARKER}\nCREATE TRIGGER workflow_guard;\n`, MARKER_REASON],
   [
     'a duplicated start marker',
     `${START_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n${END_MARKER}\n`,
+    MARKER_REASON,
   ],
-  ['markers in the wrong order', `${END_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\n`],
-  ['an empty marked block', `${START_MARKER}\n\n${END_MARKER}\n`],
+  [
+    'markers in the wrong order',
+    `${END_MARKER}\nCREATE TRIGGER a;\n${START_MARKER}\nCREATE TRIGGER b;\n`,
+    MARKER_REASON,
+  ],
+  ['an empty marked block', `${START_MARKER}\n\n${END_MARKER}\n`, EMPTY_REASON],
+  [
+    'a comment-only marked block',
+    `${START_MARKER}\n  -- nothing to apply\n${END_MARKER}\n`,
+    EMPTY_REASON,
+  ],
 ] as const) {
   const rejected = runSqlHooks(migration);
   assert.equal(rejected.status, 2, `${label} must be rejected before psql runs`);
   assert.equal(rejected.psqlInput, '', `${label} must not apply any SQL`);
+  assert.match(rejected.stderr, reason, `${label} must report why it was rejected`);
 }
 assert.doesNotMatch(
   coverageScript,
