@@ -11,6 +11,7 @@ import dataclasses
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -3751,6 +3752,10 @@ async def _run_all_tests():
         test_claude_code_max_runtime_leaves_cuda_kernel_bench_headroom,
     )
     await r.record_async(
+        "cc_local_sandbox_stop_ends_its_cli",
+        test_local_code_sandbox_stop_ends_the_claude_cli_it_spawned,
+    )
+    await r.record_async(
         "cc_drain_detaches_and_reattaches_same_sandbox",
         test_claude_code_detaches_on_worker_drain_and_reattaches_same_sandbox,
     )
@@ -4032,7 +4037,12 @@ class _LocalCodeSandbox:
         }
         with self._log_path.open("w") as log:
             self._process = subprocess.Popen(
-                [node, str(server)], cwd=home, env=env, stdout=log, stderr=subprocess.STDOUT
+                [node, str(server)],
+                cwd=home,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
         for _ in range(200):
             assert self._process.poll() is None, f"ws-server exited at startup:\n{self.log()}"
@@ -4054,14 +4064,59 @@ class _LocalCodeSandbox:
             await asyncio.sleep(0.05)
         raise AssertionError(f"ws-server never logged {needle!r}:\n{self.log()}")
 
+    @property
+    def cli_script(self) -> Path:
+        return self._tmp / "stub_claude.py"
+
     def stop(self) -> None:
-        if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
+        # The ws-server leaves its CLI running on SIGTERM; E2B kills the whole
+        # sandbox, so the stand-in signals the server's entire process group.
+        if self._process is not None:
+            self._signal_sandbox(signal.SIGTERM)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 self._process.wait(timeout=5)
-            if self._process.poll() is None:
-                self._process.kill()
+            self._signal_sandbox(signal.SIGKILL)
+            self._process.wait()
         shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _signal_sandbox(self, sig: signal.Signals) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self._process.pid, sig)
+
+
+def _pids_running(marker: str) -> list[int]:
+    listing = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True).stdout
+    return [int(line.split(None, 1)[0]) for line in listing.splitlines() if marker in line]
+
+
+async def test_local_code_sandbox_stop_ends_the_claude_cli_it_spawned():
+    """Stopping the stand-in sandbox must end its CLI the way an E2B kill does.
+
+    stop() terminated only the ws-server, so every test run orphaned its stub
+    CLI, which then polled the deleted gate files forever (28 survivors had
+    piled up on one dev VM).
+    """
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    marker = str(sandbox.cli_script)
+    try:
+        await sandbox.wait_for_log("Starting Claude Code CLI")
+        for _ in range(100):
+            if _pids_running(marker):
+                break
+            await asyncio.sleep(0.05)
+        assert _pids_running(marker), f"the stub CLI never started:\n{sandbox.log()}"
+    finally:
+        sandbox.stop()
+    for _ in range(40):
+        if not _pids_running(marker):
+            return
+        await asyncio.sleep(0.05)
+    survivors = _pids_running(marker)
+    for pid in survivors:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+    raise AssertionError(f"stop() left the sandbox's CLI running: pids={survivors}")
 
 
 class _CCBoundaryRecorder:
