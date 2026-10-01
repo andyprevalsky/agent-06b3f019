@@ -1782,10 +1782,16 @@ start_ngrok_ephemeral_tunnel() {
     # relies on exactly that. Gating the domain on the API key would silently
     # drop every fallback back onto the shared free endpoint, which is the
     # collision this is here to prevent.
+    #
+    # An isolated benchmark run is named "<worktree>-bench-<run id>", so its
+    # fallback domain is unique per run. Reserving it would leave one permanent
+    # reservation per run until the account's reserved-domain cap is full and
+    # every new worktree loses its primary domain. Run-scoped names are bound
+    # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
     fallback_label="$(dns_label_from_workspace)" || return 1
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
