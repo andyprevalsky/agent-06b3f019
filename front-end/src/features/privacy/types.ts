@@ -5,8 +5,9 @@ export interface PrivacyBullet {
 
 /** A section of the privacy policy (numbered heading + content). */
 export interface PrivacySection {
-  readonly number: number;
+  readonly number?: number;
   readonly title: string;
   readonly bullets?: readonly PrivacyBullet[];
   readonly paragraph?: string;
+  readonly paragraphs?: readonly string[];
 }

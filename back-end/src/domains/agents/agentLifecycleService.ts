@@ -6,6 +6,7 @@ import { randomUUID } from '../../providers/crypto';
 import { startAgentWorkflow } from '../../providers/temporal';
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
+import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
 import { deleteAgentRecursive as killAgentRecursive } from '../../providers/agentKill';
 import { createGithubRepo } from '../../providers/github';
 import { createLogger } from '../../providers/logger';
@@ -130,22 +131,11 @@ async function startChatMode(
     });
 
   handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
-    log.error('Chat handler error', {
-      agent_id: agentDbId,
-      error: err instanceof Error ? err.message : String(err),
+    void recoverChatHandlerFailure({
+      agentId: agentDbId,
+      userId,
+      error: err,
     });
-    repo
-      .failAgentIfStillActive(
-        agentDbId,
-        'Chat handler error: ' + (err instanceof Error ? err.message : String(err)),
-        agentDbId
-      )
-      .catch((updateErr: unknown) =>
-        log.error('Failed to update agent status', {
-          agent_id: agentDbId,
-          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-        })
-      );
   });
 }
 /* c8 ignore stop */

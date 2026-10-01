@@ -54,9 +54,11 @@ import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
 import {
   createEarlyDirectGeneratorCoordinator,
+  deadlineRouterFallback,
   shouldStartEarlyDirectGenerator,
   type TransactionalStreamGate,
 } from './earlyDirectGenerator';
+import { isChatLlmTransientMiss } from './chatStructuredRetry';
 
 const log = createLogger('ChatHandler');
 
@@ -127,7 +129,30 @@ export async function handleChatMessage(config: {
     });
   } catch (error) {
     await speculativeGenerator.discard();
-    throw error;
+    const fallbackGoal = [...messages].reverse().find((message) => message.role === 'USER')?.text;
+    const fallback =
+      isChatLlmTransientMiss(error) && error.kind === 'deadline'
+        ? deadlineRouterFallback(messages, fallbackGoal ?? '')
+        : null;
+    if (!fallback) throw error;
+    log.warn('[ChatHandler] Router deadline used intent fallback', {
+      agentId: config.agentId,
+      action: fallback.action,
+      mode: fallback.action === 'start_superintelligence' ? fallback.mode : undefined,
+    });
+    routerResponse = {
+      decision: fallback,
+      streamId: generateStreamId(),
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        model: '',
+        from_fast_cache: false,
+      },
+    };
   }
 
   const { decision, webSearchToolCallId } = routerResponse;

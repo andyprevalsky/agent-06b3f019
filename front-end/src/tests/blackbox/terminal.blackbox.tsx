@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Terminal from '@/pages/Terminal';
+import { ROSE_APP_DESCRIPTION } from '@/lib/googlePublicCopy';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -195,22 +196,39 @@ describe('Terminal page', () => {
       expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
     });
 
-    it('renders Privacy and Terms links', async () => {
+    it('renders About, Privacy, and Terms links', async () => {
       renderWithProviders(<Terminal />);
-      await waitFor(() => {
-        expect(screen.getByText('Privacy')).toBeInTheDocument();
-        expect(screen.getByText('Terms')).toBeInTheDocument();
-      });
+      const legalLinks = await screen.findByTestId('terminal-legal-links');
+      expect(within(legalLinks).getByRole('link', { name: 'About' })).toHaveAttribute(
+        'href',
+        '/about',
+      );
+      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
+        'href',
+        '/privacy',
+      );
+      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
+        'href',
+        '/terms',
+      );
     });
 
-    it('pushes legal links below the mobile URL bar area', async () => {
+    it('keeps legal links in the visible mobile layout', async () => {
       setViewport(390, 844);
+      const user = userEvent.setup();
 
       renderWithProviders(<Terminal />);
 
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(legalLinks).toHaveClass('-bottom-8');
-      expect(legalLinks).toHaveClass('md:bottom-1');
+      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toBeInTheDocument();
+      expect(legalLinks).not.toHaveClass('absolute');
+      expect(legalLinks).toHaveClass('shrink-0');
+      await user.click(within(legalLinks).getByRole('button', { name: 'About' }));
+      expect(await screen.findByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Full About page' })).toHaveAttribute(
+        'href',
+        '/about',
+      );
     });
 
     it('reserves a two-line-safe opening caption box on mobile', async () => {
@@ -314,6 +332,15 @@ describe('Terminal page', () => {
       await user.click(await screen.findByText('Test agent'));
 
       expect(await screen.findByText('Approval Required')).toBeInTheDocument();
+      const legalLinks = screen.getByTestId('terminal-legal-links');
+      expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
+        'href',
+        '/privacy',
+      );
+      expect(within(legalLinks).getByRole('link', { name: 'Terms' })).toHaveAttribute(
+        'href',
+        '/terms',
+      );
       expect(screen.queryByPlaceholderText('Type your message...')).not.toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add context (optional)...')).toBeInTheDocument();
 

@@ -141,6 +141,29 @@ const ResponseSchemaSchema = z.object({
     .describe('List of MUST-HAVE output fields (at least one required)'),
 });
 
+export function parseGeneratedResponseSchemaJson(
+  content: string
+): z.infer<typeof ResponseSchemaSchema> {
+  if (!content) {
+    throw new Error('LLM returned no content');
+  }
+  let parsedRaw: unknown;
+  try {
+    parsedRaw = JSON.parse(content);
+  } catch (parseError) {
+    throw new Error(
+      `Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${content.substring(0, 200)}`
+    );
+  }
+  const parsed = ResponseSchemaSchema.safeParse(parsedRaw);
+  if (!parsed.success) {
+    throw new Error(
+      `Response schema failed schema: ${parsed.error.issues[0]?.message ?? 'invalid'}`
+    );
+  }
+  return parsed.data;
+}
+
 export type ResponseSchema = {
   fields: Array<{
     name: string;
@@ -523,27 +546,10 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
     throw new MaxTokensTruncationError(opts.maxTokens, structuredOutput.currentText());
   }
 
-  const content = structuredOutput.finalText();
+  const rawContent = structuredOutput.currentText();
+  const parsed = parseGeneratedResponseSchemaJson(rawContent);
 
-  if (!content) {
-    throw new Error('LLM returned no content');
-  }
-
-  // Parse JSON (structured output mode guarantees valid JSON, but if a
-  // provider falls through we still get something parseable in practice).
-  let parsedRaw: unknown;
-  try {
-    parsedRaw = JSON.parse(content);
-  } catch (parseError) {
-    throw new Error(
-      `Failed to parse LLM response as JSON: ${parseError instanceof Error ? parseError.message : parseError}. Content: ${content.substring(0, 200)}`
-    );
-  }
-
-  // Validate with Zod
-  const parsed = ResponseSchemaSchema.parse(parsedRaw);
-
-  return { parsed, tokensIn, tokensOut, finishReason, rawContent: content };
+  return { parsed, tokensIn, tokensOut, finishReason, rawContent };
 }
 
 /**

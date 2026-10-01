@@ -577,6 +577,7 @@ model MessageRecord {
   timestamp  DateTime
   message    String
   externalId String? // Platform-native message ID (Telegram msg.id, iMessage ROWID, WhatsApp key.id)
+  googleAccountEmail String? // Source Gmail account for account-scoped deletion
   createdAt  DateTime       @default(now())
   person     Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
 
@@ -585,6 +586,22 @@ model MessageRecord {
   @@index([timestamp])
   @@index([personId, timestamp])
   @@index([channel, timestamp]) // Recent-inbound OTP relay: channel filter + time window
+  @@index([googleAccountEmail, createdAt])
+}
+
+model GoogleDataPurge {
+  id          String    @id @default(uuid())
+  userId      String
+  email       String?
+  /// Encrypted token kept only until Google confirms revocation.
+  revocationToken String?
+  requestedAt DateTime  @default(now())
+  claimedUntil DateTime?
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([processedAt, claimedUntil, requestedAt])
+  @@index([userId, email])
 }
 
 model Person {
@@ -802,6 +819,7 @@ model UserDataDocument {
   id              String                 @id @default(uuid())
   userId          String
   source          String
+  googleAccountEmail String?
   externalId      String
   title           String
   content         String
@@ -818,6 +836,7 @@ model UserDataDocument {
 
   @@unique([userId, source, externalId])
   @@index([userId, source])
+  @@index([userId, source, googleAccountEmail])
   @@index([userId, updatedAt])
   @@index([userId, source, deletedAt])
 }
@@ -862,6 +881,7 @@ model UserSnapshotRevision {
   snapshotId String
   documentId String?
   source     String
+  googleAccountEmail String?
   before     Json              @default("{}")
   after      Json              @default("{}")
   changes    Json?             @default("{}")
@@ -876,6 +896,7 @@ model UserSnapshotRevision {
   @@index([snapshotId])
   @@index([documentId])
   @@index([source])
+  @@index([userId, source, googleAccountEmail])
 }
 
 model EmailIntegrationCredential {

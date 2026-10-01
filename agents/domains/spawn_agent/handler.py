@@ -44,6 +44,7 @@ from domains.spawn_agent.service import (
     validate_spawn_params,
 )
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
+from helpers.child_results import fetch_child_terminal_result_activity
 from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
@@ -379,6 +380,38 @@ def _oai_demo_child_result_failed(child_result: Dict[str, Any]) -> bool:
     return status in {"failed", "error", "max_iterations"} or child_result.get("success") is False
 
 
+async def _reconcile_for_each_child_result(workflow_instance, child_agent_id: Any) -> bool:
+    """Reload a durably terminal child when the completion signal was missed or consumed."""
+    results = getattr(workflow_instance, "child_results", None)
+    if isinstance(results, dict) and child_agent_id in results:
+        pending = getattr(workflow_instance, "pending_children", None)
+        if isinstance(pending, set):
+            pending.discard(child_agent_id)
+        return True
+
+    try:
+        recovered = await workflow.execute_activity(
+            fetch_child_terminal_result_activity,
+            args=[child_agent_id],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+    except Exception as exc:
+        logger.warning("Child terminal reconciliation failed", child_agent_id=child_agent_id, error=str(exc))
+        return False
+    if not isinstance(recovered, dict):
+        return False
+
+    if not isinstance(getattr(workflow_instance, "child_results", None), dict):
+        workflow_instance.child_results = {}
+    workflow_instance.child_results[child_agent_id] = recovered
+    pending = getattr(workflow_instance, "pending_children", None)
+    if isinstance(pending, set):
+        pending.discard(child_agent_id)
+    logger.info("Recovered terminal child result from durable state", child_agent_id=child_agent_id)
+    return True
+
+
 async def _recover_oai_demo_for_each_timeout(
     workflow_instance, child_agent_id: Any, exc: BaseException
 ) -> Dict[str, Any] | None:
@@ -388,6 +421,11 @@ async def _recover_oai_demo_for_each_timeout(
     timeouts around 100s, then for_each ERRORed (T10) while the GPs were
     still replaying. On this task, keep waiting for the child signal instead
     of treating the activity timeout as a child failure.
+
+    The wait must also reconcile from durable child state. finalize_child pops
+    ``child_results`` before the FINISHED event is handled, and the completion
+    signal is not re-delivered — parking only on the in-memory map hangs
+    ``asyncio.gather`` and the parent never yields ``for_each complete``.
     """
     if not child_agent_id:
         return None
@@ -403,6 +441,8 @@ async def _recover_oai_demo_for_each_timeout(
     if child_agent_id in results:
         return results.get(child_agent_id)
     while child_agent_id not in workflow_instance.child_results:
+        if await _reconcile_for_each_child_result(workflow_instance, child_agent_id):
+            break
         try:
             await wait_condition_or_generation_handoff(
                 lambda cid=child_agent_id: cid in workflow_instance.child_results,

@@ -3505,3 +3505,6 @@
 {"task": "grep-agent-trajectories-followup", "duration_seconds": 133.1, "cost_cents": 1.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "c274bd13-0737-43ad-8ab5-d3910e06eccb"}
 {"task": "grep-agent-trajectories-isolation", "duration_seconds": 153.2, "cost_cents": 2.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "eaa14d0b-9da6-4560-8420-9da341eda31f"}
 {"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 168.3, "cost_cents": 5.0, "timestamp": "2026-09-30T21:04:58.998548+00:00", "agent_id": "2c317b43-6e97-4d45-a725-caeb1f7b3253"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 196.4, "cost_cents": 5.0, "timestamp": "2026-09-30T19:26:54.740604+00:00", "agent_id": "57afbff7-3279-4f3b-ae5c-b1cd529fa844"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 221.7, "cost_cents": 5.0, "timestamp": "2026-09-30T19:26:54.638533+00:00", "agent_id": "0337a696-21d8-4907-8a31-cd3993c6b1fb"}
+{"task": "agent-payment-abandonment", "duration_seconds": 285.0, "cost_cents": 1.0, "timestamp": "2026-09-30T19:26:54.638533+00:00", "agent_id": "762970f5-929e-4ce5-9873-ba4bca471f00"}

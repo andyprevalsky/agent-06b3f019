@@ -44,7 +44,7 @@ export async function resyncGmailAccount(userId: string, email: string): Promise
     throw new GmailAccountNotFoundError(email);
   }
 
-  log.info('Resync requested', { email, state: credential.state });
+  log.info('Resync requested', { credentialId: credential.id, state: credential.state });
 
   const accessToken = await getValidAccessToken(credential);
 

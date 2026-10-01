@@ -5882,7 +5882,13 @@ def test_build_auth_options_prompt_section_minted_account_ref():
     assert credential_refs["+19125550199"] == {"kind": "minted_account", "id": "mint1"}
 
 def test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted():
+    from domains.spawn_browser_agent_v3 import handler as browser_handler
     from domains.spawn_browser_agent_v3.service import AuthRuntimeState
+
+    assert not hasattr(AuthRuntimeState, "user_assistance_guard")
+    handler_source = open(browser_handler.__file__, encoding="utf-8").read()
+    assert "user_assistance_guard" not in handler_source
+    assert "Authentication assistance blocked" not in handler_source
 
     state = AuthRuntimeState.from_auth_options(
         {
@@ -5895,18 +5901,16 @@ def test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted(
         }
     )
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert not allowed
-    assert "password" in reason
+    snapshot = state.snapshot()
+    assert snapshot["password"]["exhausted_or_unavailable"] is False
     assert snapshot["password"]["remaining_ids"] == ["pwd1"]
 
     state.mark_credential_ref({"kind": "password", "id": "pwd1"})
     state.mark_credential_ref({"kind": "sms_otp", "id": "otp-message-1"})
     state.mark_credential_ref({"kind": "minted_account", "id": "mint1"})
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert "exhausted" in reason
+    snapshot = state.snapshot()
+    assert snapshot["password"]["exhausted_or_unavailable"] is True
     assert snapshot["email_otp"]["attempted"] is True
     assert snapshot["minted"]["attempted"] is True
     assert snapshot["guest"]["exhausted_or_unavailable"] is True
@@ -5927,9 +5931,7 @@ def test_auth_runtime_state_does_not_block_on_unmatched_connected_email():
         }
     )
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert "exhausted" in reason
+    snapshot = state.snapshot()
     assert snapshot["email_otp"]["available"] is False
     assert snapshot["email_otp"]["exhausted_or_unavailable"] is True
 
@@ -5950,9 +5952,8 @@ def test_auth_runtime_state_only_blocks_on_attemptable_passwords():
     state.restrict_password_ids_to_attemptable({"pwd-attemptable"})
     state.mark_credential_ref({"kind": "password", "id": "pwd-attemptable"})
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert "exhausted" in reason
+    snapshot = state.snapshot()
+    assert snapshot["password"]["exhausted_or_unavailable"] is True
     assert snapshot["password"]["remaining_ids"] == []
 
 def test_auth_runtime_state_does_not_block_on_disabled_passwords():
@@ -5969,15 +5970,14 @@ def test_auth_runtime_state_does_not_block_on_disabled_passwords():
         }
     )
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert not allowed
+    snapshot = state.snapshot()
+    assert snapshot["password"]["exhausted_or_unavailable"] is False
     assert snapshot["password"]["remaining_ids"] == ["pwd-enabled"]
 
     state.mark_credential_ref({"kind": "password", "id": "pwd-enabled"})
 
-    allowed, reason, snapshot = state.user_assistance_guard()
-    assert allowed
-    assert "exhausted" in reason
+    snapshot = state.snapshot()
+    assert snapshot["password"]["exhausted_or_unavailable"] is True
     assert snapshot["password"]["remaining_ids"] == []
 
 def test_auth_assistance_resume_user_message_preserves_live_state():

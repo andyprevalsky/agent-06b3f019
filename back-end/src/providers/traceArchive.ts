@@ -17,6 +17,7 @@ import {
 } from './traceArchiveEnvelope';
 import { createLogger } from './logger';
 import { withTraceArchiveRequestTimeout } from './traceArchiveRequest';
+import { redactGmailArchive } from './traceArchiveGmailRedaction';
 
 const log = createLogger('TraceArchive');
 
@@ -533,10 +534,13 @@ export async function archiveJson(params: {
   objectPath: string;
   value: unknown;
 }): Promise<StoreResult | null> {
+  const value = params.objectPath.startsWith('provider/email/gmail/')
+    ? redactGmailArchive(params.value)
+    : params.value;
   return archiveBytes({
     rootAgentId: params.rootAgentId,
     objectPath: params.objectPath,
-    body: Buffer.from(JSON.stringify(params.value, jsonReplacer)),
+    body: Buffer.from(JSON.stringify(value, jsonReplacer)),
     contentType: 'application/json',
     compress: true,
   });

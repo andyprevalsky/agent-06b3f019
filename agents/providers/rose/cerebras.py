@@ -15,7 +15,7 @@ from providers.rose.errors import RoseError
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import transform_messages_for_openai
-from providers.rose.transport import get_error_body, post_cerebras_stream
+from providers.rose.transport import post_cerebras_stream
 from providers.rose.types import StreamChunk
 from providers.rose.waterfall import _openrouter_tool_choice, _openrouter_tools
 
@@ -129,9 +129,8 @@ async def cerebras_complete(
         ) as response:
             status = response.status_code
             if status >= 400:
-                error_body = get_error_body(response)
                 raise RoseError(
-                    f"Cerebras {model} returned {status}: {error_body[:2000]}",
+                    f"Cerebras {model} returned {status}",
                     status=status,
                 )
             async for chunk in parse_openai_sse(

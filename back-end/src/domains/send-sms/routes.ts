@@ -105,7 +105,6 @@ router.post(
       if (error instanceof z.ZodError) {
         log.error('SMS Notify validation error', {
           errors: JSON.stringify(error.errors),
-          body: JSON.stringify(req.body).substring(0, 200),
         });
         res.status(400).json({ error: 'Invalid request data', details: error.errors });
         return;

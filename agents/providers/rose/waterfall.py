@@ -34,7 +34,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import is_anthropic_model, transform_messages_for_openai
-from providers.rose.transport import get_error_body, post_openrouter_stream
+from providers.rose.transport import post_openrouter_stream
 from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
@@ -367,9 +367,8 @@ async def _stream_one_step(
         ) as response:
             status = response.status_code
             if status >= 400:
-                error_body = get_error_body(response)
                 raise RoseError(
-                    f"OpenRouter {model} returned {status}: {error_body[:2000]}",
+                    f"OpenRouter {model} returned {status}",
                     status=status,
                 )
             async for chunk in parse_openai_sse(

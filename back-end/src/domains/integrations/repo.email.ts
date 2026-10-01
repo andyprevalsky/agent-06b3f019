@@ -4,7 +4,10 @@
  */
 
 import { type Prisma, EmailProvider, IntegrationStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { GOOGLE_OAUTH_SCOPES } from './googleScopes';
+import { encryptGoogleToken, readGoogleToken } from '../../providers/googleCredentials';
+import { revokeQueuedGoogleGrants } from '../../services/integrations/googleDisconnect';
 
 export async function createEmailCredential(params: {
   userId: string;
@@ -57,9 +60,34 @@ export async function findExistingCredential(params: {
 }
 
 export async function deleteEmailCredential(credentialId: string) {
-  return prisma.emailIntegrationCredential.delete({
-    where: { id: credentialId },
+  const { deleted, revocations } = await runTransactionWithRetry(async (tx) => {
+    // Gmail message inserts hold a share lock on this row. Take the exclusive
+    // lock before creating the purge job so requestedAt follows every insert
+    // that was already in flight.
+    await tx.$queryRaw`SELECT "id" FROM "EmailIntegrationCredential" WHERE "id" = ${credentialId} FOR UPDATE`;
+    const credential = await tx.emailIntegrationCredential.findUnique({
+      where: { id: credentialId },
+      select: { provider: true, userId: true, email: true, accessToken: true, refreshToken: true },
+    });
+    const revocations = [];
+    if (credential?.provider === EmailProvider.GMAIL) {
+      const token = credential.refreshToken ?? credential.accessToken;
+      if (credential.email !== null || token !== null) {
+        const job = await tx.googleDataPurge.create({
+          data: {
+            userId: credential.userId,
+            email: credential.email?.toLowerCase() ?? null,
+            revocationToken: token === null ? null : encryptGoogleToken(token),
+          },
+        });
+        revocations.push({ id: job.id, token });
+      }
+    }
+    const deleted = await tx.emailIntegrationCredential.delete({ where: { id: credentialId } });
+    return { deleted, revocations };
   });
+  await revokeQueuedGoogleGrants(revocations);
+  return deleted;
 }
 
 export async function updateEmailCredential(
@@ -100,17 +128,27 @@ export async function findGmailIntegrationsWithCredentials(userId: string) {
 }
 
 export async function findGmailCredentialForSend(userId: string, fromEmail: string) {
-  return prisma.emailIntegrationCredential.findFirst({
+  const credential = await prisma.emailIntegrationCredential.findFirst({
     where: {
       userId,
       provider: EmailProvider.GMAIL,
       accessToken: { not: null },
+      scopes: { hasEvery: [...GOOGLE_OAUTH_SCOPES] },
       email: fromEmail,
     },
     include: {
       integration: true,
     },
   });
+  return credential === null
+    ? null
+    : {
+        ...credential,
+        accessToken:
+          credential.accessToken === null ? null : readGoogleToken(credential.accessToken),
+        refreshToken:
+          credential.refreshToken === null ? null : readGoogleToken(credential.refreshToken),
+      };
 }
 
 export async function findGmailCredentialForDisconnect(userId: string, email: string) {
@@ -156,10 +194,10 @@ export async function updateEmailCredentialToken(
   return prisma.emailIntegrationCredential.update({
     where: { id: credentialId },
     data: {
-      accessToken: data.accessToken,
+      accessToken: encryptGoogleToken(data.accessToken),
       expiresAt: data.expiresAt,
       ...(data.refreshToken !== undefined &&
-        data.refreshToken !== '' && { refreshToken: data.refreshToken }),
+        data.refreshToken !== '' && { refreshToken: encryptGoogleToken(data.refreshToken) }),
     },
   });
 }

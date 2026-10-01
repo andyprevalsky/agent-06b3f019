@@ -253,7 +253,7 @@ export async function postOpenAIResponsesStream(
     log.warn('openai.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -299,7 +299,7 @@ export async function postCerebrasStream(
     log.warn('cerebras.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -341,7 +341,7 @@ export async function postAnthropicStream(
     log.warn('anthropic.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -379,7 +379,7 @@ export async function postAnthropicApiKeyStream(
     log.warn('anthropic_apikey.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -421,7 +421,7 @@ export async function postOpenRouterStream(
     log.warn('openrouter.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
@@ -470,7 +470,7 @@ export async function postCodexStream(
     log.warn('codex.error', {
       request_id: options.requestId,
       status: response.status,
-      body: errorBody.substring(0, 500),
+      error_body_len: errorBody.length,
     });
   }
 
