@@ -728,5 +728,18 @@ Archive searches covered `driver exited without cleanup acknowledgement` and
 recurrence of this recording/finalization case. The user required compact owning
 regressions and zero INFRA acceptance, so no broad suite or paid task was launched
 for diagnosis. The causal regression does not establish the exact unchanged
-benchmark outcome. That local RED/GREEN and fresh fleet proof remain outstanding;
-this case stays open.
+benchmark outcome. The subsequent outcome diagnostic below preserves that
+distinction; the required consecutive fleet proof remains outstanding.
+
+
+### Final source validation and unchanged outcome diagnostic
+
+The final canonical agents gate on `bb4a5561263b2ef9f4600e33ae936e1d4801a118` passed all 103 blackbox domains, 162 cache tests and 102 unit tests with the unchanged coverage gate. This includes the final empty-frame player control fix. The canonical nine-task local smoke also passed with durable lifecycle and exact resource cleanup verified.
+
+The unchanged live `polar-bu-063` outcome diagnostic ran on `bb4a5561263b2ef9f4600e33ae936e1d4801a118` as native run `20261001-094943-10042`, root `5db41081-6d01-4d82-9880-bc74b7515609`. It completed in 78.3 seconds with a genuine task FAILURE: the model used research/search/fetch tools and omitted the required browser tool and browser trajectory, failing the original expected-tool and minimum-step guards. Captured request schemas offered the browser option; the observed tool operations finished without FAILED/ERROR statuses or authentication/session/transport exceptions. The owning query verifier certified 19 completed correlated LIVE queries and zero terminal model-request failures. The task, evaluator, prompts, model configuration, 300-second execution cap and 1800-second allocation deadline remained unchanged.
+
+Strict canonical evidence publication passed and verified the durable frontend for the exact root. Native lifecycle verification returned the borrowed machine stopped with its claim released; a fresh exact provider status read confirmed that machine and its bound volume, the root was deleted and tree sealed, and all known owned sessions were empty. Native lifecycle took 334 seconds, allocation to durable publication took 633.562 seconds, and final ownership verification occurred at 1258.843 seconds, below the unchanged 1800-second cap. The diagnostic has zero acceptance credit and adds no campaign exclusion.
+
+This run allocated no browser agent or provider browser session, so it did not exercise native-to-Steel promotion with zero screenshot frames or establish live native media reachability/decoding. The separate identical-test real-recorder/Chromium RED→GREEN proof establishes the producer/player repair. The live result establishes a clean evaluated task failure with complete applicable durable evidence and teardown. It cannot recover lost original traces or close unrelated historical outcome/observability gaps. Private bootstrap and observer configuration failures are retained separately; none caused a paid task rerun or changed production behavior.
+
+Evidence: `.context/acceptance/proof86-bu063-outcome/outcome-final.receipt.private.json` (SHA256 `18ac6ab073f2e72486b8976311cb364741b561e900e76d39e6b254b1286c8795`), strict durable manifest SHA256 `8a43b9d43b0c3175733d66a857fc4f3121dbb3919fd06a9268b6b5225ea19d23`, native audit SHA256 `883054d98f5ffd6ead2af535454583f6c7b989ab3e76f33286ae88fe08c37f55`, sealed 154-member private archive SHA256 `c6c167819b42f2ef404dbdb2f367ed1a55f6c859a20ad7afc297077a4fe3c9af`.

@@ -689,6 +689,8 @@ the mandatory floor, deduplicates tasks, then adds history-qualified depth for
 changed areas up to 20. Read its coverage gaps, history skips and dropped extras;
 do not label tasks `smoke` or adjust their evaluators to force selection.
 
+The 20-task selection cap is separate from execution concurrency. `bash scripts/run-predeploy-local` runs the selected tasks with concurrency 2 by default to avoid starving the shared local stack; `PREDEPLOY_LOCAL_CONCURRENCY` is an emergency/debug override. Use `--list` to preview names and `--history` for recorded timings. Cloud acceptance slices use their explicitly requested fleet width.
+
 When adding a benchmark to `tasks.json`, auto-attach it to this algorithm:
 
 - Set `deploy_category` to a known category (`payment`, `grep`, `sms`, `browser_stateful`, `browser`, `plaid`, `phone`, `attachment`, `claude-code`, `research`, `response-schema`, `wait-for`, `chat`, `mass-agent`, `harness`) — or rely on matching tags (same names) for derivation
