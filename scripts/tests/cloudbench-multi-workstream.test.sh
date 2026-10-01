@@ -1323,7 +1323,10 @@ elif args[:2] == ["machine", "clone"]:
         })
         state["volumes"].append(
             {"id": volume_id, "name": "cloudbench_data_fork", "state": "created", "size_gb": 40})
-    machine_dir(machine_id)
+        provider_machine = state["machines"][-1]
+    # Retain the actual indexed row for assertions after normal teardown removes it.
+    with open(os.path.join(machine_dir(machine_id), "provider-machine.json"), "w") as fh:
+        json.dump(provider_machine, fh)
     if source_id != "aaaa0000000001":
         with open(os.path.join(MARKERS, "worker-clone-id"), "w") as fh:
             fh.write(machine_id)
@@ -3967,10 +3970,9 @@ rm -f "$FAKE_DIR/require-private-ip-proxy" "$FAKE_DIR/stale-started-inventory" \
     cat "$TMP_ROOT/controller-private-ip-proxy.log" >&2
     fail "data-plane tunnels must not depend on eventually consistent machine-name DNS"
 }
-grep -Eq '^proxy [0-9]+:8011 fdaa::[0-9a-f]+ ' "$FAKE_DIR/journal.log" ||
-    fail "the status tunnel must target the indexed private IP"
-grep -Eq '^proxy [0-9]+:3003 fdaa::[0-9a-f]+ ' "$FAKE_DIR/journal.log" ||
-    fail "the mandatory-autoscaler tunnel must target the indexed private IP"
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" \
+    --assert-private-ip-proxies "$FAKE_DIR" ||
+    fail "both data-plane tunnels must target the indexed primary private IP"
 grep -Eq '^machine start [0-9a-f]+' "$FAKE_DIR/journal.log" ||
     fail "every post-config primary must receive an explicit idempotent start request"
 JOURNAL="$FAKE_DIR/journal.log" python3 - <<'PY' ||

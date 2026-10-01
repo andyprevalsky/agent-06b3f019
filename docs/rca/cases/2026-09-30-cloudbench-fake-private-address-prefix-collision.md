@@ -93,6 +93,45 @@ archives, logs, final fast red/green evidence and native replay owners are under
 `.context/acceptance/proof85-native-scenario3-rca/`, with the original runtime
 evidence also retained on the owned controller.
 
+## October 1: a format-specific consumer rejected the repaired provider address
+
+The final-source native suite on `0bf943c9` passed its earlier cases, then failed
+scenario 2a after 138.046 seconds: "the status tunnel must target the indexed
+private IP". The case's actual controller returned zero, and the retained
+provider journal contained successful status and metrics proxy requests to the
+same valid full-identity IPv6 address. Two post-run grep assertions still
+required the old `fdaa::` spelling. This was a stale fixture consumer, not a
+production tunnel or DNS failure. The earlier fast owning case proved address
+validity and identity separation, but did not execute this consumer.
+
+The clone fixture now retains its actual provider index row before normal
+teardown removes that row from the live inventory. Scenario 2a resolves its
+intended primary through the actual warm-parent clone journal and returned name
+marker, then checks both proxy targets against that exact captured row. It
+requires valid IPv6, unique indexed identity and both status and metrics
+tunnels. The original DNS-failure injection, controller exit assertion,
+explicit start requests and metrics-after-successful-start ordering remain.
+Neither production behavior nor any deadline changes.
+
+The existing fast contract executes the scenario's actual assertion block
+against addresses emitted by the real fake clone. The same final test failed
+on the original status grep in 0.992 seconds and passed the repaired assertion
+in 1.734 seconds. It also rejects a hostname, an unknown valid IPv6 address,
+another indexed machine's address even with a start in the control journal,
+and ambiguous provider rows.
+All prior volume/preflight and full-identity collision controls remain. The
+original native result, retained fixture, exact failing bytes, final test/source
+hashes and red/green receipts are private under
+`.context/acceptance/proof85-native-multi-final-rca/`.
+
+Archive searches used the exact indexed-private-IP failure and fake IPv6
+fixture/identity vocabulary. This is a follow-up to the same fixture repair:
+the missing guardrail was exercising its actual address consumer. The complete
+mandatory Linux suite must still pass on the committed repair. Earlier passing
+commands retain their original source identity only where their executed
+inputs are unchanged; they are not relabeled as new executions. This work
+grants no paid-fleet acceptance credit.
+
 ## Human feedback
 
 Use the actual failure and the compact permanent owning reproduction. Avoid
@@ -105,3 +144,5 @@ the mandatory final native gate.
 A fake provider must preserve the same identity separation as the real
 provider. A short UUID prefix can make a lifecycle test contact another guest;
 that error can surface much later as a capacity, barrier or cleanup failure.
+Consumers should assert the actual provider identity, rather than a particular
+textual compression of its valid IPv6 address.

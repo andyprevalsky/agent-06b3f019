@@ -21,6 +21,44 @@ def shell_function(name: str) -> str:
     return match.group(0)
 
 
+def assert_private_ip_proxies(base: Path) -> None:
+    """Bind both tunnels to the primary's actual retained provider index row."""
+    calls = [line.split() for line in (base / "journal.log").read_text().splitlines()]
+    warm = [
+        row["id"]
+        for row in json.loads((base / "state.json").read_text())["machines"]
+        if row["name"] == "cloudbench-warm"
+    ]
+    assert len(warm) == 1, "missing or ambiguous warm provider identity"
+    primaries = set()
+    for call in calls:
+        if call[:3] == ["machine", "clone", warm[0]]:
+            name = call[call.index("--name") + 1]
+            primaries.add((base / "markers" / name).read_text().strip())
+    assert len(primaries) == 1, "missing or ambiguous scenario primary identity"
+    primary = next(iter(primaries))
+    addresses: dict[ipaddress.IPv6Address, list[str]] = {}
+    for path in (base / "machines").glob("*/provider-machine.json"):
+        row = json.loads(path.read_text())
+        assert row["id"] == path.parent.name, "provider row identity mismatch"
+        address = ipaddress.IPv6Address(row["private_ip"])
+        addresses.setdefault(address, []).append(row["id"])
+    targets: dict[str, set[ipaddress.IPv6Address]] = {"8011": set(), "3003": set()}
+    for call in calls:
+        if call[:1] != ["proxy"]:
+            continue
+        remote_port = call[1].rsplit(":", 1)[-1]
+        if remote_port in targets:
+            address = ipaddress.IPv6Address(call[2])
+            assert addresses.get(address) == [primary], (
+                "tunnel must select only the indexed scenario primary"
+            )
+            targets[remote_port].add(address)
+    assert all(len(values) == 1 for values in targets.values()), (
+        "both status and mandatory-autoscaler tunnels must target the indexed private IP"
+    )
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="cloudbench-volume-contract-") as temporary:
         base = Path(temporary)
@@ -173,6 +211,54 @@ def main() -> None:
             assert len(matches) == 1 and matches[0]["id"] == machine_id, (
                 "the proxy private-address selector must resolve the intended machine"
             )
+
+        # Execute the owning scenario's assertions verbatim, including on the
+        # baseline where a valid full-identity IPv6 address fails the old grep.
+        assertion_block = (
+            SOURCE.split("private_ip_status=0", 1)[1]
+            .split("\n}\n", 1)[1]
+            .split("\ngrep -Eq '^machine start", 1)[0]
+        )
+        primary_call = next(
+            line
+            for line in (base / "journal.log").read_text().splitlines()
+            if line.startswith("machine clone aaaa0000000001 ")
+            and "--name cloudbench-address-contract-left " in line
+        )
+
+        def proxy_assertions(target: str, *, accepted: bool) -> None:
+            (base / "journal.log").write_text(
+                primary_call
+                + "\n"
+                + f"machine start {left}\n"
+                + f"machine start {right}\n"
+                + f"proxy 12345:8011 {target} -a {app}\n"
+                + f"proxy 12346:3003 {target} -a {app}\n"
+            )
+            result = subprocess.run(
+                ["bash", "-c", 'fail() { echo "$*" >&2; exit 1; }\n' + assertion_block],
+                env={**env, "ROOT_DIR": str(ROOT)},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert (result.returncode == 0) == accepted, (
+                "scenario 2a must accept its primary's actual provider IPv6 row "
+                "and reject hostname, unknown, foreign or ambiguous addresses",
+                result.stderr.strip(),
+            )
+
+        proxy_assertions(str(addresses[left]), accepted=True)
+        for target in (left + ".vm.internal", "fdaa::dead", str(addresses[right])):
+            proxy_assertions(target, accepted=False)
+        right_row = base / "machines" / right / "provider-machine.json"
+        original_row = right_row.read_bytes()
+        ambiguous = json.loads(original_row)
+        ambiguous["private_ip"] = str(addresses[left])
+        right_row.write_text(json.dumps(ambiguous))
+        proxy_assertions(str(addresses[left]), accepted=False)
+        right_row.write_bytes(original_row)
+        proxy_assertions(str(addresses[left]), accepted=True)
         subprocess.run(
             [
                 "bash",
@@ -215,4 +301,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--assert-private-ip-proxies":
+        assert_private_ip_proxies(Path(sys.argv[2]))
+    else:
+        main()
