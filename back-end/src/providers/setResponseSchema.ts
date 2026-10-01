@@ -102,8 +102,14 @@ const NestedSchemaFieldSchema = z
         'list[session_file_pointer]',
       ])
       .describe('Nested field type'),
-    constraints: z.array(GeneratedBoundSchema).optional(),
-    required: z.boolean().default(true),
+    constraints: z
+      .array(GeneratedBoundSchema)
+      .nullish()
+      .transform((value) => value ?? undefined),
+    required: z
+      .boolean()
+      .nullish()
+      .transform((value) => value ?? true),
   })
   .superRefine((field, ctx) => validateFieldConstraints(field, ctx));
 
@@ -128,12 +134,19 @@ const SchemaFieldSchema = z
     type: FieldTypeSchema.describe('Field type'),
     properties: z
       .array(NestedSchemaFieldSchema)
-      .optional()
+      .nullish()
+      .transform((value) => value ?? undefined)
       .describe(
         'Required for object/list[object]. Explicit nested fields; do not encode subfields in prose.'
       ),
-    constraints: z.array(GeneratedBoundSchema).optional(),
-    required: z.boolean().default(true),
+    constraints: z
+      .array(GeneratedBoundSchema)
+      .nullish()
+      .transform((value) => value ?? undefined),
+    required: z
+      .boolean()
+      .nullish()
+      .transform((value) => value ?? true),
   })
   .superRefine((field, ctx) => {
     validateFieldConstraints(field, ctx);

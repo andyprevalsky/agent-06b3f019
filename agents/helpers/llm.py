@@ -1468,6 +1468,8 @@ def _is_successful_browser_tool_result(msg: Dict[str, Any]) -> bool:
         return False
     if metadata.get("toolStatus") != "FINISHED":
         return False
+    if metadata.get("success") is not True:
+        return False
     title = str(metadata.get("title") or "")
     text = str(msg.get("text") or "")
     if "SUCCESS" in text and title in {"Browser automation complete", "✓ Task Completed"}:
@@ -4975,46 +4977,6 @@ def _has_schema_value(value: Any, field_type: Optional[str] = None) -> bool:
     return True
 
 
-def _structured_response_ready_for_infra_soft_accept(
-    structured_response: Any,
-    response_schema: Optional[Dict[str, Any]],
-) -> bool:
-    """Whether an infra soft-fail may accept attempt_completion.
-
-    Infrastructure timeouts are not a judgment that the deliverable is missing,
-    but accepting completion still requires a schema-shaped structured response.
-    Without this gate, soft-accept can COMPLETE agents whose ``repos`` field is a
-    truncated markdown string and fail the harness declared evaluator at progress=0.
-    When no response_schema is configured, preserve the prior accept-on-infra-fail
-    behavior.
-    """
-    fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
-    if not fields:
-        return True
-    if not _structured_response_satisfies_schema(structured_response, response_schema):
-        return False
-    if not any(field.get("required", True) for field in fields) and not any(
-        isinstance(field, dict) and field.get("name") in structured_response for field in fields
-    ):
-        return False
-    # Require non-empty lists so an empty repos=[] extraction cannot soft-complete.
-    for field in fields:
-        if not isinstance(field, dict):
-            return False
-        name = field.get("name")
-        field_type = _normalize_schema_field_type(field.get("type"))
-        if not isinstance(name, str) or not field_type or not field_type.startswith("list["):
-            continue
-        if name not in structured_response and field.get("required", True) is False:
-            continue
-        value = structured_response.get(name)
-        if value is None and field.get("nullable") is True and name in structured_response:
-            continue
-        if not isinstance(value, list) or (len(value) == 0 and not explicitly_allows_empty_value(value, field)):
-            return False
-    return True
-
-
 def _normalize_schema_field_type(field_type: Any) -> Optional[str]:
     if not isinstance(field_type, str):
         return None
@@ -5174,6 +5136,10 @@ def _completed_child_task_structured_handoff(
         if tool_name == "spawn_claude_code_agent" and metadata.get("action_type") != "task_complete":
             continue
         if tool_name == "spawn_claude_code_agent" and metadata.get("success") is not True:
+            continue
+        if tool_name == "spawn_browser_agent" and (
+            metadata.get("action_type") != "task_complete" or metadata.get("success") is not True
+        ):
             continue
         structured_response = metadata.get("structured_response")
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):

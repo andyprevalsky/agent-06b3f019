@@ -130,3 +130,12 @@ Once the visible score and form verdict are already on the page — in
 reasoning or a post-submit tool result — an idle wait or network inspect
 is budget burn, not progress. Force completion at that boundary instead
 of hoping the model stops retrying a third-party proof-of-work.
+
+## 2026-10-01 rollback
+
+The FCaptcha-specific action rewrite was removed at the user's request. It
+replaced the browser agent's chosen action with `attempt_completion` based on
+benchmark-specific text patterns, which could make a run appear complete
+without the agent deciding to finish. This historical RCA explains why that
+workaround was introduced; its solution is no longer active. The underlying
+wait-loop can recur and must be measured without rewriting planner actions.

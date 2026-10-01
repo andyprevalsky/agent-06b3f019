@@ -21,6 +21,24 @@ const parsed = ResponseSchemaSchema.parse({
 assert.equal(parsed.fields[0].required, true);
 assert.equal(parsed.fields[0].properties?.[0].required, true);
 assert.equal(parsed.fields[1].required, false);
+const nullMetadata = ResponseSchemaSchema.parse({
+  reasoning: 'A count and a list.',
+  fields: [
+    { name: 'count', type: 'int', required: null, constraints: null, properties: null },
+    {
+      name: 'items',
+      type: 'list[object]',
+      required: null,
+      constraints: null,
+      properties: [{ name: 'label', type: 'str', required: null, constraints: null }],
+    },
+  ],
+});
+assert.equal(nullMetadata.fields[0].required, true);
+assert.equal(nullMetadata.fields[0].constraints, undefined);
+assert.equal(nullMetadata.fields[0].properties, undefined);
+assert.equal(nullMetadata.fields[1].required, true);
+assert.equal(nullMetadata.fields[1].properties?.[0].required, true);
 assert.deepEqual(RESPONSE_SCHEMA_JSON_SCHEMA.properties.fields.items.required, [
   'name',
   'type',

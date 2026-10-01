@@ -1171,20 +1171,8 @@ async def _handle_reconnect_exhausted(
 # ---------------------------------------------------------------------------
 
 
-_TERMINAL_TRUNCATION_RE = re.compile(r"\+\s*\d+\s+lines?\s*\(ctrl\+o to expand\)", re.IGNORECASE)
 _ABSOLUTE_PATH_RE = re.compile(r"/home/user/[A-Za-z0-9._/\-]+")
 _CODEX_COMMAND_RE = re.compile(r"\[Codex command (?:started|completed)\]\s*(.+)")
-
-
-def _terminal_output_is_truncated(final_output: str) -> bool:
-    """Detect Claude Code's TUI truncation marker (e.g. '+225 lines (ctrl+o to expand)').
-
-    When Claude Code prints long output, the terminal shows only the first ~3 lines
-    followed by a collapse indicator. The grounded-evidence verifier can't see the
-    hidden lines, so any schema field that needs them (e.g. a sequence list) becomes
-    unpopulatable from the visible terminal alone.
-    """
-    return bool(_TERMINAL_TRUNCATION_RE.search(final_output or ""))
 
 
 def _build_codex_evidence_summary(final_output: str) -> str:
@@ -1821,40 +1809,6 @@ async def _run_verifier(
         score = progress_result.get("score", 0.0)
         v_reasoning = progress_result.get("reasoning", "")
         structured_response = progress_result.get("structured_response")
-
-        # Terminal-truncation override: when Claude Code's TUI collapses long
-        # output (e.g. "+225 lines (ctrl+o to expand)"), the grounded-evidence
-        # verifier cannot see the hidden lines and scores partial. The parent
-        # LLM monitoring Claude Code DID see the full unfiltered conversation
-        # and signaled completion (attempt_completion=True). When that signal
-        # is present AND the process didn't crash AND the visible output is
-        # truncated, accept the parent LLM's judgment instead of penalising
-        # the agent for terminal-display truncation it cannot control. Without
-        # this override the parent loop retries spawn_claude_code_agent on
-        # every Collatz/long-output task and burns 50s+ per retry, blowing
-        # the smoke-suite cap (claude-code-agent: 65s passing → 115s+ failing).
-        terminal_truncated = _terminal_output_is_truncated(final_output)
-        if (
-            score < 1.0
-            and attempt_completion
-            and (exit_code is None or exit_code == 0)
-            and terminal_truncated
-        ):
-            logger.info(
-                "[ClaudeCode] Verifier score override: parent LLM signaled completion + terminal truncated",
-                agent_id=agent_id,
-                task_id=task_id,
-                original_score=score,
-                attempt_completion=attempt_completion,
-                exit_code=exit_code,
-            )
-            override_note = (
-                f" [override: parent LLM signaled completion (attempt_completion=True, "
-                f"exit_code={exit_code}); terminal output truncated by Claude Code TUI "
-                f"so grounded-evidence score {score:.2f} reflects display limits, not task failure]"
-            )
-            v_reasoning = v_reasoning + override_note
-            score = 1.0
 
         await save_claude_code_message(
             agent_id=agent_id,

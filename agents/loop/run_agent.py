@@ -35,7 +35,6 @@ from helpers.llm import (
     _completed_child_handoff_identity,
     _completed_child_task_structured_handoff,
     _pending_llm_context,
-    _structured_response_ready_for_infra_soft_accept,
     build_llm_messages,
     call_llm_activity,
     call_llm_structured_streaming,
@@ -2251,57 +2250,7 @@ async def run_agent(
                     logger.warning(
                         f"[run_agent] Verifier failed (consecutive={consecutive_verifier_errors}): {v_reasoning[:100]}"
                     )
-                    # 2026-09-04 RCA (cuda-kernel-github-top100-code-agent k=3):
-                    # The execute-loop attempt_completion verifier soft-fails at
-                    # score=0.5 after RoseDeadlineError / 420s total fence, then
-                    # the agent retries attempt_completion and burns another ~7
-                    # minutes per bounce — often the entire remaining 4200s task
-                    # budget — even when the ranking deliverable is already in
-                    # context. Infrastructure failure is not a judgment that the
-                    # deliverable is missing: accept the agent's completion
-                    # claim on the first infra soft-fail (execute loop only)
-                    # WHEN the structured response already covers the schema.
-                    # Soft-accepting without a schema-shaped deliverable
-                    # COMPLETED r30 a1 with repos as truncated markdown and the
-                    # harness declared evaluator scored progress=0.
-                    # Plan-loop verification still soft-fails and continues so a
-                    # broken plan cannot skip review by starving the verifier.
-                    # Soft-accept only when a response schema is configured.
-                    # Schema-less agents must keep the 0.5 soft-fail + retry
-                    # path and trip the consecutive-error circuit breaker —
-                    # otherwise the first verifier outage reports completed
-                    # with no deliverable check (CodeRabbit #1260).
-                    _verified_schema = verifier_result.get("resolved_response_schema")
-                    if not isinstance(_verified_schema, dict):
-                        _verified_schema = response_schema
-                    _schema_fields = (
-                        _verified_schema.get("fields")
-                        if isinstance(_verified_schema, dict)
-                        else None
-                    ) or []
-                    if (
-                        not is_plan_loop
-                        and _schema_fields
-                        and _structured_response_ready_for_infra_soft_accept(
-                            structured_response, _verified_schema
-                        )
-                    ):
-                        logger.warning(
-                            "[run_agent] Accepting attempt_completion after "
-                            "verifier infrastructure failure "
-                            f"(consecutive={consecutive_verifier_errors})"
-                        )
-                        score = 1.0
-                        v_reasoning = (
-                            "Verifier infrastructure failed; accepting agent "
-                            f"attempt_completion. Original error: {v_reasoning}"
-                        )
-                    elif consecutive_verifier_errors >= 3:
-                        # Circuit breaker must stay reachable for execute-loop
-                        # infra soft-fails that are NOT schema-ready. A prior
-                        # `elif not is_plan_loop` branch consumed every execute
-                        # path and silently disabled this guard (CodeRabbit
-                        # 2026-09-04 on #1260).
+                    if consecutive_verifier_errors >= 3:
                         return {
                             "status": "error",
                             "context": context,
@@ -2313,13 +2262,6 @@ async def run_agent(
                             "cache_creation_input_tokens": cache_write_total,
                             "message": f"Verifier unavailable after {consecutive_verifier_errors} consecutive failures: {v_reasoning}",
                         }
-                    elif not is_plan_loop:
-                        logger.warning(
-                            "[run_agent] Verifier infrastructure failed but "
-                            "structured response is not schema-ready — not "
-                            "accepting attempt_completion "
-                            f"(consecutive={consecutive_verifier_errors})"
-                        )
                 else:
                     consecutive_verifier_errors = 0
 

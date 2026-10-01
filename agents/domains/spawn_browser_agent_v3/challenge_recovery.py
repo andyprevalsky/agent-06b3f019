@@ -691,30 +691,34 @@ def cited_first_party_transport_failure(
     page_host = (urlparse(page_url).hostname or "").lower()
     if not cited_urls or not page_host or not callable(query):
         return False
-    try:
-        rows = query(limit=100)
-    except Exception:
-        return False
-    if not isinstance(rows, list):
-        return False
     seen: set[tuple[str, str]] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        raw_url = str(row.get("url") or "")
-        parsed = urlparse(raw_url)
-        if (parsed.hostname or "").lower() != page_host:
-            continue
-        normalized = blocked_resource_urls_for_verify((raw_url,))
-        if not normalized or normalized[0] not in cited_urls:
-            continue
-        key = (str(row.get("method") or "").upper(), normalized[0])
-        if key in seen:
-            continue
-        seen.add(key)
-        failure = str(row.get("failure") or "").lower()
-        if row.get("failed") and any(marker in failure for marker in _NETWORK_ROUTE_FAILURE_MARKERS):
-            return True
+    for cited_url in cited_urls:
+        try:
+            rows = query(url_pattern=cited_url, limit=100)
+        except Exception:
+            return False
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_url = str(row.get("url") or "")
+            parsed = urlparse(raw_url)
+            if (parsed.hostname or "").lower() != page_host:
+                continue
+            normalized = blocked_resource_urls_for_verify((raw_url,))
+            if not normalized or normalized[0] != cited_url:
+                continue
+            # An in-flight retry has not resolved the earlier failure.
+            if row.get("status") is None and not row.get("failed"):
+                continue
+            key = (str(row.get("method") or "").upper(), normalized[0])
+            if key in seen:
+                continue
+            seen.add(key)
+            failure = str(row.get("failure") or "").lower()
+            if row.get("failed") and any(marker in failure for marker in _NETWORK_ROUTE_FAILURE_MARKERS):
+                return True
     return False
 
 

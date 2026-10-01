@@ -79,7 +79,7 @@ def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
     from helpers.llm import (
         _GeneratedResponseSchema, _schema_from_generated_model,
         _build_verifier_json_schema, _build_verifier_response_model,
-        _structured_response_satisfies_schema, _structured_response_ready_for_infra_soft_accept,
+        _structured_response_satisfies_schema,
     )
     from providers.rose.schema import build_openai_response_format
     from utils.prompts import build_verifier_prompt
@@ -114,11 +114,7 @@ def test_optional_output_keys_can_be_omitted_but_present_values_are_typed():
     valid = {"output": {"total": 2}, "reasoning": "Grounded", "score": 1}
     assert model.model_validate(valid).model_dump(exclude_unset=True)["output"] == {"total": 2}
     assert _structured_response_satisfies_schema({"total": 2}, schema)
-    assert _structured_response_ready_for_infra_soft_accept({"total": 2}, schema)
     assert _structured_response_satisfies_schema({"total": 2, "rows": [{"name": "A"}]}, schema)
-    all_optional = {"fields": [{"name": "estimate", "type": "int", "required": False}]}
-    assert not _structured_response_ready_for_infra_soft_accept({}, all_optional)
-    assert _structured_response_ready_for_infra_soft_accept({"estimate": 2}, all_optional)
     for invalid in (
         {"total": 2, "estimate": None},
         {"total": 2, "estimate": "two"},
@@ -194,8 +190,8 @@ def test_verifier_enforces_size_bounds_and_nullable_nested_fields():
             pass
 
 
-def test_structured_output_soft_accept_respects_constraints():
-    from helpers.llm import _structured_response_ready_for_infra_soft_accept, _structured_response_satisfies_schema
+def test_structured_output_schema_respects_constraints():
+    from helpers.llm import _structured_response_satisfies_schema
 
     schema = {"fields": [
         {"name": "items", "type": "list[object]", "minItems": 2, "maxItems": 2,
@@ -217,7 +213,6 @@ def test_structured_output_soft_accept_respects_constraints():
         {"name": "summary", "type": "str", "maxLength": 0},
     ]}
     assert _structured_response_satisfies_schema({"items": [], "summary": ""}, zero_schema)
-    assert _structured_response_ready_for_infra_soft_accept({"items": [], "summary": ""}, zero_schema)
 
 
 async def test_live_schema_generation_chooses_file_for_large_goal():
@@ -638,6 +633,7 @@ def test_convert_context_to_messages_includes_structured_values_not_schema():
                 "toolCallId": "browser-1",
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "output_schema": output_schema,
                 "structured_response": {"selected_url": "https://amazon.com/item"},
@@ -4521,6 +4517,7 @@ async def test_check_progress_browser_success_uses_fast_cache_write_only():
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -4818,6 +4815,8 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
                 "toolCallId": tool_call_id,
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "structured_response": {"answer": answer},
             },
         }
@@ -4883,6 +4882,14 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         "browser-older",
     )
 
+    for legacy_success in (False, None):
+        old_result = completed_child("browser-unverified", "looks complete")
+        if legacy_success is None:
+            old_result["metadata"].pop("success")
+        else:
+            old_result["metadata"]["success"] = legacy_success
+        assert _completed_child_task_structured_handoff([old_result], schema) is None
+
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
     """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
@@ -4905,6 +4912,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
             "metadata": {
                 "toolName": "spawn_browser_agent",
                 "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": structured_response,
             },
@@ -6222,6 +6231,7 @@ def test_build_verifier_context_messages_prunes_superseded_browser_protocol_fail
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -6270,6 +6280,7 @@ async def test_build_llm_messages_prunes_superseded_browser_protocol_failure():
                 "toolName": "spawn_browser_agent",
                 "toolCallId": "tc-browser-1",
                 "toolStatus": "FINISHED",
+                "success": True,
                 "title": "Browser automation complete",
                 "structured_response": {
                     "fcaptcha_risk_score_display": "0.16",
@@ -8541,7 +8552,7 @@ async def run_all_tests():
     r.record("generated_response_schema_preserves_constraints", test_generated_response_schema_preserves_constraints)
     r.record("optional_output_keys_can_be_omitted_but_present_values_are_typed", test_optional_output_keys_can_be_omitted_but_present_values_are_typed)
     r.record("verifier_enforces_size_bounds_and_nullable_nested_fields", test_verifier_enforces_size_bounds_and_nullable_nested_fields)
-    r.record("structured_output_soft_accept_respects_constraints", test_structured_output_soft_accept_respects_constraints)
+    r.record("structured_output_schema_respects_constraints", test_structured_output_schema_respects_constraints)
     if os.getenv("SCHEMA_GEN_LIVE_GOAL_FILE"):
         await r.record_async("live_schema_generation_chooses_file", test_live_schema_generation_chooses_file_for_large_goal)
     r.record("verifier_score_schema_no_numeric_bounds", test_verifier_score_schema_has_no_numeric_bounds)
