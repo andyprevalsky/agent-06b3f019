@@ -642,15 +642,30 @@ repeats only this focused probe—not the complete coverage suite.
 
 ## Step 4p: Concurrent focused live probes
 
-The credential and Amplitude probes are independent and both read-only. Launch
-them under one foreground supervisor so a failing lane cannot interrupt or hide
-the sibling's evidence:
+The credential and Amplitude probes are independent and both read-only, so they
+run concurrently under one foreground supervisor; a failing lane cannot
+interrupt or hide the sibling's evidence. The chat-router-failover live probe
+starts after the Amplitude probe exits, because both boot the blackbox
+runner's db push and trigger hooks:
 
 ```bash
 python3 scripts/run_deploy_live_probes.py
 ```
 
-Both stage records must pass before closing the `runtime-blackbox` boundary.
+All three stage records must pass before closing the `runtime-blackbox`
+boundary.
+
+`chat-router-failover-live` replays the e8f2279b follow-up ("wrong address,
+its the 88 howard one") on its exact 30-message router context during a
+simulated Cerebras-wide stall, with the real OpenRouter GLM failover as the
+only path that can serve. It must run on the OpenRouter account
+`back-end/.env` configures, escalate on router attempt 1, and start the
+workflow with the corrected address in the goal. A miss OpenRouter caused (no
+response headers, or no first content within the 4.2s pre-content budget) is
+re-probed once 60s later. A second miss, or any other failure, blocks the
+deploy. A block means the failover could not serve that turn at that moment:
+diagnose it from the printed host, connect, and response timings and the
+`openrouter_fast_chat.end` records before rerunning.
 
 ## Step 4r: Cold-seed memory ratchet (no skip)
 
