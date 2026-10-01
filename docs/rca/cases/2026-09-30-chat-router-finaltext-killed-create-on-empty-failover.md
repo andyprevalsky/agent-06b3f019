@@ -409,10 +409,11 @@ healthy Cerebras, and the GLM failover.
     - One further 08:07:52Z run is excluded: local Postgres stopped accepting
       connections before any provider request (see the runner leak below).
   - Final probe code (connect timing, then the goal-anchor check): 08:35Z,
-    09:21Z, and 09:33Z all escalated on router attempt 1, via CoreWeave,
-    CoreWeave, and BaseTen (connected in 46ms, 44ms, and 58ms). The 09:33Z
-    run, on the final goal rule, had first content at 1,419ms and escalated
-    at 3,679ms with a goal "near 88 Harlow St, … San Francisco".
+    09:21Z, 09:33Z, and 09:39Z all escalated on router attempt 1, via
+    CoreWeave, CoreWeave, BaseTen, and Friendli (connected in 46ms, 44ms,
+    58ms, and 44ms). The 09:39Z run, on the final goal rule, had first
+    content at 2,031ms and escalated at 4,686ms with a goal "near 88 Harlow
+    St, … San Francisco".
 
 **Cemented in `/deploy`.**
 
@@ -433,9 +434,10 @@ healthy Cerebras, and the GLM failover.
     fail-at-once for HTTP 402, content without a decision, a wrong address,
     a goal that keeps the rejected anchor, a connect that never completed,
     events without a host, and a timeout. It also pins the goal-anchor check
-    on ten accepted goals (two recorded live, plus phrasings such as "within
-    2 miles from", "near the 88 Harlow St address", and a recap of the
-    earlier Irving search) and ten rejected ones, including "near Irving, TX
+    on twelve accepted goals (two recorded live, plus phrasings such as
+    "within 2 miles from", "not too far from", "near the 88 Harlow St
+    address", and a recap of the earlier Irving search) and eleven rejected
+    ones, including "near Irving, TX
     75063; do not anchor on 88 Harlow St" and goals that echo the context's
     own sentences about the delivery address.
 - Step 4p, `scripts/run_deploy_live_probes.py`: runs the live probe as
