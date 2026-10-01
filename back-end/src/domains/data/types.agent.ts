@@ -6,6 +6,8 @@ export interface AgentMetadataParams {
   surface?: string;
   trace_path?: string;
   until?: string;
+  order?: 'newest_first' | 'oldest_first';
+  page_after?: string;
 }
 
 export interface AgentNetworkGrepFilters {
@@ -22,7 +24,7 @@ export interface AgentTrajectoryGrepFilters {
   pathMessageId?: string;
   since?: Date;
   until?: Date;
-  role?: 'USER' | 'ASSISTANT' | 'TOOL';
+  role?: 'SYSTEM' | 'USER' | 'ASSISTANT' | 'TOOL';
   surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP';
   recordKind?: 'all' | 'message' | 'llm_output' | 'llm_context';
 }

@@ -276,6 +276,9 @@ export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient)
     await prisma.message.create({
       data: { agentId: prior.id, role: 'USER', text: `Earlier request ${token}` },
     });
+    await prisma.message.create({
+      data: { agentId: prior.id, role: 'SYSTEM', text: `Earlier system ${token}` },
+    });
     registerUserDataGrep(userDataGrep);
     const result = await executeGrepTool(
       { pattern: token, source: 'agent_trajectories', filters: { surface: 'SMS' } },
@@ -308,6 +311,55 @@ export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient)
       !userMessages.matches[0].content.includes(`Earlier request ${token}`)
     ) {
       throw new Error(`SMS metadata grep did not filter by role: ${metadataOnly.result}`);
+    }
+    const systemResult = await executeGrepTool(
+      { role: 'SYSTEM', trace_path: prior.id, pattern: token },
+      userId
+    );
+    const systemMatches = JSON.parse(systemResult.result) as { matches: Array<{ role: string }> };
+    if (
+      !systemResult.success ||
+      systemMatches.matches.length !== 1 ||
+      systemMatches.matches[0].role !== 'SYSTEM'
+    ) {
+      throw new Error(`SMS grep did not honor SYSTEM role: ${systemResult.result}`);
+    }
+    const firstPage = await executeGrepTool(
+      {
+        source: 'agent_trajectories',
+        trace_path: prior.id,
+        pattern: token,
+        record_kind: 'message',
+        order: 'oldest_first',
+        head_limit: 1,
+      },
+      userId
+    );
+    const firstData = JSON.parse(firstPage.result) as {
+      next_page_after: string;
+      matches: Array<{ path: string }>;
+    };
+    const secondPage = await executeGrepTool(
+      {
+        source: 'agent_trajectories',
+        trace_path: prior.id,
+        pattern: token,
+        record_kind: 'message',
+        order: 'oldest_first',
+        head_limit: 1,
+        page_after: firstData.next_page_after,
+      },
+      userId
+    );
+    const secondData = JSON.parse(secondPage.result) as { matches: Array<{ path: string }> };
+    if (
+      !firstPage.success ||
+      !secondPage.success ||
+      !firstData.next_page_after ||
+      secondData.matches.length !== 1 ||
+      firstData.matches[0].path === secondData.matches[0].path
+    ) {
+      throw new Error(`SMS grep did not advance the trajectory page: ${secondPage.result}`);
     }
   } finally {
     await cleanupAgentScopedUser(prisma, userId);

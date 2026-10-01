@@ -16,6 +16,8 @@ export interface UserDataGrepParams {
   surface?: string;
   trace_path?: string;
   until?: string;
+  order?: 'newest_first' | 'oldest_first';
+  page_after?: string;
   '-A'?: string | number;
   '-B'?: string | number;
   '-C'?: string | number;
@@ -59,6 +61,7 @@ export interface UserDataGrepResult {
   returned: number;
   has_more: boolean;
   next_offset: number | null;
+  next_page_after?: string | null;
   display_order: 'oldest_first' | 'newest_first';
   context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<string, unknown>>;

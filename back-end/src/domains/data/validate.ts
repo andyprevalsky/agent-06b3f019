@@ -15,7 +15,11 @@ import {
   rejectUnsupportedFilters,
   requireFilterObject,
 } from './validate.filters';
-import { parseAgentNetworkFilters, parseAgentTrajectoryFilters } from './validate.agent';
+import {
+  parseAgentNetworkFilters,
+  parseAgentTrajectoryFilters,
+  parseAgentPaging,
+} from './validate.agent';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -51,6 +55,8 @@ const ALLOWED_GREP_KEYS = new Set([
   'surface',
   'trace_path',
   'until',
+  'order',
+  'page_after',
   '-A',
   '-B',
   '-C',
@@ -79,6 +85,32 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
+function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
+  const hasTrajectories = sources.includes('agent_trajectories');
+  if (
+    !hasTrajectories &&
+    [
+      params.record_kind,
+      params.surface,
+      params.trace_path,
+      params.until,
+      params.order,
+      params.page_after,
+    ].some((value) => value !== undefined)
+  ) {
+    throw new InvalidGrepParamError('agent_trajectories source');
+  }
+  if (params.role !== undefined && !hasTrajectories && !sources.includes('agent_network')) {
+    throw new InvalidGrepParamError('role');
+  }
+  if (
+    (params.order !== undefined || params.page_after !== undefined) &&
+    (sources.length !== 1 || !hasTrajectories)
+  ) {
+    throw new InvalidGrepParamError('order/page_after');
+  }
+}
+
 function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const { source, sources } = params;
   const rawFilters = requireFilterObject(params);
@@ -88,6 +120,8 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     params.surface !== undefined ||
     params.trace_path !== undefined ||
     params.until !== undefined ||
+    params.order !== undefined ||
+    params.page_after !== undefined ||
     ['role', 'record_kind', 'surface'].some((key) => key in rawFilters) ||
     (typeof rawFilters.path === 'string' && rawFilters.path.startsWith('agent_trajectories/'));
   if (source !== undefined && !(source in VALID_SOURCES)) {
@@ -129,18 +163,7 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const hasNetwork = resolvedSources.includes('network');
   const hasAgentNetwork = resolvedSources.includes('agent_network');
   const hasAgentTrajectories = resolvedSources.includes('agent_trajectories');
-  if (
-    !hasAgentTrajectories &&
-    (params.record_kind !== undefined ||
-      params.surface !== undefined ||
-      params.trace_path !== undefined ||
-      params.until !== undefined)
-  ) {
-    throw new InvalidGrepParamError('agent_trajectories source');
-  }
-  if (params.role !== undefined && !hasAgentTrajectories && !hasAgentNetwork) {
-    throw new InvalidGrepParamError('role');
-  }
+  validateAgentSourceSelection(params, resolvedSources);
 
   // Reject filters that NO resolved source can consume. Message/transaction/
   // document families reject unsupported keys inside their own parse step; the
@@ -185,6 +208,8 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     hasAgentTrajectories,
     mergeTopLevelNarrowing,
   } = resolveSourceSelection(params);
+
+  const agentPaging = parseAgentPaging(params);
 
   const pattern =
     params.pattern === undefined
@@ -239,6 +264,7 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     contextAfter,
     headLimit: parseBoundedNumber(params.head_limit, 20, 1, MAX_RESULTS),
     offset: parseBoundedNumber(params.offset, 0, 0, 10_000),
+    ...agentPaging,
     filters: {
       messages: hasMessageFamily ? parseMessageFilters(params, mergeTopLevelNarrowing) : undefined,
       transactions: hasTransactions ? parseTransactionFilters(params) : undefined,

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { proveTreeRolesAndPaging } from './agent-trajectories.paging';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { archiveJson } from '../../providers/traceArchive';
@@ -186,6 +187,24 @@ async function proveR2OnlyHistory(): Promise<void> {
       }),
       3
     );
+    const archivedPaths: string[] = [];
+    let pageAfter: string | undefined;
+    do {
+      const page = await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'Archive-only',
+        trace_path: path,
+        record_kind: 'all',
+        head_limit: 1,
+        ...(pageAfter ? { page_after: pageAfter } : {}),
+      });
+      const [hit] = requireResult(page, 1);
+      archivedPaths.push(String(hit.path));
+      pageAfter = (page.data as { next_page_after?: string | null }).next_page_after ?? undefined;
+    } while (pageAfter !== undefined && archivedPaths.length <= allRows.length);
+    if (archivedPaths.join('|') !== allRows.map((row) => row.path).join('|')) {
+      throw new Error(`Archived cursor skipped or repeated R2 rows: ${archivedPaths.join(', ')}`);
+    }
     requireResult(
       await grep(ownerId, {
         source: 'agent_trajectories',
@@ -208,7 +227,7 @@ async function proveR2OnlyHistory(): Promise<void> {
       throw new Error(`Trajectory pagination repeated the first hit: ${JSON.stringify(found)}`);
     }
     const indexed = await prisma.agentTrajectorySearch.count({ where: { rootAgentId } });
-    if (indexed !== 3) throw new Error(`Expected 3 lazily indexed archived rows, got ${indexed}`);
+    if (indexed !== 4) throw new Error(`Expected 4 lazily indexed archived rows, got ${indexed}`);
     if (!found.every((match) => String(match.pointer).includes('trace-archive'))) {
       throw new Error(`R2-only rows have no archive pointer: ${JSON.stringify(found)}`);
     }
@@ -228,6 +247,24 @@ async function proveR2OnlyHistory(): Promise<void> {
       0
     );
     requireResult(await grep(ownerId, { source: 'agent_trajectories', pattern: 'private-84' }), 0);
+    const [archivedSystem] = requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'private-84',
+        role: 'SYSTEM',
+        trace_path: path,
+      }),
+      1
+    );
+    if (archivedSystem.role !== 'SYSTEM' || !String(archivedSystem.path).includes('/SYSTEM/')) {
+      throw new Error(
+        `Explicit archived SYSTEM role lost its path: ${JSON.stringify(archivedSystem)}`
+      );
+    }
+    requireResult(
+      await grep(otherId, { source: 'agent_trajectories', pattern: 'private-84', role: 'SYSTEM' }),
+      0
+    );
     const changedFixture = {
       ...fixture,
       rows: {
@@ -498,6 +535,7 @@ async function run(): Promise<void> {
     if (typedUserMessage.path !== userMessage.path) {
       throw new Error('Typed trajectory parameters did not resolve the original USER message');
     }
+    await proveTreeRolesAndPaging(grep, ownerId, otherId, prior.id, priorChild.id, current.id);
     const [mixedUserMessage] = requireResult(
       await grep(ownerId, {
         sources: ['agent_network', 'agent_trajectories'],

@@ -20,10 +20,12 @@ const log = createLogger('SmsSupervisorGrep');
 export interface GrepArgs {
   pattern?: string;
   source?: string | null;
-  role?: 'USER' | 'ASSISTANT' | 'TOOL' | null;
+  role?: 'SYSTEM' | 'USER' | 'ASSISTANT' | 'TOOL' | null;
   record_kind?: 'message' | 'llm_output' | 'llm_context' | 'all' | null;
   surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP' | null;
   trace_path?: string | null;
+  order?: 'newest_first' | 'oldest_first' | null;
+  page_after?: string | null;
   until?: string | null;
   context?: number | null;
   '-B'?: number | null;
@@ -121,6 +123,8 @@ export async function executeGrepTool(args: GrepArgs, userId: string): Promise<T
     params.record_kind !== undefined ||
     params.surface !== undefined ||
     params.trace_path !== undefined ||
+    params.order !== undefined ||
+    params.page_after !== undefined ||
     params.until !== undefined;
   if (params.source === undefined && trajectoryNarrowing) {
     result = await executeUserDataGrep(userId, { ...params, source: 'agent_trajectories' });

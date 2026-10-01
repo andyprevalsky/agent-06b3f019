@@ -228,6 +228,7 @@ export interface GrepResult {
   returned: number;
   has_more: boolean;
   next_offset: number | null;
+  next_page_after?: string | null;
   display_order: 'oldest_first' | 'newest_first';
   context_unit: 'message_record' | 'logical_line' | 'mixed';
   summaries?: Partial<Record<ValidSource, unknown>>;
@@ -286,6 +287,9 @@ export interface ValidatedGrepInput {
   contextAfter: number;
   headLimit: number;
   offset: number;
+  order: 'newest_first' | 'oldest_first';
+  pageAfterMessageId?: string;
+  pageAfterPath?: string;
   filters: {
     messages?: MessageGrepFilters;
     network?: NetworkGrepFilters;

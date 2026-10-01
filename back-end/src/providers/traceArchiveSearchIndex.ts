@@ -12,7 +12,7 @@ import { withArchiveManifestLock } from './traceArchiveManifest';
 import type { ScopedDbFixture } from './traceArchiveFixture';
 
 const END_FIXTURE_PATH = 'db/end.fixture.json.gz.enc';
-const TRACE_ROLES = new Set(['USER', 'ASSISTANT', 'TOOL']);
+const TRACE_ROLES = new Set(['SYSTEM', 'USER', 'ASSISTANT', 'TOOL']);
 const WRITE_BATCH_SIZE = 100;
 
 type RecordValue = Record<string, unknown>;

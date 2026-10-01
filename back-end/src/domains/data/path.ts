@@ -145,7 +145,7 @@ export function parseGrepPath(value: string): ParsedGrepPath | null {
     case 'agent_trajectories': {
       if (rest.length > 4) return null;
       const [rootAgentId, second, third, fourth] = rest;
-      const rootMessage = second === 'USER' || second === 'ASSISTANT' || second === 'TOOL';
+      const rootMessage = ['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(second ?? '');
       const agentId = rootMessage ? rootAgentId : second;
       const role = rootMessage ? second : third;
       const messageId = rootMessage ? third : fourth;

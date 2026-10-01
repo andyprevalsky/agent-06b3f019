@@ -1,7 +1,12 @@
 /** Parse agent-specific grep selectors. */
 import { InvalidGrepParamError } from './errors';
 import { parseGrepPath } from './path';
-import type { AgentNetworkGrepFilters, AgentTrajectoryGrepFilters, GrepParams } from './types';
+import type {
+  AgentNetworkGrepFilters,
+  AgentTrajectoryGrepFilters,
+  GrepParams,
+  ValidatedGrepInput,
+} from './types';
 import {
   parseFilterDate,
   parseFilterSince,
@@ -9,6 +14,37 @@ import {
   rejectUnsupportedFilters,
   requireFilterObject,
 } from './validate.filters';
+
+export function parseAgentPaging(
+  params: GrepParams
+): Pick<ValidatedGrepInput, 'order' | 'pageAfterMessageId' | 'pageAfterPath'> {
+  if (params.order !== undefined && !['newest_first', 'oldest_first'].includes(params.order)) {
+    throw new InvalidGrepParamError('order');
+  }
+  const pageAfter = params.page_after === undefined ? undefined : parseGrepPath(params.page_after);
+  if (
+    params.page_after !== undefined &&
+    (pageAfter?.source !== 'agent_trajectories' ||
+      pageAfter.messageId === undefined ||
+      pageAfter.role === undefined ||
+      pageAfter.rootAgentId === undefined)
+  ) {
+    throw new InvalidGrepParamError('page_after');
+  }
+  if (
+    params.page_after !== undefined &&
+    params.offset !== undefined &&
+    Number(params.offset) !== 0
+  ) {
+    throw new InvalidGrepParamError('page_after with offset');
+  }
+  return {
+    order: params.order ?? 'newest_first',
+    pageAfterMessageId:
+      pageAfter?.source === 'agent_trajectories' ? pageAfter.messageId : undefined,
+    pageAfterPath: params.page_after?.trim().replace(/\/+$/, ''),
+  };
+}
 
 export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFilters | undefined {
   const raw = { ...requireFilterObject(params) };
@@ -78,10 +114,10 @@ export function parseAgentTrajectoryFilters(
   const role = parseFilterString(raw, 'role')?.toUpperCase();
   const surface = parseFilterString(raw, 'surface')?.toUpperCase();
   const recordKind = parseFilterString(raw, 'record_kind')?.toLowerCase();
-  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
+  if (role !== undefined && !['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(role)) {
     throw new InvalidGrepParamError('filters.role');
   }
-  if (path?.role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
+  if (path?.role !== undefined && !['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
     throw new InvalidGrepParamError('filters.path');
   }
   if (surface !== undefined && !['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'].includes(surface)) {

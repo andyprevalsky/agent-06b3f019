@@ -505,9 +505,9 @@ class GrepTool(BaseModel):
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
     )
-    role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
+    role: Optional[Literal["SYSTEM", "USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
-        description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
+        description="Message role in agent_trajectories or agent_network. SYSTEM is returned only when explicitly selected. Implies agent_trajectories when sources are omitted.",
     )
     record_kind: Optional[Literal["message", "llm_output", "llm_context", "all"]] = Field(
         default=None,
@@ -519,7 +519,15 @@ class GrepTool(BaseModel):
     )
     trace_path: Optional[str] = Field(
         default=None,
-        description="Agent trajectory path or root UUID returned by grep.",
+        description="Agent trajectory root path/UUID searches its entire child tree; a child path narrows to that agent, and a message path to one message.",
+    )
+    order: Optional[Literal["newest_first", "oldest_first"]] = Field(
+        default=None,
+        description="Order messages in one agent_trajectories search. Defaults to newest_first.",
+    )
+    page_after: Optional[str] = Field(
+        default=None,
+        description="For the next page of one agent_trajectories search, pass the previous result's next_page_after path with the same query and order.",
     )
     until: Optional[str] = Field(
         default=None,

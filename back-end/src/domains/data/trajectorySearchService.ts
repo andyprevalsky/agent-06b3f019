@@ -1,6 +1,7 @@
 /** User-scoped grep over prior agent trees. */
 
 import { buildAgentTrajectoryMatch } from './format';
+import { buildAgentTrajectoryPath } from './path';
 import { AgentNotFoundError } from './errors';
 import * as repo from './repo';
 import * as trajectoryRepo from './trajectoryRepo';
@@ -41,7 +42,12 @@ export async function searchTrajectorySource(
   userId: string,
   input: ValidatedGrepInput,
   agentId: string | undefined
-): Promise<{ total: number; matches: GrepMatch[] }> {
+): Promise<{
+  total: number;
+  matches: GrepMatch[];
+  hasMore?: boolean;
+  nextPageAfter?: string | null;
+}> {
   let excludeRootAgentId: string | undefined;
   if (agentId !== undefined && agentId !== '') {
     const agent = await repo.findAgentByIdAndUser(agentId, userId);
@@ -76,13 +82,33 @@ export async function searchTrajectorySource(
     caseInsensitive: input.caseInsensitive,
     filters: input.filters.agentTrajectories,
   };
+  const useKeyset = input.sources.length === 1 && input.offset === 0;
   const [total, rows] = await Promise.all([
     trajectoryRepo.countAgentTrajectories(query),
     trajectoryRepo.searchAgentTrajectories({
       ...query,
       limit: input.headLimit,
       offset: input.offset,
+      order: input.order,
+      pageAfterMessageId: input.pageAfterMessageId,
+      pageAfterPath: input.pageAfterPath,
+      useKeyset,
     }),
   ]);
-  return { total, matches: rows.map((row) => buildAgentTrajectoryMatch(row, input)) };
+  const hasMore = useKeyset && rows.length > input.headLimit;
+  const pageRows = useKeyset ? rows.slice(0, input.headLimit) : rows;
+  const last = pageRows.at(-1);
+  return {
+    total,
+    matches: pageRows.map((row) => buildAgentTrajectoryMatch(row, input)),
+    ...(useKeyset
+      ? {
+          hasMore,
+          nextPageAfter:
+            hasMore && last !== undefined
+              ? buildAgentTrajectoryPath(last.rootAgentId, last.agentId, last.role, last.messageId)
+              : null,
+        }
+      : {}),
+  };
 }

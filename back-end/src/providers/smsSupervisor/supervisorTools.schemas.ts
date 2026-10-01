@@ -114,6 +114,7 @@ Usage:
 - \`source\` is optional. Omit it to search messages and network.
 - Supported sources: messages, network, agent_trajectories, transactions, documents. agent_trajectories searches this user's prior agent runs across chat, SMS, and Temporal.
 - Agent trajectory results include trace_path, message_role, and agent_title as separate fields.
+- A root trace_path searches its child tree; a child path narrows to one agent. Use next_page_after as page_after with the same query to continue through results; order selects newest_first or oldest_first. SYSTEM messages require role=SYSTEM.
 - Trajectory record_kind: message is a stored agent message, llm_output is a model response, and llm_context is text passed to a model and may replay earlier turns. Ordinary results include messages and outputs, newest first; record_kind=all includes replayed inputs.
 - Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
@@ -139,7 +140,7 @@ Returns:
         },
         role: {
           type: 'string' as const,
-          enum: ['USER', 'ASSISTANT', 'TOOL'],
+          enum: ['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'],
           description:
             'Agent trajectory message role. Implies agent_trajectories when source is omitted.',
         },
@@ -155,7 +156,16 @@ Returns:
         },
         trace_path: {
           type: 'string' as const,
-          description: 'Agent trajectory path or root UUID returned by grep.',
+          description: 'Agent trajectory root path/UUID, child agent path, or message path.',
+        },
+        order: {
+          type: 'string' as const,
+          enum: ['newest_first', 'oldest_first'],
+          description: 'Order one agent_trajectories search; defaults to newest_first.',
+        },
+        page_after: {
+          type: 'string' as const,
+          description: 'Use the prior next_page_after path with the same agent_trajectories query.',
         },
         until: {
           type: 'string' as const,
@@ -219,7 +229,7 @@ Returns:
               enum: ['chatgpt', 'claude', 'apple_notes', 'obsidian'],
             },
             path: { type: 'string' as const },
-            role: { type: 'string' as const, enum: ['USER', 'ASSISTANT', 'TOOL'] },
+            role: { type: 'string' as const, enum: ['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'] },
             surface: { type: 'string' as const, enum: ['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'] },
             record_kind: {
               type: 'string' as const,
