@@ -26,7 +26,7 @@ sources:
   - commit 75754719f
   - commit 145990cd9
   - PR #1354
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+repro: agents/tests/blackbox/deploy_resume_e2e.blackbox.py
 status: fixed
 ---
 
@@ -84,9 +84,21 @@ deploys.
 - Explore: cemented that a live explore's parent wait plus cancel grace fits
   inside the worker shutdown grace, so explores finish or recover their evidence
   before the machine exits. They need no reattach machinery.
-- Repros: the real browser step loop yielding under
-  `ActivityEnvironment.worker_shutdown()`, and a real `AgentWorkflow` on two task
-  queues resuming parked browser and Claude Code tasks on the new generation.
+- End-to-end repro (`deploy_resume_e2e.blackbox.py`): a real `AgentWorkflow`
+  runs the real browser and Claude Code activities on real Temporal workers, and
+  only external services are faked. Two deploy shapes are covered. In a rolling
+  deploy, a new machine joins the queue and the old one gets a real
+  `Worker.shutdown()`. In a cutover, the queue pointer moves to a new generation
+  mid-run. Each test asserts that the old machine stops within its grace, that
+  the task finishes from the step where it stopped on the same Steel session or
+  E2B sandbox, that the user sees one chip, and that usage is billed once.
+  Before the fix all four tests fail: the browser shows "Browser Session Paused"
+  or runs every step on the old generation, and Claude Code shows "Session
+  Cancelled" or never releases the run.
+- Narrower repros: the real browser step loop yielding under
+  `ActivityEnvironment.worker_shutdown()` in `spawn_browser_agent_v3.blackbox.py`,
+  the real ws-server drain and reattach in `spawn_claude_code_agent.blackbox.py`,
+  and parked-tool cutovers in `workflow.blackbox.py`.
 
 10k agents: one cached pointer read per worker process per 30 seconds; parked
 calls are bounded by the 256KB carry budget, and larger resume snapshots go to
