@@ -166,11 +166,13 @@ export async function refreshOrgCardholderStatus(
 
   const onboarding = await deps.getOrgOnboardingConfig(userId);
   if (onboarding === undefined) return { connected: false };
-  let sessionResult: unknown;
+  let result: Record<string, unknown>;
   try {
-    sessionResult = await deps.callOrgTool('get_onboarding_session', {
-      session_id: onboarding.sessionId,
-    });
+    // The MCP transport can return a structured error instead of throwing.
+    // Normalize it inside the same stale-session handling boundary.
+    result = resultRecord(
+      await deps.callOrgTool('get_onboarding_session', { session_id: onboarding.sessionId })
+    );
   } catch (error) {
     // Benchmark/reset races and expired hosted sessions leave a stale session id. Surface as
     // disconnected instead of 500'ing GET /api/agentcard/status.
@@ -185,7 +187,6 @@ export async function refreshOrgCardholderStatus(
     }
     throw error;
   }
-  const result = resultRecord(sessionResult);
   const status = stringField(result, ['status']) ?? 'pending';
   const completedCardholderId = stringField(result, ['cardholder_id', 'cardholderId']);
   if (status === 'completed' && completedCardholderId !== undefined) {

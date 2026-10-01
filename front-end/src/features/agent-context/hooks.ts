@@ -1,6 +1,7 @@
 import { useCallback, useContext, createContext } from 'react';
 
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
+import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 
 import type { AgentContextValue, AgentProviderProps } from './types';
 import { benchmarkAgentPreviewEnabled } from './api';
@@ -31,7 +32,7 @@ export function useAgentProvider({
   const state = useAgentProviderState();
   const canSubscribe = (isAuthenticated ?? !!user) && (realtimeReady ?? false);
   const hasFullAccess = canSubscribe || isBenchmarkArchiveMode();
-  const canLoadAgent = hasFullAccess || benchmarkAgentPreviewEnabled();
+  const canLoadAgent = hasFullAccess || benchmarkAgentPreviewEnabled() || isBenchmarkSharedView();
   const messaging = useAgentMessaging(state);
   const selection = useAgentSelection(state, { canLoadAgent, hasFullAccess });
   const { setForceResubscribeCounter } = state;

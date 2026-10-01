@@ -30,6 +30,7 @@ Auto-debug mode:
 import argparse
 import asyncio
 import csv
+import fcntl
 import ipaddress
 import json
 import os
@@ -43,6 +44,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +81,7 @@ from benchmarks.llm_usage import (
     live_output_tokens,
 )
 from benchmarks.local import manifest_database_url
+from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.logs import (
     canonicalize_agent_tree,
     collect_logs,
@@ -225,6 +228,7 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+NEW_USER_PAYMENT_JOURNEY_TASK_NAME = "agent-payment-new-user-journey"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -533,6 +537,11 @@ def _attention_request_matches_task(
     req: dict,
     observed_count: int = 0,
 ) -> bool:
+    if task.require_attention_order:
+        sequence = task.expected_attention_kinds
+        if observed_count >= len(sequence) or _attention_request_kind(req) != sequence[observed_count]:
+            return False
+        return observed_count != 0 or not task.expected_gate or _gate_request_matches_task(task, req)
     if task.expected_gate:
         return _gate_request_matches_task(task, req)
     alternatives = getattr(task, "expected_attention_kind_any_of", [])
@@ -547,10 +556,10 @@ def _attention_request_matches_task(
 
 
 def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
-    return not (
-        task.agentcard_setup_action == "complete"
-        and _attention_request_kind(req) == "agentcard_user_cardholder_onboarding_required"
-    )
+    kind = _attention_request_kind(req)
+    if task.complete_subscription_checkout and kind == "gate:subscription":
+        return False
+    return not (task.agentcard_setup_action == "complete" and kind == "agentcard_user_cardholder_onboarding_required")
 
 
 def _attention_request_evidence(req: dict) -> dict:
@@ -1830,10 +1839,24 @@ def _current_benchmark_user_id() -> str:
     return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
 
 
+def _new_user_payment_journey_user_id() -> str:
+    """Give each isolated run a fresh account and Stripe Checkout idempotency scope."""
+    run_scope = os.environ.get("BENCHMARK_RUN_ID", "").strip()
+    if not run_scope:
+        context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR", "").strip()
+        if context_dir and context_dir != ".context":
+            run_scope = str(Path(context_dir).resolve())
+    if not run_scope:
+        raise RuntimeError("New-user payment journey requires an isolated benchmark run ID")
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"rose-new-user-payment:{run_scope}"))
+
+
 def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) -> Optional[str]:
     """Return a task-scoped synthetic identity, leaving ordinary and production tasks unchanged."""
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
+    if task_name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
+        return _new_user_payment_journey_user_id() if base_url is None or _is_local_base_url(base_url) else None
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
@@ -1865,6 +1888,8 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
     """
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
+    if task_name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
+        return _new_user_payment_journey_user_id()
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
@@ -3827,6 +3852,7 @@ async def poll_agent(
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
     expected_gate_evidence: Optional[dict] = None
+    subscription_checkout_evidence: Optional[dict] = None
     write_lock_prerequisite_request_id: Optional[str] = None
     agentcard_setup_attention_seen = False
     agentcard_setup_attention_id: Optional[str] = None
@@ -3902,6 +3928,8 @@ async def poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        if subscription_checkout_evidence:
+            data["_benchmark"]["subscription_checkout"] = subscription_checkout_evidence
         if seen_attention_kinds:
             data["_benchmark"]["attention_request_kind_seen"] = seen_attention_kinds[-1]
             if task.expected_attention_kind:
@@ -4327,6 +4355,7 @@ async def poll_agent(
                                 observed_kind = _attention_request_kind(req)
                                 if (
                                     task.expected_gate
+                                    and not task.require_attention_order
                                     and task.approval_handling == "auto_approve"
                                     and observed_kind == "payment_approval"
                                 ):
@@ -4416,7 +4445,37 @@ async def poll_agent(
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kinds_seen": list(seen_attention_kinds),
                                 }
-                            if task.expected_gate:
+                            if task.complete_subscription_checkout and observed_kind == "gate:subscription":
+                                gate = (req.get("metadata") or {}).get("gate") or {}
+                                checkout_url = (gate.get("action") or {}).get("url")
+                                if not isinstance(checkout_url, str):
+                                    raise RuntimeError("Subscription gate has no Checkout URL")
+                                expected_gate_evidence = {"gate": gate, "request_id": req_id}
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_gate_seen": True,
+                                    "expected_gate": gate,
+                                    "expected_gate_request_id": req_id,
+                                }
+                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]}")
+                                try:
+                                    checkout = await complete_test_subscription_checkout(
+                                        base_url,
+                                        checkout_url,
+                                        _current_benchmark_user_id(),
+                                        stripe_key=load_env_var("STRIPE_SECRET_KEY", _AGENTS_ENV, _BACKEND_ENV),
+                                        webhook_secret=load_env_var("STRIPE_WEBHOOK_SECRET", _AGENTS_ENV, _BACKEND_ENV),
+                                    )
+                                except Exception as checkout_error:
+                                    return (
+                                        data, approvals_triggered, approvals_resolved,
+                                        f"Subscription Checkout failed: {checkout_error}",
+                                    )
+                                subscription_checkout_evidence = checkout
+                                data["_benchmark"]["subscription_checkout"] = checkout
+                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]}")
+                                continue
+                            if task.expected_gate and _gate_request_matches_task(task, req):
                                 expected_gate_evidence = {
                                     "gate": (req.get("metadata") or {}).get("gate"),
                                     "request_id": req_id,
@@ -4523,6 +4582,8 @@ async def poll_agent(
                                 await respond_to_attention_request(base_url, req_id, "approved")
                                 approvals_resolved += 1
                                 print(f"    ✅ Auto-approved attention request {req_id[:8]}")
+                        elif task.complete_subscription_checkout and observed_kind == "gate:subscription":
+                            return data, approvals_triggered, approvals_resolved, "Subscription gate reached generic approval handler"
                         elif task.approval_handling == "prompt_user":
                             if req_id:
                                 question = req.get("question", req.get("message", "(no details)"))
@@ -4924,7 +4985,7 @@ def evaluate_task(
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
-    if task.expected_gate and not task.simulate_gate_webhook:
+    if task.expected_gate and not task.simulate_gate_webhook and not task.complete_subscription_checkout:
         if _mark_expected_gate_from_data(task, data):
             return True, None
         return False, f"Expected gate {task.expected_gate} but none was observed"
@@ -4936,6 +4997,19 @@ def evaluate_task(
             return False, f"Expected gate {task.expected_gate} before webhook resume"
         if benchmark_state.get("subscription_webhook_simulated") is not True:
             return False, "Expected simulated subscription webhook after gate"
+
+    if task.complete_subscription_checkout:
+        benchmark_state = data.get("_benchmark", {})
+        checkout = benchmark_state.get("subscription_checkout") or {}
+        if benchmark_state.get("expected_gate_seen") is not True:
+            return False, "Expected subscription gate before Checkout"
+        if checkout.get("status") != "complete" or checkout.get("payment_status") != "paid" or checkout.get("webhook_delivered") is not True:
+            return False, "Expected paid Stripe test Checkout and local webhook delivery"
+
+    if task.require_attention_order:
+        observed = (data.get("_benchmark") or {}).get("expected_attention_kinds_seen")
+        if observed != task.expected_attention_kinds:
+            return False, f"Attention sequence mismatch: expected {task.expected_attention_kinds}, got {observed}"
 
     # Agent mode: must complete. Polar step-budget stops pause the agent on
     # purpose so the Odysseys/BU judge can grade the trajectory (upstream also
@@ -5996,21 +6070,21 @@ def _run_user_data_fixture(action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _free_credit_subscription_fixture_env() -> dict:
+def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
         raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
-    env["BENCHMARK_USER_ID"] = _free_credit_subscription_gate_user_id()
+    env["BENCHMARK_USER_ID"] = user_id or _free_credit_subscription_gate_user_id()
     return env
 
 
-def _run_free_credit_subscription_fixture(action: str) -> dict:
+def _run_free_credit_subscription_fixture(action: str, user_id: Optional[str] = None) -> dict:
     result = subprocess.run(
         ["npx", "tsx", "scripts/free-credit-subscription-gate-fixture.ts", action],
         cwd=REPO_ROOT / "back-end",
-        env=_free_credit_subscription_fixture_env(),
+        env=_free_credit_subscription_fixture_env(user_id),
         capture_output=True,
         text=True,
         timeout=60,
@@ -6020,6 +6094,34 @@ def _run_free_credit_subscription_fixture(action: str) -> dict:
             f"free-credit subscription benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
+
+
+def _run_new_user_payment_fixture() -> dict:
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"],
+        cwd=REPO_ROOT / "back-end",
+        env=_free_credit_subscription_fixture_env(_new_user_payment_journey_user_id()),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"new-user payment fixture failed: {(result.stderr or result.stdout).strip()}")
+    return _parse_last_json_line(result.stdout)
+
+
+async def _verify_new_user_payment_start_state(base_url: str) -> None:
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.get(
+            f"{base_url}/api/credits/usage",
+            headers=headers,
+            params={"userId": _new_user_payment_journey_user_id()},
+        )
+        response.raise_for_status()
+        usage = response.json()
+    if usage.get("remaining") != 0 or usage.get("tier") is not None or usage.get("unlimited") is not False:
+        raise RuntimeError(f"New-user payment fixture did not start gated: {usage}")
 
 
 def _gate_fixture_env(task_name: str) -> dict:
@@ -11412,6 +11514,24 @@ def _run_declared_static_check(
             if benchmark_state.get("expected_payment_receipt_seen") is not True:
                 return False, "Expected validated payment receipt was not observed"
             continue
+        if check_type == "attention_kind_sequence":
+            expected = check.get("value")
+            observed = benchmark_state.get("expected_attention_kinds_seen")
+            if observed != expected:
+                return False, f"Attention sequence mismatch: expected {expected}, got {observed}"
+            continue
+        if check_type == "subscription_checkout_completed":
+            checkout = benchmark_state.get("subscription_checkout") or {}
+            if checkout.get("status") != "complete" or checkout.get("payment_status") != "paid" or checkout.get("webhook_delivered") is not True:
+                return False, "Paid Stripe Checkout and local webhook delivery were not observed"
+            continue
+        if check_type == "expected_payment_lifecycle":
+            if task is None:
+                return False, "Payment lifecycle check requires a task contract"
+            error = _validate_payment_lifecycle(task, data)
+            if error:
+                return False, error
+            continue
         if check_type == "expected_gate":
             if task is not None and _mark_expected_gate_from_data(task, data) is True:
                 benchmark_state = data.get("_benchmark", {})
@@ -12036,16 +12156,24 @@ async def run_single_task(
     plaid_transactions_fixture_action: Optional[str] = None
     free_credit_subscription_manifest: Optional[dict] = None
     gate_fixture_manifest: Optional[dict] = None
-    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+    if task.name in {FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME, NEW_USER_PAYMENT_JOURNEY_TASK_NAME}:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply")
+        fixture_user_id = (
+            _new_user_payment_journey_user_id()
+            if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME
+            else _free_credit_subscription_gate_user_id()
+        )
+        free_credit_subscription_manifest = _run_free_credit_subscription_fixture("apply", fixture_user_id)
         print(
             "    💳 Prepared free-credit subscription gate fixture: "
             f"user={free_credit_subscription_manifest.get('user_id')} "
             f"credit={free_credit_subscription_manifest.get('credit_cents')}c "
             f"used={free_credit_subscription_manifest.get('used_cents')}c"
         )
+        if task.name == NEW_USER_PAYMENT_JOURNEY_TASK_NAME:
+            _run_new_user_payment_fixture()
+            await _verify_new_user_payment_start_state(base_url)
     if task.name in GATE_FIXTURE_TASK_MODES:
         if not _is_local_base_url(base_url):
             raise RuntimeError(f"{task.name} must run against the local benchmark stack")
@@ -12467,6 +12595,7 @@ async def run_single_task(
             task.expected_gate
             and data["_benchmark"].get("expected_gate_seen") is True
             and not task.simulate_gate_webhook
+            and not task.complete_subscription_checkout
         )
         if not expected_gate_terminal:
             min_steps_error = _validate_agent_class_min_steps(
@@ -12534,7 +12663,7 @@ async def run_single_task(
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
 
-        if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME and passed:
+        if task.name in {AGENT_PAYMENT_TEST_SHOP_TASK_NAME, NEW_USER_PAYMENT_JOURNEY_TASK_NAME} and passed:
             try:
                 payment_confirmation_error = await validate_agent_payment_confirmation_contract(data, agent_id)
                 if payment_confirmation_error:
@@ -13724,6 +13853,38 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     raise SystemExit(1)
 
 
+@asynccontextmanager
+async def _sandbox_agentcard_payment_lock():
+    """Serialize payment fixtures across benchmark processes on one host."""
+    lock_path = Path(
+        os.environ.get("BENCHMARK_AGENTCARD_LOCK_PATH")
+        or Path(tempfile.gettempdir()) / "rose-agentcard-sandbox-benchmark.lock"
+    )
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                await asyncio.sleep(1)
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+async def _run_with_sandbox_payment_lock(
+    task: BenchmarkTask, runner: Callable[[], Awaitable[TaskResult]]
+) -> TaskResult:
+    if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
+        async with _sandbox_agentcard_payment_lock():
+            return await runner()
+    return await runner()
+
+
 def _parallel_task_runners(
     tasks: list[BenchmarkTask],
     max_concurrency: int | None,
@@ -13752,6 +13913,9 @@ def _parallel_task_runners(
     # the other's. Serialize them against each other; they still run alongside
     # non-SMS work.
     sms_surface = asyncio.Semaphore(1)
+    # The cross-process lock is held by the task runner below. Keep a local
+    # semaphore too so one batch does not spin many waiters on the file lock.
+    payment_surface = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -13759,7 +13923,7 @@ def _parallel_task_runners(
         async with semaphore:
             return await runner(task)
 
-    async def run_limited(task: BenchmarkTask) -> TaskResult:
+    async def run_with_other_surface_limits(task: BenchmarkTask) -> TaskResult:
         if task.requires_browser_agent and browser_profile_writer is not None:
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
@@ -13771,6 +13935,12 @@ def _parallel_task_runners(
             async with sms_surface:
                 return await run_with_batch_limit(task)
         return await run_with_batch_limit(task)
+
+    async def run_limited(task: BenchmarkTask) -> TaskResult:
+        if "agentcard-lifecycle-sandbox" in getattr(task, "tags", []):
+            async with payment_surface:
+                return await run_with_other_surface_limits(task)
+        return await run_with_other_surface_limits(task)
 
     return [run_limited(task) for task in tasks]
 
@@ -14169,15 +14339,18 @@ async def main_async(args):
                 raise ValueError("--checkpoint-source-index requires exactly one task")
             if args.checkpoint_source_price_limit_cents is not None:
                 tasks[0].price_limit_cents = args.checkpoint_source_price_limit_cents
-            result = await run_single_task(
-                base_url,
+            result = await _run_with_sandbox_payment_lock(
                 tasks[0],
-                keep_failed_agents=True,
-                checkpoint_source_index=args.checkpoint_source_index,
-                checkpoint_source_boundary=args.checkpoint_source_boundary,
-                checkpoint_source_out=Path(args.checkpoint_source_out),
-                checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
-                on_agent_created=_remember_live_agent,
+                lambda: run_single_task(
+                    base_url,
+                    tasks[0],
+                    keep_failed_agents=True,
+                    checkpoint_source_index=args.checkpoint_source_index,
+                    checkpoint_source_boundary=args.checkpoint_source_boundary,
+                    checkpoint_source_out=Path(args.checkpoint_source_out),
+                    checkpoint_tree_out=Path(args.checkpoint_tree_out) if args.checkpoint_tree_out else None,
+                    on_agent_created=_remember_live_agent,
+                ),
             )
             run.task_results.append(result)
         elif args.parallel:
@@ -14204,11 +14377,14 @@ async def main_async(args):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
 
             async def run_parallel_task(task: BenchmarkTask) -> TaskResult:
-                return await run_single_task(
-                    base_url,
+                return await _run_with_sandbox_payment_lock(
                     task,
-                    args.keep_failed_agents,
-                    on_agent_created=_remember_live_agent,
+                    lambda: run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    ),
                 )
 
             pending_results: dict[asyncio.Task, BenchmarkTask] = {}
@@ -14218,11 +14394,14 @@ async def main_async(args):
                     print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
                     _report_running[task.name] += 1
-                    result = await run_single_task(
-                        base_url,
+                    result = await _run_with_sandbox_payment_lock(
                         task,
-                        args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
+                        lambda: run_single_task(
+                            base_url,
+                            task,
+                            args.keep_failed_agents,
+                            on_agent_created=_remember_live_agent,
+                        ),
                     )
                     run.task_results.append(result)
                     _report_running[task.name] -= 1
@@ -14294,11 +14473,14 @@ async def main_async(args):
             for task in tasks:
                 _report_running.clear()
                 _report_running[task.name] += 1
-                result = await run_single_task(
-                    base_url,
+                result = await _run_with_sandbox_payment_lock(
                     task,
-                    args.keep_failed_agents,
-                    on_agent_created=_remember_live_agent,
+                    lambda: run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    ),
                 )
                 run.task_results.append(result)
                 _report_running[task.name] -= 1

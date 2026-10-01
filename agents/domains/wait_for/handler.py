@@ -9,7 +9,6 @@ workflow_instance for pause/cost-limit state and workflow.start_activity.
 
 from __future__ import annotations
 
-import uuid as uuid_module
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator, Optional
 
@@ -326,8 +325,8 @@ class WaitForManager(ToolManager):
                 return
 
             # Spawn explore agent via SpawnAgentManager
-            task_id = str(uuid_module.uuid4())
-            explore_tool_call_id = str(uuid_module.uuid4())
+            task_id = str(workflow.uuid4())
+            explore_tool_call_id = str(workflow.uuid4())
             explore_goal = (
                 f'Gather evidence for whether this is currently true: "{condition}". '
                 f"Try to complete your task in as few tool calls as possible."

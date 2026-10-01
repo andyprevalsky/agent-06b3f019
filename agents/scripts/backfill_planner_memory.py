@@ -11,6 +11,8 @@ Usage:
     python scripts/backfill_planner_memory.py --stats                 # read the archive, report counts, cache rows
     python scripts/backfill_planner_memory.py --backend https://navi-j9a9.onrender.com   # upsert cached rows
     python scripts/backfill_planner_memory.py --backend http://localhost:3001 --limit 100
+    python scripts/backfill_planner_memory.py --backend https://navi-j9a9.onrender.com --embed-pending
+        # embed every row lacking a current retrieval embedding (voyage-4 goal vector)
 
 The row cache (.context/planner-memory-backfill.jsonl) lets the archive read and
 the backend write run separately.
@@ -140,9 +142,30 @@ async def upsert(rows: list[dict[str, Any]], *, backend: str, api_key: str, conc
             except Exception as exc:
                 outcome[f"error:{type(exc).__name__}"] += 1
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    # PUT embeds synchronously (one embedding call), so allow for it.
+    async with httpx.AsyncClient(timeout=120) as client:
         await asyncio.gather(*(one(client, row) for row in rows))
     return outcome
+
+
+async def embed_pending(*, backend: str, api_key: str, batch: int = 50) -> dict[str, int]:
+    """Drain rows without a current-model embedding, one bounded backend batch at a time."""
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    totals = {"embedded": 0, "failed": 0, "remaining": 0}
+    async with httpx.AsyncClient(timeout=900) as client:
+        while True:
+            resp = await client.post(
+                f"{backend}/api/planner-memory/embed-pending", headers=headers, json={"limit": batch}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for key in ("embedded", "failed"):
+                totals[key] += int(data.get(key) or 0)
+            totals["remaining"] = int(data.get("remaining") or 0)
+            print(json.dumps({"batch": data, "totals": totals}), flush=True)
+            progressed = int(data.get("embedded") or 0)
+            if totals["remaining"] == 0 or progressed == 0:
+                return totals
 
 
 def main() -> int:
@@ -151,6 +174,7 @@ def main() -> int:
     parser.add_argument("--backend", help="Backend base URL to upsert cached rows into")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=64)
+    parser.add_argument("--embed-pending", action="store_true", help="Embed rows lacking a retrieval embedding")
     args = parser.parse_args()
     if args.stats:
         rows, reasons = read_rows(args.concurrency)
@@ -163,6 +187,9 @@ def main() -> int:
         if not api_key:
             print("BACKEND_API_KEY required")
             return 2
+        if args.embed_pending:
+            totals = asyncio.run(embed_pending(backend=args.backend.rstrip("/"), api_key=api_key))
+            return 0 if totals["remaining"] == 0 else 1
         rows = load_cache()
         rows = [r for r in rows if r["world_model_mode"] == "real"]
         if args.limit:

@@ -2772,6 +2772,7 @@ async def call_llm_structured_streaming(
                     "effort": effort,
                     "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
                     "cache_namespace": cache_sequence_id,
+                    "_exclude_anthropic_family": _exclude_anthropic_family,
                     **rose_kwargs,
                 }
                 deferred_fast_cache_key = fast_cache_context.llm_key(
@@ -2843,7 +2844,7 @@ async def call_llm_structured_streaming(
                     if chunk.data.get("actual_model"):
                         actual_model = chunk.data["actual_model"]
                         using_claude_auth = actual_model.endswith("-claude")
-                        using_native_direct_tools = using_claude_auth or actual_model.endswith("-gpt")
+                        using_native_direct_tools = using_claude_auth or actual_model.endswith(("-gpt", "-foundry"))
                         logger.info(f"🎯 Rose model selected: {actual_model} (claudeAuth={using_claude_auth})")
                         if on_model_detected:
                             on_model_detected(actual_model)
@@ -3204,6 +3205,7 @@ async def call_llm_structured_streaming(
                 call_site=call_site,
                 tool_choice=tool_choice,
                 context_tools=context_tools,
+                _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
@@ -5992,6 +5994,7 @@ async def call_llm_activity(
     force_backend_context: bool = False,
     cache_before_extra_user_message: bool = False,
     cache_sequence_id: Optional[str] = None,
+    exclude_anthropic_family: bool = False,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -6126,7 +6129,7 @@ async def call_llm_activity(
             # "-claude" suffix = user's own Claude token ($0, skipped the waterfall)
             # e.g. "claude-sonnet-4-6-claude", "claude-opus-4-7-claude"
             is_user_claude = actual_model.endswith("-claude")
-            is_user_gpt = actual_model.endswith("-gpt")
+            is_user_gpt = actual_model.endswith(("-gpt", "-foundry"))
             _is_claude[0] = is_user_claude
             _is_gpt[0] = is_user_gpt
             logger.info(
@@ -6258,6 +6261,10 @@ async def call_llm_activity(
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
                 tool_choice={"name": required_tool} if required_tool else None,
+                # Without this the agent loop's refusal reroute dies at the activity boundary:
+                # every retry goes back to the model that just refused, so one refusal becomes a
+                # guaranteed 3-strikes kill instead of a provider switch.
+                _exclude_anthropic_family=exclude_anthropic_family,
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.

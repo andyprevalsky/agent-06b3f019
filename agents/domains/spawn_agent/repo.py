@@ -33,6 +33,29 @@ logger = structlog.get_logger()
 _network_metadata_cache: Dict[str, Dict[str, Any]] = {}
 
 
+@activity.defn
+async def fetch_explore_tool_evidence(agent_id: str, user_id: str, task_id: str) -> List[str]:
+    """Read only this explore task's persisted, completed tool results.
+
+    The backend scopes the read to the parent agent and user, scans at most
+    16 rows, and returns at most eight 1,200-character excerpts. A failed read
+    never becomes a successful explore result.
+    """
+    config = load_config()
+    response = await get_http_client().get(
+        f"{config.backend.api_url}/api/agents/{agent_id}/explore-tool-evidence",
+        params={"taskId": task_id},
+        headers={"x-api-key": config.backend.api_key or "", "x-user-id": user_id},
+        timeout=10.0,
+    )
+    raise_if_generation_sealed(response.status_code, "spawn_agent")
+    response.raise_for_status()
+    results = response.json().get("results", [])
+    if not isinstance(results, list):
+        return []
+    return [item[:1280] for item in results[:8] if isinstance(item, str) and item.strip()]
+
+
 async def save_explore_message(
     agent_id: str,
     title: str,

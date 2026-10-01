@@ -136,6 +136,32 @@ try {
     ],
     { stdio: 'pipe' }
   );
+  // `ps` can miss one identity read under concurrent coverage work. The
+  // guardian must retry that transient result before abandoning a registered
+  // group, while a definite identity mismatch must still fail closed.
+  execFileSync(
+    'python3',
+    [
+      '-c',
+      [
+        'import importlib.util, sys',
+        'sys.path.insert(0, sys.argv[1])',
+        "spec = importlib.util.spec_from_file_location('lock_helper', sys.argv[2])",
+        'lock_helper = importlib.util.module_from_spec(spec)',
+        'spec.loader.exec_module(lock_helper)',
+        'group = lock_helper.RegisteredProcessGroup(pgid=1, identity_pid=2, start_identity="same")',
+        'lock_helper.process_group_exists = lambda pgid: True',
+        'observations = iter([None, "same"])',
+        'lock_helper.process_start_identity = lambda pid: next(observations)',
+        'assert lock_helper.process_group_identity_matches(group)',
+        'lock_helper.process_start_identity = lambda pid: "different"',
+        'assert not lock_helper.process_group_identity_matches(group)',
+      ].join('\n'),
+      join(process.cwd(), 'scripts'),
+      processLockHelperPath,
+    ],
+    { stdio: 'pipe' }
+  );
   // The guardian publishes `shutdown` under the same lock launchers hold through
   // exec. If it fuses onto an unterminated tail ("...recordshutdown"), a waiting
   // launcher sees no complete closed marker, registers, and execs after the final

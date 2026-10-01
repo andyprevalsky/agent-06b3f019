@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -56,6 +57,26 @@ function test(name: string, fn: () => void): void {
 function asyncTest(name: string, fn: () => Promise<void>): void {
   asyncCases.push({ name, fn });
 }
+
+test('isolated Hub run IDs reject path aliases without rejecting dotted IDs', () => {
+  for (const runId of ['.', '..', 'run.v2']) {
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', '--eval', "import('./src/providers/benchmarkHubStore.ts')"],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, BENCHMARK_ISOLATED_RUN: 'true', BENCHMARK_RUN_ID: runId },
+        encoding: 'utf8',
+      }
+    );
+    if (runId === 'run.v2') {
+      assert.equal(result.status, 0, result.stderr);
+    } else {
+      assert.notEqual(result.status, 0, `${runId} unexpectedly imported successfully`);
+      assert.match(result.stderr, /BENCHMARK_RUN_ID must be a safe, nonempty ID/);
+    }
+  }
+});
 
 const runs = [
   {

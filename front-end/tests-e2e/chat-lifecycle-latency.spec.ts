@@ -23,6 +23,11 @@ import {
 const SAMPLE_COUNT = 5;
 const FULL_LIFECYCLE_RATCHET_MS = 5_000;
 const MILESTONE_TIMEOUT_MS = 15_000;
+// Four paths still submit concurrently, but repeated submissions must leave
+// room in the shared provider's token-per-minute quota. The pause happens
+// before the Enter-key clock starts, so every measured lifecycle keeps the
+// same five-second ratchet.
+const PROVIDER_QUOTA_COOLDOWN_MS = 25_000;
 // The discarded warmup (sample 0) exists to populate the prompt/fast-mode cache
 // so the measured samples are warm. On a freshly seeded workspace that cache is
 // EMPTY, and a genuinely cold web_search lifecycle exceeds MILESTONE_TIMEOUT_MS
@@ -305,9 +310,11 @@ test.describe('chat full-lifecycle latency', () => {
       // stable across the path's independent agent submissions so the warmup can
       // actually warm the prompt/cache path it is designed to exclude.
       for (let sample = 0; sample <= SAMPLE_COUNT; sample += 1) {
+        if (sample > 0) await page.waitForTimeout(PROVIDER_QUOTA_COOLDOWN_MS);
         // Sample 0 is the discarded warmup and may legitimately be cold-slow.
         // Every measured sample keeps the strict milestone budget.
-        const milestoneTimeoutMs = sample === 0 ? WARMUP_MILESTONE_TIMEOUT_MS : MILESTONE_TIMEOUT_MS;
+        const milestoneTimeoutMs =
+          sample === 0 ? WARMUP_MILESTONE_TIMEOUT_MS : MILESTONE_TIMEOUT_MS;
         await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
 
         const goal = path.prompt(marker);
@@ -354,10 +361,25 @@ test.describe('chat full-lifecycle latency', () => {
           ]);
           const failures: string[] = [];
           const screenMs = settledMilestone('screen', milestones[0], failures, milestoneTimeoutMs);
-          const userMessageMs = settledMilestone('user-message', milestones[1], failures, milestoneTimeoutMs);
-          const firstResponseMs = settledMilestone('first-response', milestones[2], failures, milestoneTimeoutMs);
+          const userMessageMs = settledMilestone(
+            'user-message',
+            milestones[1],
+            failures,
+            milestoneTimeoutMs,
+          );
+          const firstResponseMs = settledMilestone(
+            'first-response',
+            milestones[2],
+            failures,
+            milestoneTimeoutMs,
+          );
           const routeMs = settledMilestone('route', milestones[3], failures, milestoneTimeoutMs);
-          const lifecycleMs = settledMilestone('terminal', milestones[4], failures, milestoneTimeoutMs);
+          const lifecycleMs = settledMilestone(
+            'terminal',
+            milestones[4],
+            failures,
+            milestoneTimeoutMs,
+          );
 
           if (path.id === 'direct_answer') {
             const unexpectedRouteCount = await page

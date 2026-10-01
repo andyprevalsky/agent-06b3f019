@@ -40,6 +40,7 @@ export const KNOWN_TAGS = [
   'grep',
   'github',
   'payment',
+  'new-user',
   'phone',
   'ivr',
   'plaid',

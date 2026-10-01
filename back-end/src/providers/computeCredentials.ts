@@ -6,6 +6,12 @@ import {
 } from './claudeCredentials';
 import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
+export {
+  __clearGptApiKeyCooldownCache,
+  __resetGptApiKeyCooldown,
+  isGptApiKeyOnCooldown,
+  markGptApiKeyOnCooldown,
+} from './gptCredentials';
 
 const log = createLogger('ComputeCredentials');
 
