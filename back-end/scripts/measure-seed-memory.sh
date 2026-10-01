@@ -145,12 +145,13 @@ else
     # older image silently produced an EMPTY source db, and the gate then failed
     # with the misleading "no Cookie rows" message instead of naming the cause.
     # Pick the image from the dump header so a newer publisher just works.
-    SRC_PG_IMAGE=postgres:16-alpine
+    # pgvector images: prod dumps carry CREATE EXTENSION vector (planner memory).
+    SRC_PG_IMAGE=pgvector/pgvector:pg16
     DUMP_FORMAT_VERSION="$(
         head -c 8 "$DUMP" | od -An -tu1 -j5 -N2 | awk 'NF{printf "%d.%d", $1, $2; exit}'
     )"
     case "$DUMP_FORMAT_VERSION" in
-        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=postgres:18-alpine ;;
+        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=pgvector/pgvector:pg18 ;;
     esac
     echo "   dump archive format $DUMP_FORMAT_VERSION -> $SRC_PG_IMAGE" | tee -a "$SUMMARY"
     docker run -d --name "$SRC_CONTAINER" \
