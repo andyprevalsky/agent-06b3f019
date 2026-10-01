@@ -426,9 +426,11 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
+# Launch node directly: `npx tsx` interposes npx → sh → tsx → node, and killing
+# $! (npx) orphans the server, which keeps holding its port after the run.
 PORT="$PORT" \
 DISABLE_GMAIL_SYNC=1 \
-npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+node --import tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {

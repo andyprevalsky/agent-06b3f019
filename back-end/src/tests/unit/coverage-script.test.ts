@@ -371,6 +371,16 @@ assert.match(
 );
 assert.match(
   blackboxScript,
+  /\nnode --import tsx src\/bootstrap\.ts >"\$BACKEND_LOG" 2>&1 &\nBACKEND_PID=\$!/,
+  'the isolated blackbox backend must be the PID cleanup() kills, not an npx wrapper that orphans it'
+);
+assert.doesNotMatch(
+  blackboxScript,
+  /\nnpx tsx src\/bootstrap\.ts/,
+  'npx tsx wraps the backend in npx → sh → tsx, so killing $! leaks the server'
+);
+assert.match(
+  blackboxScript,
   /EXPLICIT_TEST_PSQL_URL="\$\{EXPLICIT_TEST_DB_URL%%\\\?\*\}"[\s\S]*psql "\$EXPLICIT_TEST_PSQL_URL"/,
   'existing-backend reachability probes must strip Prisma-only URL parameters before invoking psql'
 );
