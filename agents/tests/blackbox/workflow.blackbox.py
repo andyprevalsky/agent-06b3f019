@@ -588,7 +588,7 @@ async def mock_resolve_fast_cache_goal_activity(
 ) -> Optional[dict[str, Optional[str]]]:
     RESOLVE_FAST_CACHE_GOAL_CALLS.append(agent_id)
     if agent_id == LEFTOVER_CHILD_AGENT_ID:
-        from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+        from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
         return {"goal": LEFTOVER_CHILD_GOAL, "root_goal": OAI_DEMO_ROOT_GOAL_PREFIX}
     # DEMO-tagged mass-agent root prompt (stable cache namespace).
@@ -4887,7 +4887,7 @@ async def test_workflow_handle_incomplete_max_iterations():
 
 async def test_workflow_handle_incomplete_max_iterations_fast_mode_completes():
     """Demo Fast Mode + 100% verifier after a cached trajectory must COMPLETE, not FAIL."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "a"
@@ -6803,7 +6803,7 @@ async def test_workflow_mark_complete_never_persists_raw_tool_envelope_for_any_t
 
 async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
     """Root OAI demo Task Complete outputs become HTML/CSV file_pointers."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-root"
@@ -6893,7 +6893,7 @@ async def test_workflow_mark_complete_materializes_oai_demo_root_report_files():
 
 async def test_workflow_mark_complete_skips_report_files_for_oai_demo_child():
     """Per-creator children keep structured fields; only the root report becomes files."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "oai-demo-child"
@@ -8350,7 +8350,7 @@ async def test_workflow_query_parent_state_skips_throttle_when_paused_by_parent(
 
 async def test_workflow_fast_mode_post_message_does_not_block_loop():
     """Demo Fast Mode replay must not await each post_message activity."""
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
 
     wf = _bare_workflow_instance()
     wf.agent_id = "fm-child"
@@ -8379,7 +8379,7 @@ async def test_workflow_post_message_throttles_tree_updates():
     """Per-message tree broadcasts under 50-way demo fan-out must coalesce."""
     from datetime import timedelta
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from workflows.agent_workflow import _TREE_STATE_EMIT_MIN_INTERVAL
 
     wf = _bare_workflow_instance()

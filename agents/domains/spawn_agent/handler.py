@@ -17,7 +17,6 @@ from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
     EXPLORE_CANCEL_GRACE,
     EXPLORE_DEFAULT_MODEL,
@@ -33,13 +32,12 @@ from domains.spawn_agent.config import (
     resolve_explore_depth,
     should_skip_oai_demo_browser_spawn,
 )
-from domains.spawn_agent.oai_demo_july import apply_oai_demo_july_for_each
-from domains.spawn_agent.repo import fetch_explore_tool_evidence
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_wrap_up,
+    fetch_explore_tool_evidence,
     resolve_start_phase,
     spawn_explore_agent_activity,
     validate_spawn_params,
@@ -50,14 +48,16 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from tools.grep import fetch_local_data_summary
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
-from utils.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo_july import apply_oai_demo_july_for_each
 from utils.tool_call_ids import spawn_group_id
 
 _FAST_MODE_USER_COPY = (

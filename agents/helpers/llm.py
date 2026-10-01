@@ -6345,7 +6345,7 @@ async def _persist_mass_agent_root_title(
     api_key: str,
 ) -> None:
     """Best-effort PATCH of the mass-agent root title after schema generation fails."""
-    from domains.spawn_agent.config import mass_agent_root_title
+    from utils.oai_demo import mass_agent_root_title
 
     title = mass_agent_root_title(goal, include_title, None)
     if not title:
@@ -6420,7 +6420,7 @@ async def set_response_schema_activity(
         logger.error("No user messages provided for schema generation", agent_id=agent_id)
         return None
 
-    from domains.spawn_agent.config import mass_agent_root_title
+    from utils.oai_demo import mass_agent_root_title
 
     _safe_heartbeat(
         "Generating response schema and title via Rose" if include_title else "Generating response schema via Rose"
@@ -7068,7 +7068,7 @@ async def call_planner_llm_activity(
     """
     import time
 
-    from domains.set_plan.config import PLANNER_MODEL
+    from providers.rose.pools import PLANNER_MODEL
     from utils.prompts import build_planner_system_prompt
     from utils.tool_schemas import get_planner_response_model
 

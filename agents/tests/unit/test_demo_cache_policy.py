@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from domains.spawn_agent.config import (
+from providers.fast_cache.normalize import (
+    OAI_DEMO_ROOT_GOAL_HASH,
+    demo_cache_allowed,
+    demo_cache_goal_hashes,
+    soft_complete_allowed,
+)
+from utils.oai_demo import (
     OAI_DEMO_CHILD_GOAL_PREFIX,
     OAI_DEMO_CHILD_WINDOW,
     OAI_DEMO_ROOT_GOAL_PREFIX,
     OAI_DEMO_ROOT_TITLE,
     is_oai_demo_goal,
     mass_agent_root_title,
-)
-from providers.fast_cache.normalize import (
-    OAI_DEMO_ROOT_GOAL_HASH,
-    demo_cache_allowed,
-    demo_cache_goal_hashes,
-    soft_complete_allowed,
 )
 
 

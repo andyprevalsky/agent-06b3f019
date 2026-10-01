@@ -16,7 +16,6 @@ import structlog.contextvars
 from temporalio import activity
 
 from domains.spawn_agent.config import (
-    EXPLORE_GOAL_DISPLAY_LEN,
     EXPLORE_MESSAGE_TRUNCATE_LEN,
     EXPLORE_WINDDOWN_WINDOW,
     explore_limits_for_depth,
@@ -25,6 +24,9 @@ from domains.spawn_agent.config import (
 )
 from domains.spawn_agent.repo import (
     _resolve_explore_attachments_activity as _resolve_explore_attachments_activity,
+)
+from domains.spawn_agent.repo import (
+    fetch_explore_tool_evidence as fetch_explore_tool_evidence,
 )
 from domains.spawn_agent.repo import (
     fetch_full_network_metadata as fetch_full_network_metadata,
@@ -779,7 +781,7 @@ async def spawn_explore_agent_activity(
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name == "api_request":
-            from domains.api_request.config import api_request_disabled
+            from utils.kill_switches import api_request_disabled
 
             if api_request_disabled():
                 return {
@@ -802,7 +804,7 @@ async def spawn_explore_agent_activity(
                 # ends the leaf so the chip does not fill with 50 rejects.
                 if completion_no_evidence_rejects >= 2 and _oai_demo:
                     return {"success": True, "message": "Completion accepted"}
-                from domains.api_request.config import api_request_disabled
+                from utils.kill_switches import api_request_disabled
 
                 evidence_tools = "web_search, people_search, web_fetch, or grep"
                 if not api_request_disabled():

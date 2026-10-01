@@ -804,11 +804,8 @@ async def test_handler_explore_passes_canonical_oai_demo_flag():
     """
     import inspect
 
-    from domains.spawn_agent.config import (
-        OAI_DEMO_CHILD_GOAL_PREFIX,
-        is_oai_demo_goal,
-        resolve_explore_depth,
-    )
+    from domains.spawn_agent.config import resolve_explore_depth
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX, is_oai_demo_goal
     from domains.spawn_agent.handler import SpawnAgentManager
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
@@ -1882,7 +1879,7 @@ async def test_handler_fast_mode_skips_second_root_for_each_when_first_in_progre
 
 async def test_handler_fast_mode_does_not_self_skip_root_for_each_in_progress():
     """The in-flight first for_each must still spawn (same toolCallId IN_PROGRESS)."""
-    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+    from utils.oai_demo_july import JULY_FOR_EACH_ITEMS
     import domains.spawn_agent.handler as h
 
     fake_mgr = _FakeDelegateManager([])
@@ -2604,7 +2601,7 @@ async def test_handler_oai_demo_for_each_pins_july_creators():
     """test-mass-agent-run-0 Fast Mode for_each must spawn the July 50, not a live list."""
     from tools.base import EventType, MessageStatus, ToolEvent
     import domains.spawn_agent.handler as h
-    from domains.spawn_agent.oai_demo_july import JULY_FOR_EACH_ITEMS
+    from utils.oai_demo_july import JULY_FOR_EACH_ITEMS
 
     fake_mgr = _FakeDelegateManager(
         [ToolEvent(type=EventType.POST_MESSAGE, title="sub ok", message="ok", status=MessageStatus.FINISHED)]
@@ -3179,7 +3176,7 @@ async def test_spawn_explore_agent_activity_reraises_cancel_on_demo():
     """Demo cancel re-raises like live — Fast Mode does not change the harness."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -3274,7 +3271,7 @@ async def test_spawn_explore_agent_activity_accepts_second_no_evidence_completio
     """A demo Fast Mode completion stub must not reject-loop the explore chip."""
     from unittest.mock import patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     completion_results = []
@@ -3344,7 +3341,7 @@ async def test_spawn_explore_agent_activity_explicit_live_reraises_cancel_on_dem
     """Passed False must re-raise even when the explore goal matches a demo prefix."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_CHILD_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_CHILD_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -3375,7 +3372,7 @@ async def test_spawn_explore_agent_activity_ignores_fast_mode_root_for_class():
     """A Fast Mode demo root must not promote a live explore when the flag is omitted."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_agent.service import spawn_explore_agent_activity
 
     fake_ws = MagicMock()
@@ -4260,7 +4257,7 @@ async def test_handler_for_each_oai_demo_timeout_recovery_reconciles_instead_of_
     succeeded, then one drain entered ``_recover_oai_demo_for_each_timeout`` with
     an empty in-memory map and never called fetch_child_terminal_result_activity.
     """
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from tools.base import MessageStatus
     import domains.spawn_agent.handler as h
 

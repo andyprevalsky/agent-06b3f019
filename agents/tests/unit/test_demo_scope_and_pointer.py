@@ -12,12 +12,7 @@ import pytest
 from domains.spawn_agent.config import (
     EXPLORE_CANCEL_GRACE,
     LIVE_EXPLORE_PARENT_WAIT,
-    OAI_DEMO_CHILD_GOAL_PREFIX,
-    OAI_DEMO_CHILD_WINDOW,
-    OAI_DEMO_ROOT_GOAL_PREFIX,
     explore_parent_wait_timeout,
-    is_oai_demo_goal,
-    is_oai_demo_mass_agent_task,
     resolve_explore_depth,
     resolve_explore_oai_demo,
     should_skip_oai_demo_browser_spawn,
@@ -43,7 +38,14 @@ from domains.spawn_browser_agent_v3.config import (
     skip_browser_network_recording,
 )
 from helpers.fetch_queue_pointer import fetch_agent_queue_pointer
-from utils.source_connect_gates import raise_source_connect_gates
+from helpers.source_connect_gates import raise_source_connect_gates
+from utils.oai_demo import (
+    OAI_DEMO_CHILD_GOAL_PREFIX,
+    OAI_DEMO_CHILD_WINDOW,
+    OAI_DEMO_ROOT_GOAL_PREFIX,
+    is_oai_demo_goal,
+    is_oai_demo_mass_agent_task,
+)
 
 
 def test_explore_parent_wait_timeout_caps_live_not_demo():
@@ -344,8 +346,8 @@ def test_raise_source_connect_gates_dedups_and_swallows_reject():
 
     async def _run():
         with (
-            patch("utils.source_connect_gates.raise_gate_direct", new=fake_raise),
-            patch("utils.source_connect_gates.workflow.logger.info"),
+            patch("helpers.source_connect_gates.raise_gate_direct", new=fake_raise),
+            patch("helpers.source_connect_gates.workflow.logger.info"),
         ):
             await raise_source_connect_gates(
                 wf,
@@ -639,7 +641,7 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
         wait_for_fast_mode_explore_slot,
         wrap_up_payload_from_failure,
     )
-    from domains.spawn_agent.oai_demo_july import (
+    from utils.oai_demo_july import (
         apply_oai_demo_july_for_each,
         extract_oai_demo_creator_name,
         july_explore_goal_hash_for_goal,

@@ -7,6 +7,7 @@ import os
 from typing import Any, Mapping, Optional
 
 from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
+from utils.oai_demo import is_oai_demo_goal, is_oai_demo_mass_agent_task
 
 # External service keys
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
@@ -51,8 +52,6 @@ def browser_start_to_close_timeout_minutes(
     Polar / high BROWSER_MAX_ITERATIONS runs scale the ceiling with the step
     budget (~30m per 100 steps, matching Odysseys Opus wall-clock at 100 steps).
     """
-    from domains.spawn_agent.config import is_oai_demo_goal, is_oai_demo_mass_agent_task
-
     demo = is_oai_demo_goal(goal)
     if workflow_instance is not None:
         demo = demo or is_oai_demo_mass_agent_task(workflow_instance)
@@ -67,9 +66,9 @@ def browser_start_to_close_timeout_minutes(
 
 def skip_browser_network_recording(*, fast_mode: bool, goal: str = "") -> bool:
     """Skip CDP Network.enable only on the demo Fast Mode tree."""
-    from domains.spawn_agent.config import is_oai_demo_goal
-
     return bool(fast_mode and is_oai_demo_goal(goal))
+
+
 HEARTBEAT_TIMEOUT_SECONDS = 120
 # A background task heartbeats at this cadence independent of the main loop, so a
 # CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for

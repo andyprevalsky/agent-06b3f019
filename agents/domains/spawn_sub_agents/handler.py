@@ -15,7 +15,6 @@ import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from domains.spawn_agent.config import is_oai_demo_mass_agent_task
 from domains.spawn_sub_agents.config import MAX_DEPTH
 from domains.spawn_sub_agents.service import (
     extract_file_pointers_from_structured_response,
@@ -29,6 +28,7 @@ from helpers.generation_handoff import (
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
+from utils.oai_demo import is_oai_demo_mass_agent_task
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()

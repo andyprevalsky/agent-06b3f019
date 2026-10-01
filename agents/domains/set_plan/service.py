@@ -16,14 +16,13 @@ from temporalio.common import RetryPolicy
 
 from domains.set_plan.config import (
     DEFAULT_GOAL,
-    MAX_RETRIES,  # noqa: F401 — re-exported for handler layer
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
-    PLANNER_MODEL,
 )
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from helpers.context_scope import is_internal_subagent_message
+from providers.rose.pools import PLANNER_MODEL
 from tools.prompts import TOOL_PROMPTS
 from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS, TOOL_MODELS
 

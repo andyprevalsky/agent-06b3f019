@@ -1148,7 +1148,7 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
 
 def test_oai_demo_reasoning_fast_mode_step_uses_july_slot():
     """Leftover GPs must not shift catalog-demo assemble-final off July p:6."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from loop.dag_executor import (
         DAGTask,
         OAI_DEMO_ASSEMBLE_FINAL_REASONING_STEP,
@@ -1249,7 +1249,7 @@ async def test_execute_dag_strict_readonly_populate_miss_skips_without_error():
 
 async def test_execute_dag_skips_oai_demo_leftover_gp_after_for_each():
     """Catalog demo leftover GPs after for_each must not spawn — they desync assemble-final cache."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
 
     leftover_goal = "Create a 90-day content calendar for Andy Prevalsky"
     plan_data = {

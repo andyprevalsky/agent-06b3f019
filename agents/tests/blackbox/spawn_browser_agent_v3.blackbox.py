@@ -227,7 +227,7 @@ def test_browser_spawn_goal_uses_tool_call_goal_verbatim():
 
 def test_browser_fast_mode_timeout_is_demo_only():
     """Live Fast Mode purchases keep 30m; only the OAi demo gets the 3m ceiling."""
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_browser_agent_v3.config import (
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
         ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES_FAST_MODE,
@@ -19834,7 +19834,7 @@ async def test_manager_passes_fast_mode_cache_for_browser_activity():
 
 
 async def test_manager_uses_three_minute_ceiling_only_for_demo_fast_mode():
-    from domains.spawn_agent.config import OAI_DEMO_ROOT_GOAL_PREFIX
+    from utils.oai_demo import OAI_DEMO_ROOT_GOAL_PREFIX
     from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
 
     class _FakeActivityHandle:
