@@ -2030,6 +2030,7 @@ class RoseClient:
             "claude_token_error": response.claude_token_error,
             "gpt_token_error": response.gpt_token_error,
             "mode": mode,
+            "timing": response.timing,
         }
 
     async def collect(
