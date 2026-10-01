@@ -1,21 +1,59 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import {
+  createRouterCompletionDeadline,
+  streamBeforeRouterCompletionDeadline,
+} from '../../providers/chat/routerCompletionDeadline';
+import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import { createStreamingCompletion } from '../../providers/rose';
 import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastRoute';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
-function completion(): Response {
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
+// Scaled from the chat-lifecycle web_search failure: a direct Cerebras 429
+// left the fast fallback waiting behind a 500ms hedge for the slow same-model
+// spill, and the full router reply then landed past the 3s completion bound.
+const ROUTER_DEADLINE_MS = 800;
+const FAST_REPLY_MS = 400;
+
+function delayedCompletion(delayMs: number, signal?: AbortSignal | null): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    const timer = setTimeout(() => {
       const payload =
         'data: {"choices":[{"index":0,"delta":{"content":"{\\"action\\":\\"direct_answer\\"}"}}]}\n\n' +
         'data: [DONE]\n\n';
-      controller.enqueue(new TextEncoder().encode(payload));
-      controller.close();
-    },
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(payload));
+          controller.close();
+        },
+      });
+      resolve(
+        new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      );
+    }, delayMs);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error('aborted'));
+      },
+      { once: true }
+    );
   });
-  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+function neverAnswers(signal?: AbortSignal | null, onAbort?: () => void): Promise<Response> {
+  return new Promise<Response>((_resolve, reject) => {
+    signal?.addEventListener(
+      'abort',
+      () => {
+        onAbort?.();
+        reject(new Error('slow same-model host cancelled'));
+      },
+      { once: true }
+    );
+  });
 }
 
 async function run(): Promise<void> {
@@ -36,34 +74,43 @@ async function run(): Promise<void> {
     assert.equal(url, OPENROUTER_API_URL);
     const model = (JSON.parse(String(init?.body)) as { model: string }).model;
     models.push(model);
-    if (model === OPENROUTER_FAST_CHAT_MODEL) return completion();
-    return new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener(
-        'abort',
-        () => {
-          slowHostAborted = true;
-          reject(new Error('slow same-model host cancelled'));
-        },
-        { once: true }
-      );
+    if (model === OPENROUTER_FAST_CHAT_MODEL) return delayedCompletion(FAST_REPLY_MS, init?.signal);
+    return neverAnswers(init?.signal, () => {
+      slowHostAborted = true;
     });
   }) as typeof fetch;
 
+  const deadline = createRouterCompletionDeadline(ROUTER_DEADLINE_MS);
+  const startedAt = Date.now();
   try {
-    const chunks = [];
-    for await (const chunk of await createStreamingCompletion({
+    const options = buildRouterCompletionOptions({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'Route this request' }],
-      provider_route: 'direct-cerebras',
-    })) {
-      chunks.push(chunk);
+      providerRoute: 'direct-cerebras',
+      providerFastMode: true,
+      abortSignal: deadline.signal,
+    });
+    let text = '';
+    for await (const chunk of streamBeforeRouterCompletionDeadline(
+      await createStreamingCompletion(options),
+      deadline
+    )) {
+      text += chunk.choices[0]?.delta?.content ?? '';
     }
-    const text = chunks.map((chunk) => chunk.choices[0]?.delta?.content ?? '').join('');
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(
+      deadline.expired(),
+      false,
+      `a rate-capped router reply must land inside the completion bound (${elapsedMs}ms)`
+    );
     assert.match(text, /direct_answer/);
-    assert.ok(models.includes('qwen/qwen3.8-27b'));
-    assert.ok(models.includes(OPENROUTER_FAST_CHAT_MODEL));
-    assert.equal(slowHostAborted, true, 'the winning fast route cancels the stalled host');
+    assert.equal(models[0], OPENROUTER_FAST_CHAT_MODEL, 'the fast chat route must lead');
+    if (models.length > 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(slowHostAborted, true, 'the winning fast route cancels the stalled host');
+    }
   } finally {
+    deadline.dispose();
     globalThis.fetch = originalFetch;
     if (originalCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
     else process.env.CEREBRAS_API_KEY = originalCerebrasKey;
