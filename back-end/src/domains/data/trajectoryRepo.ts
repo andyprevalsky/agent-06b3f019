@@ -10,7 +10,7 @@ export interface AgentTrajectoryRow {
   messageId: string;
   rootAgentId: string;
   agentId: string;
-  role: 'SYSTEM' | 'USER' | 'ASSISTANT' | 'TOOL';
+  role: 'USER' | 'ASSISTANT' | 'TOOL';
   surface: string;
   createdAt: Date;
   searchText: string;
@@ -32,6 +32,9 @@ function where(query: Query): Prisma.Sql {
   const filters = query.filters;
   const clauses: Prisma.Sql[] = [
     Prisma.sql`s."userId" = ${query.userId}`,
+    // Keep this predicate even after the indexer is fixed: older derived rows
+    // must never become visible through a path, role, or cursor query.
+    Prisma.sql`s.role <> 'SYSTEM'`,
     // A prior trajectory is either a finalized archive or a terminal live run.
     // Concurrent active agents otherwise bury the older evidence in results.
     Prisma.sql`(s."archivePath" IS NOT NULL OR EXISTS (
@@ -62,15 +65,12 @@ function where(query: Query): Prisma.Sql {
   if (filters?.pathMessageId !== undefined)
     clauses.push(Prisma.sql`s."messageId" = ${filters.pathMessageId}`);
   if (filters?.role !== undefined) clauses.push(Prisma.sql`s.role = ${filters.role}`);
-  else if (filters?.pathRole === undefined) clauses.push(Prisma.sql`s.role <> 'SYSTEM'`);
   if (filters?.surface !== undefined) clauses.push(Prisma.sql`s.surface = ${filters.surface}`);
   // Replayed LLM inputs are often copies of earlier messages. Keep direct
   // messages and model outputs in ordinary search; callers can request replay
   // context or the full corpus explicitly when that is the evidence they need.
   if (filters?.recordKind === undefined) {
-    if (filters?.role !== 'SYSTEM' && filters?.pathRole !== 'SYSTEM') {
-      clauses.push(Prisma.sql`s."traceKind" <> 'llm_context'`);
-    }
+    clauses.push(Prisma.sql`s."traceKind" <> 'llm_context'`);
   } else if (filters.recordKind !== 'all') {
     clauses.push(Prisma.sql`s."traceKind" = ${filters.recordKind}`);
   }

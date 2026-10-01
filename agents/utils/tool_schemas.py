@@ -505,9 +505,9 @@ class GrepTool(BaseModel):
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
     )
-    role: Optional[Literal["SYSTEM", "USER", "ASSISTANT", "TOOL"]] = Field(
+    role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
-        description="Message role in agent_trajectories or agent_network. SYSTEM is returned only when explicitly selected. Implies agent_trajectories when sources are omitted.",
+        description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
     )
     record_kind: Optional[Literal["message", "llm_output", "llm_context", "all"]] = Field(
         default=None,

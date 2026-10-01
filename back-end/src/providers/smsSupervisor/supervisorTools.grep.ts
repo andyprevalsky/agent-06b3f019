@@ -20,7 +20,7 @@ const log = createLogger('SmsSupervisorGrep');
 export interface GrepArgs {
   pattern?: string;
   source?: string | null;
-  role?: 'SYSTEM' | 'USER' | 'ASSISTANT' | 'TOOL' | null;
+  role?: 'USER' | 'ASSISTANT' | 'TOOL' | null;
   record_kind?: 'message' | 'llm_output' | 'llm_context' | 'all' | null;
   surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP' | null;
   trace_path?: string | null;

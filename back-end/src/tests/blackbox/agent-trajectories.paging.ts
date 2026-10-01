@@ -19,12 +19,18 @@ export async function proveTreeRolesAndPaging(
   priorChildId: string,
   currentId: string
 ): Promise<void> {
-  const [systemMessage] = requireHits(
-    await grep(ownerId, { pattern: 'system-only decoy', role: 'SYSTEM', trace_path: priorId }),
-    1
-  );
   requireHits(await grep(ownerId, { pattern: 'system-only decoy', trace_path: priorId }), 0);
-  requireHits(await grep(ownerId, { trace_path: systemMessage.path, role: 'SYSTEM' }), 1);
+  for (const query of [
+    { pattern: 'system-only decoy', role: 'SYSTEM', trace_path: priorId },
+    { pattern: 'system-only decoy', filters: { role: 'SYSTEM' }, trace_path: priorId },
+    { trace_path: `agent_trajectories/${priorId}/SYSTEM/system-message` },
+    { source: 'agent_network', pattern: 'system-only decoy', role: 'SYSTEM' },
+  ]) {
+    const result = await grep(ownerId, query);
+    if (result.status !== 400) {
+      throw new Error(`SYSTEM selector was accepted: ${JSON.stringify(result)}`);
+    }
+  }
 
   const treeQuery = {
     source: 'agent_trajectories',

@@ -35,7 +35,7 @@ DECLARE
   agent_goal TEXT;
   agent_title TEXT;
 BEGIN
-  IF btrim(NEW.text) = '' THEN
+  IF btrim(NEW.text) = '' OR NEW.role::text = 'SYSTEM' THEN
     DELETE FROM "AgentTrajectorySearch"
     WHERE "messageId" = NEW.id AND "archivePath" IS NULL;
     RETURN NEW;
@@ -128,5 +128,8 @@ SELECT m.id, a."userId", roots.root_id, a.id, a.source::text,
 FROM "Message" m
 JOIN "Agent" a ON a.id = m."agentId"
 JOIN roots ON roots.id = a.id
-WHERE btrim(m.text) <> '' AND a."userId" IS NOT NULL
+WHERE btrim(m.text) <> '' AND m.role::text <> 'SYSTEM' AND a."userId" IS NOT NULL
 ON CONFLICT ("messageId") DO NOTHING;
+
+-- Remove rows left by earlier local projections before this role was excluded.
+DELETE FROM "AgentTrajectorySearch" WHERE role = 'SYSTEM';

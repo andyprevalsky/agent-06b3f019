@@ -312,18 +312,13 @@ export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient)
     ) {
       throw new Error(`SMS metadata grep did not filter by role: ${metadataOnly.result}`);
     }
-    const systemResult = await executeGrepTool(
-      { role: 'SYSTEM', trace_path: prior.id, pattern: token },
-      userId
-    );
-    const systemMatches = JSON.parse(systemResult.result) as { matches: Array<{ role: string }> };
-    if (
-      !systemResult.success ||
-      systemMatches.matches.length !== 1 ||
-      systemMatches.matches[0].role !== 'SYSTEM'
-    ) {
-      throw new Error(`SMS grep did not honor SYSTEM role: ${systemResult.result}`);
+    let systemRejected = false;
+    try {
+      await executeGrepTool({ role: 'SYSTEM', trace_path: prior.id, pattern: token }, userId);
+    } catch {
+      systemRejected = true;
     }
+    if (!systemRejected) throw new Error('SMS grep accepted a SYSTEM role');
     const firstPage = await executeGrepTool(
       {
         source: 'agent_trajectories',

@@ -65,10 +65,11 @@ export function parseAgentNetworkFilters(params: GrepParams): AgentNetworkGrepFi
     throw new InvalidGrepParamError('filters.path');
   }
   const role = parseFilterString(raw, 'role')?.toUpperCase();
-  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL', 'SYSTEM'].includes(role)) {
+  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
     throw new InvalidGrepParamError('role');
   }
   const path = parsed?.source === 'agent_network' ? parsed : undefined;
+  if (path?.role === 'SYSTEM') throw new InvalidGrepParamError('filters.path');
   return {
     pathAgentId: path?.agentId,
     pathRole: path?.role,
@@ -114,10 +115,10 @@ export function parseAgentTrajectoryFilters(
   const role = parseFilterString(raw, 'role')?.toUpperCase();
   const surface = parseFilterString(raw, 'surface')?.toUpperCase();
   const recordKind = parseFilterString(raw, 'record_kind')?.toLowerCase();
-  if (role !== undefined && !['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(role)) {
+  if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
     throw new InvalidGrepParamError('filters.role');
   }
-  if (path?.role !== undefined && !['SYSTEM', 'USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
+  if (path?.role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(path.role)) {
     throw new InvalidGrepParamError('filters.path');
   }
   if (surface !== undefined && !['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'].includes(surface)) {

@@ -12,7 +12,7 @@ import { withArchiveManifestLock } from './traceArchiveManifest';
 import type { ScopedDbFixture } from './traceArchiveFixture';
 
 const END_FIXTURE_PATH = 'db/end.fixture.json.gz.enc';
-const TRACE_ROLES = new Set(['SYSTEM', 'USER', 'ASSISTANT', 'TOOL']);
+const TRACE_ROLES = new Set(['USER', 'ASSISTANT', 'TOOL']);
 const WRITE_BATCH_SIZE = 100;
 
 type RecordValue = Record<string, unknown>;
@@ -138,6 +138,9 @@ function llmRows(
     const text = textParts(entry?.content ?? entry?.text)
       .join('\n')
       .trim();
+    // Some LLM dumps flatten stored SYSTEM turns into a user turn with this
+    // prefix. Treat those as SYSTEM content, regardless of the wrapper role.
+    if (role === 'USER' && /^\[SYSTEM\]:/i.test(text)) continue;
     if (text) candidates.push({ role, kind: 'llm_context', text });
   }
   const output = textParts(dump.output).join('\n').trim();

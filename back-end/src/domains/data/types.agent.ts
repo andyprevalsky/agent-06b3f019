@@ -24,7 +24,7 @@ export interface AgentTrajectoryGrepFilters {
   pathMessageId?: string;
   since?: Date;
   until?: Date;
-  role?: 'SYSTEM' | 'USER' | 'ASSISTANT' | 'TOOL';
+  role?: 'USER' | 'ASSISTANT' | 'TOOL';
   surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP';
   recordKind?: 'all' | 'message' | 'llm_output' | 'llm_context';
 }

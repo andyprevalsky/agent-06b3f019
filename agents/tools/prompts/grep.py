@@ -5,7 +5,7 @@ PROMPT = """Search this user's local records and current agent tree.
 - `pattern` is a regex over record text. Omit it for metadata-only agent searches.
 - `sources` selects one or more sources; omitted defaults: messages, network, agent_network. `gmail` aliases email.
 - `agent_trajectories` contains prior user-owned chat, SMS, and Temporal runs, including R2 archives; `agent_network` contains the current tree.
-- Typed agent parameters: `role` (SYSTEM, USER, ASSISTANT, TOOL), `record_kind` (message, llm_output, llm_context, all), `surface`, `trace_path`, `since`, `until`. SYSTEM rows require an explicit SYSTEM role. Agent parameters without `sources` select agent_trajectories.
+- Typed agent parameters: `role` (USER, ASSISTANT, TOOL), `record_kind` (message, llm_output, llm_context, all), `surface`, `trace_path`, `since`, `until`. Agent parameters without `sources` select agent_trajectories.
 - `trace_path` at a root includes its child tree; a child path narrows to one agent. For trajectory pages, keep the same query and set `page_after` to `next_page_after`; `order` selects newest_first or oldest_first.
 - Other source-specific narrowing remains in `filters`: messages (person, since, path); transactions (since, until, account, min_amount, max_amount, status, include_pending_in_totals, path); documents (document_source, since, until, path, tag).
 - Flags: -A after, -B before, -C both, -n line numbers, -i case insensitive, head_limit, offset, multiline.

@@ -437,7 +437,8 @@ function agentNetworkPathFilters(params: {
   pathMessageId?: string;
   role?: string;
 }): Prisma.Sql {
-  const parts: Prisma.Sql[] = [];
+  // A role/path filter must never expose SYSTEM, including legacy messages.
+  const parts: Prisma.Sql[] = [Prisma.sql`AND m.role::text <> 'SYSTEM'`];
   if (params.pathAgentId !== undefined)
     parts.push(Prisma.sql`AND m."agentId" = ${params.pathAgentId}`);
   if (params.pathRole !== undefined) parts.push(Prisma.sql`AND m.role::text = ${params.pathRole}`);
