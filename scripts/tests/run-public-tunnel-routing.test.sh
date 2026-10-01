@@ -288,6 +288,7 @@ while [ "$#" -gt 0 ]; do
   [ "$1" = "--domain" ] && domain="$2"
   shift
 done
+sleep 1
 printf '{"url":"https://%s"}\n' "${domain:-stub.ngrok-free.dev}"
 exec sleep 30
 STUB
@@ -307,14 +308,16 @@ fallback_domain_for() { # fallback_domain_for <workspace name>
       PIDS=(); NAMES=()
       ensure_ngrok_domain_reserved() { printf "%s\n" "$1" >> "$RUN_CONTEXT_DIR/reserved"; }
       cloudflare_tunnel_edge_is_routing() { return 0; }
-      start_ngrok_ephemeral_tunnel >/dev/null
+      # run.sh only calls this in a conditional, which suspends errexit for
+      # its URL poll; an unconditional call dies on the first empty poll.
+      start_ngrok_ephemeral_tunnel >&2 || exit 1
       kill "$NGROK_PID" 2>/dev/null || true
       echo "$PUBLIC_BASE_URL"
     ' 2>"$TMP/ngrok_fallback.err"
 }
 
 out="$(fallback_domain_for cloud-44cb5599-bench-1788291482-530832-87704)" \
-  || fail "case 10: fallback tunnel failed to start ($(cat "$TMP/ngrok_fallback.err"))"
+  || fail "case 10: fallback tunnel failed to start ($(cat "$TMP/ngrok_fallback.err"); log: $(cat "$TMP/ctx/ngrok-fallback.log" 2>/dev/null))"
 [ "$out" = "https://rose-cloud-44cb5599-bench.ngrok.app" ] \
   || fail "case 10: isolated run must bind the worktree fallback domain, got $out"
 [ "$(cat "$TMP/ctx/reserved")" = "rose-cloud-44cb5599-bench.ngrok.app" ] \
