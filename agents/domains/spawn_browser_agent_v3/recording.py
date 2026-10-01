@@ -23,8 +23,8 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
 from types import SimpleNamespace
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
