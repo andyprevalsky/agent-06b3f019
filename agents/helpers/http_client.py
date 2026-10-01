@@ -18,6 +18,7 @@ module generalises the pattern for the tool/domain repos.
 from __future__ import annotations
 
 import asyncio
+from http.cookiejar import DefaultCookiePolicy
 from typing import Dict, Optional, Tuple
 
 import httpx
@@ -42,6 +43,10 @@ def _pooled_client(name: str, limits: httpx.Limits) -> httpx.AsyncClient:
         if not client.is_closed and (loop is None or loop is client_loop):
             return client
     client = httpx.AsyncClient(limits=limits, timeout=30.0)
+    # One client serves every user's and provider's credentials, so a Set-Cookie
+    # from one account's response must never ride along on the next account's
+    # request. AsyncClient copies a passed-in jar, so set the policy in place.
+    client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
     _clients[name] = (client, loop)
     return client
 

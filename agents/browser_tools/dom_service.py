@@ -49,6 +49,10 @@ def normalize_action_coordinates(coordinates: Optional[Any]) -> Optional[Dict[st
     )
 
 
+DOM_TREES_TIMEOUT_SECONDS = 10.0
+DOM_TREES_GRACE_SECONDS = 2.0
+
+
 async def _no_pending_network_requests(self: Any) -> list:
     return []
 
@@ -110,14 +114,13 @@ async def _get_all_trees_without_serial_probes(self: Any, target_id: Any) -> Any
     }
     started = time.time()
     tasks = {key: create_task_with_error_handling(factory(), name=f"get_{key}") for key, factory in factories.items()}
-    _, pending = await asyncio.wait(tasks.values(), timeout=10.0)
+    # Upstream cancels and re-sends slow requests after 10s, but a cancelled CDP
+    # request keeps running in the renderer, so the retry doubles the work on an
+    # already-stalled main thread. Give the originals the extra 2s instead.
+    _, pending = await asyncio.wait(tasks.values(), timeout=DOM_TREES_TIMEOUT_SECONDS)
     if pending:
-        for key, task in list(tasks.items()):
-            if task in pending:
-                task.cancel()
-                tasks[key] = create_task_with_error_handling(factories[key](), name=f"get_{key}_retry")
-        _, pending_retry = await asyncio.wait([t for t in tasks.values() if not t.done()], timeout=2.0)
-        for task in pending_retry:
+        _, pending = await asyncio.wait(pending, timeout=DOM_TREES_GRACE_SECONDS)
+        for task in pending:
             task.cancel()
 
     # The AX tree only enriches names/roles; a page structure without it is

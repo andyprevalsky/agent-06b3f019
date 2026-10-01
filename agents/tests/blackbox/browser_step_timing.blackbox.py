@@ -1,7 +1,9 @@
 """Blackbox tests for browser step phase timing (browser.step.phases)."""
 
 import asyncio
+import gc
 import re
+import time
 from pathlib import Path
 
 from structlog.testing import capture_logs
@@ -300,7 +302,117 @@ def test_browser_loop_never_awaits_otp_poll():
     assert harvest < loop.index("browser_turn_messages.extend(otp_user_messages[otp_history_count:])")
     assert harvest < loop.index('step_timer.mark("llm_decision")')
     teardown = source[source.rindex("finally:") :]
-    assert "otp_poll_task.cancel()" in teardown
+    assert "await _drain_otp_poll(otp_poll_task)" in teardown
+
+
+async def test_otp_poll_teardown_lets_inflight_writes_finish_then_cancels():
+    from domains.spawn_browser_agent_v3.handler import _drain_otp_poll
+
+    unretrieved = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+    try:
+        saved = []
+
+        async def finishing_save():
+            await asyncio.sleep(0.02)
+            saved.append("credential-ref")
+            return 1
+
+        finishing = asyncio.create_task(finishing_save())
+        await _drain_otp_poll(finishing, grace_s=1.0)
+        assert saved == ["credential-ref"] and not finishing.cancelled()
+
+        async def hung():
+            await asyncio.Event().wait()
+
+        stuck = asyncio.create_task(hung())
+        started = time.monotonic()
+        await _drain_otp_poll(stuck, grace_s=0.05)
+        await asyncio.sleep(0)
+        assert stuck.cancelled() and time.monotonic() - started < 0.5
+
+        async def failing():
+            raise RuntimeError("backend 502")
+
+        failed = asyncio.create_task(failing())
+        await asyncio.sleep(0)
+        await _drain_otp_poll(failed)
+        await _drain_otp_poll(None)
+        del failed
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+    assert not unretrieved, unretrieved
+
+
+async def test_otp_credential_refs_survive_realm_rebind_mid_poll():
+    """A realm transition rebinds credential_refs_by_secret_ref while a poll is in
+    flight; refs the poll finds must still reach the dict execute_action reads."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_new_otp_user_messages,
+        _spawn_browser_agent_activity_v3_real,
+    )
+    from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
+
+    otp_credential_refs: dict = {}
+    credential_refs_by_secret_ref = {"pw-ref": {"kind": "password", "id": "p1"}}
+    release = asyncio.Event()
+
+    async def poll():
+        await release.wait()
+        return await _append_new_otp_user_messages(
+            otps=[ExtractedOTP("481516", "Shop", "now", 5, 600, credential_id="c-9")],
+            seen_otp_codes=set(),
+            otp_user_messages=[],
+            credential_refs_by_secret_ref=otp_credential_refs,
+            agent_id="a1",
+            task_id=None,
+        )
+
+    task = asyncio.create_task(poll())
+    await asyncio.sleep(0)
+    credential_refs_by_secret_ref = {"pw-ref-2": {"kind": "password", "id": "p2"}}
+    release.set()
+    await task
+    credential_refs_by_secret_ref.update(otp_credential_refs)
+    assert credential_refs_by_secret_ref["481516"] == {"kind": "email_otp", "id": "c-9"}
+
+    source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    loop = source[source.index("while iteration < MAX_ITERATIONS:") :]
+    assert "credential_refs_by_secret_ref=otp_credential_refs" in loop
+    merge = loop.index("credential_refs_by_secret_ref.update(otp_credential_refs)")
+    assert loop.index("otp_poll_task = _harvest_otp_poll(otp_poll_task)") < merge
+    assert merge < loop.index('step_timer.mark("execute_action")')
+
+
+async def test_otp_source_failure_keeps_other_sources_codes():
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    from domains.spawn_browser_agent_v3 import service_crypto
+
+    async def email_down(*_args, **_kwargs):
+        raise RuntimeError("gmail 502")
+
+    async def sms(*_args, **_kwargs):
+        now = datetime.now(timezone.utc).isoformat()
+        return [{"id": "s1", "from": "+18885551234", "to": "me", "body": "Your code is 246810", "date": now}]
+
+    async def no_imessages(*_args, **_kwargs):
+        return []
+
+    with (
+        patch.object(service_crypto, "fetch_recent_emails", new=email_down),
+        patch.object(service_crypto, "fetch_recent_sms_messages", new=sms),
+        patch.object(service_crypto, "fetch_recent_imessages", new=no_imessages),
+    ):
+        otps = await service_crypto.fetch_recent_otps("user-1", "http://backend", "key")
+    assert [otp.code for otp in otps] == ["246810"]
 
 
 async def test_otp_sources_fetched_concurrently():
@@ -433,14 +545,12 @@ async def test_browser_use_pending_request_probe_disabled():
         DOMWatchdog._get_pending_network_requests = original
 
 
-async def test_dom_build_skips_serial_page_evaluates():
+async def _build_dom_trees(sent, *, delays=None):
     from types import SimpleNamespace
 
     from browser_use.dom.service import DomService
 
     from browser_tools.dom_service import drop_browser_use_serial_dom_probes
-
-    sent = []
 
     class _Domain:
         def __init__(self, name):
@@ -449,6 +559,7 @@ async def test_dom_build_skips_serial_page_evaluates():
         def __getattr__(self, method):
             async def call(params=None, session_id=None):
                 sent.append(f"{self.name}.{method}")
+                await asyncio.sleep((delays or {}).get(method, 0))
                 if method == "captureSnapshot":
                     return {"documents": [{"nodes": []}] * 3, "strings": []}
                 return {"root": {"nodeId": 1}}
@@ -482,15 +593,38 @@ async def test_dom_build_skips_serial_page_evaluates():
     original = DomService._get_all_trees
     try:
         drop_browser_use_serial_dom_probes()
-        trees = await DomService._get_all_trees(service, "target-1")
+        return await DomService._get_all_trees(service, "target-1")
     finally:
         DomService._get_all_trees = original
+
+
+async def test_dom_build_skips_serial_page_evaluates():
+    sent = []
+    trees = await _build_dom_trees(sent)
     assert not [call for call in sent if call.startswith("Runtime.")], sent
     assert sorted(sent) == ["DOM.getDocument", "DOMSnapshot.captureSnapshot"]
     assert trees.ax_tree == {"nodes": []}, "a failed AX tree must not fail the DOM build"
     assert trees.device_pixel_ratio == 2.0
     assert len(trees.snapshot["documents"]) == 2
     assert trees.js_click_listener_backend_ids is None
+
+
+async def test_slow_dom_tree_request_is_waited_on_not_resent():
+    """A cancelled CDP request keeps running in the renderer; re-sending it after
+    the first budget doubles the work on an already-stalled main thread."""
+    from unittest.mock import patch
+
+    from browser_tools import dom_service
+
+    sent = []
+    with (
+        patch.object(dom_service, "DOM_TREES_TIMEOUT_SECONDS", 0.05),
+        patch.object(dom_service, "DOM_TREES_GRACE_SECONDS", 0.5),
+    ):
+        trees = await _build_dom_trees(sent, delays={"captureSnapshot": 0.15})
+    assert sent.count("DOMSnapshot.captureSnapshot") == 1, sent
+    assert sent.count("DOM.getDocument") == 1, sent
+    assert len(trees.snapshot["documents"]) == 2
 
 
 class _PrefetchDom:
@@ -506,6 +640,37 @@ class _PrefetchDom:
         if self.error:
             raise self.error
         return {"url": self.url, "title": "Shop", "dom_tree": "[5]<button>Add</button>"}
+
+    async def get_page_identity(self):
+        return {"url": self.url, "title": "Shop"}
+
+
+async def test_stalled_speculative_state_gives_up_at_soft_budget():
+    """A stalled speculative build must not eat the step budget before the
+    fresh read_browser_state build that replaces it."""
+    from unittest.mock import patch
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.state_prefetch import BrowserStatePrefetch
+
+    stalled = _PrefetchDom(delay=30)
+    prefetch = BrowserStatePrefetch(settle_s=0)
+    prefetch.arm("click", success=True)
+    prefetch.start(stalled)
+    build = prefetch._task
+    started = time.monotonic()
+    with patch.object(handler, "BROWSER_STATE_SOFT_TIMEOUT_SECONDS", 0.05):
+        assert await handler._take_speculative_browser_state(prefetch, stalled) is None
+    assert time.monotonic() - started < 1.0
+    await asyncio.sleep(0)
+    assert build.cancelled() and not prefetch.in_flight
+
+    ready = _PrefetchDom()
+    prefetch.arm("click", success=True)
+    prefetch.start(ready)
+    with patch.object(handler, "BROWSER_STATE_SOFT_TIMEOUT_SECONDS", 0.05):
+        state = await handler._take_speculative_browser_state(prefetch, ready)
+    assert state["dom_tree"] == "[5]<button>Add</button>"
 
 
 async def test_speculative_state_only_after_page_changing_actions():
@@ -607,6 +772,87 @@ async def test_pooled_http_client_reused_per_loop():
     http_client._clients.clear()
 
 
+async def test_pooled_http_clients_never_carry_cookies_between_accounts():
+    """One pooled client serves every user's provider tokens; a Set-Cookie from
+    account A's response must not ride on account B's next request."""
+    import httpx
+
+    from helpers import http_client
+
+    def account_a_response():
+        request = httpx.Request("GET", "https://chatgpt.com/backend-api/codex")
+        return httpx.Response(200, headers={"set-cookie": "__cf_bm=account-a; Path=/"}, request=request)
+
+    http_client._clients.clear()
+    try:
+        for client in (http_client.get_http_client(), http_client.get_streaming_http_client()):
+            client.cookies.extract_cookies(account_a_response())
+            next_request = client.build_request("GET", "https://chatgpt.com/backend-api/codex")
+            assert "cookie" not in next_request.headers
+            assert len(client.cookies.jar) == 0
+
+        default_jar = httpx.AsyncClient()
+        default_jar.cookies.extract_cookies(account_a_response())
+        assert "cookie" in default_jar.build_request("GET", "https://chatgpt.com/backend-api/codex").headers, (
+            "control: httpx replays stored cookies by default"
+        )
+        await default_jar.aclose()
+    finally:
+        for client, _ in list(http_client._clients.values()):
+            await client.aclose()
+        http_client._clients.clear()
+
+
+async def test_recorder_transition_captures_queued_marks_on_outgoing_page():
+    import os
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class _Context:
+        pages: list = []
+
+    class _Page:
+        def __init__(self, name):
+            self.url = f"https://{name}.example/"
+            self.context = _Context()
+            self.context.pages = [self]
+
+        async def screenshot(self, **_kwargs):
+            return b"frame"
+
+    previous = {key: os.environ.get(key) for key in ("BROWSER_AGENT_RECORDINGS_DIR", "BROWSER_AGENT_KERNEL_REPLAY")}
+    os.environ.pop("BROWSER_AGENT_KERNEL_REPLAY", None)
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = temp_dir
+            outgoing, promoted = _Page("steel-one"), _Page("steel-two")
+            recorder = BrowserAgentRecorder(
+                page=outgoing,
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="steel-one",
+                browser_url=outgoing.url,
+                session_metadata={"provider": "steel"},
+            )
+            await recorder.mark("Click Place order", metadata={"step": 7})
+            await recorder.transition_browser(
+                page=promoted,
+                session_id="steel-two",
+                browser_url=promoted.url,
+                session_metadata={"provider": "steel"},
+            )
+            marked = [frame for frame in recorder.frames if frame["label"] == "Click Place order"]
+            assert [frame["tab_url"] for frame in marked] == [outgoing.url], recorder.frames
+            await recorder.close(include_steel_media=False)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 async def test_per_step_backend_and_llm_calls_never_build_a_client():
     """Each fresh httpx.AsyncClient builds an SSLContext (CA bundle parse) and a
     new TLS connection; py-spy put that at ~27% of a live browser worker's main
@@ -685,9 +931,18 @@ async def run_all_tests():
         "slow_otp_poll_does_not_block_steps", test_slow_otp_poll_does_not_block_steps_and_codes_land_later
     )
     r.record("browser_loop_never_awaits_otp_poll", test_browser_loop_never_awaits_otp_poll)
+    await r.record_async(
+        "otp_poll_teardown_drains_then_cancels", test_otp_poll_teardown_lets_inflight_writes_finish_then_cancels
+    )
+    await r.record_async("otp_refs_survive_realm_rebind", test_otp_credential_refs_survive_realm_rebind_mid_poll)
+    await r.record_async("otp_source_failure_keeps_others", test_otp_source_failure_keeps_other_sources_codes)
     await r.record_async("otp_sources_fetched_concurrently", test_otp_sources_fetched_concurrently)
     await r.record_async("pending_request_probe_disabled", test_browser_use_pending_request_probe_disabled)
     await r.record_async("dom_build_skips_serial_evaluates", test_dom_build_skips_serial_page_evaluates)
+    await r.record_async("slow_dom_tree_request_not_resent", test_slow_dom_tree_request_is_waited_on_not_resent)
+    await r.record_async(
+        "stalled_speculative_state_soft_budget", test_stalled_speculative_state_gives_up_at_soft_budget
+    )
     await r.record_async(
         "speculative_state_after_page_changes", test_speculative_state_only_after_page_changing_actions
     )
@@ -702,6 +957,12 @@ async def run_all_tests():
     )
     await r.record_async("page_identity_cached_target_info", test_page_identity_reads_cached_target_info)
     await r.record_async("pooled_http_client_reused_per_loop", test_pooled_http_client_reused_per_loop)
+    await r.record_async(
+        "pooled_http_clients_reject_cookies", test_pooled_http_clients_never_carry_cookies_between_accounts
+    )
+    await r.record_async(
+        "recorder_transition_flushes_marks", test_recorder_transition_captures_queued_marks_on_outgoing_page
+    )
     await r.record_async("step_calls_never_build_http_client", test_per_step_backend_and_llm_calls_never_build_a_client)
     teardown_mock()
     return r.all_passed

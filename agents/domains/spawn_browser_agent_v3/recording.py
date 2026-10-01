@@ -1032,6 +1032,9 @@ class BrowserAgentRecorder:
             )
             return
 
+        # Queued marks carry the outgoing session's label/metadata; let them
+        # capture the outgoing page before it is replaced.
+        await self.flush_marks()
         self.page = page
         self.session_id = session_id
         self.browser_url = browser_url

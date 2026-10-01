@@ -1816,6 +1816,16 @@ def _harvest_otp_poll(task: Optional["asyncio.Task[int]"]) -> Optional["asyncio.
     return None
 
 
+async def _drain_otp_poll(task: Optional["asyncio.Task[int]"], *, grace_s: float = 2.0) -> None:
+    """Let an in-flight OTP poll finish its credential-ref writes, then stop it."""
+    if task is None:
+        return
+    if not task.done():
+        await asyncio.wait({task}, timeout=grace_s)
+        task.cancel()
+    task.add_done_callback(_harvest_otp_poll)
+
+
 def _step_observe_needs_dom(*, fast_mode_replay: bool, browser_recorder: Any) -> bool:
     """Whether the per-step observe must build the full DOM.
 
@@ -1845,9 +1855,12 @@ async def _take_speculative_browser_state(
         state_prefetch.discard()
         return None
     try:
+        # The build already overlapped the LLM call; one still running after
+        # the soft budget is stalled, and the fresh build that replaces it keeps
+        # the full action timeout for challenge freezes.
         return await asyncio.wait_for(
             state_prefetch.take(dom_service, live_url),
-            timeout=BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+            timeout=BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
         logger.warning("Speculative browser state build timed out; building fresh")
@@ -6041,6 +6054,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             payment_card_last4,
         )
     otp_user_messages: List[Dict[str, str]] = []
+    # The background OTP poll writes here, not into credential_refs_by_secret_ref,
+    # because a realm transition rebinds that dict while a poll is in flight.
+    otp_credential_refs: Dict[str, Dict[str, str]] = {}
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
@@ -7340,6 +7356,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # step never waits on it. Codes a finished poll found are appended
             # as USER messages here, at a turn boundary, and the next poll starts.
             otp_poll_task = _harvest_otp_poll(otp_poll_task)
+            if otp_credential_refs:
+                credential_refs_by_secret_ref.update(otp_credential_refs)
+                otp_credential_refs.clear()
             if len(otp_user_messages) > otp_history_count:
                 browser_turn_messages.extend(otp_user_messages[otp_history_count:])
                 otp_history_count = len(otp_user_messages)
@@ -7351,7 +7370,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         api_key=config.backend.api_key,
                         seen_otp_codes=seen_otp_codes,
                         otp_user_messages=otp_user_messages,
-                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                        credential_refs_by_secret_ref=otp_credential_refs,
                         agent_id=agent_id,
                         task_id=task_id,
                     )
@@ -10158,8 +10177,7 @@ Based on this feedback, I need to continue working on the task and address the i
         raise
     finally:
         stop_browser_activity_heartbeat(_heartbeat_token)
-        if otp_poll_task is not None and not otp_poll_task.done():
-            otp_poll_task.cancel()
+        await _drain_otp_poll(otp_poll_task)
         state_prefetch.discard()
         diagnostics_finalized = False
         if browser_network_recorder is None and network_recorder_task is not None:
