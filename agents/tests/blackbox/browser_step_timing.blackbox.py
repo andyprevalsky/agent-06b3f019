@@ -6,7 +6,7 @@ from pathlib import Path
 
 from structlog.testing import capture_logs
 
-from _test_utils import BlackboxResult, teardown_mock
+from _test_utils import BlackboxResult, setup_mock_fn, teardown_mock
 
 AGENTS_ROOT = Path(__file__).resolve().parents[2]
 HANDLER = AGENTS_ROOT / "domains" / "spawn_browser_agent_v3" / "handler.py"
@@ -619,6 +619,7 @@ async def test_per_step_backend_and_llm_calls_never_build_a_client():
     import config as config_module
     from domains.spawn_browser_agent_v3 import repo
     from helpers import http_client, update_status
+    from providers.rose import client as rose_client
     from providers.rose import transport
     from tools.base import MessageStatus
 
@@ -637,12 +638,16 @@ async def test_per_step_backend_and_llm_calls_never_build_a_client():
         raise AssertionError("per-call httpx.AsyncClient constructed on the browser step hot path")
 
     cfg = SimpleNamespace(backend=SimpleNamespace(api_url="http://backend", api_key="k"))
+    setup_mock_fn(handler)
     try:
         with (
             patch.object(httpx, "AsyncClient", side_effect=no_new_clients),
             patch.object(config_module, "load_config", return_value=cfg),
             patch.object(update_status, "load_config", return_value=cfg),
+            patch.object(rose_client, "load_config", return_value=cfg),
         ):
+            rose_client._reset_gpt_api_key_cooldown_cache()
+            assert await rose_client._gpt_api_key_on_cooldown() is False
             assert await repo.fetch_browser_control_state(cfg, "t1") == "agent"
             await repo.fetch_browser_captcha_telemetry(cfg, "t1")
             assert await repo.save_browser_action_message("a1", "Click", "msg", MessageStatus.IN_PROGRESS, "t1")
@@ -654,10 +659,12 @@ async def test_per_step_backend_and_llm_calls_never_build_a_client():
         for client, _ in list(http_client._clients.values()):
             await client.aclose()
         http_client._clients.clear()
+        teardown_mock()
     assert "/api/browser-session/task/t1/control" in seen
     assert "/api/agents/a1/messages" in seen
     assert "/api/agents/a1/status" in seen
     assert "/v1/chat/completions" in seen
+    assert "/api/integrations/compute-code/gpt-key/cooldown" in seen
 
 
 async def run_all_tests():
