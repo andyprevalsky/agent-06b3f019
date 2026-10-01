@@ -21408,8 +21408,9 @@ def test_handoff_autofill_invalidates_observe_page_state_prefetch():
         "observe_page_state = {}",
         autofill,
     )
-    prefetch = source.index("prefetched_browser_state=observe_page_state", autofill)
+    prefetch = source.index("prefetched_browser_state = observe_page_state", autofill)
     assert invalidate < prefetch
+    assert autofill < source.index("state_prefetch.start(dom_service)", autofill) < prefetch
 
 
 def test_browser_tool_events_declare_action_type():
