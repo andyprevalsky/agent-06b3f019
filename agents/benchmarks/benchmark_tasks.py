@@ -45,6 +45,7 @@ class BenchmarkTask:
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
     expected_attention_kinds: List[str] = field(default_factory=list)  # Allowed terminal attention kinds for flows with multiple valid checkout gates
+    require_attention_order: bool = False  # Require expected_attention_kinds in exact arrival order
     expected_attention_kind_any_of: List[str] = field(default_factory=list)  # Exactly one approval whose kind is in this set
     agentcard_setup_action: Optional[str] = None  # Benchmark user action for hosted setup (for example, complete)
     expected_credential_ref_kind: Optional[str] = None  # credential_ref.kind that must be observed before terminal success
@@ -59,6 +60,7 @@ class BenchmarkTask:
     required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
     simulate_gate_webhook: Optional[str] = None  # After gate is seen, replay webhook (e.g. subscription)
+    complete_subscription_checkout: bool = False  # Complete real Stripe test Checkout before resuming
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     min_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory minimums by agent class
     max_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory maximums by agent class

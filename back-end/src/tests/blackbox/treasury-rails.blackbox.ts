@@ -14,7 +14,7 @@
  * resolution) is safe against live credentials and is exercised as-is.
  *
  * ── HARD SAFETY GUARD ──────────────────────────────────────────────────────────────────────────
- * This test refuses to run if `get_company_wallet` reports `livemode: true`. Local `.env` carries
+ * This test refuses to run if `whoami` reports production mode. Local `.env` carries
  * sandbox org credentials; the live ones exist only on Render. If those ever leak into a local
  * env, this aborts rather than minting and closing real cards. That check is not optional and
  * must never be relaxed to "make the test run somewhere".
@@ -26,9 +26,10 @@
 import assert from 'node:assert/strict';
 import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCallerOverrides';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
-import { extractAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
+import { readAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
+import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/org-wallet-fiat';
 import {
   unusedMintSettleOutcome,
   type MintTransferObservation,
@@ -36,7 +37,6 @@ import {
 import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
 import { createCoinbaseTreasury } from '../../providers/coinbase/treasury';
 import { createBrexTreasury, loadBrexConfig } from '../../providers/brex/treasury';
-import { planFloatReplenish } from '../../providers/brex/replenish';
 import { cleanupTreasuryRailCards } from './treasury-rails-card-cleanup';
 
 loadDotenvWithCallerOverrides();
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
 
   let wallet;
   try {
-    wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
+    wallet = await readAgentCardOrgWallet(callOrgTool);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Provider-side OAuth/token outages (invalid token, grant failure, timeout) are
@@ -264,25 +264,12 @@ async function main(): Promise<void> {
   });
   assert.deepEqual(
     lowPlan,
-    { action: 'transfer', transferCents: 34_088 },
+    { action: 'transfer', transferCents: 34_088, fiatShortfallCents: 0 },
     'a $159.12 pool must top up to exactly the $500 target'
   );
-  assert.deepEqual(
-    planFloatReplenish({
-      policy: {
-        enabled: true,
-        floorCents: 50_000,
-        targetCents: 200_000,
-        minTransferCents: 10_000,
-        maxTransferCents: 500_000,
-      },
-      floatCents: 0,
-      brexAvailableCents: -41_209,
-    }),
-    { action: 'insufficient_brex_funds', wantedCents: 200_000, brexAvailableCents: -41_209 },
-    'a negative Brex balance must never be read as spendable'
-  );
-  record('planners produce the expected decisions for real-world balances');
+  assert.equal(fiatPullEnabled(), false, 'broken Brex→Coinbase rail must remain hard-disabled');
+  assert.equal(resolveFiatSource(), undefined, 'production binder must not expose a bank source');
+  record('USDC planner and Brex hard kill have the expected decisions');
 
   // ── Leg 3: the AgentCard money loop (REAL, on sandbox) ───────────────────────────────────────
   const cardholders =
@@ -314,48 +301,50 @@ async function main(): Promise<void> {
   const createdCardIds = new Set([cardId]);
   record(`minted ${usd(mintCents)} card ${cardId}`);
 
-  // Close it unused, then prove recovery returns the value to the POOL (not the cardholder).
-  const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
-    structuredContent?: { status?: string };
-  };
-  assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
-  record('closed the card unused');
+  let cardClosed = false;
+  try {
+    // Assert on this card's transfer: the sandbox pool moves under concurrent
+    // benchmarks, so an aggregate balance delta cannot prove what this mint drew.
+    const closed = (await callOrgTool('close_card', { card_id: cardId })) as {
+      structuredContent?: { status?: string };
+    };
+    assert.equal(closed.structuredContent?.status, 'CLOSED', 'close_card did not report CLOSED');
+    cardClosed = true;
+    record('closed the card unused');
 
-  // Assert on OUR transfer, not the pool balance / any recover_funds yield. The sandbox org is
-  // shared with running benchmarks that mint and consume cards continuously, so absolute pool
-  // balance and foreign residual sweeps move underneath us. An earlier wait accepted ANY
-  // recover_funds yield then polled transfers without further recover — foreign residual made
-  // that wait return early while THIS transfer stayed `consumed` (deploy failure:
-  // `ended in "consumed"`). The race-free invariant is THIS card's funding transfer reaching a
-  // terminal release with the full unused amount; recover_funds runs each poll only as accelerator.
-  const settled = await waitForUnusedMintSettled(cardId, mintCents);
-  const transfer = await readCardTransfer(cardId);
-  // The sandbox org is shared with other benchmarks, so its aggregate pool balance can move
-  // between two reads. THIS card's transfer proves whether its mint drew the full amount.
-  assert.equal(
-    transfer?.transferredCents,
-    mintCents,
-    `transfer for ${cardId} drew ${usd(transfer?.transferredCents ?? 0)} from the pool for a ` +
-      `${usd(mintCents)} mint`
-  );
-  record('mint drew from the pool');
-  assert.ok(
-    settled.status === 'reclaimed' || settled.status === 'released',
-    `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
-      `not stay consumed`
-  );
-  assert.ok(
-    settled.releasedCents >= mintCents,
-    `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
-      `amount must return to the pool`
-  );
-  record(
-    `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
-  );
-
-  // ── Cleanup: never leave open cards behind ───────────────────────────────────────────────────
-  const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
-  if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
+    // Keep recovering while this exact card's transfer settles. Another
+    // cardholder's recover_funds yield is not evidence for this transfer.
+    const settled = await waitForUnusedMintSettled(cardId, mintCents);
+    const transfer = await readCardTransfer(cardId);
+    assert.equal(
+      transfer?.transferredCents,
+      mintCents,
+      `transfer for ${cardId} drew ${usd(transfer?.transferredCents ?? 0)} from the pool for a ` +
+        `${usd(mintCents)} mint`
+    );
+    record('mint drew from the pool');
+    assert.ok(
+      settled.status === 'reclaimed' || settled.status === 'released',
+      `transfer for ${cardId} ended in "${settled.status}" — an unused card must reclaim/release, ` +
+        `not stay consumed`
+    );
+    assert.ok(
+      settled.releasedCents >= mintCents,
+      `released ${usd(settled.releasedCents)} but the card held ${usd(mintCents)} — the full unused ` +
+        `amount must return to the pool`
+    );
+    record(
+      `transfer ${settled.status} in full: released ${usd(settled.releasedCents)} of ${usd(mintCents)}`
+    );
+  } finally {
+    try {
+      if (!cardClosed) await callOrgTool('close_card', { card_id: cardId });
+    } finally {
+      // The sandbox cardholder is shared. Cleanup may close only cards this test created.
+      const cleaned = await cleanupTreasuryRailCards(cardholderId, createdCardIds, callOrgTool);
+      if (cleaned > 0) record(`cleanup: closed ${cleaned} lingering open card(s)`);
+    }
+  }
 
   console.log('\ntreasury-rails blackbox: all checks passed');
 }

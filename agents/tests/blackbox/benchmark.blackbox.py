@@ -2516,6 +2516,7 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
 
     assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
         "agent-payment-test-shop",
+        "agent-payment-new-user-journey",
         "agent-payment-setup-resume",
         "agent-payment-idempotent-abandonment",
         "agent-payment-abandonment",
@@ -2808,7 +2809,7 @@ def test_agentcard_setup_attention_is_not_auto_approved():
 
     from benchmarks.run_benchmark import _should_auto_approve_attention
 
-    task = SimpleNamespace(agentcard_setup_action="complete")
+    task = SimpleNamespace(agentcard_setup_action="complete", complete_subscription_checkout=False)
     assert _should_auto_approve_attention(
         task,
         {"metadata": {"attentionKind": "payment_approval"}},
@@ -12544,6 +12545,22 @@ def test_canonical_base_cache_token_is_revisioned_not_daily():
     assert "20260803" not in token
 
 
+def test_isolated_postgres_default_keeps_macos_stacks_separate():
+    from benchmarks.local import apply_isolated_postgres_default
+
+    mac_env = {}
+    apply_isolated_postgres_default(mac_env, "darwin")
+    assert "ROSE_USE_SYSTEM_PG" not in mac_env
+
+    linux_env = {}
+    apply_isolated_postgres_default(linux_env, "linux")
+    assert linux_env["ROSE_USE_SYSTEM_PG"] == "true"
+
+    explicit_env = {"ROSE_USE_SYSTEM_PG": "false"}
+    apply_isolated_postgres_default(explicit_env, "linux")
+    assert explicit_env["ROSE_USE_SYSTEM_PG"] == "false"
+
+
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
     from benchmarks import local as local_bench
@@ -18574,6 +18591,7 @@ async def run_all_tests():
         "canonical_base_cache_token_is_revisioned",
         test_canonical_base_cache_token_is_revisioned_not_daily,
     )
+    r.record("isolated_postgres_default", test_isolated_postgres_default_keeps_macos_stacks_separate)
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
         "dotenv_fast_mode_cache_falls_back_to_database_url",

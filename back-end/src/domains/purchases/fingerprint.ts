@@ -84,6 +84,30 @@ function canonicalizeLineItemName(
   return name.slice(0, match.index).trimEnd();
 }
 
+/** Browser extraction sometimes appends a product card's description to its title. */
+function canonicalizeProductDescription(name: unknown, productUrl: unknown): unknown {
+  if (typeof name !== 'string' || typeof productUrl !== 'string') return name;
+  const separator = name.indexOf(' - ');
+  if (separator < 0) return name;
+  const title = name.slice(0, separator).trim();
+  const description = name.slice(separator + 3).trim();
+  // Keep short suffixes such as color and size variants distinct.
+  if (description.split(/\s+/).length < 5) return name;
+  let pathname: string;
+  try {
+    const url = new URL(productUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) return name;
+    pathname = url.pathname;
+  } catch {
+    return name;
+  }
+  const slug = /\/(?:p|products)\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/i.exec(pathname)?.[1];
+  if (slug === undefined || title.toLowerCase().replace(/\s+/g, '-') !== slug.toLowerCase()) {
+    return name;
+  }
+  return title;
+}
+
 function canonicalizeLineItems(value: unknown, merchant: string): unknown[] | null {
   if (!Array.isArray(value)) return null;
   return value.map((rawItem) => {
@@ -92,7 +116,10 @@ function canonicalizeLineItems(value: unknown, merchant: string): unknown[] | nu
       ? rawItem
       : {
           ...item,
-          name: canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents, merchant),
+          name: canonicalizeProductDescription(
+            canonicalizeLineItemName(item.name, item.quantity, item.unitPriceCents, merchant),
+            item.productUrl
+          ),
           imageUrl: canonicalizeImageUrl(item.imageUrl),
           reviewCount: canonicalizeReviewCount(item.reviewCount),
         };

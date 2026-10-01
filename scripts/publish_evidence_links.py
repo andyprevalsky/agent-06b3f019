@@ -44,7 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HUB = "https://navi-j9a9.onrender.com"
 DURABLE_ORIGIN = "https://www.roselabs.ai"
 ARTIFACTS_ROOT = Path(
-    os.getenv("RCA_EVIDENCE_ARTIFACTS_ROOT", "/opt/cursor/artifacts/rca_evidence")
+    os.getenv("RCA_EVIDENCE_ARTIFACTS_ROOT")
+    or Path(os.getenv("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts")) / "rca_evidence"
 )
 _AGENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

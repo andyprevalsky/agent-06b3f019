@@ -791,6 +791,17 @@ async def _capture_preserved_evidence_after_evaluate(
     return state
 
 
+def _replace_resume_image_blocks(value: Any) -> Any:
+    """Replace image payloads with valid text blocks in simulated resume history."""
+    if isinstance(value, dict):
+        if value.get("type") == "image_url" or "image_url" in value:
+            return {"type": "text", "text": "[image omitted from Temporal resume]"}
+        return {key: _replace_resume_image_blocks(nested) for key, nested in value.items()}
+    if isinstance(value, list):
+        return [_replace_resume_image_blocks(item) for item in value]
+    return value
+
+
 
 def _browser_turn_messages_for_resume(
     browser_turn_messages: Optional[List[Dict[str, Any]]],
@@ -2272,7 +2283,7 @@ def _browser_tool_arguments(unified_action: Dict[str, Any]) -> Dict[str, Any]:
     if unified_action.get("index") is not None and "index" not in args:
         args["index"] = unified_action["index"]
     coords = unified_action.get("coordinates")
-    if action_name == "click_coordinates" and isinstance(coords, dict):
+    if action_name in {"click", "click_coordinates"} and "index" not in args and isinstance(coords, dict):
         args.setdefault("x", coords.get("x"))
         args.setdefault("y", coords.get("y"))
     return args
@@ -2310,6 +2321,11 @@ def _append_browser_turn_messages(
     action_name = unified_action.get("action") or "unknown"
     thinking = unified_action.get("thinking") or ""
     args = _browser_tool_arguments(unified_action)
+    # The provider normalizes click_coordinates to an internal click + coordinates.
+    # Reconstruct the advertised tool name here so the next LLM turn does not see
+    # a successful but invalid-looking click({}) and try to correct a valid action.
+    if action_name == "click" and "index" not in args and {"x", "y"} <= args.keys():
+        action_name = "click_coordinates"
     turn_messages.append(
         {
             "role": "assistant",
@@ -2352,6 +2368,51 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+def _resolve_payment_card_tool_result_for_resume(
+    turn_messages: List[Dict[str, Any]],
+    payment_card_refs: Dict[str, Any],
+    payment_card_last4: Any,
+) -> bool:
+    """Finish the pending browser tool result with safe refs after approval."""
+    if not has_payment_card_secret_refs(payment_card_refs):
+        return False
+
+    for index in range(len(turn_messages) - 1, 0, -1):
+        message = turn_messages[index]
+        if message.get("role") != "tool" or message.get("name") != "request_payment_card":
+            continue
+        prior = turn_messages[index - 1]
+        if prior.get("role") != "assistant" or not any(
+            call.get("id") == message.get("tool_call_id")
+            and (call.get("function") or {}).get("name") == "request_payment_card"
+            for call in prior.get("tool_calls") or []
+        ):
+            continue
+        try:
+            previous_result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(previous_result, dict) or previous_result.get("status") != "awaiting_payment_card_approval":
+            continue
+
+        finished_result: Dict[str, Any] = {
+            "success": True,
+            "status": "payment_card_ready",
+            "card_secret_refs": {
+                "card_number": "card_number",
+                "card_name": "card_name",
+                "card_expiry": "card_expiry",
+                "card_cvv": "card_cvv",
+            },
+        }
+        safe_last4 = _normalize_payment_card_last4(payment_card_last4)
+        if safe_last4:
+            finished_result["card_last4"] = safe_last4
+        turn_messages[index] = {**message, "content": json_dumps_compact(finished_result)}
+        return True
+    return False
 
 
 async def _get_browser_state_soft(
@@ -4796,7 +4857,7 @@ def _simulated_browser_resume_payload(
 ) -> Dict[str, Any]:
     compact_state = _compact_simulated_resume_value(browser_state)
     compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
-    compact_turns = [_compact_simulated_resume_value(message) for message in turn_messages[-24:]]
+    compact_turns = [_compact_browser_turn_message_for_resume(message) for message in turn_messages[-24:]]
     return {
         "simulated_browser_state": compact_state,
         "simulated_action_entries": compact_actions,
@@ -4846,6 +4907,37 @@ def _compact_simulated_resume_value(value: Any) -> Any:
         if len(value) > _SIMULATED_RESUME_MAX_TEXT_CHARS:
             return value[:_SIMULATED_RESUME_MAX_TEXT_CHARS] + "…[truncated for Temporal resume]"
     return value
+
+
+def _compact_browser_turn_message_for_resume(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep payment tool JSON parseable when a large cart crosses a resume boundary."""
+    compact = _compact_simulated_resume_value(_replace_resume_image_blocks(message))
+    if message.get("role") == "tool" and message.get("name") == "request_payment_card":
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            result = None
+        if isinstance(result, dict) and result.get("status") == "awaiting_payment_card_approval":
+            compact["content"] = json_dumps_compact(
+                {"success": result.get("success", True), "status": "awaiting_payment_card_approval"}
+            )
+    if message.get("role") == "assistant":
+        for original_call, compact_call in zip(message.get("tool_calls") or [], compact.get("tool_calls") or []):
+            original_function = original_call.get("function") or {}
+            if original_function.get("name") != "request_payment_card":
+                continue
+            arguments = original_function.get("arguments")
+            if not isinstance(arguments, str) or len(arguments) <= _SIMULATED_RESUME_MAX_TEXT_CHARS:
+                continue
+            try:
+                request = json.loads(arguments)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(request, dict):
+                compact_call["function"]["arguments"] = json_dumps_compact(
+                    _summarize_payment_request_for_log(request)
+                )
+    return compact
 
 
 def _simulated_browser_verifier_context(
@@ -5003,6 +5095,12 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
     turn_messages = list(resume.get("simulated_turn_messages") or [])
+    if resume.get("approval_type") == "payment":
+        _resolve_payment_card_tool_result_for_resume(
+            turn_messages,
+            resume.get("payment_card_refs") or {},
+            resume.get("payment_card_last4"),
+        )
     frames: List[Dict[str, Any]] = []
     visited_urls = list(resume.get("simulated_visited_urls") or [])
     reasoning_messages = list(resume.get("simulated_reasoning_messages") or [])
@@ -5306,6 +5404,12 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 result = {"success": True, "status": "awaiting_payment_card_approval"}
                 action_entries.append(
                     {"step": iteration, "action": action_name, "thinking": thinking, "params": params, "result": result}
+                )
+                _append_browser_turn_messages(
+                    turn_messages,
+                    unified_action=action,
+                    result=result,
+                    tool_call_id=action_call_id,
                 )
                 await save_step(
                     title=title_done,
@@ -5881,6 +5985,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         for message in ((write_lock_resume_state or {}).get("browser_turn_messages") or [])
         if isinstance(message, dict)
     ]
+    if (write_lock_resume_state or {}).get("approval_type") == "payment":
+        _resolve_payment_card_tool_result_for_resume(
+            browser_turn_messages,
+            (write_lock_resume_state or {}).get("payment_card_refs") or {},
+            payment_card_last4,
+        )
     otp_user_messages: List[Dict[str, str]] = []
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}

@@ -32,6 +32,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
+# This synthetic suite starts many independent controllers. Exercise reserve
+# ownership and release with the minimum real allocation; the focused reserve
+# tests cover sizing and low-space behavior separately.
+export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
+
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
 fleet_bench_app() {
@@ -113,7 +118,7 @@ import sys
 try:
     subprocess.run(["tail", "-30", sys.argv[1]], timeout=5, check=False)
 except subprocess.TimeoutExpired:
-    print("(log tail timed out)")
+    print("(log tail timed out)", file=sys.stderr)
 PY
     done
     exit 1

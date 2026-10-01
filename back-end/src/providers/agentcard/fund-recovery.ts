@@ -6,14 +6,13 @@
  * user's headroom and NETS against their next mint (verified: a $4 mint against existing residual
  * moved `transferred_cents: 0` and debited the pool $0.00).
  *
- * Netting is efficient for an ACTIVE user, but idle residual is pool capital no other user can
- * draw on. `recover_funds` is AgentCard's primitive for pulling it back — verified end to end:
+ * Netting is efficient for an ACTIVE user. Per AgentCard's current MCP contract, recover_funds is
+ * intended for users we will not fund again. It should not be run on every card issuance.
+ * `recover_funds` is AgentCard's primitive for pulling residual back — verified end to end:
  * `recover_funds({cardholder_id})` -> recovery `completed`, "the pool was credited", org wallet
  * increased by exactly the recovered amount.
  *
- * Money-safety: recovery only ever moves value from a cardholder back to OUR OWN pool, so the
- * worst case of a spurious call is losing the netting optimisation, never losing funds. It is
- * therefore safe to attempt opportunistically before spending new money on USDC.
+ * Live recovery completes asynchronously; don't treat a requested recovery as pool balance.
  */
 
 import { createLogger } from '../logger';

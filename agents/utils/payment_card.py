@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from typing import Any, Dict
+from urllib.parse import urlsplit
 
 from utils.purchase_approval import (
     validate_product_detail_url,
@@ -173,6 +174,27 @@ def _canonicalize_line_item_name(
     return name[: match.start()].rstrip()
 
 
+def _canonicalize_product_description(name: Any, product_url: Any) -> Any:
+    """Drop a long description only when the title agrees with the product URL slug."""
+    if not isinstance(name, str) or not isinstance(product_url, str):
+        return name
+    title, separator, description = name.partition(" - ")
+    if not separator or len(description.split()) < 5:
+        return name
+    try:
+        url = urlsplit(product_url)
+    except ValueError:
+        return name
+    if url.scheme.lower() not in {"http", "https"} or not url.netloc:
+        return name
+    slug_match = re.search(
+        r"/(?:p|products)/([a-z0-9]+(?:-[a-z0-9]+)*)/?$", url.path, re.IGNORECASE
+    )
+    if slug_match is None or re.sub(r"\s+", "-", title.strip().lower()) != slug_match.group(1).lower():
+        return name
+    return title.strip()
+
+
 def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Copy line items with display-only fields canonicalized for hashing."""
     candidate = {**payload, "lineItems": []}
@@ -188,6 +210,7 @@ def _payment_payload_for_fingerprint(payload: Dict[str, Any]) -> Dict[str, Any]:
         item["name"] = _canonicalize_line_item_name(
             item.get("name"), item.get("quantity"), item.get("unitPriceCents"), payload.get("merchant")
         )
+        item["name"] = _canonicalize_product_description(item["name"], item.get("productUrl"))
         candidate["lineItems"].append(item)
     return candidate
 

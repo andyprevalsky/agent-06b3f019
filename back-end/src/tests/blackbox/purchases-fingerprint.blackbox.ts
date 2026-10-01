@@ -210,6 +210,114 @@ async function testCheckoutSummaryNameParity(): Promise<void> {
   }
 }
 
+async function testProductDescriptionNameParity(): Promise<void> {
+  const items = [
+    ['Aurora Notebook', 'Hardcover planning notebook with dotted pages', 'aurora-notebook'],
+    ['Ceramic Mug', 'Matte white mug for long checkout tests', 'ceramic-mug'],
+    ['Canvas Tote', 'Heavy canvas tote with reinforced handles', 'canvas-tote'],
+  ] as const;
+  for (const [title, description, slug] of items) {
+    const fingerprint = (name: string) =>
+      canonicalStoredPurchaseFingerprint({
+        userId: 'description-user',
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: fixtureReceipt(
+          name,
+          '1,284 reviews',
+          1200,
+          'https://placehold.co/320x220/png?text=Aurora+Notebook',
+          `https://shop.example/p/${slug}`
+        ),
+        totalCents: 1200,
+      });
+    assert(
+      fingerprint(`${title} - ${description}`) === fingerprint(title),
+      `a verified ${title} description must not mint a second card`
+    );
+    assert(
+      fingerprint(`${title} - Red`) !== fingerprint(title),
+      `a short ${title} variant must remain distinct`
+    );
+  }
+  const wrongSlug = fixtureReceipt(
+    'Different Notebook - Hardcover planning notebook with dotted pages',
+    '1,284 reviews',
+    1200,
+    'https://placehold.co/320x220/png?text=Aurora+Notebook',
+    'https://shop.example/p/aurora-notebook'
+  );
+  const bareWrongSlug = {
+    ...wrongSlug,
+    lineItems: [{ ...wrongSlug.lineItems[0], name: 'Different Notebook' }],
+  };
+  const identity = (receipt: typeof wrongSlug) =>
+    canonicalStoredPurchaseFingerprint({
+      userId: 'description-user',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: receipt,
+      totalCents: 1200,
+    });
+  assert(
+    identity(wrongSlug) !== identity(bareWrongSlug),
+    'a mismatched URL slug must keep the suffix'
+  );
+}
+
+async function testActiveCardSurvivesCanonicalizationUpgrade(): Promise<void> {
+  const userId = await createUser('description-upgrade');
+  const productUrl = 'https://shop.example/p/aurora-notebook';
+  const described = fixtureReceipt(
+    'Aurora Notebook - Hardcover planning notebook with dotted pages',
+    '1,284 reviews',
+    1200,
+    'https://shop.example/notebook.png',
+    productUrl
+  );
+  const bare = fixtureReceipt(
+    'Aurora Notebook',
+    '1,284 reviews',
+    1200,
+    'https://shop.example/notebook.png',
+    productUrl
+  );
+  const held = await prisma.purchaseSpend.create({
+    data: {
+      userId,
+      fingerprint: 'before-description-normalization',
+      canonicalFingerprint: 'before-description-normalization',
+      merchant: 'Rose Labs Test Payment',
+      lineItemsJson: described,
+      totalCents: 1200,
+      status: PurchaseSpendStatus.HELD,
+      cardId: `held-card-${randomUUID()}`,
+    },
+  });
+  const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
+    userId,
+    merchant: held.merchant,
+    lineItemsJson: bare,
+    totalCents: 1200,
+  });
+  assert(canonicalFingerprint !== null, 'bare receipt must fingerprint');
+  const retry = await purchasesRepo.createPendingPurchaseWithLock({
+    userId,
+    fingerprint: 'after-description-normalization',
+    canonicalFingerprint,
+    merchant: held.merchant,
+    lineItemsJson: bare,
+    totalCents: 1200,
+  });
+  assert(!retry.created && retry.purchase.id === held.id, 'retry must reuse the held card');
+  assert(
+    retry.purchase.canonicalFingerprint === canonicalFingerprint,
+    'reused purchase should be indexed under the new canonical fingerprint'
+  );
+  assert(
+    (await prisma.purchaseSpend.count({ where: { userId } })) === 1,
+    'canonicalization upgrade must not create a second purchase'
+  );
+}
+
 async function testUnicodeParity(): Promise<void> {
   const unicodeReceipt = fixtureReceipt(
     'Lámpara 🪔',
@@ -461,6 +569,8 @@ async function main(): Promise<void> {
   try {
     await testQuantityEchoNameParity();
     await testCheckoutSummaryNameParity();
+    await testProductDescriptionNameParity();
+    await testActiveCardSurvivesCanonicalizationUpgrade();
     await testUnicodeParity();
     await testBackfillBeyondTwenty();
     await testChargingMintGuard();

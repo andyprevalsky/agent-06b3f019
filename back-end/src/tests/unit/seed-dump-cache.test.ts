@@ -204,6 +204,7 @@ async function testHangingEndpointIsBounded(): Promise<void> {
   const server = createServer(() => {
     // Intentionally leave the response open: the client deadline must abort it.
     requestObserved = true;
+    clearTimeout(startupWatchdog);
     requestWatchdog = setTimeout(() => {
       killedByRequestWatchdog = true;
       child.kill('SIGKILL');

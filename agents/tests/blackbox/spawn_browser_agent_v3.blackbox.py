@@ -1367,6 +1367,29 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
 
+async def test_browser_use_navigation_uses_event_timeout():
+    """The browser-use navigation handler passes our event budget to Page.navigate."""
+    from browser_use.browser.events import NavigateToUrlEvent
+    from browser_use.browser.session import BrowserSession
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    session = SimpleNamespace(
+        logger=MagicMock(),
+        agent_focus_target_id="target-1234",
+        session_manager=MagicMock(),
+        event_bus=SimpleNamespace(dispatch=AsyncMock()),
+        _navigate_and_wait=AsyncMock(return_value=None),
+        _close_extension_options_pages=AsyncMock(),
+    )
+    session.session_manager.get_target.return_value.url = "https://example.com/start"
+    with patch.dict(os.environ, {"TIMEOUT_NavigateToUrlEvent": str(NAVIGATE_TO_URL_TIMEOUT_SECONDS)}):
+        event = NavigateToUrlEvent(url="https://example.com")
+    assert event.event_timeout == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+    await BrowserSession.on_NavigateToUrlEvent(session, event)
+    session._navigate_and_wait.assert_awaited_once()
+    assert session._navigate_and_wait.await_args.kwargs["nav_timeout"] == event.event_timeout
+
+
 def test_browser_navigation_handles_installed_timeout_without_global_patch():
     """Older browser-use releases need start-url recovery for their fixed CDP wait."""
     import inspect
@@ -1486,6 +1509,76 @@ async def test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target():
     assert state["dom_tree"] == "checkout"
     assert action["index"] == 7
     assert action["params"]["index"] == 7
+
+async def test_browser_agent_recording_marks_do_not_block_on_slow_screenshots():
+    """Action bookkeeping advances while a diagnostic screenshot would hang."""
+    import tempfile
+
+    from domains.spawn_browser_agent_v3 import recording
+
+    class FakePage:
+        url = "https://shop.example.test/checkout"
+
+        def __init__(self):
+            self.screenshot_calls = 0
+            self.block_screenshots = True
+
+        async def screenshot(self, **_kwargs):
+            self.screenshot_calls += 1
+            if self.block_screenshots:
+                await asyncio.Event().wait()
+            return b"recording-frame"
+
+        async def content(self):
+            return "<html><body>Order complete</body></html>"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(recording, "_recording_root", return_value=Path(tmp)):
+            page = FakePage()
+            recorder = recording.BrowserAgentRecorder(
+                page=page,
+                agent_id="agent-recorder",
+                task_id="task-recorder",
+                session_id="steel-session",
+                browser_url=page.url,
+                session_metadata={"provider": "steel"},
+            )
+            recorder.frames_dir.mkdir(parents=True)
+            recorder._loop_task = asyncio.create_task(asyncio.sleep(60))
+            await asyncio.wait_for(
+                recorder.mark("Submit started", action="click", metadata={"step": 1, "phase": "start"}),
+                timeout=0.5,
+            )
+            await asyncio.wait_for(
+                recorder.mark("Submit finished", action="click", metadata={"step": 1, "phase": "finish"}),
+                timeout=0.5,
+            )
+            assert page.screenshot_calls == 2
+            assert recorder.frames == []
+            await recorder.record_observation(
+                iteration=1,
+                browser_state={"url": page.url, "dom_tree": "Order complete"},
+                action_entries=[
+                    {"step": 1, "action": "click", "phase": "start"},
+                    {"step": 1, "action": "click", "phase": "finish"},
+                ],
+            )
+            page.block_screenshots = False
+            await recorder.capture("Periodic frame", action="idle")
+            html_path = await recorder.close(include_steel_media=False, archive_artifacts=False)
+            assert html_path is not None and html_path.exists()
+            manifest = json.loads((html_path.parent / "manifest.json").read_text())
+            assert manifest["source_frame_count"] == 2
+            assert recorder.frames[-1]["metadata"]["phase"] == "finish"
+            assert "Submit finished" in html_path.read_text()
+            observation = json.loads(
+                (html_path.parent / "observations" / "iteration_0001.json").read_text()
+            )
+            assert [entry["phase"] for entry in observation["action_entries"]] == [
+                "start",
+                "finish",
+            ]
+
 
 async def test_browser_agent_recording_writes_local_html_replay():
     import tempfile
@@ -4765,6 +4858,29 @@ def test_browser_turn_history_appends_tool_call_without_auto_state():
     assert turns[1]["name"] == "click"
 
 
+def test_browser_turn_history_preserves_coordinate_click_tool_call():
+    from domains.spawn_browser_agent_v3.handler import _append_browser_turn_messages
+    from providers.rose.browser_use import normalize_browser_use_tool_call
+
+    action = normalize_browser_use_tool_call(
+        {"name": "click_coordinates", "arguments": '{"x": 527, "y": 443}'},
+        thinking="Click the visible checkbox.",
+    )
+    assert action["action"] == "click"
+    turns = []
+    _append_browser_turn_messages(
+        turns,
+        unified_action=action,
+        result={"success": True, "message": ""},
+        tool_call_id="coordinate-click",
+    )
+
+    call = turns[0]["tool_calls"][0]
+    assert call["function"]["name"] == "click_coordinates"
+    assert json.loads(call["function"]["arguments"]) == {"x": 527, "y": 443}
+    assert turns[1]["name"] == "click_coordinates"
+
+
 def test_read_browser_state_tool_result_keeps_formatted_state_in_history():
     from domains.spawn_browser_agent_v3.handler import _browser_tool_result_for_history
 
@@ -6011,6 +6127,105 @@ def test_auth_assistance_resume_user_message_preserves_live_state():
     assert "same_steel_session_live_view" in content
     assert "same auth realm" in content
     assert "Do not undo user-entered changes" in content
+
+
+def test_payment_card_approval_finishes_original_browser_tool_result():
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_browser_turn_messages,
+        _resolve_payment_card_tool_result_for_resume,
+    )
+
+    turns = []
+    _append_browser_turn_messages(
+        turns,
+        unified_action={"action": "request_payment_card", "params": {"merchant": "Example Shop"}},
+        result={"status": "awaiting_payment_card_approval", "payment_request": {"total_cents": 4396}},
+        tool_call_id="payment-call-1",
+    )
+    refs = {
+        "card_number": "4111111111111111",
+        "card_name": "Rose Labs",
+        "card_expiry": "12/30",
+        "card_cvv": "123",
+    }
+
+    assert _resolve_payment_card_tool_result_for_resume(turns, refs, "1111")
+    assert len(turns) == 2
+    assert turns[1]["role"] == "tool"
+    assert turns[1]["tool_call_id"] == turns[0]["tool_calls"][0]["id"]
+    result = json.loads(turns[1]["content"])
+    assert result["success"] is True
+    assert result["status"] == "payment_card_ready"
+    assert result["card_secret_refs"] == {key: key for key in refs}
+    assert result["card_last4"] == "1111"
+    assert "4111111111111111" not in turns[1]["content"]
+    assert "123" not in turns[1]["content"]
+    assert not _resolve_payment_card_tool_result_for_resume(turns, refs, "1111")
+
+
+def test_large_payment_request_resumes_with_parseable_finished_tool_result():
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_browser_turn_messages,
+        _compact_browser_turn_messages_for_resume,
+        _resolve_payment_card_tool_result_for_resume,
+        _simulated_browser_resume_payload,
+    )
+
+    request = {
+        "merchant": "Example Shop",
+        "total_cents": 4396,
+        "currency": "USD",
+        "line_items": [{"name": f"Item {index}", "description": "x" * 200} for index in range(30)],
+    }
+    turns = []
+    _append_browser_turn_messages(
+        turns,
+        unified_action={"action": "request_payment_card", "params": request},
+        result={"success": True, "status": "awaiting_payment_card_approval", "payment_request": request},
+        tool_call_id="payment-call-large",
+    )
+    real_turns = _compact_browser_turn_messages_for_resume(turns)
+    simulated_turns = _simulated_browser_resume_payload(
+        browser_state={},
+        action_entries=[],
+        turn_messages=turns,
+        recording_ref=None,
+        frame_count=0,
+        visited_urls=[],
+        reasoning_messages=[],
+        action_summary=[],
+        world_model_session_id="wmh-session",
+        total_input_tokens=0,
+        total_output_tokens=0,
+        usage_by_model={},
+    )["simulated_turn_messages"]
+    refs = {"card_number": "4111111111111111", "card_name": "Rose Labs", "card_expiry": "12/30", "card_cvv": "123"}
+    for compact in (real_turns, simulated_turns):
+        assert json.loads(compact[0]["tool_calls"][0]["function"]["arguments"])["total_cents"] == 4396
+        assert json.loads(compact[1]["content"])["status"] == "awaiting_payment_card_approval"
+        assert _resolve_payment_card_tool_result_for_resume(compact, refs, "1111")
+        assert json.loads(compact[1]["content"])["status"] == "payment_card_ready"
+
+
+def test_payment_card_approval_requires_complete_refs_and_matching_tool_call():
+    from domains.spawn_browser_agent_v3.handler import (
+        _append_browser_turn_messages,
+        _resolve_payment_card_tool_result_for_resume,
+    )
+
+    turns = []
+    _append_browser_turn_messages(
+        turns,
+        unified_action={"action": "request_payment_card"},
+        result={"status": "awaiting_payment_card_approval"},
+        tool_call_id="payment-call-1",
+    )
+    refs = {"card_number": "4111111111111111", "card_name": "Rose Labs", "card_expiry": "12/30", "card_cvv": "123"}
+    assert not _resolve_payment_card_tool_result_for_resume(turns, {"card_number": refs["card_number"]}, "1111")
+    assert json.loads(turns[1]["content"])["status"] == "awaiting_payment_card_approval"
+    turns[1]["tool_call_id"] = "unmatched"
+    assert not _resolve_payment_card_tool_result_for_resume(turns, refs, "1111")
+    assert json.loads(turns[1]["content"])["status"] == "awaiting_payment_card_approval"
 
 # ========================================
 # repo: fetch_claude_token
@@ -16364,8 +16579,8 @@ def test_url_looks_like_api_surface_guard():
 
     ctx = _ActionContext(
         user_id="user-1",
-        dom_service=None,  # type: ignore[arg-type]
-        action_history=None,  # type: ignore[arg-type]
+        dom_service=MagicMock(),
+        action_history=MagicMock(),
         session=None,
         action_name="goto",
         index=None,
@@ -21466,6 +21681,10 @@ async def run_all_tests():
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
     )
+    await r.record_async(
+        "browser_use_navigation_uses_event_timeout",
+        test_browser_use_navigation_uses_event_timeout,
+    )
     r.record(
         "browser_navigation_handles_installed_timeout_without_global_patch",
         test_browser_navigation_handles_installed_timeout_without_global_patch,
@@ -21481,6 +21700,10 @@ async def run_all_tests():
     r.record(
         "browser_turn_history_no_auto_state",
         test_browser_turn_history_appends_tool_call_without_auto_state,
+    )
+    r.record(
+        "browser_turn_history_coordinate_click",
+        test_browser_turn_history_preserves_coordinate_click_tool_call,
     )
     r.record(
         "read_browser_state_history_keeps_formatted_state",
@@ -21675,6 +21898,14 @@ async def run_all_tests():
     r.record(
         "auth_assistance_resume_user_message",
         test_auth_assistance_resume_user_message_preserves_live_state,
+    )
+    r.record(
+        "payment_card_approval_finishes_original_browser_tool_result",
+        test_payment_card_approval_finishes_original_browser_tool_result,
+    )
+    r.record(
+        "payment_card_approval_requires_complete_refs_and_matching_tool_call",
+        test_payment_card_approval_requires_complete_refs_and_matching_tool_call,
     )
 
     # repo
@@ -22726,6 +22957,10 @@ async def run_all_tests():
     )
 
     await r.record_async("move_visual_cursor_success", test_move_visual_cursor_success)
+    await r.record_async(
+        "browser_agent_recording_marks_do_not_block_on_slow_screenshots",
+        test_browser_agent_recording_marks_do_not_block_on_slow_screenshots,
+    )
     await r.record_async(
         "browser_agent_recording_writes_html",
         test_browser_agent_recording_writes_local_html_replay,
