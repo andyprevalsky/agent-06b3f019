@@ -25,8 +25,11 @@ owner = intent.with_name("runtime-evidence.owner.json")
 for path in (owner, intent):
     assert not path.is_symlink() and path.is_file()
     assert json.loads(path.read_text()) == {"version": 1, "run_token": run_token, "machine_id": machine}
+class RuntimeEvidenceDeadline(RuntimeError):
+    """The whole capture budget expired, not one retryable socket read."""
+
 def timed_out(_signum, _frame):
-    raise TimeoutError("terminal runtime evidence deadline expired")
+    raise RuntimeEvidenceDeadline("terminal runtime evidence deadline expired")
 signal.signal(signal.SIGALRM, timed_out)
 signal.alarm(int(deadline))
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -62,28 +65,27 @@ def exited_without_ack():
     except urllib.error.HTTPError as error:
         return error.code == 404
 unacked_exits = 0
-# DONE is emitted before the guest's EXIT trap drains the worker and seals the
-# runtime. A 409 at this boundary means the exact guest is still cleaning up;
-# it is not an immutable artifact failure. The alarm bounds seal wait and the
-# complete transfer together. Once sealed, any changed manifest still fails.
+shutdown_complete = False
+# DONE precedes the guest EXIT trap. Retry only seal observation and transient
+# transport reads before the first manifest, within the unchanged whole-capture
+# alarm. Once sealed, transfers and the final manifest comparison fail closed.
 while True:
     try:
-        expected = manifest()
-        break
-    except urllib.error.HTTPError as error:
-        if error.code != 409:
-            raise
-        # A 409 is normal while the guest drains, but the same authenticated
-        # guest can already know that its driver exited without a cleanup ACK.
-        # That terminal state can never publish runtime evidence, so fail closed
-        # now instead of consuming the full recovery deadline.
+        try:
+            expected = manifest()
+            break
+        except urllib.error.HTTPError as error:
+            if error.code != 409:
+                raise
+            if shutdown_complete:
+                # This 409 was observed after the exact terminal ACK, unlike
+                # the earlier read that may have raced the guest's seal.
+                raise RuntimeError("guest shutdown without sealed runtime evidence") from error
         try:
             with opener.open(urllib.request.Request(shutdown_url, headers=headers), timeout=6) as response:
                 if response.status == 204:
-                    # The exact driver and its exit trap have finished. A 409
-                    # now cannot become a sealed run result; preserve the
-                    # pending latch for zero-credit forensic retirement.
-                    raise RuntimeError("guest shutdown without sealed runtime evidence")
+                    shutdown_complete = True
+                    continue
                 assert response.status == 202
         except urllib.error.HTTPError as shutdown_error:
             if shutdown_error.code == 500:
@@ -93,7 +95,13 @@ while True:
         unacked_exits = unacked_exits + 1 if exited_without_ack() else 0
         if unacked_exits >= 2:
             raise RuntimeError("driver exited without cleanup acknowledgement")
-        time.sleep(0.5)
+    except urllib.error.HTTPError:
+        # HTTPError is a URLError subclass; authentication and protocol failures
+        # are not transient transport reads.
+        raise
+    except (urllib.error.URLError, TimeoutError):
+        pass
+    time.sleep(0.5)
 assert expected["version"] == 1 and expected["run_token"] == run_token and expected["machine_id"] == machine
 files = expected["files"]
 required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}

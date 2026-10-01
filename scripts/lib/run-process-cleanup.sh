@@ -2,9 +2,13 @@
 
 run_wait_owned_agent_shutdown() {  # <pid> <birth> <deadline-seconds>
   local pid="$1" birth="$2" timeout="$3" current state deadline
-  [ -n "$pid" ] && [ -n "$birth" ] || return 1
+  [ -n "$pid" ] || return 1
   current="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^ *//;s/ *$//')"
-  [ -n "$current" ] || return 0
+  if [ -z "$current" ]; then
+    ! kill -0 "$pid" 2>/dev/null
+    return $?
+  fi
+  [ -n "$birth" ] || return 1
   [ "$current" = "$birth" ] || return 1
   # The supervisor owns worker cancellation. A group/tree signal would also
   # reach its workers, producing the second signal that requests forced exit.

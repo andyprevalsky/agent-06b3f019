@@ -109,13 +109,25 @@ def verify_failed_stack_provider_archive(
         assert run["tasks"][0]["name"] == row["task"]
         assert run["tasks"][0]["status"] == "ERROR"
 
+    verify_stopped_provider_archive(
+        out, row, owner, run_id,
+        hashlib.sha256(originals["repo/.context/cloudbench/logs/backend.log"]).hexdigest(),
+    )
+
+
+def verify_stopped_provider_archive(
+    out: Path, row: dict[str, object], owner: str, run_id: str,
+    original_backend_sha256: str,
+) -> None:
+    """A stopped guest still owns every provider session in its original log."""
     helper = runpy.run_path(str(Path(__file__).with_name("cloudbench-exact-session-cleanup.py")))
     provider = object_file(out / "guest-cleanup.provider-manifest.json")
     stopped = object_file(out / "guest-cleanup.machine-stopped.json")
     receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
     assert provider["kind"] == "provider-active-exact-manifest"
-    assert regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024) == (
-        originals["repo/.context/cloudbench/logs/backend.log"])
+    assert hashlib.sha256(
+        regular_bytes(out / "guest-cleanup.backend.log", 64 * 1024 * 1024)
+    ).hexdigest() == original_backend_sha256
     args = argparse.Namespace(
         owner=owner, fleet_run_id=run_id, bench=row["task"],
         machine_id=row["machine_id"], output_dir=str(out),
@@ -417,6 +429,7 @@ def verify_started_pool_evidence(
     seen = set()
     archived_services = {}
     archived_runs = {}
+    archived_backends = {}
     with tarfile.open(archive_path, "r:gz") as archive:
         for member in archive:
             assert member.isfile() and member.name in expected_files
@@ -432,6 +445,8 @@ def verify_started_pool_evidence(
                 archived_services[member.name.split("/", 1)[0]] = json.loads(data)
             if member.name.endswith("/repo/.context/cloudbench/run.json"):
                 archived_runs[member.name.split("/", 1)[0]] = json.loads(data)
+            if member.name.endswith("/repo/.context/cloudbench/logs/backend.log"):
+                archived_backends[member.name.split("/", 1)[0]] = hashlib.sha256(data).hexdigest()
             seen.add(member.name)
     assert seen == set(expected_files)
     for row in rows:
@@ -443,21 +458,9 @@ def verify_started_pool_evidence(
             # sealed exact stopped-machine cleanup proof instead.
             assert services_status == "running"
             out = run / name
-            stopped = object_file(out / "guest-cleanup.machine-stopped.json")
-            receipt = object_file(out / "guest-cleanup.recovery-receipt.json")
-            assert stopped["version"] == 1 and stopped["state"] == "stopped"
-            assert stopped["machine_id"] == row["machine_id"]
-            assert stopped["fleet_owner_token"] == owner
-            assert stopped["fleet_run_id"] == meta["run_id"]
-            assert receipt["machine_id"] == row["machine_id"]
-            assert receipt["fleet_owner_token"] == owner
-            assert receipt["fleet_run_id"] == meta["run_id"]
-            assert stopped["machine_status_sha256"] == hashlib.sha256(
-                regular_bytes(out / "guest-cleanup.machine-status.txt", 1048576)
-            ).hexdigest()
-            assert receipt["stopped_machine_proof_sha256"] == hashlib.sha256(
-                json.dumps(stopped, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            verify_stopped_provider_archive(
+                out, row, owner, meta["run_id"], archived_backends[name],
+            )
             assert native_machines[row["machine_id"]]["state"] == "stopped"
         results = archived_runs[name].get("tasks")
         assert isinstance(results, list) and len(results) == 1
@@ -748,6 +751,12 @@ def verify_interrupted_pool_evidence(
                     verify_clean_stack_status(status, token)
             else:
                 assert state == b"running" and services["status"] == "running"
+                verify_stopped_provider_archive(
+                    run / row["task"], row, owner, meta["run_id"],
+                    hashlib.sha256(
+                        archived[prefix + "repo/.context/cloudbench/logs/backend.log"]
+                    ).hexdigest(),
+                )
         if path in archived and row["task"] not in rejected_names | prestack_names:
             results = archived[path].get("tasks")
             assert isinstance(results, list) and len(results) == 1

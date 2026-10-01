@@ -599,3 +599,43 @@ the recurrence. Work is bounded by one previous sealed capture (existing 512 MB
 ceiling) and one local namespace lock. At 10,000 agents there is no global
 registry, Machine inventory scan or per-agent shared lock. This causal admission
 proof grants no live fleet acceptance credit.
+
+### October 1 review recurrence: seal observations and transport deadlines
+
+Review findings 4152321169/4152321171 identified two gaps in the first-manifest
+wait. The owning authenticated HTTP fixture reproduced an initial manifest 409,
+then shutdown 204, followed by an available complete manifest. Both normal and
+recovery collectors rejected that valid transition using the earlier observation.
+Controlled urllib transport faults also showed that a single connection refusal
+or socket timeout during manifest, shutdown, driver or ACK observation terminated
+collection before its existing deadline. This is causal fixture evidence; it does
+not attribute any historical fleet failure to these mechanisms.
+
+The collector now observes the manifest again after terminal shutdown and rejects
+only a 409 observed after that terminal acknowledgement. Before the first sealed
+manifest, transient transport failures share the existing bounded polling loop.
+HTTP errors retain their explicit protocol handling. The whole-capture alarm uses
+a distinct non-`OSError` exception: urllib cannot wrap it into a retryable transport
+error, and socket-timeout retries cannot swallow it. Transfers, hash/owner checks,
+final manifest comparison, normal 7,200-second backstops and temporary proof limits
+are unchanged. Both existing collector entrypoints receive the same implementation;
+no new retry service, global state or model calls are introduced.
+
+Archive searches were `guest shutdown without sealed runtime evidence` and
+`runtime collector transient transport seal race`. This is a recurrence of the
+first-seal observation boundary above. The old standalone fixture was dormant and
+also omitted the real `/driver-health` route; that omission produced an unrelated
+`RemoteDisconnected` and is preserved separately in the private evidence. Its
+fixture now serves the actual route. One compact parameterized control is wired
+into the existing registered runtime-retention suite, including genuine missing
+seal, failed cleanup, HTTP 403, persistent socket timeout and native SIGALRM during
+a blocked read. The final unchanged test bodies yield seven failures/three passing
+refusal controls on immutable baseline `393ebef7c` (6.96 seconds), then ten passes
+on the corrected collectors (7.20 seconds). Formatting-only adjustments preserve
+those ASTs. Private paired logs, immutable source and hash receipts are under
+`.context/acceptance/proof85-collector-seal-rca/`. Independent root review passed against all five frozen file hashes; its private
+receipt is `proof85-collector-seal-rca/root-independent-review.receipt.private.json`.
+The complete existing terminal-evidence group subsequently passed in 54.64 seconds
+under its unchanged 60-second cap, with every tracked script/benchmark input hash
+unchanged across the run. Final source-bound deploy/fleet gates remain separate
+requirements; no acceptance credit is granted by this repair.

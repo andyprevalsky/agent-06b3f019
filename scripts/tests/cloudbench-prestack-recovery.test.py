@@ -346,6 +346,132 @@ class FailedStackRecoveryTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.verify_archive()
 
+    def make_started_archive(self):
+        forensic = self.run / "_forensic"
+        forensic.mkdir()
+        archive_path = forensic / "originals.tar.gz"
+        files = {}
+        with tarfile.open(archive_path, "w:gz") as archive:
+            for relative, data in self.original.items():
+                files[relative] = {
+                    "bytes": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+                info = tarfile.TarInfo(f"{self.bench}/{relative}")
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+        write(
+            forensic / "manifest.json",
+            json.dumps(
+                {
+                    "schema": "cloudbench-started-evidence-v1",
+                    "owner": OWNER,
+                    "run_id": RUN_ID,
+                    "proof_credit": 0,
+                    "archive_bytes": archive_path.stat().st_size,
+                    "archive_sha256": hashlib.sha256(
+                        archive_path.read_bytes()
+                    ).hexdigest(),
+                    "tasks": [
+                        {
+                            "task": self.bench,
+                            "ordinal": 0,
+                            "run_token": TOKEN,
+                            "machine_id": MACHINE,
+                            "volume_id": VOLUME,
+                            "kind": "pool",
+                            "proof_credit": 0,
+                            "files": files,
+                        }
+                    ],
+                }
+            ),
+        )
+
+
+    def verify_started_archive(self):
+        forensic = self.run / "_forensic"
+        return retirement.verify_started_pool_evidence(
+            self.registry,
+            self.run,
+            forensic / "manifest.json",
+            forensic / "originals.tar.gz",
+            self.machines,
+            self.volumes,
+        )
+
+
+    def assert_stopped_provider_corruptions_rejected(self, verify):
+        paths = {
+            name: self.out / f"guest-cleanup.{name}"
+            for name in (
+                "recovery-receipt.json",
+                "provider-manifest.json",
+                "machine-stopped.json",
+                "backend.log",
+            )
+        }
+        originals = {name: path.read_bytes() for name, path in paths.items()}
+        for mutation in (
+            "missing-release",
+            "wrong-receipt-kind",
+            "wrong-session",
+            "forged-manifest",
+            "different-backend",
+        ):
+            with self.subTest(mutation=mutation):
+                receipt = json.loads(originals["recovery-receipt.json"])
+                if mutation == "missing-release":
+                    receipt["results"] = []
+                elif mutation == "wrong-receipt-kind":
+                    receipt["kind"] = "unverified-cleanup"
+                elif mutation == "wrong-session":
+                    receipt["results"][0]["session_id"] = "kernel_another_owner123"
+                elif mutation == "forged-manifest":
+                    manifest = json.loads(originals["provider-manifest.json"])
+                    manifest["sessions"]["kernel"] = []
+                    stopped = json.loads(originals["machine-stopped.json"])
+                    stopped["manifest_sha256"] = cleanup.canonical_digest(manifest)
+                    receipt["manifest_sha256"] = cleanup.canonical_digest(manifest)
+                    receipt["stopped_machine_proof_sha256"] = cleanup.canonical_digest(
+                        stopped
+                    )
+                    receipt["results"] = []
+                    write(paths["provider-manifest.json"], json.dumps(manifest))
+                    write(paths["machine-stopped.json"], json.dumps(stopped))
+                else:
+                    write(
+                        paths["backend.log"],
+                        originals["backend.log"] + b"another backend tail\n",
+                    )
+                write(paths["recovery-receipt.json"], json.dumps(receipt))
+                try:
+                    with self.assertRaises((AssertionError, ValueError)):
+                        verify()
+                finally:
+                    for name, data in originals.items():
+                        write(paths[name], data)
+        self.assertEqual(verify()["proof_credit"], 0)
+
+
+    def test_started_stale_running_requires_complete_exact_provider_cleanup(
+        self,
+    ) -> None:
+        self.make_started_archive()
+        self.assertEqual(self.verify_started_archive()["proof_credit"], 0)
+        self.assert_stopped_provider_corruptions_rejected(self.verify_started_archive)
+
+
+    def test_interrupted_running_driver_requires_complete_exact_provider_cleanup(
+        self,
+    ) -> None:
+        self.original["cloudbench-driver.state"] = b"running\n"
+        self.original["cloudbench-driver.pid"] = b"1511\n"
+        self.make_capture()
+        self.assertEqual(self.verify_archive()["proof_credit"], 0)
+        self.assert_stopped_provider_corruptions_rejected(self.verify_existing_archive)
+
+
     def test_failed_services_cannot_retire_with_unverified_provider_cleanup(self) -> None:
         self.original["repo/.context/cloudbench/services.json"] = b'{"status":"failed"}'
         self.original["repo/.context/cloudbench/stack.log"] = b"Worker cleanup failed\n"

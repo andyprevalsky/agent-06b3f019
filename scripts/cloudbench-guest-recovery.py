@@ -795,9 +795,9 @@ def validate_zero_backend(path: Path, root_agent_id: str) -> tuple[str, str]:
     if (
         root_agent_id not in text.lower()
         or len(starts) != 1
-        or len(shutdowns) != 1
+        or not shutdowns
         or starts[0] >= shutdowns[0]
-        or shutdowns[0] != len(lines) - 1
+        or shutdowns != list(range(shutdowns[0], len(lines)))
     ):
         raise GuestRecoveryError(
             "backend evidence has no complete exact-root lifecycle boundary"

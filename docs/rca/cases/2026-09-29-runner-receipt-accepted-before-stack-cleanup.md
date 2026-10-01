@@ -196,8 +196,8 @@ backend's unexplained SIGKILL as fixed.
 ### Failed services bypassed exact provider receipt validation
 
 The October 1 independent review found that the interrupted-pool verifier
-validated an active provider manifest and its release receipt when the original
-services status was stale `running`, but accepted `failed` services without
+validated an active provider manifest and its release receipt in the exited-driver
+branch when the original services status was stale `running`, but accepted `failed` services without
 those checks. The stopped Machine alone does not prove that its external
 provider sessions were released. This could retire an interrupted owner with
 zero benchmark credit while silently dropping its provider cleanup obligation.
@@ -213,7 +213,7 @@ and a backend-log digest that did not match the retained original bytes. Each
 negative assertion failed with `AssertionError not raised`; the complete
 positive fixture remained accepted with zero proof credit.
 
-Both `failed` and stale `running` services now require the same recomputed
+Both `failed` and stale `running` services in that exited-driver branch now require the same recomputed
 active provider manifest, original backend-byte binding, stopped-Machine proof,
 and exact provider release receipt. The stale-running supervisor exit and
 single-task `ERROR` guards remain unchanged. The identical regression passes
@@ -222,6 +222,47 @@ pass 22 tests in total. At 10,000 agents, this adds only validation of each
 owner's already captured bytes and exact recorded sessions; it makes no new
 provider inventory or model requests. Independent review and the consecutive
 live fleet proof remain required; the owning fixture earns no acceptance credit.
+
+### Started and still-running driver archives bypassed provider receipt validation
+
+The later exact-source review identified two further branches of this same
+ownership defect: a started archive with stale `running` services and an
+interrupted archive retaining the original driver PID. Both compared native
+Machine identity and stopped-proof hashes but could accept an unrelated cleanup
+receipt or omit provider sessions. The earlier exited-driver repair did not
+cover those branches; its positive and negative assertions remain unchanged.
+
+The actual public verifier now has two compact owning cases in
+`scripts/tests/cloudbench-prestack-recovery.test.py`, each with an exact
+zero-credit positive control and five corruptions: a missing release, wrong
+receipt kind, another session's release, a forged manifest with its stopped
+proof and receipt hashes consistently updated, and different captured backend
+bytes. The same final fixture accepted all ten corruptions against
+the original verifier; each negative assertion failed. The repaired verifier
+rejects all ten and accepts both controls. The original verifier was loaded
+from its retained exact bytes through a private import overlay; the actual test
+and canonical helper paths were unchanged. No source was swapped during the
+reproduction.
+
+Both branches now use the same full validation as the existing failed-stack
+path: bind the captured backend digest to the already verified original archive,
+recompute the active provider manifest, validate the exact stopped-Machine proof,
+and match every cleanup result to the manifest's sessions. The started archive
+retains only backend digests for this check, not all backend payloads. Existing
+supervisor-exit, single-task `ERROR`, native inventory, worker ownership and
+archive hash guards remain. This adds no network inventory or model requests,
+changes no task or timeout, and supplies zero benchmark credit.
+
+The permanent runtime-retention gate selects just these two owning cases under
+its existing terminal bound. The focused prestack, quiesced, prestart and
+rejected-start controls pass 24 tests in total. All 18 existing prestack class
+methods and all unrelated verifier functions remain unchanged. The final diff
+preserves existing formatting outside the actual helper and call-site changes.
+Private exact-source red/green,
+controls and source receipts are under
+`.context/acceptance/proof85-forensic-stopped-receipt-rca/`. Independent review
+and the final native gate remain required. The original live recovery and
+consecutive fleet outcome requirements remain open.
 
 ## Human feedback
 

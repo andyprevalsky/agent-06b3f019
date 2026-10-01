@@ -628,3 +628,40 @@ def test_boot_admission_archives_only_verified_completed_standalone_runs(tmp_pat
     assert json.loads(new_owner)["run_token"] != token
     assert (output / "runtime-evidence.pending").read_bytes() == new_owner
     assert not capture.exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "seal-transition",
+        "manifest-url",
+        "manifest-timeout",
+        "shutdown-url",
+        "driver-timeout",
+        "ack-url",
+        "persistent-timeout",
+        "deadline-during-read",
+        "http-rejection",
+        "terminal-failures",
+    ],
+)
+def test_runtime_collector_rechecks_terminal_seal_and_bounds_transport_reads(case: str) -> None:
+    fixture = runpy.run_path(str(ROOT / "scripts/tests/cloudbench-runtime-evidence-collector.test.py"))
+    fixture["exercise_read_transition"](case)
+
+
+def test_forensic_running_stack_requires_exact_provider_cleanup() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/tests/cloudbench-prestack-recovery.test.py"),
+            "FailedStackRecoveryTest.test_started_stale_running_requires_complete_exact_provider_cleanup",
+            "FailedStackRecoveryTest.test_interrupted_running_driver_requires_complete_exact_provider_cleanup",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

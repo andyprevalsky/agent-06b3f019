@@ -11241,20 +11241,27 @@ def test_exited_runless_subtype_requires_complete_process_and_service_fence(
 
 
 @pytest.mark.parametrize(
-    ("database_container", "database_volume"),
+    ("database_container", "database_volume", "shutdown_count"),
     (
-        ("", ""),
+        ("", "", 1),
         (
             "victoria-db-exact-zero",
             "victoria-pgdata-exact-zero",
+            1,
         ),
+        ("", "", 2),
     ),
-    ids=("canonical-system-postgres", "legacy-nominal-docker-labels"),
+    ids=(
+        "canonical-system-postgres",
+        "legacy-nominal-docker-labels",
+        "repeated-terminal-shutdown",
+    ),
 )
 def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
     tmp_path: Path,
     database_container: str,
     database_volume: str,
+    shutdown_count: int,
 ) -> None:
     """Complete lifecycle plus an exact root/tree query can prove zero allocation."""
     owner = "7d" * 16
@@ -11289,6 +11296,9 @@ def test_quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt(
         "operation=findMany status=ok\n"
         "[Server] SIGTERM received, closing server...\n"
     )
+    if shutdown_count == 2:
+        with backend_log.open("a") as output_log:
+            output_log.write("[Server] SIGTERM received, closing server...\n")
     services = {
         "schema_version": 1,
         "benchmark_mode": True,

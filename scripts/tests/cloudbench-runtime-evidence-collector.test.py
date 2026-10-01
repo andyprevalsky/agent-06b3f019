@@ -22,9 +22,20 @@ assert MATCH, "production collector function was not found"
 COLLECTOR = MATCH.group()
 
 
-def exercise(*, seal_after: int, deadline: int, file_delay: float,
-             recovery: bool = False, terminal_cleanup_failure: bool = False,
-             terminal_clean_without_seal: bool = False):
+def exercise(
+    *,
+    seal_after: int,
+    deadline: int,
+    file_delay: float,
+    recovery: bool = False,
+    terminal_cleanup_failure: bool = False,
+    terminal_clean_without_seal: bool = False,
+    seal_during_shutdown: bool = False,
+    transport_fault: tuple[str, str] | None = None,
+    blocked_manifest: bool = False,
+    expect_deadline: bool = False,
+    forbidden_manifest: bool = False,
+):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
         "services.json": json.dumps({"status": "stopped", "env": {"worker_processes": 2}}).encode(),
@@ -54,15 +65,38 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
             assert self.headers.get("X-Cloudbench-Run-Token") == token
             assert self.headers.get("X-Cloudbench-Machine-Id") == machine
             parts = urlsplit(self.path)
+            if parts.path == "/driver-health":
+                self.send_error(
+                    410 if transport_fault and transport_fault[0] == "ack" else 202
+                )
+                return
+            if parts.path.startswith("/cloudbench-driver-clean-"):
+                data = token.encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if parts.path == "/shutdown-health":
-                self.send_error(500 if terminal_cleanup_failure else
-                                204 if terminal_clean_without_seal else 202,
-                                "driver exited without cleanup acknowledgement"
-                                if terminal_cleanup_failure else "cleanup pending")
+                self.send_error(
+                    500
+                    if terminal_cleanup_failure
+                    else 204
+                    if terminal_clean_without_seal or seal_during_shutdown
+                    else 202,
+                    "driver exited without cleanup acknowledgement"
+                    if terminal_cleanup_failure
+                    else "cleanup pending",
+                )
                 return
             assert parts.path == "/runtime-evidence"
             if not parts.query:
                 manifest_calls += 1
+                if forbidden_manifest:
+                    self.send_error(403)
+                    return
+                if blocked_manifest:
+                    time.sleep(deadline + 0.5)
                 if manifest_calls <= seal_after:
                     self.send_error(409, "exact runtime is not sealed")
                     return
@@ -74,10 +108,13 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except BrokenPipeError:
+                assert blocked_manifest
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     try:
         with tempfile.TemporaryDirectory() as directory:
@@ -95,6 +132,39 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
                 ["bash", "-c", command, "collector-test", str(destination),
                  str(server.server_port), token, machine, str(deadline)]
             )
+            if transport_fault:
+                # Inject the exact urllib transport exception before delegating
+                # all successful reads to the authenticated real HTTP fixture.
+                bootstrap = """
+import json, runpy, sys, urllib.error, urllib.request
+from urllib.parse import urlsplit
+stage, kind = json.loads(sys.argv.pop(1))
+native_open = urllib.request.OpenerDirector.open
+raised = False
+def open_with_fault(self, request, *args, **kwargs):
+    global raised
+    path = urlsplit(request.full_url).path
+    target = {"manifest": "/runtime-evidence", "shutdown": "/shutdown-health",
+              "driver": "/driver-health", "ack": "/cloudbench-driver-clean-"}[stage]
+    if path.startswith(target) and (not raised or kind == "persistent-timeout"):
+        raised = True
+        if kind == "url":
+            raise urllib.error.URLError(ConnectionRefusedError("fixture proxy unavailable"))
+        raise TimeoutError("fixture socket read timed out")
+    return native_open(self, request, *args, **kwargs)
+urllib.request.OpenerDirector.open = open_with_fault
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+assert raised, "transport fault was never exercised"
+"""
+                assert recovery
+                argv = [
+                    sys.executable,
+                    "-c",
+                    bootstrap,
+                    json.dumps(transport_fault),
+                    *argv[1:],
+                ]
             started = time.monotonic()
             result = subprocess.run(
                 argv,
@@ -102,6 +172,12 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
                 capture_output=True, text=True, timeout=deadline + 5,
             )
             elapsed = time.monotonic() - started
+            if forbidden_manifest:
+                assert result.returncode != 0 and "HTTP Error 403" in result.stderr
+                assert elapsed < 1.5 and manifest_calls == 1
+                assert not (destination / "runtime-evidence").exists()
+                assert (output / "runtime-evidence.pending").exists()
+                return
             if terminal_cleanup_failure or terminal_clean_without_seal:
                 assert result.returncode != 0
                 expected_error = (
@@ -112,8 +188,9 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
                 assert expected_error in result.stderr
                 assert elapsed < 1.5, elapsed
                 assert not (destination / "runtime-evidence").exists()
+                assert (output / "runtime-evidence.pending").exists()
                 return
-            if seal_after < 100:
+            if seal_after < 100 and not expect_deadline:
                 assert result.returncode == 0, result.stderr[-600:]
                 capture = destination / "runtime-evidence"
                 assert json.loads((capture / "manifest.json").read_text()) == manifest
@@ -123,6 +200,7 @@ def exercise(*, seal_after: int, deadline: int, file_delay: float,
             else:
                 assert result.returncode != 0
                 assert "terminal runtime evidence deadline expired" in result.stderr
+                assert elapsed < deadline + 1, elapsed
                 assert not (destination / "runtime-evidence").exists()
                 assert (output / "runtime-evidence.pending").exists()
     finally:
@@ -158,6 +236,70 @@ def test_collectors_stop_on_clean_shutdown_without_run_result():
                  terminal_clean_without_seal=True)
 
 
+def exercise_read_transition(case: str):
+    if case == "seal-transition":
+        for recovery in (False, True):
+            exercise(
+                seal_after=1,
+                deadline=3,
+                file_delay=0,
+                recovery=recovery,
+                seal_during_shutdown=True,
+            )
+    elif case == "terminal-failures":
+        test_collectors_stop_on_clean_shutdown_without_run_result()
+        test_recovery_collector_stops_on_terminal_cleanup_failure()
+    elif case == "deadline-during-read":
+        exercise(
+            seal_after=0,
+            deadline=1,
+            file_delay=0,
+            recovery=True,
+            blocked_manifest=True,
+            expect_deadline=True,
+        )
+    elif case == "persistent-timeout":
+        exercise(
+            seal_after=0,
+            deadline=1,
+            file_delay=0,
+            recovery=True,
+            transport_fault=("manifest", "persistent-timeout"),
+            expect_deadline=True,
+        )
+    elif case == "http-rejection":
+        exercise(
+            seal_after=0,
+            deadline=3,
+            file_delay=0,
+            recovery=True,
+            forbidden_manifest=True,
+        )
+    else:
+        stage, kind = case.split("-")
+        exercise(
+            seal_after=0 if stage == "manifest" else 1,
+            deadline=3,
+            file_delay=0,
+            recovery=True,
+            transport_fault=(stage, kind),
+        )
+
+
+READ_TRANSITIONS = (
+    "seal-transition",
+    "manifest-url",
+    "manifest-timeout",
+    "shutdown-url",
+    "driver-timeout",
+    "ack-url",
+    "persistent-timeout",
+    "deadline-during-read",
+    "http-rejection",
+    "terminal-failures",
+)
+
+
 if __name__ == "__main__":
     test_delayed_seal_then_complete_transfer()
     test_unsealed_guest_fails_closed_at_deadline()
@@ -165,4 +307,6 @@ if __name__ == "__main__":
     test_recovery_collector_keeps_pending_on_timeout()
     test_recovery_collector_stops_on_terminal_cleanup_failure()
     test_collectors_stop_on_clean_shutdown_without_run_result()
+    for transition in READ_TRANSITIONS:
+        exercise_read_transition(transition)
     print("PASS: terminal collector waits for exact seal, transfers, and fails closed on timeout")

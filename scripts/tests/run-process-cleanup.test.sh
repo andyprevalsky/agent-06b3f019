@@ -210,4 +210,20 @@ case "$age_dead" in
   *) echo "FAIL: process_age_seconds returned garbage for a dead pid: [$age_dead]" >&2; exit 1 ;;
 esac
 
+# A launched wrapper can finish before run.sh captures its birth. Its exact
+# reaped PID needs no signal; a live child with unknown birth must remain owned.
+bash -c 'exit 0' &
+already_exited_pid=$!
+wait "$already_exited_pid"
+if ! run_wait_owned_agent_shutdown "$already_exited_pid" "" 1; then
+  echo "FAIL: an already-reaped worker with no captured birth needs no drain" >&2
+  exit 1
+fi
+echo "PASS: an already-reaped worker needs no birth or signal"
+if run_wait_owned_agent_shutdown "$current_pid" "" 1; then
+  echo "FAIL: a live worker with unknown birth must remain fail-closed" >&2
+  exit 1
+fi
+assert_alive "$current_pid" "live worker with unknown birth is not signalled"
+
 echo "All run process cleanup tests passed."
