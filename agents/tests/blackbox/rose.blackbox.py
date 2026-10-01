@@ -3833,7 +3833,7 @@ async def test_browser_qwen_prefers_cached_provider_without_affecting_flash():
         )
 
     assert bodies[0]["model"] == "qwen/qwen3.8-27b"
-    assert bodies[0]["provider"] == {"order": ["Novita"], "allow_fallbacks": True}
+    assert bodies[0]["provider"] == {"order": ["novita"], "allow_fallbacks": True}
     assert bodies[0]["session_id"] == "browser-task:task-1:browser_use"
     assert bodies[1]["model"] == "qwen/qwen3.8-27b"
     assert "provider" not in bodies[1]

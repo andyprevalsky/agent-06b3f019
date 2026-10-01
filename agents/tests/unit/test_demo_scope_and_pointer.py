@@ -827,6 +827,20 @@ def test_spawn_handler_helpers_cover_demo_counts_and_wrapup():
     assert "https://example.com/cost" in balanced
     assert "https://example.com/neighborhoods" in balanced
     assert "https://example.com/weather" in balanced
+    long_url = "https://example.com/" + "x" * 500
+    bounded_sources = compile_explore_wrap_up(
+        "",
+        [
+            "[web_search] " + "a" * 3000 + " " + long_url + " https://example.com/cost",
+            "[web_search] " + "b" * 3000 + " " + long_url + " https://example.com/weather",
+        ],
+        budget=400,
+    )
+    assert len(bounded_sources) <= 400
+    assert "Sources: https://example.com/cost" in bounded_sources
+    assert "Sources: https://example.com/weather" in bounded_sources
+    assert long_url not in bounded_sources
+    assert "https://example.com/x" not in bounded_sources
     assert _has_usable_tool_evidence(None) is False
     assert _has_usable_tool_evidence("error: nope") is False
     assert _has_usable_tool_evidence("Huberman notes") is True

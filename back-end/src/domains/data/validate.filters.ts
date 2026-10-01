@@ -198,6 +198,7 @@ export function parseAgentTrajectoryFilters(
   const path = parsed?.source === 'agent_trajectories' ? parsed : undefined;
   const role = parseFilterString(raw, 'role');
   const surface = parseFilterString(raw, 'surface');
+  const recordKind = parseFilterString(raw, 'record_kind');
   if (role !== undefined && !['USER', 'ASSISTANT', 'TOOL'].includes(role)) {
     throw new InvalidGrepParamError('filters.role');
   }
@@ -206,6 +207,12 @@ export function parseAgentTrajectoryFilters(
   }
   if (surface !== undefined && !['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'].includes(surface)) {
     throw new InvalidGrepParamError('filters.surface');
+  }
+  if (
+    recordKind !== undefined &&
+    !['all', 'message', 'llm_output', 'llm_context'].includes(recordKind)
+  ) {
+    throw new InvalidGrepParamError('filters.record_kind');
   }
   return {
     ...(path?.rootAgentId !== undefined ? { pathRootAgentId: path.rootAgentId } : {}),
@@ -216,6 +223,9 @@ export function parseAgentTrajectoryFilters(
     until: parseFilterDate(raw, 'until'),
     ...(role !== undefined ? { role: role as AgentTrajectoryGrepFilters['role'] } : {}),
     ...(surface !== undefined ? { surface: surface as AgentTrajectoryGrepFilters['surface'] } : {}),
+    ...(recordKind !== undefined
+      ? { recordKind: recordKind as AgentTrajectoryGrepFilters['recordKind'] }
+      : {}),
   };
 }
 

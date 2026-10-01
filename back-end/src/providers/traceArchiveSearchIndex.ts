@@ -103,6 +103,12 @@ function archivedMessageRows(fixture: ScopedDbFixture): ArchivedTrajectoryRow[] 
   });
 }
 
+function contentDigest(rootAgentId: string, agentId: string, role: string, text: string): string {
+  return createHash('sha256')
+    .update(`${rootAgentId}\0${agentId}\0${role}\0${text}`)
+    .digest('hex');
+}
+
 function llmRows(
   fixture: ScopedDbFixture,
   artifactPath: string,
@@ -139,9 +145,7 @@ function llmRows(
   const output = textParts(dump.output).join('\n').trim();
   if (output) candidates.push({ role: 'ASSISTANT', kind: 'llm_output', text: output });
   return candidates.flatMap((candidate) => {
-    const digest = createHash('sha256')
-      .update(`${fixture.root_agent_id}\0${agentId}\0${candidate.role}\0${candidate.text}`)
-      .digest('hex');
+    const digest = contentDigest(fixture.root_agent_id, agentId, candidate.role, candidate.text);
     if (seen.has(digest)) return [];
     seen.add(digest);
     return [
@@ -232,7 +236,11 @@ export async function indexArchivedTrace(
     throw new Error(`Trace fixture owner/root mismatch for ${rootAgentId}`);
   }
   const rows = archivedMessageRows(fixture);
-  const seen = new Set<string>();
+  // Replayed LLM inputs often repeat a stored message. Keep its original path
+  // and timestamp instead of indexing later copies as separate search hits.
+  const seen = new Set(
+    rows.map((row) => contentDigest(rootAgentId, row.agentId, row.role, row.searchText))
+  );
   const llmPaths = [...new Set(artifactPaths)]
     .filter((path) => /^(llm|llm-updates)\/.*\.json\.gz\.enc$/.test(path))
     .sort();

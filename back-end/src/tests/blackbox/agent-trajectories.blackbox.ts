@@ -117,6 +117,7 @@ async function proveR2OnlyHistory(): Promise<void> {
         messages: [
           { role: 'system', content: 'Archive-only hidden system token: private-84' },
           { role: 'tool', content: 'Archive-only tool diagnosis: missing lilac-83' },
+          { role: 'assistant', content: fixture.rows.Message[0].text },
         ],
         output: 'Archive-only LLM fix: enabled lilac-83',
       },
@@ -135,12 +136,25 @@ async function proveR2OnlyHistory(): Promise<void> {
       pattern: 'Archive-only',
       filters: { path },
     });
-    const found = requireResult(result, 3);
+    const found = requireResult(result, 2);
+    if ((found[0].location as { field?: string } | undefined)?.field === 'message') {
+      throw new Error(`An older stored message displaced a newer trace: ${JSON.stringify(found)}`);
+    }
+    const mixed = requireResult(
+      await grep(ownerId, {
+        sources: ['agent_trajectories', 'messages'],
+        pattern: 'Archive-only',
+      }),
+      2
+    );
+    if ((mixed[0].location as { field?: string } | undefined)?.field === 'message') {
+      throw new Error(`Mixed-source grep lost chronological order: ${JSON.stringify(mixed)}`);
+    }
     const [first] = requireResult(
       await grep(ownerId, {
         source: 'agent_trajectories',
         pattern: 'Archive-only',
-        filters: { path },
+        filters: { path, record_kind: 'message' },
         head_limit: 1,
       }),
       1
@@ -150,8 +164,48 @@ async function proveR2OnlyHistory(): Promise<void> {
       !String(first.content).includes('ship at 09:15 UTC')
     ) {
       throw new Error(
-        `Original archive message or nearby fact was hidden by LLM context: ${JSON.stringify(first)}`
+        `Stored archive message filter returned the wrong hit: ${JSON.stringify(first)}`
       );
+    }
+    const [modelOutput] = requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'Archive-only',
+        filters: { record_kind: 'llm_output' },
+      }),
+      1
+    );
+    if (!String(modelOutput.content).includes('enabled lilac-83')) {
+      throw new Error(`Model output filter returned the wrong hit: ${JSON.stringify(modelOutput)}`);
+    }
+    const allRows = requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'Archive-only',
+        filters: { path, record_kind: 'all' },
+      }),
+      3
+    );
+    requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'Archive-only',
+        filters: { path, record_kind: 'llm_context' },
+      }),
+      1
+    );
+    const [secondPage] = requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'Archive-only',
+        filters: { path },
+        head_limit: 1,
+        offset: 1,
+      }),
+      1
+    );
+    if (secondPage.path === found[0].path) {
+      throw new Error(`Trajectory pagination repeated the first hit: ${JSON.stringify(found)}`);
     }
     const indexed = await prisma.agentTrajectorySearch.count({ where: { rootAgentId } });
     if (indexed !== 3) throw new Error(`Expected 3 lazily indexed archived rows, got ${indexed}`);
@@ -162,7 +216,10 @@ async function proveR2OnlyHistory(): Promise<void> {
       await grep(ownerId, {
         source: 'agent_trajectories',
         pattern: 'lilac-83',
-        filters: { path: found.find((match) => match.role === 'TOOL')?.path },
+        filters: {
+          path: allRows.find((match) => match.role === 'TOOL')?.path,
+          record_kind: 'llm_context',
+        },
       }),
       1
     );
@@ -267,7 +324,15 @@ async function provePartialArchiveHistory(): Promise<void> {
     if ((await indexArchivedTraceFromR2(rootAgentId)) !== 2) {
       throw new Error('A stopped partial archive lost its root or child history');
     }
-    requireResult(await grep(ownerId, { source: 'agent_trajectories', pattern: 'violet-61' }), 2);
+    requireResult(await grep(ownerId, { source: 'agent_trajectories', pattern: 'violet-61' }), 1);
+    requireResult(
+      await grep(ownerId, {
+        source: 'agent_trajectories',
+        pattern: 'violet-61',
+        filters: { record_kind: 'all' },
+      }),
+      2
+    );
     requireResult(await grep(otherId, { source: 'agent_trajectories', pattern: 'violet-61' }), 0);
   } finally {
     await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId } });

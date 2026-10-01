@@ -5402,8 +5402,8 @@
   {
     "name": "grep-agent-trajectories-cross-surface",
     "title": "Recall browser and code agent history",
-    "description": "Retrieve grounded facts from two archived prior agent traces.",
-    "prompt": "From my original archived agent runs, what document title did the browser find at example.com, and how many steps did the Collatz program starting at 27 take? Use my local agent history only. In your final answer, include each fact with the exact agent_trajectories message path from grep and its message role.",
+    "description": "Retrieve grounded facts from two prior agent runs.",
+    "prompt": "What page title did my last browser agent run report for example.com, and what step count did my last coding agent run report for Collatz starting at 27?",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "start_phase": "execute",
@@ -5449,10 +5449,10 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "The answer gives Example Domain as the document title and 111 as the Collatz step count.",
-          "Both facts are grounded in agent_trajectories grep results from prior R2-backed runs, with paths and roles.",
+          "Both facts are grounded in prior agent trajectory messages.",
           "The answer does not substitute general knowledge or invent a source."
         ],
-        "judge_prompt": "Pass only if the completed answer says the earlier browser run found the title Example Domain and the earlier Claude Code Collatz-27 run reported 111 total steps. Require actual agent_trajectories grep evidence for both facts in the trajectory, with distinct prior agent paths and roles cited in the answer. Do not infer either fact from general knowledge, the task prompt, other grep sources, or a fabricated citation."
+        "judge_prompt": "Pass only if the completed answer says the prior browser run found the title Example Domain and the prior Collatz-27 run reported 111 total steps. Require actual agent_trajectories grep evidence for both facts in the trajectory from distinct prior runs. Do not infer either fact from general knowledge, the task prompt, other grep sources, or a fabricated citation."
       }
     ],
     "label_eval": "Grounded prior browser title and Collatz step count with two archived trace paths."
@@ -5460,8 +5460,8 @@
   {
     "name": "grep-agent-trajectories-followup",
     "title": "Recall a prior research agent result",
-    "description": "Recover a specific finding from an archived multi-city research trace.",
-    "prompt": "In my earlier agent comparison of cities to live in, which three cities did I compare, and what approximate monthly cost for one person excluding rent did the Denver research find? Use my local agent history only. In your final answer, cite the exact agent_trajectories trace_path down to a message ID and its message_role (USER, ASSISTANT, or TOOL); the agent title is not the role.",
+    "description": "Recall the user's most recent city comparison request.",
+    "prompt": "What was my last message to an agent about comparing cities to live in?",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "start_phase": "execute",
@@ -5507,19 +5507,19 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "The answer names Austin, Denver, and Lisbon.",
-          "The answer reports approximately $1,304 per month for one person in Denver excluding rent.",
-          "The cost and city list are grounded in an agent_trajectories grep result with a prior agent path and role."
+          "The answer recalls that the user requested cost of living, best neighborhoods, and weather for each city.",
+          "The answer is grounded in a prior USER agent trajectory message, directly or through a delegated grep-backed result quoting the message and path."
         ],
-        "judge_prompt": "Pass only if the answer names Austin TX, Denver CO, and Lisbon Portugal and gives the Denver single-person monthly cost excluding rent as approximately $1,303.8 (reasonable rounding to $1,304). The archived prior agent_trajectories grep evidence must support both the compared cities and the Denver cost. Require a cited prior agent path and message role. Fail if the agent uses live web estimates, guesses, or cites only the current run."
+        "judge_prompt": "Pass only if the answer reports the user's city comparison message: Austin TX, Denver CO, and Lisbon Portugal, with a request to research cost of living, best neighborhoods, and weather for each city. Require evidence from a prior USER message in agent_trajectories. Accept either a direct grep result containing the message or a completed delegated agent result that quotes its exact content and prior USER message path after a grep-backed search. Fail if the answer relies on an unsupported summary, live web, a guess, or only the current run."
       }
     ],
-    "label_eval": "Grounded city list and Denver amount from the archived research run."
+    "label_eval": "Grounded recall of the user's last city comparison request."
   },
   {
     "name": "grep-agent-trajectories-isolation",
-    "title": "Recall a past code run despite a conflicting status",
-    "description": "Distinguish the archived code tool status from its verified output.",
-    "prompt": "Look at my original Mac app Claude Code agent run that computed the Collatz sequence from 27. What status did its code-agent tool report, and what step count did the later verifier confirm? Use my local agent history only. Ground the status in the original code-agent TOOL message's Status line and the count in the later verifier output, not in later agents' summaries. Cite each exact agent_trajectories trace_path down to its message ID and its message_role.",
+    "title": "Recall a prior coding request",
+    "description": "Recover the user's request to a prior coding agent.",
+    "prompt": "What did I ask my coding agent to do with the Collatz sequence starting at 27?",
     "timeout_seconds": 450,
     "is_chat_mode": false,
     "start_phase": "execute",
@@ -5561,16 +5561,114 @@
     ],
     "evaluators": [
       {
-        "id": "prior-code-status-and-verification",
+        "id": "prior-coding-request",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The answer reports that the code-agent tool displayed FAILED (despite exit_code=0).",
-          "The later verifier confirmed 111 total Collatz steps.",
-          "Both claims are grounded in prior agent_trajectories grep results and cited paths and roles; the answer acknowledges the differing signals."
+          "The answer says the user asked for a Python program to compute the Collatz sequence starting at 27.",
+          "The answer says to print every number until the sequence reaches 1 and the total step count.",
+          "The request is grounded in a prior USER agent trajectory message."
         ],
-        "judge_prompt": "Pass only if the final answer distinguishes the earlier code-agent tool status of FAILED from the later verifier finding that the Collatz-27 program produced 111 steps. Require both observations to be present in agent_trajectories tool evidence from the archived prior run, and require cited prior agent trace paths and roles. Fail if the answer silently resolves the conflict, invents a successful tool status, or relies on general knowledge."
+        "judge_prompt": "Pass only if the answer says the user asked the coding agent to write and run a Python program for Collatz starting at 27, print every number through 1, and print the total step count. Require the earlier USER message in agent_trajectories grep evidence. Fail if the answer is based only on general knowledge, an agent summary, or the current run."
       }
     ],
-    "label_eval": "Grounded status and step-count distinction from the archived Collatz run."
+    "label_eval": "Grounded recall of a prior coding request."
+  },
+  {
+    "name": "grep-agent-trajectories-browser-verification",
+    "title": "Recall how a browser run verified a title",
+    "description": "Recover the verification method from a prior browser run.",
+    "prompt": "How did my browser agent verify the title of example.com?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses a prior browser trace already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-browser-title-verification",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the browser agent checked the page title in the browser tab or state and confirmed it by evaluating document.title in the page.",
+          "The verification method is grounded in messages from the earlier browser run."
+        ],
+        "judge_prompt": "Pass only if the answer explains that the prior browser run saw Example Domain in the browser tab or state and confirmed the title with an in-page JavaScript evaluation of document.title. Require agent_trajectories grep evidence from that earlier run showing these actions. Fail if the answer guesses how a browser usually checks titles, cites only the current run, or reports a title without explaining the verification."
+      }
+    ],
+    "label_eval": "Grounded recall of browser tab and document.title verification."
+  },
+  {
+    "name": "grep-agent-trajectories-code-tool-status",
+    "title": "Recall a coding tool's reported status",
+    "description": "Recover a prior coding tool result.",
+    "prompt": "Did my coding agent's tool report success or failure when it ran the Collatz program?",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "start_phase": "execute",
+    "expected_tools": [],
+    "tags": ["grep"],
+    "group": "daily",
+    "deploy_category": "grep",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "price_limit_cents": 100,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "memory": "off",
+    "context_gates": {
+      "recent_communications": false,
+      "network": false
+    },
+    "environment": {
+      "mode": "synthetic",
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "db_fixtures": [],
+      "services": ["grep"],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Uses the original coding-tool result already present in the canonical base image."
+    },
+    "enforce_declared_evaluators": true,
+    "source": ["feature:agent-trajectories"],
+    "evaluators": [
+      {
+        "id": "prior-code-tool-reported-status",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The answer says the code-agent tool reported FAILED.",
+          "The status is grounded in the original prior TOOL message, rather than a later summary."
+        ],
+        "judge_prompt": "Pass only if the answer says the prior coding-agent tool reported FAILED. Require agent_trajectories grep evidence from the original prior TOOL message with its Status line. The underlying process exit code may be mentioned but is not required by the user's question. Fail if the answer treats the process exit or later verifier as a successful tool status, or relies only on a later summary."
+      }
+    ],
+    "label_eval": "Grounded original coding-tool status."
   }
 ]

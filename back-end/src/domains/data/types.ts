@@ -75,7 +75,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'AgentTrajectorySearch' as const,
     searchField: 'searchText',
     groupBy: 'rootAgentId',
-    filters: ['path', 'since', 'until', 'role', 'surface'] as const,
+    filters: ['path', 'since', 'until', 'role', 'surface', 'record_kind'] as const,
     connector: null,
     channel: null,
   },

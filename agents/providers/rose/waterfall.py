@@ -183,7 +183,7 @@ def build_openrouter_body(
         # prompt-cache reads across an append-only browser task. Novita returned
         # repeated 7,424-token cache reads in a live three-turn browser-style
         # probe. Keep OpenRouter's normal provider fallback for availability.
-        body["provider"] = {"order": ["Novita"], "allow_fallbacks": True}
+        body["provider"] = {"order": ["novita"], "allow_fallbacks": True}
     return body
 
 

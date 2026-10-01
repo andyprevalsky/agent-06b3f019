@@ -61,6 +61,14 @@ function where(query: Query): Prisma.Sql {
     clauses.push(Prisma.sql`s."messageId" = ${filters.pathMessageId}`);
   if (filters?.role !== undefined) clauses.push(Prisma.sql`s.role = ${filters.role}`);
   if (filters?.surface !== undefined) clauses.push(Prisma.sql`s.surface = ${filters.surface}`);
+  // Replayed LLM inputs are often copies of earlier messages. Keep direct
+  // messages and model outputs in ordinary search; callers can request replay
+  // context or the full corpus explicitly when that is the evidence they need.
+  if (filters?.recordKind === undefined) {
+    clauses.push(Prisma.sql`s."traceKind" <> 'llm_context'`);
+  } else if (filters.recordKind !== 'all') {
+    clauses.push(Prisma.sql`s."traceKind" = ${filters.recordKind}`);
+  }
   if (filters?.since) clauses.push(Prisma.sql`s."createdAt" >= ${filters.since}`);
   if (filters?.until) clauses.push(Prisma.sql`s."createdAt" <= ${filters.until}`);
   return Prisma.join(clauses, ' AND ');
@@ -96,11 +104,7 @@ export async function searchAgentTrajectories(
       s."agentTitle", s."archivePath", s."traceKind"
     FROM "AgentTrajectorySearch" s
     WHERE ${predicate}
-    ORDER BY CASE s."traceKind"
-      WHEN 'message' THEN 0
-      WHEN 'llm_output' THEN 1
-      ELSE 2
-    END, s."createdAt" DESC, s."messageId" DESC
+    ORDER BY s."createdAt" DESC, s."messageId" DESC
     LIMIT ${query.limit + query.offset}
   `;
 }

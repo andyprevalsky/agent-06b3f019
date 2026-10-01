@@ -114,6 +114,7 @@ Usage:
 - \`source\` is optional. Omit it to search messages and network.
 - Supported sources: messages, network, agent_trajectories, transactions, documents. agent_trajectories searches this user's prior agent runs across chat, SMS, and Temporal.
 - For agent trajectory citations, copy the returned path and message role exactly. Root or child identifies the agent's place in a tree, not the message role.
+- Trajectory record_kind: message is a stored agent message, llm_output is a model response, and llm_context is text passed to a model and may replay earlier turns. Ordinary results include messages and outputs, newest first; use record_kind=llm_context for replayed inputs or record_kind=all for the full corpus.
 - Grep-style flags: for messages, -A/-B/-C/context return adjacent message records; for text records they return logical lines. -n controls numbering, -i is case-insensitive, head_limit supports up to 100, plus offset and multiline.
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
@@ -179,7 +180,7 @@ Returns:
         filters: {
           type: 'object' as const,
           description:
-            "Source-specific nested filters. For transactions: since, until, account, min_amount, max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. For messages: person and since. For documents: document_source, since, until, path, and tag. Unsupported filters are rejected by the backend for the selected source.",
+            "Source-specific nested filters. For agent_trajectories: path, since, until, role, surface, record_kind. For transactions: since, until, account, min_amount, max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. For messages: person and since. For documents: document_source, since, until, path, and tag. Unsupported filters are rejected by the backend for the selected source.",
           properties: {
             since: { type: 'string' as const },
             until: { type: 'string' as const },
@@ -196,6 +197,10 @@ Returns:
             path: { type: 'string' as const },
             role: { type: 'string' as const, enum: ['USER', 'ASSISTANT', 'TOOL'] },
             surface: { type: 'string' as const, enum: ['WEB', 'MAC_APP', 'SMS', 'WHATSAPP'] },
+            record_kind: {
+              type: 'string' as const,
+              enum: ['all', 'message', 'llm_output', 'llm_context'],
+            },
             tag: { type: 'string' as const },
           },
         },

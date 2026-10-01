@@ -125,18 +125,29 @@ def compile_explore_wrap_up(
     # concatenation hides later searches entirely, so the parent sees cost data
     # but misses neighborhoods or weather and delegates the same work again.
     # Give each result a share of the bounded payload and retain source URLs.
-    per_result_budget = max(80, (budget - 2 * (len(parts) - 1)) // len(parts))
+    separator_budget = 2 * (len(parts) - 1)
+    if budget < separator_budget:
+        return compiled[:budget]
+    per_result_budget = (budget - separator_budget) // len(parts)
     balanced: list[str] = []
     for part in parts:
         if len(part) <= per_result_budget:
             balanced.append(part)
             continue
+        truncation_marker = "\n[excerpt truncated]"
+        if per_result_budget <= len(truncation_marker):
+            balanced.append(part[:per_result_budget])
+            continue
         urls = list(dict.fromkeys(re.findall(r"https?://[^\s\\\"']+", part)))
-        sources = "\nSources: " + ", ".join(urls[:3]) if urls else ""
-        sources = sources[: min(400, per_result_budget // 4)]
-        excerpt_budget = max(1, per_result_budget - len(sources) - len("\n[excerpt truncated]"))
-        balanced.append(part[:excerpt_budget] + sources + "\n[excerpt truncated]")
-    return "\n\n".join(balanced)[:budget]
+        source_allowance = min(400, per_result_budget // 4)
+        sources = ""
+        for url in urls[:3]:
+            candidate = ("\nSources: " if not sources else ", ") + url
+            if len(sources) + len(candidate) <= source_allowance:
+                sources += candidate
+        excerpt_budget = per_result_budget - len(sources) - len(truncation_marker)
+        balanced.append(part[:excerpt_budget] + sources + truncation_marker)
+    return "\n\n".join(balanced)
 
 
 _SOURCE_GOAL_TERMS = {

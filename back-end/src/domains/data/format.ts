@@ -174,6 +174,7 @@ export function buildAgentTrajectoryMatch(
     `trace_path: ${path}`,
     `message_role: ${row.role}`,
     `agent_title: ${row.agentTitle !== null && row.agentTitle !== '' ? row.agentTitle : row.agentGoal}`,
+    `record_kind: ${row.traceKind}`,
     ...(row.role === 'TOOL' && toolStatus !== undefined ? [`tool_status: ${toolStatus}`] : []),
     ...(row.archivePath !== null ? [`archive: ${row.archivePath}`] : []),
   ].join('\n');
