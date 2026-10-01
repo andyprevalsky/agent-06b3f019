@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import diagnostics from 'node:diagnostics_channel';
 import { existsSync, readFileSync } from 'node:fs';
 
 import { defaultPayloadConverter } from '@temporalio/client';
@@ -15,6 +16,9 @@ import { parse as parseDotenv } from 'dotenv';
 import { buildAgentWorkflowStartHistoryRequest, getTemporalClient } from '../../providers/temporal';
 
 export interface LiveObservation {
+  /** Set when this request opened a new connection; times are from the request. */
+  connectStartMs?: number;
+  connectedMs?: number;
   status?: number;
   headersMs?: number;
   upstreamProvider?: string;
@@ -58,6 +62,28 @@ async function observeLiveStream(
   }
 }
 
+/**
+ * Times the TCP/TLS connect a request opens. The probe sends one real request
+ * at a time (every other route is stalled in-process), so any connect to the
+ * request's host while it waits for headers is that request's.
+ */
+function observeConnect(host: string, observation: LiveObservation, sentAt: number): () => void {
+  const isHost = (message: unknown) =>
+    (message as { connectParams?: { hostname?: string } }).connectParams?.hostname === host;
+  const onConnectStart = (message: unknown) => {
+    if (isHost(message)) observation.connectStartMs ??= Date.now() - sentAt;
+  };
+  const onConnected = (message: unknown) => {
+    if (isHost(message)) observation.connectedMs ??= Date.now() - sentAt;
+  };
+  diagnostics.subscribe('undici:client:beforeConnect', onConnectStart);
+  diagnostics.subscribe('undici:client:connected', onConnected);
+  return () => {
+    diagnostics.unsubscribe('undici:client:beforeConnect', onConnectStart);
+    diagnostics.unsubscribe('undici:client:connected', onConnected);
+  };
+}
+
 /** Real fetch whose stream is also read into `observation` (times from the request). */
 export async function observedLiveFetch(
   realFetch: typeof fetch,
@@ -66,7 +92,14 @@ export async function observedLiveFetch(
   observation: LiveObservation
 ): Promise<Response> {
   const sentAt = Date.now();
-  const response = await realFetch(input, init);
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const stopObservingConnect = observeConnect(new URL(url).hostname, observation, sentAt);
+  let response: Response;
+  try {
+    response = await realFetch(input, init);
+  } finally {
+    stopObservingConnect();
+  }
   observation.status = response.status;
   observation.headersMs = Date.now() - sentAt;
   if (!response.body) return response;
@@ -132,13 +165,21 @@ function isOpenRouterSideMiss(request: LiveObservation, budgetMs: number): boole
   return request.firstContentMs === undefined || request.firstContentMs > budgetMs;
 }
 
+function describeConnect(request: LiveObservation): string {
+  if (request.connectStartMs === undefined) return 'reused connection';
+  if (request.connectedMs === undefined)
+    return `connect started ${request.connectStartMs}ms, never completed`;
+  return `connected ${request.connectedMs}ms`;
+}
+
 export function describeLiveRequests(requests: LiveObservation[]): string {
   return requests
     .map(
       (request, index) =>
-        `attempt ${index + 1}: ${request.upstreamProvider ?? 'no host'}, HTTP ` +
-        `${request.status ?? '-'} at ${request.headersMs ?? '-'}ms, first event ` +
-        `${request.firstEventMs ?? '-'}ms, first content ${request.firstContentMs ?? '-'}ms`
+        `attempt ${index + 1}: ${request.upstreamProvider ?? 'no host'}, ` +
+        `${describeConnect(request)}, HTTP ${request.status ?? '-'} at ` +
+        `${request.headersMs ?? '-'}ms, first event ${request.firstEventMs ?? '-'}ms, ` +
+        `first content ${request.firstContentMs ?? '-'}ms`
     )
     .join('; ');
 }
