@@ -426,6 +426,13 @@ async def test_runner_seeds_grades_and_deletes_the_site() -> None:
             ok, detail = rb._run_declared_static_check(task, outcome_evaluator, data)
             assert not ok and MEMBER_NUMBER in detail
 
+            data["messages"][0]["metadata"]["completionSummary"] = {
+                "summary": "I signed in to your Larkspur Members account and verified your member number.",
+                "outputs": [{"key": "member_number", "label": "Member Number", "value": MEMBER_NUMBER}],
+            }
+            ok, detail = rb._run_declared_static_check(task, outcome_evaluator, data)
+            assert ok, f"the completion card's structured outputs are part of the final answer: {detail}"
+
             await rb._release_auth_test_site(backend.base_url, manifest)
             assert backend.requests[2][:2] == ("DELETE", "/api/test-sites/larkspur/fixtures/abc123")
             assert auth_test_site.active_manifest() is None

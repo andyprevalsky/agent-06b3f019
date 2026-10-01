@@ -82,7 +82,6 @@ from benchmarks.llm_usage import (
     live_output_tokens,
 )
 from benchmarks.local import manifest_database_url
-from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.logs import (
     canonicalize_agent_tree,
     collect_logs,
@@ -111,6 +110,7 @@ from benchmarks.polar_catalog import (
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
 from benchmarks.spawn_contract import primary_live_target, should_disable_saved_browser_auth
+from benchmarks.subscription_checkout import complete_test_subscription_checkout
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
 )
@@ -11054,6 +11054,16 @@ def _root_deliverable_blob(data: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _root_final_answer_blob(data: dict) -> str:
+    """Root deliverable prose plus the structured outputs its Task Complete card shows the user."""
+    parts = [_root_deliverable_blob(data)]
+    for summary in _final_completion_summaries(data):
+        for output in summary.get("outputs") or []:
+            if isinstance(output, dict) and output.get("value") not in (None, ""):
+                parts.append(f"{output.get('label') or output.get('key')}: {output.get('value')}")
+    return "\n".join(part for part in parts if part)
+
+
 def _final_completion_summaries(data: dict) -> list[dict]:
     """Return durable root completion cards in transcript order."""
     return _completion_cards_from_messages(data.get("messages", []) or [])
@@ -11791,7 +11801,7 @@ def _run_declared_static_check(
             continue
         if check_type == auth_test_site.AUTH_TEST_SITE_OUTCOME_CHECK:
             ok, detail = auth_test_site.evaluate_outcome(
-                check, benchmark_state.get("auth_test_site"), _root_deliverable_blob(data)
+                check, benchmark_state.get("auth_test_site"), _root_final_answer_blob(data)
             )
             if not ok:
                 return False, detail
